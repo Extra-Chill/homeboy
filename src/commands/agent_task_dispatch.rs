@@ -3,7 +3,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchRequest};
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{
+    default_backend_for_component, ExtensionProviderAgentTaskExecutor,
+};
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter};
 use homeboy::core::agent_tasks::AgentTaskAggregateReport;
 
@@ -113,6 +115,27 @@ where
 pub(crate) fn dispatch_request_from_args(
     args: DispatchArgs,
 ) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    dispatch_request_from_args_with_default(args, default_backend_for_component)
+}
+
+fn dispatch_request_from_args_with_default(
+    args: DispatchArgs,
+    default_backend: impl FnOnce(Option<&str>) -> homeboy::core::Result<Option<String>>,
+) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    let backend = match args.backend {
+        Some(backend) => backend,
+        None => default_backend(args.repo.as_deref())?.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "backend",
+                "agent-task dispatch requires --backend because no default backend policy is configured",
+                None,
+                Some(vec![
+                    "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
+                ]),
+            )
+        })?,
+    };
+
     Ok(AgentTaskDispatchRequest {
         prompt: args.prompt,
         tasks: args.tasks,
@@ -121,7 +144,7 @@ pub(crate) fn dispatch_request_from_args(
         workspace: args.workspace,
         repo: args.repo,
         task_url: args.task_url,
-        backend: args.backend,
+        backend,
         selector: args.selector,
         model: args.model,
         required_capabilities: args.required_capabilities,
@@ -341,6 +364,66 @@ mod tests {
                 .expect("next action")
                 .contains("homeboy agent-task run cook-queued"));
         });
+    }
+
+    #[test]
+    fn dispatch_request_uses_declared_default_backend_when_backend_is_absent() {
+        let request = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run with default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            |_| Ok(Some("fake-default".to_string())),
+        )
+        .expect("default backend request");
+
+        assert_eq!(request.backend, "fake-default");
+    }
+
+    #[test]
+    fn dispatch_request_errors_when_backend_and_default_are_absent() {
+        let error = dispatch_request_from_args_with_default(
+            DispatchArgs {
+                prompt: Some("run without default".to_string()),
+                tasks: Vec::new(),
+                tasks_json: None,
+                cwd: None,
+                workspace: None,
+                repo: None,
+                task_url: None,
+                backend: None,
+                selector: None,
+                model: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                provider_config: None,
+                client_context: None,
+                concurrency: 1,
+                attempts: 1,
+                run_id: None,
+                queue_only: false,
+            },
+            |_| Ok(None),
+        )
+        .expect_err("missing backend should fail");
+
+        assert!(error.message.contains("requires --backend"));
     }
 
     struct NoopExecutor;

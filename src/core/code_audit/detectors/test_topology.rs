@@ -390,6 +390,7 @@ JSON
             structured_sidecars: std::collections::BTreeMap::new(),
             release_preflights: vec![],
             agent_runtimes: vec![],
+            agent_task: None,
             actions: vec![],
             hooks: std::collections::HashMap::new(),
             settings: vec![],

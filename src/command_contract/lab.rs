@@ -181,7 +181,7 @@ impl Commands {
 fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTaskCommand) -> bool {
     agent_task_provider_requires_cwd_git_checkout_with(
         command,
-        default_backend,
+        || default_backend().ok().flatten(),
         provider_requires_cwd_git_checkout,
     )
 }

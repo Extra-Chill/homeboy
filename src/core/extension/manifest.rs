@@ -408,6 +408,12 @@ pub struct AgentRuntimeManifestConfig {
     pub agent_task_executors: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AgentTaskPolicyConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_backend: Option<String>,
+}
+
 /// Unified extension manifest decomposed into capability groups.
 ///
 /// Extension JSON files use nested capability groups that map directly to these fields.
@@ -494,6 +500,11 @@ pub struct ExtensionManifest {
     /// First-class agent runtime package manifests supplied by this extension.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_runtimes: Vec<AgentRuntimeManifestConfig>,
+
+    /// Extension-owned agent task policy. Runtime/provider manifests declare
+    /// capabilities only; they do not select global defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_task: Option<AgentTaskPolicyConfig>,
 
     // Actions (cross-cutting: used by both platform and executable extensions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
