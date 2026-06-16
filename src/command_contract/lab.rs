@@ -45,6 +45,7 @@ pub enum LabWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
     Git,
     GitCheckoutRequired,
+    RunnerResident,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,12 +170,14 @@ impl Commands {
                 )
             }
             Commands::Tunnel(args) if args.is_service_start() => {
-                LabCommandContract::explicit_runner(
+                let mut contract = LabCommandContract::explicit_runner(
                     "tunnel service start",
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
-                )
+                );
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
+                contract
             }
             _ => return None,
         };
