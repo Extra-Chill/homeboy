@@ -877,6 +877,7 @@ impl AgentTaskScheduleSupport {
         mut outcome: AgentTaskOutcome,
         running: Option<&RunningTask>,
     ) -> AgentTaskOutcome {
+        Self::classify_failed_nested_executor_status(&mut outcome);
         Self::classify_incomplete_executor_result(&mut outcome);
 
         if let Some(running) = running {
@@ -901,6 +902,32 @@ impl AgentTaskScheduleSupport {
             }
         }
         outcome
+    }
+
+    fn classify_failed_nested_executor_status(outcome: &mut AgentTaskOutcome) {
+        if outcome.status != AgentTaskOutcomeStatus::Succeeded {
+            return;
+        }
+        let Some(failed_status) = nested_failed_executor_status(outcome) else {
+            return;
+        };
+
+        let message = format!(
+            "nested executor reported failed status: {}={}",
+            failed_status.path, failed_status.value
+        );
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        outcome.summary = Some(message.clone());
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.nested_executor_failed_status".to_string(),
+            message,
+            data: serde_json::json!({
+                "path": failed_status.path,
+                "key": failed_status.key,
+                "value": failed_status.value,
+            }),
+        });
     }
 
     fn classify_incomplete_executor_result(outcome: &mut AgentTaskOutcome) {
@@ -1498,6 +1525,68 @@ fn provider_run_result_is_empty_incomplete(result: &Value) -> bool {
         && !has_tool_calls(result)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NestedFailedExecutorStatus {
+    path: String,
+    key: String,
+    value: String,
+}
+
+fn nested_failed_executor_status(outcome: &AgentTaskOutcome) -> Option<NestedFailedExecutorStatus> {
+    outcome
+        .outputs
+        .get("provider_run_result")
+        .and_then(|result| find_failed_status_value(result, "outputs.provider_run_result"))
+}
+
+fn find_failed_status_value(value: &Value, path: &str) -> Option<NestedFailedExecutorStatus> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if is_status_key(key) {
+                    if let Some(raw) = child.as_str().map(str::trim).filter(|raw| !raw.is_empty()) {
+                        if status_value_is_failed(raw) {
+                            return Some(NestedFailedExecutorStatus {
+                                path: child_path,
+                                key: key.clone(),
+                                value: raw.to_string(),
+                            });
+                        }
+                    }
+                }
+                if let Some(found) = find_failed_status_value(child, &child_path) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, child)| find_failed_status_value(child, &format!("{path}.{index}"))),
+        _ => None,
+    }
+}
+
+fn is_status_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("status") || key.to_ascii_lowercase().ends_with("_status")
+}
+
+fn status_value_is_failed(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized == "fail"
+        || normalized == "failed"
+        || normalized == "failure"
+        || normalized == "error"
+        || normalized == "timeout"
+        || normalized == "timed_out"
+        || normalized == "cancelled"
+        || normalized == "canceled"
+        || normalized.starts_with("failed ")
+        || normalized.starts_with("failed-")
+}
+
 fn value_text_is_empty(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
@@ -1720,6 +1809,30 @@ mod tests {
         assert_eq!(aggregate.totals.failed, 1);
         assert_eq!(aggregate.totals.queued, 0);
         assert_eq!(aggregate.queue.queued, 0);
+    }
+
+    #[test]
+    fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
+        let scheduler = AgentTaskScheduler::new(NestedFailedStatusExecutor);
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.succeeded, 0);
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.nested_executor_failed_status"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["path"],
+            json!("outputs.provider_run_result.job_status")
+        );
     }
 
     #[test]
@@ -2763,6 +2876,8 @@ mod tests {
 
     struct EmptyIncompleteExecutor;
 
+    struct NestedFailedStatusExecutor;
+
     impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         fn execute(
             &self,
@@ -2802,6 +2917,23 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             empty_incomplete_outcome(request.task_id)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for NestedFailedStatusExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            outcome.outputs = json!({
+                "provider_run_result": {
+                    "job_status": "failed - completion_required_tool_unavailable",
+                    "completion_status": "partial"
+                }
+            });
+            outcome
         }
     }
 
