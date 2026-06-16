@@ -131,10 +131,11 @@ Available factories from the WordPress test framework: `user`, `post`,
 
 ### Real-WordPress host smokes
 
-Standalone smoke files matching `tests/**/*-smoke.php` run through the same WP
-Codebox-backed real WordPress harness as CI. Each file is mounted with the
-component and executed via `wordpress.run-php`, so WordPress functions and
-runtime dependencies are available.
+Standalone smoke files matching `tests/**/*-smoke.php` are diagnostic/operator
+targets, not default release gates. Run one explicitly through the same WP
+Codebox-backed real WordPress harness when you need it. The selected file is
+mounted with the component and executed via `wordpress.run-php`, so WordPress
+functions and runtime dependencies are available.
 
 To rerun one existing smoke on demand before pushing:
 
@@ -142,8 +143,8 @@ To rerun one existing smoke on demand before pushing:
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-The focused command is opt-in and does not change default test discovery or add
-smokes to CI. Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
+The focused command does not change default test discovery or add smokes to CI.
+Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers.
 

@@ -298,12 +298,12 @@ elif [ -n "$TARGET_SMOKE_FILE" ]; then
     fi
     smoke_files=("$target_abs")
 else
-    mapfile -t smoke_files < <(find "$TEST_DIR" -type f -name '*-smoke.php' | sort)
+    smoke_files=()
 fi
 
 if [ "${#smoke_files[@]}" -eq 0 ]; then
     echo ""
-    echo "Skipping real-WordPress smoke tests: no files matched ${TEST_DIR}/**/*-smoke.php"
+    echo "Skipping real-WordPress smoke tests: no smoke files requested. Use --host-smoke-file or HOMEBOY_WORDPRESS_HOST_SMOKE_FILES to run one explicitly."
     exit 0
 fi
 

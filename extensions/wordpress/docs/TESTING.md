@@ -25,9 +25,10 @@ homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
 Tests run through `scripts/test/test-runner.sh`, which dispatches to the WP
-Codebox runner for WordPress PHPUnit and real-WordPress host smokes. The runner
-mounts the component under `/wordpress/wp-content/plugins/<slug>`, boots
-WordPress in-process, discovers test files, and routes files by type.
+Codebox runner for WordPress PHPUnit by default. The runner mounts the component
+under `/wordpress/wp-content/plugins/<slug>`, boots WordPress in-process,
+discovers PHPUnit test files, and routes explicitly selected diagnostic files by
+type.
 
 ## Requirements
 
@@ -44,20 +45,17 @@ rejected with a clear error.
 
 ## Real-WordPress host smokes
 
-Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They run
-through WP Codebox against real WordPress, using the same component mounts,
-dependency mounts, drop-in handling, WordPress version selection, and
-`wordpress.run-php` recipe execution path CI uses.
-
-The default test command discovers existing smoke files when present. To rerun
-one failed smoke without the full CI loop, pass the file explicitly:
+Standalone PHP smoke files can live under `tests/**/*-smoke.php`. They are
+diagnostic/operator targets, not default release gates. Run one explicitly
+through WP Codebox against real WordPress when you need the same component
+mounts, dependency mounts, drop-in handling, WordPress version selection, and
+`wordpress.run-php` recipe execution path CI uses:
 
 ```bash
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
-This focused path is opt-in and does not add default smokes or broaden CI
-coverage. It preserves the machine-readable `HOST_SMOKE_BEGIN`,
+This focused path preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers, and fails fast with the selected script name.
 
@@ -81,10 +79,10 @@ For full CI agent runs on the WP Codebox WordPress execution substrate, see
 
 ## WP Codebox test runtime status
 
-WordPress PHPUnit and standalone `tests/**/*-smoke.php` files run through WP
-Codebox by default. The WP Codebox path owns the same component mounts,
-dependency mounts, drop-ins, file routing, WordPress version selection, and
-artifact parsing contract that the direct Playground runner previously handled.
+WordPress PHPUnit files run through WP Codebox by default. Explicitly selected
+standalone `tests/**/*-smoke.php` files use the same WP Codebox path for
+component mounts, dependency mounts, drop-ins, file routing, WordPress version
+selection, and artifact parsing when an operator chooses to run one.
 
 ## Dependencies
 

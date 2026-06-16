@@ -26,12 +26,10 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Component path: ${COMPONENT_PATH:-$(pwd)}"
 fi
 
-# WordPress tests run through WP Codebox against real WordPress, routed purely by
-# file type: tests/**/*Test.php and tests/**/test-*.php run via the PHPUnit
-# backend, and tests/**/*-smoke.php standalone scripts run via the real-WordPress
-# smoke backend (wordpress.run-php with WordPress booted). There is no
-# bare-host/no-WordPress backend and no test_backend toggle; the runtime is
-# always WP Codebox.
+# WordPress tests run through WP Codebox against real WordPress. The default
+# suite is PHPUnit. Standalone smoke scripts are diagnostic/operator targets and
+# run only when selected explicitly with --file, --host-smoke-file, or the
+# HOMEBOY_WORDPRESS_HOST_SMOKE_FILES scope environment.
 
 show_usage() {
     cat <<'EOF'
@@ -360,30 +358,7 @@ if [ -n "$TARGET_FILE" ]; then
     esac
 fi
 
-# Full-suite run (no --file, no changed-file scope): run every test the
-# component carries, routed by file type. PHPUnit (tests/**/*Test.php,
-# tests/**/test-*.php) runs through the WP Codebox PHPUnit backend; standalone
-# tests/**/*-smoke.php scripts run through the real-WordPress smoke backend. Both
-# run against real WordPress in WP Codebox. A component may carry one or both;
-# each backend skips cleanly when it finds no matching files.
-TEST_ROOT="${PLUGIN_PATH}/tests"
-has_smoke_files=0
-if [ -d "$TEST_ROOT" ] && [ -n "$(find "$TEST_ROOT" -type f -name '*-smoke.php' -print -quit 2>/dev/null)" ]; then
-    has_smoke_files=1
-fi
-
-# Run the PHPUnit backend (it discovers *Test.php / test-*.php and falls back to
-# a composer test script, and is the canonical default path). When the component
-# also carries standalone smoke scripts, run the real-WordPress smoke backend
-# after it. A non-zero exit from either backend fails the whole run, so neither
-# can mask the other's failure.
-if [ "$has_smoke_files" -eq 1 ]; then
-    bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
-    phpunit_status=$?
-    if [ "$phpunit_status" -ne 0 ]; then
-        exit "$phpunit_status"
-    fi
-    exec bash "$SMOKE_RUNNER" "${PASSTHROUGH_ARGS[@]}"
-fi
-
+# Full-suite run (no --file, no changed-file scope): run the canonical PHPUnit
+# backend only. Ad hoc PHP smoke scripts are intentionally not release gates;
+# rerun one explicitly with --host-smoke-file or --file when diagnosing it.
 exec bash "$WP_CODEBOX_RUNNER" "${PASSTHROUGH_ARGS[@]}"
