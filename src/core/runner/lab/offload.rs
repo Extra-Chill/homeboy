@@ -170,6 +170,73 @@ fn lab_workspace_sync_mode(
     Ok(requested)
 }
 
+fn preflight_required_git_checkout_workspace(
+    policy: LabOffloadWorkspaceModePolicy,
+    args: &[String],
+) -> Result<()> {
+    if policy != LabOffloadWorkspaceModePolicy::GitCheckoutRequired {
+        return Ok(());
+    }
+
+    let source_path = rig_materialization::lab_offload_rig_component_checkout_root(args)?
+        .unwrap_or(lab_offload_source_path(args)?);
+    preflight_patch_provider_git_checkout(&source_path)
+}
+
+fn preflight_patch_provider_git_checkout(source_path: &Path) -> Result<()> {
+    let path = source_path.display().to_string();
+    let unsupported = |message: &str, hints: Vec<String>| {
+        Error::validation_invalid_argument(
+            "cwd",
+            message.to_string(),
+            Some(path.clone()),
+            Some(hints),
+        )
+    };
+
+    let inside_work_tree =
+        super::super::workspace::git_output(source_path, &["rev-parse", "--is-inside-work-tree"])
+            .map(|value| value == "true")
+            .unwrap_or(false);
+    if !inside_work_tree {
+        return Err(unsupported(
+            "Lab offload for patch-producing agent-task providers requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
+            vec![
+                "Use a Homeboy/Data Machine Code worktree or another existing git checkout for --cwd.".to_string(),
+                "Initialize the target as a git checkout before using Lab offload with a patch-producing provider.".to_string(),
+                "Use a provider without a git-checkout materialization requirement only if it has an explicit non-git apply-back artifact contract.".to_string(),
+            ],
+        ));
+    }
+
+    let remote_url =
+        super::super::workspace::git_output(source_path, &["config", "--get", "remote.origin.url"])
+            .unwrap_or_default();
+    if remote_url.trim().is_empty() {
+        return Err(unsupported(
+            "Lab offload for patch-producing agent-task providers requires --cwd to have remote.origin.url so the runner can materialize a real git checkout",
+            vec![
+                "Set remote.origin.url on the source checkout before retrying Lab offload.".to_string(),
+                "Use a Homeboy/Data Machine Code worktree or another checkout cloned from the canonical remote.".to_string(),
+            ],
+        ));
+    }
+
+    let status = super::super::workspace::git_output(source_path, &["status", "--porcelain=v1"])
+        .unwrap_or_default();
+    if !status.trim().is_empty() {
+        return Err(unsupported(
+            "Lab offload for patch-producing agent-task providers requires --cwd to be a clean git checkout before runner-side patch capture",
+            vec![
+                "Commit or stash local changes before offloading the patch-producing agent task.".to_string(),
+                "Run with --force-hot to execute locally while the worktree is dirty.".to_string(),
+            ],
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -228,6 +295,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             messages: Vec::new(),
         });
     }
+
+    preflight_required_git_checkout_workspace(
+        contract.workspace_mode_policy,
+        request.normalized_args,
+    )?;
 
     let selection = resolve_lab_runner_selection(
         &contract,
@@ -2029,6 +2101,103 @@ mod tests {
         .expect("sync mode");
 
         assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
+    }
+
+    #[test]
+    fn required_git_checkout_preflight_rejects_non_git_source_before_offload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let err = preflight_patch_provider_git_checkout(dir.path())
+            .expect_err("non-git source should fail");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("requires --cwd to be a git checkout"));
+        assert!(err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("Data Machine Code worktree"))));
+    }
+
+    #[test]
+    fn required_git_checkout_preflight_rejects_checkout_without_origin() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+
+        let err = preflight_patch_provider_git_checkout(dir.path())
+            .expect_err("checkout without origin should fail");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("remote.origin.url"));
+        assert!(err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("Set remote.origin.url"))));
+    }
+
+    #[test]
+    fn required_git_checkout_preflight_rejects_dirty_checkout() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("add origin");
+        std::fs::write(dir.path().join("dirty.txt"), "dirty").expect("write dirty file");
+
+        let err = preflight_patch_provider_git_checkout(dir.path())
+            .expect_err("dirty checkout should fail");
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("clean git checkout"));
+        assert!(err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("Commit or stash"))));
+    }
+
+    #[test]
+    fn required_git_checkout_preflight_accepts_clean_checkout_with_origin() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .expect("init git repo");
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .expect("add origin");
+
+        preflight_patch_provider_git_checkout(dir.path()).expect("clean checkout should pass");
     }
 
     #[test]

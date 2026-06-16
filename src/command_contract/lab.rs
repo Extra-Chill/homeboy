@@ -11,7 +11,7 @@
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandDescriptor;
 use crate::commands::agent_task;
-use crate::core::agent_tasks::provider::provider_requires_cwd_git_checkout;
+use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 use std::collections::BTreeSet;
@@ -184,12 +184,27 @@ impl Commands {
 }
 
 fn agent_task_provider_requires_cwd_git_checkout(command: &agent_task::AgentTaskCommand) -> bool {
+    agent_task_provider_requires_cwd_git_checkout_with(
+        command,
+        default_backend,
+        provider_requires_cwd_git_checkout,
+    )
+}
+
+fn agent_task_provider_requires_cwd_git_checkout_with(
+    command: &agent_task::AgentTaskCommand,
+    default_backend: impl FnOnce() -> Option<String>,
+    provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
+) -> bool {
     match command {
         agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
-            args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
-                && args.backend.as_ref().is_some_and(|backend| {
-                    provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
-                })
+            if !args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty()) {
+                return false;
+            }
+            let backend = args.backend.clone().or_else(default_backend);
+            backend.as_ref().is_some_and(|backend| {
+                provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
+            })
         }
         _ => false,
     }
@@ -738,6 +753,42 @@ mod tests {
                 .lab_contract()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_uses_default_backend_when_backend_is_omitted() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--cwd",
+            "/work/repo",
+            "--prompt",
+            "cook",
+        ]);
+        let Commands::AgentTask(args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || Some("default-patch-provider".to_string()),
+            |backend, selector| backend == "default-patch-provider" && selector.is_none(),
+        ));
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_keeps_non_cwd_dispatch_snapshot_eligible() {
+        let command = parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]);
+        let Commands::AgentTask(args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(!agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || Some("default-patch-provider".to_string()),
+            |backend, _| backend == "default-patch-provider",
+        ));
     }
 
     #[test]
