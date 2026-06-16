@@ -230,8 +230,8 @@ fn matches_any(path: &str, globs: &[String]) -> bool {
 }
 
 fn load_rules(root: &Path) -> Option<TestTopologyRules> {
-    let homeboy_json = root.join("homeboy.json");
-    let content = std::fs::read_to_string(homeboy_json).ok()?;
+    let config_path = root.join(crate::core::product_identity::PRODUCT_IDENTITY.config_filename);
+    let content = std::fs::read_to_string(config_path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let audit_rules = value.get("audit_rules")?.clone();
     let config: AuditRulesConfig = serde_json::from_value(audit_rules).ok()?;

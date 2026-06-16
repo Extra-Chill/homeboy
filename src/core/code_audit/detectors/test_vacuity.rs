@@ -1,50 +1,93 @@
+//! Generic vacuity detection for brace-delimited test methods.
+//!
+//! "Vacuous" tests are no-op or placeholder tests that do not exercise product
+//! code — empty bodies, `assert!(true)`-style placeholders, or bodies whose
+//! only intent is audit bookkeeping. The detector is language-agnostic: it
+//! operates on brace-delimited (`{ ... }`) function bodies and is driven by a
+//! `TestVacuityPolicy` declared by an extension manifest, which supplies the
+//! applicable file extensions, the markers that prove a test references product
+//! code, deliberate-contract markers, and an optional package-name resolver.
+
 use std::collections::HashSet;
 use std::path::Path;
 
 use regex::Regex;
 
-use super::conventions::{AuditFinding, Language};
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use crate::core::extension::{PackageNameSource, TestVacuityPolicy};
 
-pub(crate) fn rust_crate_name(root: &Path) -> Option<String> {
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
-    let package_start = manifest.find("[package]")?;
-    let package = &manifest[package_start..];
-    for line in package.lines().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            break;
+/// Resolve a package name from a config-declared manifest source.
+///
+/// This is language-agnostic: the caller declares the manifest filename, an
+/// optional section header, and the key whose value names the package. The
+/// resolved name lets vacuity detection treat `<package>::` references as
+/// product references without core knowing the ecosystem.
+pub(crate) fn resolve_package_name(root: &Path, source: &PackageNameSource) -> Option<String> {
+    let manifest = std::fs::read_to_string(root.join(&source.manifest_file)).ok()?;
+    let scoped = match &source.section {
+        Some(section) => {
+            let start = manifest.find(section.as_str())?;
+            let rest = &manifest[start..];
+            // Stop at the next section header on its own line, if any.
+            let end = rest[section.len()..]
+                .find("\n[")
+                .map(|idx| section.len() + idx + 1)
+                .unwrap_or(rest.len());
+            &rest[..end]
         }
-        if let Some(value) = trimmed.strip_prefix("name") {
+        None => manifest.as_str(),
+    };
+
+    for line in scoped.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix(&source.key) {
             let value = value.trim_start();
             if let Some(value) = value.strip_prefix('=') {
-                return Some(value.trim().trim_matches('"').replace('-', "_"));
+                let name = value.trim().trim_matches('"').trim_matches('\'');
+                if name.is_empty() {
+                    continue;
+                }
+                return Some(if source.normalize_dashes_to_underscores {
+                    name.replace('-', "_")
+                } else {
+                    name.to_string()
+                });
             }
         }
     }
     None
 }
 
+/// Detect vacuous test methods in a fingerprint according to a vacuity policy.
+///
+/// `package_name` is the resolved package name (see [`resolve_package_name`]),
+/// passed in by the caller so it is resolved once per component.
 pub(crate) fn find_vacuous_test_methods(
     findings: &mut Vec<Finding>,
     fp: &FileFingerprint,
     test_methods: &[String],
     source_methods: &HashSet<&str>,
-    crate_name: Option<&str>,
+    policy: &TestVacuityPolicy,
+    package_name: Option<&str>,
 ) {
-    if fp.language != Language::Rust || fp.content.trim().is_empty() {
+    if fp.content.trim().is_empty() || !policy_applies_to(policy, &fp.relative_path) {
         return;
     }
 
-    let product_symbols = collect_rust_product_imports(&fp.content, crate_name);
+    let product_symbols = collect_product_imports(&fp.content, package_name);
     for method in test_methods {
-        let Some(body) = extract_rust_function_body(&fp.content, method) else {
+        let Some(body) = extract_function_body(&fp.content, method) else {
             continue;
         };
-        let Some(reason) =
-            classify_vacuous_rust_test(&body, &product_symbols, source_methods, crate_name)
-        else {
+        let Some(reason) = classify_vacuous_test(
+            &body,
+            &product_symbols,
+            source_methods,
+            policy,
+            package_name,
+        ) else {
             continue;
         };
 
@@ -62,25 +105,41 @@ pub(crate) fn find_vacuous_test_methods(
     }
 }
 
-fn classify_vacuous_rust_test(
+fn policy_applies_to(policy: &TestVacuityPolicy, relative_path: &str) -> bool {
+    let ext = Path::new(relative_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    policy
+        .file_extensions
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+}
+
+fn classify_vacuous_test(
     body: &str,
     product_symbols: &HashSet<String>,
     source_methods: &HashSet<&str>,
-    crate_name: Option<&str>,
+    policy: &TestVacuityPolicy,
+    package_name: Option<&str>,
 ) -> Option<String> {
     let lower = body.to_ascii_lowercase();
-    if lower.contains("compile contract") || lower.contains("compile-only") {
-        return None;
-    }
-    if body.contains("assert_snapshot") || body.contains("assert_debug_snapshot") {
+    if policy.allowed_body_markers.iter().any(|marker| {
+        lower.contains(&marker.to_ascii_lowercase()) || body.contains(marker.as_str())
+    }) {
         return None;
     }
 
-    let uncommented = strip_rust_comments(body);
+    let uncommented = strip_comments(body);
     let compact: String = uncommented.chars().filter(|c| !c.is_whitespace()).collect();
     let has_assertion = uncommented.contains("assert") || uncommented.contains("panic!");
-    let has_product_ref =
-        has_rust_product_reference(&uncommented, product_symbols, source_methods, crate_name);
+    let has_product_ref = has_product_reference(
+        &uncommented,
+        product_symbols,
+        source_methods,
+        policy,
+        package_name,
+    );
 
     if has_product_ref {
         return None;
@@ -92,7 +151,7 @@ fn classify_vacuous_rust_test(
     if compact.contains("assert!(true)") {
         return Some("it contains only placeholder assertion logic".to_string());
     }
-    let comment_text = collect_rust_comments(body).to_ascii_lowercase();
+    let comment_text = collect_comments(body).to_ascii_lowercase();
     if comment_text.contains("audit")
         && (comment_text.contains("mapping") || comment_text.contains("coverage"))
     {
@@ -106,16 +165,21 @@ fn classify_vacuous_rust_test(
     None
 }
 
-fn has_rust_product_reference(
+fn has_product_reference(
     body: &str,
     product_symbols: &HashSet<String>,
     source_methods: &HashSet<&str>,
-    crate_name: Option<&str>,
+    policy: &TestVacuityPolicy,
+    package_name: Option<&str>,
 ) -> bool {
-    if body.contains("crate::") || body.contains("super::") || body.contains("self::") {
+    if policy
+        .product_reference_markers
+        .iter()
+        .any(|marker| body.contains(marker.as_str()))
+    {
         return true;
     }
-    if let Some(name) = crate_name {
+    if let Some(name) = package_name {
         if body.contains(&format!("{}::", name)) {
             return true;
         }
@@ -135,14 +199,19 @@ fn contains_word_call(haystack: &str, needle: &str) -> bool {
         .is_some_and(|re| re.is_match(haystack))
 }
 
-fn collect_rust_product_imports(content: &str, crate_name: Option<&str>) -> HashSet<String> {
+/// Collect product symbols imported from the resolved package via `use` lines.
+///
+/// This recognizes the common `use <package>::path::Symbol;` and
+/// `use <package>::path::{A, B};` import shapes shared by several languages.
+/// When no package name is resolved, no symbols are collected.
+fn collect_product_imports(content: &str, package_name: Option<&str>) -> HashSet<String> {
     let mut symbols = HashSet::new();
-    let Some(crate_name) = crate_name else {
+    let Some(package_name) = package_name else {
         return symbols;
     };
     let simple = Regex::new(&format!(
         r"(?m)^\s*use\s+{}::[^;:]+::([A-Za-z_][A-Za-z0-9_]*)\s*;",
-        regex::escape(crate_name)
+        regex::escape(package_name)
     ))
     .unwrap();
     for cap in simple.captures_iter(content) {
@@ -151,7 +220,7 @@ fn collect_rust_product_imports(content: &str, crate_name: Option<&str>) -> Hash
 
     let grouped = Regex::new(&format!(
         r"(?m)^\s*use\s+{}::[^;]*\{{([^}}]+)\}}\s*;",
-        regex::escape(crate_name)
+        regex::escape(package_name)
     ))
     .unwrap();
     for cap in grouped.captures_iter(content) {
@@ -171,7 +240,13 @@ fn collect_rust_product_imports(content: &str, crate_name: Option<&str>) -> Hash
     symbols
 }
 
-fn extract_rust_function_body(content: &str, fn_name: &str) -> Option<String> {
+/// Extract the brace-delimited body of `fn_name` from brace-using source.
+///
+/// Matches a `fn <name>(...)` declaration followed by `{ ... }` and returns the
+/// inner text. Brace-delimited function syntax is shared across many languages,
+/// so this is a generic block-body extractor rather than a language-specific
+/// one.
+fn extract_function_body(content: &str, fn_name: &str) -> Option<String> {
     let pattern = Regex::new(&format!(
         r"(?m)\bfn\s+{}\s*\([^)]*\)\s*(?:->[^{{]+)?\{{",
         regex::escape(fn_name)
@@ -179,10 +254,10 @@ fn extract_rust_function_body(content: &str, fn_name: &str) -> Option<String> {
     .ok()?;
     let mat = pattern.find(content)?;
     let open = mat.end() - 1;
-    matching_rust_brace(content, open).map(|end| content[mat.end()..end].to_string())
+    matching_brace(content, open).map(|end| content[mat.end()..end].to_string())
 }
 
-fn matching_rust_brace(content: &str, open: usize) -> Option<usize> {
+fn matching_brace(content: &str, open: usize) -> Option<usize> {
     if content.as_bytes().get(open) != Some(&b'{') {
         return None;
     }
@@ -310,7 +385,7 @@ fn skip_char_literal(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>) 
     }
 }
 
-fn strip_rust_comments(content: &str) -> String {
+fn strip_comments(content: &str) -> String {
     let without_blocks = Regex::new(r"(?s)/\*.*?\*/")
         .unwrap()
         .replace_all(content, "");
@@ -321,7 +396,7 @@ fn strip_rust_comments(content: &str) -> String {
         .join("\n")
 }
 
-fn collect_rust_comments(content: &str) -> String {
+fn collect_comments(content: &str) -> String {
     let mut comments = String::new();
     let mut iter = content.char_indices().peekable();
     while let Some((idx, ch)) = iter.next() {
@@ -380,8 +455,31 @@ fn collect_block_comment(
 mod tests {
     use super::*;
 
+    fn policy() -> TestVacuityPolicy {
+        TestVacuityPolicy {
+            file_extensions: vec!["rs".to_string()],
+            allowed_body_markers: vec![
+                "compile contract".to_string(),
+                "compile-only".to_string(),
+                "assert_snapshot".to_string(),
+                "assert_debug_snapshot".to_string(),
+            ],
+            product_reference_markers: vec![
+                "crate::".to_string(),
+                "super::".to_string(),
+                "self::".to_string(),
+            ],
+            package_name: Some(PackageNameSource {
+                manifest_file: "Cargo.toml".to_string(),
+                section: Some("[package]".to_string()),
+                key: "name".to_string(),
+                normalize_dashes_to_underscores: true,
+            }),
+        }
+    }
+
     #[test]
-    fn extracts_body_with_unbalanced_braces_inside_raw_string() {
+    fn extract_function_body_with_unbalanced_braces_inside_raw_string() {
         let content = r#"
 #[cfg(test)]
 mod tests {
@@ -393,28 +491,28 @@ mod tests {
 }
 "#;
 
-        let body = extract_rust_function_body(content, "build_grammar").expect("body");
+        let body = extract_function_body(content, "build_grammar").expect("body");
 
         assert!(body.contains("Grammar"));
         assert!(body.contains("regex"));
     }
 
     #[test]
-    fn extracts_body_with_hash_raw_string_containing_braces() {
+    fn extract_function_body_with_hash_raw_string_containing_braces() {
         let content = r##"
 fn parse_json() {
-    let value = r#"{"name":"homeboy"}"#;
-    assert!(value.contains("homeboy"));
+    let value = r#"{"name":"package"}"#;
+    assert!(value.contains("package"));
 }
 "##;
 
-        let body = extract_rust_function_body(content, "parse_json").expect("body");
+        let body = extract_function_body(content, "parse_json").expect("body");
 
         assert!(body.contains("assert!"));
     }
 
     #[test]
-    fn vacuity_mapping_comment_heuristic_ignores_code_and_string_literals() {
+    fn classify_vacuous_test_ignores_code_and_string_literals() {
         let body = r#"
             let finding = Finding {
                 convention: "test_coverage".to_string(),
@@ -424,21 +522,61 @@ fn parse_json() {
         "#;
 
         assert_eq!(
-            classify_vacuous_rust_test(body, &HashSet::new(), &HashSet::new(), None),
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
             None
         );
     }
 
     #[test]
-    fn vacuity_mapping_comment_heuristic_flags_comment_only_mapping_tests() {
+    fn classify_vacuous_test_flags_comment_only_mapping_tests() {
         let body = r#"
             // Keep this audit coverage mapping test wired.
             assert_eq!(1, 1);
         "#;
 
         assert_eq!(
-            classify_vacuous_rust_test(body, &HashSet::new(), &HashSet::new(), None),
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
             Some("its comments describe audit coverage mapping instead of behavior".to_string())
         );
+    }
+
+    #[test]
+    fn classify_vacuous_test_flags_assert_true_placeholder() {
+        let body = "assert!(true);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            Some("it only asserts true".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_vacuous_test_accepts_product_reference_marker() {
+        let body = "let result = crate::run();\nassert!(result);";
+        assert_eq!(
+            classify_vacuous_test(body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_package_name_reads_manifest_section_key() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-tool\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+
+        let resolved = resolve_package_name(
+            dir.path(),
+            &PackageNameSource {
+                manifest_file: "Cargo.toml".to_string(),
+                section: Some("[package]".to_string()),
+                key: "name".to_string(),
+                normalize_dashes_to_underscores: true,
+            },
+        );
+
+        assert_eq!(resolved.as_deref(), Some("my_tool"));
     }
 }

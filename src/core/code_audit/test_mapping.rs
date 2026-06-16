@@ -170,6 +170,7 @@ mod tests {
             critical_patterns: vec![],
             inline_tests: true,
             skip_test_patterns: vec![],
+            ..Default::default()
         }
     }
 

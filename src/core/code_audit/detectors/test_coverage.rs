@@ -28,7 +28,7 @@ use super::idiomatic::{is_trivial_method, test_covers_method};
 use super::test_mapping::{
     build_source_name_index, partition_fingerprints, source_to_test_path, test_to_source_path,
 };
-use super::test_vacuity::{find_vacuous_test_methods, rust_crate_name};
+use super::test_vacuity::{find_vacuous_test_methods, resolve_package_name};
 use crate::core::extension::TestMappingConfig;
 
 pub(in crate::core::code_audit) fn run(
@@ -60,7 +60,11 @@ pub(crate) fn analyze_test_coverage(
         .map(|fp| (fp.relative_path.as_str(), *fp))
         .collect();
 
-    let crate_name = rust_crate_name(root);
+    let package_name = config
+        .vacuity
+        .as_ref()
+        .and_then(|policy| policy.package_name.as_ref())
+        .and_then(|source| resolve_package_name(root, source));
 
     // Check 1 & 2: For each source file, check for corresponding test file and methods
     for source_fp in &source_fps {
@@ -151,13 +155,16 @@ pub(crate) fn analyze_test_coverage(
             let source_methods: HashSet<&str> =
                 source_fp.methods.iter().map(|m| m.as_str()).collect();
 
-            find_vacuous_test_methods(
-                &mut findings,
-                source_fp,
-                &source_fp.test_methods,
-                &source_methods,
-                crate_name.as_deref(),
-            );
+            if let Some(vacuity) = &config.vacuity {
+                find_vacuous_test_methods(
+                    &mut findings,
+                    source_fp,
+                    &source_fp.test_methods,
+                    &source_methods,
+                    vacuity,
+                    package_name.as_deref(),
+                );
+            }
 
             // Check method coverage: combine inline test methods + dedicated
             // test file methods, accepting either literal-prefix matches or
@@ -219,13 +226,16 @@ pub(crate) fn analyze_test_coverage(
 
             // Also check dedicated test file methods against this source
             if let Some(test_fingerprint) = test_fp {
-                find_vacuous_test_methods(
-                    &mut findings,
-                    test_fingerprint,
-                    &collect_test_methods_from_fp(test_fingerprint, config),
-                    &HashSet::new(),
-                    crate_name.as_deref(),
-                );
+                if let Some(vacuity) = &config.vacuity {
+                    find_vacuous_test_methods(
+                        &mut findings,
+                        test_fingerprint,
+                        &collect_test_methods_from_fp(test_fingerprint, config),
+                        &HashSet::new(),
+                        vacuity,
+                        package_name.as_deref(),
+                    );
+                }
                 find_orphaned_test_methods(
                     &mut findings,
                     &test_fingerprint.relative_path,
@@ -318,13 +328,16 @@ pub(crate) fn analyze_test_coverage(
 
                 // Check 4b: Orphaned test methods (external file)
                 if let Some(test_fingerprint) = test_fp {
-                    find_vacuous_test_methods(
-                        &mut findings,
-                        test_fingerprint,
-                        &test_methods,
-                        &HashSet::new(),
-                        crate_name.as_deref(),
-                    );
+                    if let Some(vacuity) = &config.vacuity {
+                        find_vacuous_test_methods(
+                            &mut findings,
+                            test_fingerprint,
+                            &test_methods,
+                            &HashSet::new(),
+                            vacuity,
+                            package_name.as_deref(),
+                        );
+                    }
                 }
                 find_orphaned_test_methods(
                     &mut findings,
@@ -378,6 +391,7 @@ pub(crate) fn analyze_test_coverage(
                         &test_fp.relative_path,
                         &test_fp.content,
                         &correct_test_path,
+                        config,
                     ) {
                         continue;
                     }
@@ -441,32 +455,33 @@ fn load_test_methods_from_disk(
     }
 
     let content = std::fs::read_to_string(&abs).ok()?;
-    Some(extract_test_methods_fallback(
-        &content,
-        test_path,
-        &config.method_prefix,
-    ))
+    Some(extract_test_methods_fallback(&content, test_path, config))
 }
 
+/// Extract test method names from raw file text using config-declared,
+/// per-extension regex templates. Core supplies only a generic identifier
+/// fallback; concrete per-language test-method syntax is declared by the
+/// extension via `test_method_patterns` / `default_test_method_pattern`.
 fn extract_test_methods_fallback(
     content: &str,
     test_path: &str,
-    method_prefix: &str,
+    config: &TestMappingConfig,
 ) -> Vec<String> {
     let ext = Path::new(test_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    let escaped = regex::escape(method_prefix);
-    let pattern = match ext {
-        "rs" => format!(r"(?m)^\s*fn\s+({}\w*)\s*\(", escaped),
-        "php" => format!(r"(?m)^\s*(?:public\s+)?function\s+({}\w*)\s*\(", escaped),
-        "js" | "jsx" | "ts" | "tsx" => {
-            format!(r"(?m)^\s*(?:async\s+)?function\s+({}\w*)\s*\(", escaped)
-        }
-        _ => format!(r"(?m)({}\w*)", escaped),
-    };
+    let escaped = regex::escape(&config.method_prefix);
+    let template = config
+        .test_method_patterns
+        .get(ext)
+        .or(config.default_test_method_pattern.as_ref())
+        .cloned()
+        // Generic identifier fallback when nothing is declared: any token that
+        // starts with the configured prefix. Capture group required.
+        .unwrap_or_else(|| r"({prefix}\w*)".to_string());
+    let pattern = template.replace("{prefix}", &escaped);
 
     let re = match Regex::new(&pattern) {
         Ok(re) => re,
@@ -593,7 +608,7 @@ fn find_orphaned_test_methods(
             continue;
         }
 
-        if config.inline_tests && is_rust_behavior_scenario_name(expected_source) {
+        if config.inline_tests && config.behavior_scenario_names.matches(expected_source) {
             continue;
         }
 
@@ -639,12 +654,31 @@ fn find_orphaned_test_methods(
     }
 }
 
+/// Determine whether `wrapper_path` is a thin wrapper that only includes
+/// `target_test_path`, according to the extension-declared `include_wrapper`
+/// policy. The wrapper file extension(s) and the include template (with
+/// `{relative_target}`) are config-owned so core does not hardcode any
+/// language's include syntax.
 fn is_include_wrapper_for_test_path(
     wrapper_path: &str,
     wrapper_content: &str,
     target_test_path: &str,
+    config: &TestMappingConfig,
 ) -> bool {
-    if !wrapper_path.ends_with(".rs") || !target_test_path.ends_with(".rs") {
+    let Some(policy) = &config.include_wrapper else {
+        return false;
+    };
+
+    let has_ext = |path: &str| {
+        let ext = Path::new(path).extension().and_then(|e| e.to_str());
+        ext.is_some_and(|ext| {
+            policy
+                .file_extensions
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        })
+    };
+    if !has_ext(wrapper_path) || !has_ext(target_test_path) {
         return false;
     }
 
@@ -662,30 +696,14 @@ fn is_include_wrapper_for_test_path(
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect();
-    let expected = format!("include!(\"{}\");", relative_target);
+    let expected: String = policy
+        .include_template
+        .replace("{relative_target}", &relative_target)
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
 
     normalized_content == expected
-}
-
-fn is_rust_behavior_scenario_name(name: &str) -> bool {
-    let behavior_prefixes = [
-        "accepts_",
-        "detects_",
-        "emits_",
-        "handles_",
-        "ignores_",
-        "rejects_",
-        "skips_",
-        "translates_",
-    ];
-    let behavior_suffixes = ["_roundtrip", "_roundtrips"];
-
-    behavior_prefixes
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-        || behavior_suffixes
-            .iter()
-            .any(|suffix| name.ends_with(suffix))
 }
 
 // ============================================================================
@@ -696,6 +714,7 @@ fn is_rust_behavior_scenario_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::core::code_audit::conventions::Language;
+    use crate::core::extension::{BehaviorScenarioNames, IncludeWrapperPolicy};
 
     fn make_config() -> TestMappingConfig {
         TestMappingConfig {
@@ -706,6 +725,7 @@ mod tests {
             inline_tests: false,
             critical_patterns: vec!["core/".to_string()],
             skip_test_patterns: vec![],
+            ..Default::default()
         }
     }
 
@@ -718,6 +738,43 @@ mod tests {
             inline_tests: true,
             critical_patterns: vec!["core/".to_string()],
             skip_test_patterns: vec![],
+            behavior_scenario_names: BehaviorScenarioNames {
+                prefixes: vec![
+                    "accepts_".to_string(),
+                    "detects_".to_string(),
+                    "emits_".to_string(),
+                    "handles_".to_string(),
+                    "ignores_".to_string(),
+                    "rejects_".to_string(),
+                    "skips_".to_string(),
+                    "translates_".to_string(),
+                ],
+                suffixes: vec!["_roundtrip".to_string(), "_roundtrips".to_string()],
+            },
+            include_wrapper: Some(IncludeWrapperPolicy {
+                file_extensions: vec!["rs".to_string()],
+                include_template: "include!(\"{relative_target}\");".to_string(),
+            }),
+            vacuity: Some(rust_vacuity_policy()),
+            ..Default::default()
+        }
+    }
+
+    fn rust_vacuity_policy() -> crate::core::extension::TestVacuityPolicy {
+        crate::core::extension::TestVacuityPolicy {
+            file_extensions: vec!["rs".to_string()],
+            allowed_body_markers: vec![
+                "compile contract".to_string(),
+                "compile-only".to_string(),
+                "assert_snapshot".to_string(),
+                "assert_debug_snapshot".to_string(),
+            ],
+            product_reference_markers: vec![
+                "crate::".to_string(),
+                "super::".to_string(),
+                "self::".to_string(),
+            ],
+            package_name: None,
         }
     }
 
@@ -1121,6 +1178,7 @@ fn test_chat_tools() {
             inline_tests: false,
             critical_patterns: vec!["Abilities/".to_string()],
             skip_test_patterns: vec![],
+            ..Default::default()
         };
 
         assert_eq!(

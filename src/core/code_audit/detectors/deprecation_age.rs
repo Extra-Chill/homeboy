@@ -3,7 +3,7 @@
 //!
 //! Walks file fingerprints, scans `content` for docblock `@deprecated`
 //! tags, compares the tagged version against the component's current
-//! version (from a plugin header or `composer.json`), and emits
+//! version (from a config-declared version source), and emits
 //! `Info`-severity findings when the deprecation exceeds the age
 //! threshold. Each finding is annotated with a count of remaining call
 //! sites (scanned from `internal_calls` and `call_sites` across all
@@ -38,9 +38,9 @@ static DEPRECATED_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)@deprecated(?:\s+since)?\s+(\d+\.\d+\.\d+)").expect("valid regex")
 });
 
-/// Match the nearest symbol declaration following a docblock: PHP
-/// class/trait/interface/function/method, Rust fn/struct/enum/trait,
-/// JS/TS function/class. Captures the symbol name.
+/// Match the nearest symbol declaration following a docblock across the
+/// supported declaration keywords (class/trait/interface/function/method/
+/// fn/struct/enum). Captures the symbol name.
 static SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
@@ -172,10 +172,9 @@ fn line_number_at(content: &str, byte_offset: usize) -> usize {
 /// Walk forward from the docblock tag to find the first symbol
 /// declaration that follows.
 ///
-/// Skips blank lines, comment lines, and bookkeeping lines (PHP
-/// `namespace`/`use`, Rust `use`/attributes, JS/TS `import`/decorators)
-/// that commonly sit between a file-level docblock and the class it
-/// documents.
+/// Skips blank lines, comment lines, and bookkeeping lines
+/// (`namespace`/`use`/`import` statements, attributes, decorators) that
+/// commonly sit between a file-level docblock and the symbol it documents.
 fn find_following_symbol(content: &str, tag_offset: usize) -> Option<String> {
     let tail = content.get(tag_offset..)?;
     for line in tail.lines().skip(1) {
@@ -235,11 +234,10 @@ fn build_reference_counts<'a>(fingerprints: &'a [&FileFingerprint]) -> HashMap<&
 
 /// Read the current version of the component under `root`.
 ///
-/// Tries in order:
-/// 1. Plugin header `Version:` in any `*.php` file directly under `root`.
-/// 2. `composer.json` top-level `version` field.
-///
-/// Returns `None` when neither source yields a parseable semver.
+/// Tries the supported version sources in order and returns `None` when none
+/// yield a parseable semver. The concrete manifest/header conventions are
+/// ecosystem defaults; richer projects can declare their own version targets
+/// elsewhere in component config.
 fn detect_current_version(root: &Path) -> Option<Version> {
     if let Some(v) = plugin_header_version(root) {
         return Some(v);

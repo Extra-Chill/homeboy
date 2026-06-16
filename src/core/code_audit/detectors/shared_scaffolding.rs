@@ -31,7 +31,7 @@ const MIN_GROUP_SIZE: usize = 3;
 const MIN_MEAN_SIMILARITY: f64 = 0.60;
 
 /// Path depth used to bucket classes into subtrees. A file at
-/// `inc/Abilities/AgentPing/SendPingAbility.php` has subtree root `inc/Abilities`.
+/// `src/abilities/agent_ping/send_ping.ext` has subtree root `src/abilities`.
 const SUBTREE_DEPTH: usize = 2;
 
 /// Approximate LOC per method body when projecting a base class.
@@ -181,8 +181,8 @@ fn build_shape_signature(fp: &FileFingerprint) -> Vec<(String, String)> {
 /// Determine the subtree root (top-level directory under the component root)
 /// for a given relative path.
 ///
-/// Uses the first `SUBTREE_DEPTH` directory components. For `inc/Abilities/Chat/ChatAbility.php`,
-/// this returns `inc/Abilities`. For shorter paths, falls back to the file's parent dir.
+/// Uses the first `SUBTREE_DEPTH` directory components. For `src/abilities/chat/chat.ext`,
+/// this returns `src/abilities`. For shorter paths, falls back to the file's parent dir.
 fn subtree_root(relative_path: &str) -> String {
     let normalized = relative_path.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').collect();

@@ -6,7 +6,8 @@
 //! `error_envelope($error, $message)` helper for the ubiquitous
 //! `['success' => false, 'error' => $x, 'message' => $y]` shape).
 //!
-//! PHP-first. The detector recognizes two literal syntaxes:
+//! Targets associative-array literal syntax. The detector recognizes two
+//! literal forms:
 //!
 //! - Short array: `[ 'key' => value, ... ]`
 //! - Long array:  `array( 'key' => value, ... )`
@@ -208,7 +209,7 @@ fn suggest_helper_name(shape: &Shape) -> String {
 // Literal extraction
 // ============================================================================
 
-/// Extract all top-level associative array literal shapes from a PHP source
+/// Extract all top-level associative-array literal shapes from a source
 /// string. Positional arrays and non-associative literals are skipped.
 fn extract_literal_shapes(content: &str) -> Vec<Shape> {
     let bytes = content.as_bytes();
@@ -505,7 +506,7 @@ fn skip_string_or_comment(bytes: &[u8], i: usize) -> Option<usize> {
     let b = bytes[i];
 
     // Line comments: `//` and `#` (the latter only when not followed by `[` to
-    // avoid colliding with PHP 8 attribute syntax `#[...]`).
+    // avoid colliding with attribute syntax `#[...]`).
     if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
         return Some(skip_to_eol(bytes, i + 2));
     }

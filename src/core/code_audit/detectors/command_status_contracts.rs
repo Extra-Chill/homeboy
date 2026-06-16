@@ -6,6 +6,13 @@ use crate::core::component::{CommandStatusContractConfig, CommandStatusContractS
 
 use super::super::{AuditFinding, Finding, Severity};
 
+/// Label pointing reviewers at the component config file that declares these
+/// contracts. Sourced from core product identity so the detector does not
+/// hardcode the host product's config filename.
+fn config_file_label() -> &'static str {
+    crate::core::product_identity::PRODUCT_IDENTITY.config_filename
+}
+
 pub(in crate::core::code_audit) fn run(
     root: &Path,
     config: &CommandStatusContractConfig,
@@ -19,7 +26,7 @@ pub(in crate::core::code_audit) fn run(
             .any(|scenario| scenario.command.as_deref() == Some(command.as_str()))
         {
             findings.push(finding(
-                "homeboy.json",
+                config_file_label(),
                 command,
                 "required command has no declared golden output fixture".to_string(),
                 "Add a command_status_contracts scenario with a JSON fixture for this structured-output command.".to_string(),
@@ -34,7 +41,7 @@ pub(in crate::core::code_audit) fn run(
                 && is_validation_error_scenario(scenario)
         }) {
             findings.push(finding(
-                "homeboy.json",
+                config_file_label(),
                 command,
                 "required command lacks a validation-error --output golden fixture".to_string(),
                 "Add an output_file validation_error scenario so validation failures prove they still write structured --output JSON.".to_string(),
@@ -265,7 +272,7 @@ fn validate_json_envelope(
                     &scenario.file,
                     &scenario.id,
                     format!("golden contract scenario at /scenarios/{index} is missing /payload"),
-                    "Store grouped command contract fixtures as scenarios containing Homeboy CLI envelope payloads.".to_string(),
+                    "Store grouped command contract fixtures as scenarios containing CLI status envelope payloads.".to_string(),
                 )),
             }
         }
@@ -289,7 +296,7 @@ fn validate_single_json_envelope(
                     &scenario.file,
                     &scenario.id,
                     format!("successful JSON envelope is missing {pointer_prefix}/data"),
-                    "Store command output fixtures as Homeboy CLI envelopes with success=true and data.".to_string(),
+                    "Store command output fixtures as CLI status envelopes with success=true and data.".to_string(),
                 ));
             }
         }
@@ -299,7 +306,7 @@ fn validate_single_json_envelope(
                     &scenario.file,
                     &scenario.id,
                     format!("failed JSON envelope is missing {pointer_prefix}/data or {pointer_prefix}/error"),
-                    "Store non-zero command fixtures as Homeboy CLI envelopes with either command data or error details.".to_string(),
+                    "Store non-zero command fixtures as CLI status envelopes with either command data or error details.".to_string(),
                 ));
             }
         }
@@ -307,14 +314,14 @@ fn validate_single_json_envelope(
             &scenario.file,
             &scenario.id,
             format!("JSON envelope {pointer_prefix}/success is not a boolean"),
-            "Use the standard Homeboy CLI JSON envelope shape for command output fixtures."
+            "Use the standard CLI JSON status envelope shape for command output fixtures."
                 .to_string(),
         )),
         None => findings.push(finding(
             &scenario.file,
             &scenario.id,
             format!("JSON envelope is missing {pointer_prefix}/success"),
-            "Use the standard Homeboy CLI JSON envelope shape for command output fixtures."
+            "Use the standard CLI JSON status envelope shape for command output fixtures."
                 .to_string(),
         )),
     }
