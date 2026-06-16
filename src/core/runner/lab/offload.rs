@@ -893,6 +893,17 @@ fn run_lab_offload_inner(
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
     hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
+    preflight_agent_task_provider_on_runner(
+        runner_id,
+        &command_prefix.argv,
+        &remote_cwd,
+        &remapped_args,
+        env.clone(),
+        source_snapshot.clone(),
+        contract.required_extensions.clone(),
+        capability_preflight.clone(),
+        &runner_homeboy,
+    )?;
     if is_agent_task_offload_command(&remapped_args) {
         preflight_agent_task_provider_registry(
             runner_id,
@@ -1182,6 +1193,236 @@ fn runner_homeboy_daemon_display(metadata: &serde_json::Value) -> String {
         })
         .unwrap_or("<not connected>")
         .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentTaskProviderSelection {
+    backend: String,
+    selector: Option<String>,
+}
+
+fn preflight_agent_task_provider_on_runner(
+    runner_id: &str,
+    command_prefix: &[String],
+    remote_cwd: &str,
+    args: &[String],
+    env: std::collections::HashMap<String, String>,
+    source_snapshot: SourceSnapshot,
+    required_extensions: Vec<String>,
+    capability_preflight: Option<RunnerCapabilityPreflight>,
+    runner_homeboy: &serde_json::Value,
+) -> Result<()> {
+    let Some(selection) = agent_task_provider_selection_from_args(args) else {
+        return Ok(());
+    };
+
+    let mut command = command_prefix.to_vec();
+    command.extend(["agent-task".to_string(), "providers".to_string()]);
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions {
+            cwd: Some(remote_cwd.to_string()),
+            project_id: None,
+            allow_diagnostic_ssh: false,
+            command: command.clone(),
+            env,
+            secret_env_names: Vec::new(),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: Some(source_snapshot),
+            capability_preflight,
+            required_extensions,
+            require_paths: Vec::new(),
+        },
+    )?;
+
+    let local_providers = ExtensionProviderAgentTaskExecutor::discover()
+        .providers()
+        .to_vec();
+    let local_available = provider_available(
+        &local_providers,
+        &selection.backend,
+        selection.selector.as_deref(),
+    );
+
+    if exit_code != 0 {
+        return Err(agent_task_provider_selection_preflight_error(
+            runner_id,
+            &selection,
+            local_available,
+            None,
+            runner_homeboy,
+            Some(format!(
+                "runner provider preflight command exited with {exit_code}: {}",
+                first_non_empty_line(&output.stderr)
+                    .or_else(|| first_non_empty_line(&output.stdout))
+                    .unwrap_or_else(|| "no output".to_string())
+            )),
+            &command,
+        ));
+    }
+
+    let runner_providers =
+        parse_agent_task_providers_output(&output.stdout).map_err(|message| {
+            agent_task_provider_selection_preflight_error(
+                runner_id,
+                &selection,
+                local_available,
+                None,
+                runner_homeboy,
+                Some(message),
+                &command,
+            )
+        })?;
+    let runner_available = provider_available(
+        &runner_providers,
+        &selection.backend,
+        selection.selector.as_deref(),
+    );
+
+    if !runner_available {
+        return Err(agent_task_provider_selection_preflight_error(
+            runner_id,
+            &selection,
+            local_available,
+            Some(false),
+            runner_homeboy,
+            None,
+            &command,
+        ));
+    }
+
+    Ok(())
+}
+
+fn agent_task_provider_selection_from_args(args: &[String]) -> Option<AgentTaskProviderSelection> {
+    let action_index =
+        super::args_util::subcommand_index(args, "agent-task").and_then(|index| {
+            args.get(index + 1)
+                .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
+                .map(|_| index + 1)
+        })?;
+
+    let mut backend = None;
+    let mut selector = None;
+    let mut iter = args.iter().skip(action_index + 1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        match arg.as_str() {
+            "--backend" => backend = iter.next().cloned(),
+            "--selector" => selector = iter.next().cloned(),
+            _ => {
+                if let Some(value) = arg.strip_prefix("--backend=") {
+                    backend = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--selector=") {
+                    selector = Some(value.to_string());
+                }
+            }
+        }
+    }
+
+    backend
+        .filter(|backend| !backend.trim().is_empty())
+        .map(|backend| AgentTaskProviderSelection { backend, selector })
+}
+
+fn parse_agent_task_providers_output(
+    output: &str,
+) -> std::result::Result<Vec<AgentTaskExecutorProvider>, String> {
+    let value = parse_json_from_mixed_output(output)
+        .ok_or_else(|| "runner provider preflight did not return JSON".to_string())?;
+    let providers = value
+        .get("providers")
+        .or_else(|| value.get("data").and_then(|data| data.get("providers")))
+        .cloned()
+        .ok_or_else(|| "runner provider preflight JSON did not include providers".to_string())?;
+
+    serde_json::from_value::<Vec<AgentTaskExecutorProvider>>(providers).map_err(|error| {
+        format!("runner provider preflight returned invalid providers JSON: {error}")
+    })
+}
+
+fn parse_json_from_mixed_output(output: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        return Some(value);
+    }
+    for (index, _) in output.match_indices('{') {
+        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter();
+        if let Some(Ok(value)) = stream.next() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn provider_available(
+    providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> bool {
+    providers.iter().any(|provider| {
+        provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
+    })
+}
+
+fn agent_task_provider_selection_preflight_error(
+    runner_id: &str,
+    selection: &AgentTaskProviderSelection,
+    local_available: bool,
+    runner_available: Option<bool>,
+    runner_homeboy: &serde_json::Value,
+    reason: Option<String>,
+    command: &[String],
+) -> Error {
+    let selector = selection.selector.as_deref().unwrap_or("<default>");
+    let runner_available = runner_available.unwrap_or(false);
+    let reason = reason.unwrap_or_else(|| {
+        format!(
+            "runner provider availability is {runner_available} while local provider availability is {local_available}"
+        )
+    });
+    Error::validation_invalid_argument(
+        "backend",
+        format!(
+            "Lab runner `{runner_id}` cannot execute agent-task backend `{}` selector `{selector}` before dispatch: {reason}. No task cells were queued. This points to extension/runtime sync drift between the controller and selected runner, not a task failure.",
+            selection.backend
+        ),
+        Some(selection.backend.clone()),
+        Some(vec![
+            format!(
+                "Local provider availability: {local_available}; runner provider availability: {runner_available}."
+            ),
+            format!(
+                "Refresh runner `{runner_id}` with `{}`.",
+                runner_homeboy["refresh_commands"]
+                    .as_array()
+                    .map(|commands| commands
+                        .iter()
+                        .filter_map(|command| command.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" && "))
+                    .filter(|command| !command.is_empty())
+                    .unwrap_or_else(|| format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}"))
+            ),
+            format!(
+                "Upgrade or sync the runner runtime/extensions with `{}`.",
+                runner_homeboy["upgrade_command"]
+                    .as_str()
+                    .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
+            ),
+            format!("Preflight command: `{}`.", command.join(" ")),
+        ]),
+    )
+}
+
+fn first_non_empty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 fn with_lab_apply_patch_step(
@@ -2255,6 +2496,105 @@ mod tests {
             runner_homeboy_daemon_display(&metadata),
             "homeboy 0.1.0+abc123"
         );
+    }
+
+    #[test]
+    fn agent_task_provider_selection_reads_cook_backend_and_selector() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--backend".to_string(),
+            "wordpress".to_string(),
+            "--selector=wp-codebox".to_string(),
+            "--prompt".to_string(),
+            "fix it".to_string(),
+        ];
+
+        let selection = agent_task_provider_selection_from_args(&args).expect("selection");
+
+        assert_eq!(selection.backend, "wordpress");
+        assert_eq!(selection.selector.as_deref(), Some("wp-codebox"));
+    }
+
+    #[test]
+    fn agent_task_provider_selection_ignores_non_dispatch_commands() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "wordpress".to_string(),
+        ];
+
+        assert!(agent_task_provider_selection_from_args(&args).is_none());
+    }
+
+    #[test]
+    fn runner_provider_output_parser_accepts_cli_envelope_with_chatter() {
+        let stdout = concat!(
+            "Preparing runtime...\n",
+            "{\"success\":true,\"data\":{\"providers\":[{\"schema\":\"homeboy/agent-task-executor-provider/v1\",\"id\":\"wp-codebox\",\"backend\":\"wordpress\",\"default_backend\":true,\"command\":\"wp-codebox agent\",\"request_schema\":\"homeboy/agent-task-request/v1\",\"outcome_schema\":\"homeboy/agent-task-outcome/v1\"}]}}\n"
+        );
+
+        let providers = parse_agent_task_providers_output(stdout).expect("providers parse");
+
+        assert!(provider_available(&providers, "wordpress", None));
+        assert!(provider_available(
+            &providers,
+            "wordpress",
+            Some("wp-codebox")
+        ));
+        assert!(!provider_available(
+            &providers,
+            "wordpress",
+            Some("missing")
+        ));
+    }
+
+    #[test]
+    fn provider_preflight_error_reports_local_runner_drift_and_no_cells_queued() {
+        let selection = AgentTaskProviderSelection {
+            backend: "wordpress".to_string(),
+            selector: None,
+        };
+        let runner_homeboy = serde_json::json!({
+            "refresh_commands": [
+                "homeboy runner disconnect homeboy-lab",
+                "homeboy runner connect homeboy-lab"
+            ],
+            "upgrade_command": "homeboy upgrade --force --upgrade-runner homeboy-lab"
+        });
+
+        let err = agent_task_provider_selection_preflight_error(
+            "homeboy-lab",
+            &selection,
+            true,
+            Some(false),
+            &runner_homeboy,
+            None,
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+        );
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("homeboy-lab"));
+        assert!(err.message.contains("backend `wordpress`"));
+        assert!(err.message.contains("No task cells were queued"));
+        assert!(err.message.contains("extension/runtime sync drift"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Local provider availability: true"))));
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("runner provider availability: false"))));
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains("homeboy upgrade --force --upgrade-runner homeboy-lab")
+        )));
     }
 
     #[test]
