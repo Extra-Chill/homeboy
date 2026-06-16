@@ -1,0 +1,73 @@
+{
+  "name": "Fake Agent Runtime",
+  "version": "1.0.0",
+  "description": "Minimal generic agent runtime fixture for Homeboy contract tests.",
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "fake-runtime.agent-task-executor",
+      "label": "Fake agent task executor",
+      "backend": "fake-runtime",
+      "command": "node {{runtime_path}}/scripts/agent/fake-agent-task-executor.cjs",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "failed",
+        "no_op",
+        "timeout",
+        "provider_error"
+      ],
+      "failure_classifications": [
+        "request_validation",
+        "provider",
+        "timeout",
+        "execution_failed"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets",
+        "fake_runtime_token"
+      ],
+      "capabilities": [
+        "workspace_materialization",
+        "structured_outcome",
+        "diagnostic_artifacts"
+      ],
+      "workspace_materialization": {
+        "cwd": "git_checkout",
+        "requires_git": true,
+        "write_scope": "artifacts",
+        "artifact_paths": [
+          ".homeboy/fake-runtime"
+        ]
+      },
+      "secret_requirements": [
+        {
+          "name": "FAKE_RUNTIME_TOKEN",
+          "required": false,
+          "purpose": "Optional fake credential used by the contract fixture."
+        }
+      ],
+      "diagnostics": {
+        "outcome_fields": [
+          "diagnostics",
+          "artifacts",
+          "metadata"
+        ],
+        "artifact_kinds": [
+          "fake-runtime-diagnostic"
+        ]
+      },
+      "status": "experimental",
+      "integration_contract": "homeboy-generic-agent-runtime/v1"
+    }
+  ]
+}
