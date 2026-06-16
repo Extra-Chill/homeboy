@@ -47,10 +47,65 @@ pub(super) fn resolve_effective_remote_path(
             return Ok(resolved);
         }
 
-        return base_path::join_remote_path(Some(fallback_base_path), &remote_path);
+        // A parent-relative managed path (e.g. `../wp-content/...`) can only
+        // resolve safely through a configured/detected path_root. Without one,
+        // joining it against base_path produces a literal `..` that escapes the
+        // writable wp-content root and fails mid-install with a cryptic
+        // read-only filesystem error. Reject early with a clear diagnostic. (#3488)
+        return Err(reject_unresolved_parent_relative_path(
+            component,
+            managed_path,
+            &remote_path,
+        ));
     }
 
     base_path::join_remote_path(Some(fallback_base_path), &remote_path)
+}
+
+/// Reject a parent-relative managed path (`../wp-content/...`) whose path_root
+/// was neither configured nor detected. Joining such a path against base_path
+/// yields a literal `..` escape that lands outside the writable wp-content
+/// root, so we fail fast with an actionable diagnostic instead of letting the
+/// install fail later with a cryptic read-only filesystem error. (#3488)
+fn reject_unresolved_parent_relative_path(
+    component: &Component,
+    managed_path: &str,
+    remote_path: &str,
+) -> Error {
+    let matching_rule = component_remote_path_root_rules(component)
+        .into_iter()
+        .find(|rule| path_matches_prefix(managed_path, &rule.path_prefix));
+    let managed_root_name = matching_rule
+        .as_ref()
+        .map(|rule| rule.root.clone())
+        .unwrap_or_else(|| "wp_content".to_string());
+
+    // The runtime wp-content root is unknown — that's the failure — so show the
+    // *shape* of a correct absolute remote_path by stripping the managed prefix
+    // (e.g. "wp-content") off the path so it isn't doubled under the root.
+    let example_child = matching_rule
+        .as_ref()
+        .map(|rule| strip_path_prefix(managed_path, &rule.path_prefix).to_string())
+        .unwrap_or_else(|| managed_path.trim_start_matches('/').to_string());
+
+    Error::validation_invalid_argument(
+        "remotePath",
+        format!(
+            "Component '{}' remote_path '{}' resolves outside the writable wp-content root: the parent-relative '..' escape requires path_root '{}' which was not configured or detected for this runtime",
+            component.id, remote_path, managed_root_name
+        ),
+        Some(remote_path.to_string()),
+        Some(vec![
+            format!(
+                "Set remote_path to an explicit absolute path inside the writable wp-content root (absolute paths are used verbatim, e.g. '/<runtime-wp-content-root>/{}')",
+                example_child.trim_start_matches('/')
+            ),
+            format!(
+                "Configure project path_roots.{} to the active remote wp-content root, or ensure the extension can detect it at deploy time",
+                managed_root_name
+            ),
+        ]),
+    )
 }
 
 fn parent_relative_managed_path(
@@ -404,11 +459,11 @@ mod tests {
     }
 
     #[test]
-    fn parent_relative_content_paths_resolve_against_base_path() {
+    fn parent_relative_content_paths_without_root_are_rejected() {
         with_isolated_home(|_| {
             install_extension();
 
-            let resolved = resolve_effective_remote_path(
+            let err = resolve_effective_remote_path(
                 &Project {
                     id: "site".to_string(),
                     base_path: Some("/srv/site".to_string()),
@@ -417,9 +472,61 @@ mod tests {
                 &component("../wp-content/plugins/foo"),
                 "/srv/site",
             )
-            .expect("parent-relative content path should resolve");
+            .expect_err("parent-relative content path without a root should be rejected");
 
-            assert_eq!(resolved, "/srv/site/../wp-content/plugins/foo");
+            let message = err.to_string();
+            assert!(
+                message.contains("resolves outside the writable wp-content root"),
+                "expected clear root-escape diagnostic, got: {message}"
+            );
+            assert!(message.contains("wp_content"));
+
+            // Remediation lives in details.tried (same shape as the other
+            // path-root errors in this module).
+            let tried = err.details["tried"].as_array().expect("tried hints");
+            let tried_text: String = tried
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                tried_text.contains("runtime-wp-content-root>/plugins/foo"),
+                "diagnostic should suggest an explicit absolute path shape, got: {tried_text}"
+            );
+            assert!(
+                tried_text.contains("path_roots.wp_content"),
+                "diagnostic should mention configuring the path_root, got: {tried_text}"
+            );
+        });
+    }
+
+    #[test]
+    fn wp_cloud_parent_relative_path_without_root_is_rejected_3488() {
+        // Regression for issue #3488: WP Cloud base_path `/htdocs/__wp__` with a
+        // `../wp-content/...` remote_path and no detected wp_content root must be
+        // rejected at preflight instead of producing `/htdocs/__wp__/../wp-content/...`
+        // (which `mkdir -p` expands into a read-only filesystem).
+        with_isolated_home(|_| {
+            install_extension();
+
+            let err = resolve_effective_remote_path(
+                &Project {
+                    id: "wp-docs-runtime".to_string(),
+                    base_path: Some("/htdocs/__wp__".to_string()),
+                    ..Project::default()
+                },
+                &component("../wp-content/plugins/frontend-agent-chat"),
+                "/htdocs/__wp__",
+            )
+            .expect_err("WP Cloud parent-relative escape must be rejected (#3488)");
+
+            let message = err.to_string();
+            assert!(message.contains("resolves outside the writable wp-content root"));
+            assert!(message.contains("frontend-agent-chat"));
+            assert!(
+                !message.contains("/htdocs/__wp__/../wp-content"),
+                "must not surface the escaping expanded path, got: {message}"
+            );
         });
     }
 
