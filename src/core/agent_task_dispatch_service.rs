@@ -151,7 +151,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
 
     let workspace_target = resolve_dispatch_workspace(request)?;
     validate_dispatch_workspace_target(
-        request,
+        &request.backend,
+        request.selector.as_deref(),
         workspace_target.as_ref(),
         &provider_requires_cwd_git_checkout,
     )?;
@@ -291,7 +292,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
 }
 
 fn validate_dispatch_workspace_target(
-    request: &AgentTaskDispatchRequest,
+    backend: &str,
+    selector: Option<&str>,
     workspace: Option<&DispatchWorkspaceTarget>,
     provider_requires_cwd_git_checkout: &impl Fn(&str, Option<&str>) -> bool,
 ) -> Result<()> {
@@ -299,7 +301,7 @@ fn validate_dispatch_workspace_target(
         return Ok(());
     };
     if workspace.kind.as_deref() != Some("cwd")
-        || !provider_requires_cwd_git_checkout(&request.backend, request.selector.as_deref())
+        || !provider_requires_cwd_git_checkout(backend, selector)
     {
         return Ok(());
     }

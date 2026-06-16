@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::core::agent_runtime_manifest;
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
@@ -17,6 +16,7 @@ use crate::core::agent_task_scheduler::{
 };
 use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
 use crate::core::agent_task_timeout::timeout_with_grace;
+use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
@@ -231,8 +231,8 @@ impl ExtensionProviderAgentTaskExecutor {
         &self.providers
     }
 
-    pub fn default_backend(&self) -> Option<String> {
-        default_backend_from_providers(&self.providers)
+    pub fn default_backend(&self) -> crate::core::Result<Option<String>> {
+        default_backend_from_policy(None)
     }
 
     pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
@@ -240,8 +240,14 @@ impl ExtensionProviderAgentTaskExecutor {
     }
 }
 
-pub fn default_backend() -> Option<String> {
-    default_backend_from_providers(&discover_agent_task_executor_providers())
+pub fn default_backend() -> crate::core::Result<Option<String>> {
+    default_backend_from_policy(None)
+}
+
+pub fn default_backend_for_component(
+    component_id: Option<&str>,
+) -> crate::core::Result<Option<String>> {
+    default_backend_from_policy(component_id)
 }
 
 pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadiness> {
@@ -360,12 +366,66 @@ fn provider_runner_secret_env(provider: &AgentTaskExecutorProvider) -> Vec<Strin
     names
 }
 
-fn default_backend_from_providers(providers: &[AgentTaskExecutorProvider]) -> Option<String> {
-    providers
-        .iter()
-        .find(|provider| provider.default_backend)
-        .or_else(|| providers.first())
-        .map(|provider| provider.backend.clone())
+fn default_backend_from_policy(component_id: Option<&str>) -> crate::core::Result<Option<String>> {
+    if let Some(component_id) = component_id {
+        if let Ok(component) = component::load(component_id) {
+            if let Some(default_backend) = component_default_backend(&component) {
+                return Ok(Some(default_backend));
+            }
+        }
+    }
+
+    let extension_defaults: Vec<String> = extension::load_all_extensions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|manifest| {
+            manifest
+                .agent_task
+                .and_then(|agent_task| agent_task.default_backend)
+        })
+        .filter(|backend| !backend.trim().is_empty())
+        .collect();
+
+    if extension_defaults.len() > 1 {
+        return Err(Error::validation_invalid_argument(
+            "backend",
+            "agent-task default backend is ambiguous because multiple extension policies declare agent_task.default_backend",
+            None,
+            Some(vec![
+                "Set /agent_task/default_backend in Homeboy config or pass --backend explicitly.".to_string(),
+            ]),
+        ));
+    }
+    if let Some(default_backend) = extension_defaults.into_iter().next() {
+        return Ok(Some(default_backend));
+    }
+
+    Ok(defaults::load_config()
+        .agent_task
+        .default_backend
+        .filter(|backend| !backend.trim().is_empty()))
+}
+
+fn component_default_backend(component: &component::Component) -> Option<String> {
+    component
+        .extensions
+        .as_ref()?
+        .values()
+        .find_map(|extension| {
+            extension
+                .settings
+                .get("agent_task")
+                .and_then(|value| value.get("default_backend"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    extension
+                        .settings
+                        .get("agent_task_default_backend")
+                        .and_then(Value::as_str)
+                })
+                .filter(|backend| !backend.trim().is_empty())
+                .map(String::from)
+        })
 }
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
@@ -1199,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn default_backend_prefers_provider_declaration() {
+    fn default_backend_ignores_provider_declaration() {
         let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
         provider_a.backend = "first".to_string();
         let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
@@ -1209,7 +1269,149 @@ mod tests {
         let executor =
             ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
-        assert_eq!(executor.default_backend().as_deref(), Some("preferred"));
+        crate::test_support::with_isolated_home(|_| {
+            assert_eq!(executor.default_backend().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn default_backend_uses_global_config_policy() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                agent_task: defaults::AgentTaskConfig {
+                    default_backend: Some("configured".to_string()),
+                    ..defaults::AgentTaskConfig::default()
+                },
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("config saved");
+
+            assert_eq!(default_backend().unwrap().as_deref(), Some("configured"));
+        });
+    }
+
+    #[test]
+    fn default_backend_uses_extension_policy() {
+        crate::test_support::with_isolated_home(|home| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                agent_task: defaults::AgentTaskConfig {
+                    default_backend: Some("global-policy".to_string()),
+                    ..defaults::AgentTaskConfig::default()
+                },
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("config saved");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/runtime-extension");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join("runtime-extension.json"),
+                json!({
+                    "name": "Runtime Extension",
+                    "version": "1.0.0",
+                    "agent_task": { "default_backend": "extension-policy" }
+                })
+                .to_string(),
+            )
+            .expect("extension manifest");
+
+            assert_eq!(
+                default_backend().unwrap().as_deref(),
+                Some("extension-policy")
+            );
+        });
+    }
+
+    #[test]
+    fn default_backend_rejects_ambiguous_extension_policy() {
+        crate::test_support::with_isolated_home(|home| {
+            for (id, backend) in [("runtime-a", "backend-a"), ("runtime-b", "backend-b")] {
+                let extension_dir = home.path().join(format!(".config/homeboy/extensions/{id}"));
+                std::fs::create_dir_all(&extension_dir).expect("extension dir");
+                std::fs::write(
+                    extension_dir.join(format!("{id}.json")),
+                    json!({
+                        "name": id,
+                        "version": "1.0.0",
+                        "agent_task": { "default_backend": backend }
+                    })
+                    .to_string(),
+                )
+                .expect("extension manifest");
+            }
+
+            let error = default_backend().expect_err("ambiguous policy should fail");
+            assert!(error.message.contains("ambiguous"));
+        });
+    }
+
+    #[test]
+    fn default_backend_reads_component_scoped_extension_policy() {
+        let mut component = component::Component::new(
+            "fixture".to_string(),
+            "/tmp/fixture".to_string(),
+            String::new(),
+            None,
+        );
+        component.extensions = Some(std::collections::HashMap::from([(
+            "runtime-extension".to_string(),
+            component::ScopedExtensionConfig {
+                settings: std::collections::HashMap::from([(
+                    "agent_task".to_string(),
+                    json!({ "default_backend": "component-policy" }),
+                )]),
+                ..component::ScopedExtensionConfig::default()
+            },
+        )]));
+
+        assert_eq!(
+            component_default_backend(&component).as_deref(),
+            Some("component-policy")
+        );
+    }
+
+    #[test]
+    fn default_backend_ignores_provider_manifest_default_backend() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes/standalone-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("standalone-runtime.json"),
+                json!({
+                    "schema": agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "standalone-runtime",
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "runtime.provider",
+                        "backend": "runtime-default",
+                        "default_backend": true,
+                        "command": "runtime-provider",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            assert_eq!(default_backend().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn default_backend_is_absent_without_provider_declaration() {
+        let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.backend = "first".to_string();
+        let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        provider_b.backend = "second".to_string();
+
+        let executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+
+        assert_eq!(executor.default_backend().unwrap(), None);
     }
 
     #[test]

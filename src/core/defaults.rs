@@ -189,6 +189,8 @@ pub struct TriageConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_backend: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub secrets: HashMap<String, AgentTaskSecretSource>,
 }
@@ -493,6 +495,7 @@ mod tests {
         let config: HomeboyConfig = serde_json::from_str(
             r#"{
                 "agent_task": {
+                    "default_backend": "codex",
                     "secrets": {
                         "TOKEN": {
                             "source": "config",
@@ -504,6 +507,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(config.agent_task.default_backend.as_deref(), Some("codex"));
         let secret = config.agent_task.secrets.get("TOKEN").unwrap();
         assert_eq!(secret.source, "config");
         assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));

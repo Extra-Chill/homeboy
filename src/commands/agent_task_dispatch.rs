@@ -3,7 +3,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchRequest};
-use homeboy::core::agent_tasks::provider::{default_backend, ExtensionProviderAgentTaskExecutor};
+use homeboy::core::agent_tasks::provider::{
+    default_backend_for_component, ExtensionProviderAgentTaskExecutor,
+};
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter};
 use homeboy::core::agent_tasks::AgentTaskAggregateReport;
 
@@ -113,13 +115,27 @@ where
 pub(crate) fn dispatch_request_from_args(
     args: DispatchArgs,
 ) -> homeboy::core::Result<AgentTaskDispatchRequest> {
-    dispatch_request_from_args_with_default(args, default_backend)
+    dispatch_request_from_args_with_default(args, default_backend_for_component)
 }
 
 fn dispatch_request_from_args_with_default(
     args: DispatchArgs,
-    default_backend: impl FnOnce() -> Option<String>,
+    default_backend: impl FnOnce(Option<&str>) -> homeboy::core::Result<Option<String>>,
 ) -> homeboy::core::Result<AgentTaskDispatchRequest> {
+    let backend = match args.backend {
+        Some(backend) => backend,
+        None => default_backend(args.repo.as_deref())?.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "backend",
+                "agent-task dispatch requires --backend because no default backend policy is configured",
+                None,
+                Some(vec![
+                    "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
+                ]),
+            )
+        })?,
+    };
+
     Ok(AgentTaskDispatchRequest {
         prompt: args.prompt,
         tasks: args.tasks,
@@ -128,16 +144,7 @@ fn dispatch_request_from_args_with_default(
         workspace: args.workspace,
         repo: args.repo,
         task_url: args.task_url,
-        backend: args.backend.or_else(default_backend).ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "backend",
-                "agent-task dispatch requires --backend because no default backend provider is declared",
-                None,
-                Some(vec![
-                    "Declare an agent_task_executors entry with default_backend=true in an extension manifest, or pass --backend explicitly.".to_string(),
-                ]),
-            )
-        })?,
+        backend,
         selector: args.selector,
         model: args.model,
         required_capabilities: args.required_capabilities,
@@ -382,7 +389,7 @@ mod tests {
                 run_id: None,
                 queue_only: false,
             },
-            || Some("fake-default".to_string()),
+            |_| Ok(Some("fake-default".to_string())),
         )
         .expect("default backend request");
 
@@ -412,7 +419,7 @@ mod tests {
                 run_id: None,
                 queue_only: false,
             },
-            || None,
+            |_| Ok(None),
         )
         .expect_err("missing backend should fail");
 

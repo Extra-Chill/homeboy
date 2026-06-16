@@ -171,6 +171,7 @@ mod tests {
             structured_sidecars: Default::default(),
             release_preflights: Vec::new(),
             agent_runtimes: Vec::new(),
+            agent_task: None,
             actions: Vec::new(),
             hooks: Default::default(),
             settings: Vec::new(),
