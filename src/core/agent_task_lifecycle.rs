@@ -2115,16 +2115,17 @@ mod tests {
     }
 
     #[test]
-    fn status_accepts_legacy_totals_without_skipped() {
+    fn list_records_skips_malformed_status_files() {
         with_isolated_home(|_| {
             let plan = test_plan();
-            let record = submit_plan(&plan, Some("legacy-run")).expect("submitted");
-            let status_path = paths::homeboy_data()
+            submit_plan(&plan, Some("good-run")).expect("submitted");
+            let invalid_shape = submit_plan(&plan, Some("missing-skipped-run")).expect("submitted");
+            let invalid_shape_path = paths::homeboy_data()
                 .expect("homeboy data")
                 .join("agent-task-runs")
-                .join(&record.run_id)
+                .join(&invalid_shape.run_id)
                 .join("status.json");
-            let mut raw = serde_json::to_value(&record).expect("record json");
+            let mut raw = serde_json::to_value(&invalid_shape).expect("record json");
             raw["totals"] = json!({
                 "queued": 1,
                 "running": 0,
@@ -2135,25 +2136,13 @@ mod tests {
                 "timed_out": 0
             });
             std::fs::write(
-                &status_path,
+                &invalid_shape_path,
                 format!(
                     "{}\n",
                     serde_json::to_string_pretty(&raw).expect("pretty json")
                 ),
             )
-            .expect("write legacy status");
-
-            let loaded = status("legacy-run").expect("legacy status loaded");
-
-            assert_eq!(loaded.totals.expect("totals").skipped, 0);
-        });
-    }
-
-    #[test]
-    fn list_records_skips_malformed_status_files() {
-        with_isolated_home(|_| {
-            let plan = test_plan();
-            submit_plan(&plan, Some("good-run")).expect("submitted");
+            .expect("write invalid-shape status");
             let bad_dir = paths::homeboy_data()
                 .expect("homeboy data")
                 .join("agent-task-runs")

@@ -537,7 +537,6 @@ pub struct AgentTaskAggregateTotals {
     pub running: usize,
     #[serde(default)]
     pub blocked: usize,
-    #[serde(default)]
     pub skipped: usize,
     #[serde(default)]
     pub succeeded: usize,
