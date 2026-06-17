@@ -40,6 +40,17 @@ pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
     secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
 }
 
+pub fn secret_env_status_with_fallbacks(
+    names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        fallback_sources,
+    )
+}
+
 pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvStatus> {
     secret_env_status(&plan.secret_env_names())
 }
@@ -216,6 +227,14 @@ fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
 ) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(names, config, &HashMap::new())
+}
+
+fn secret_env_status_with_config_and_fallbacks(
+    names: &[String],
+    config: &AgentTaskSecretConfig,
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
     let mut bundle_cache = HashMap::new();
     names
         .iter()
@@ -228,7 +247,10 @@ fn secret_env_status_with_config(
                 };
             }
 
-            let source = config.secrets.get(name);
+            let source = config
+                .secrets
+                .get(name)
+                .or_else(|| fallback_sources.get(name));
             AgentTaskSecretEnvStatus {
                 name: name.clone(),
                 configured: source
@@ -666,5 +688,45 @@ mod tests {
         assert!(!serde_json::to_string(&status)
             .unwrap()
             .contains("json-file-access-token"));
+    }
+
+    #[test]
+    fn reports_json_file_fallback_status_without_exposing_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "tokens": {
+                    "refresh_token": "json-file-refresh-token"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth file");
+        let name = "AI_PROVIDER_EXAMPLE_REFRESH_TOKEN".to_string();
+        std::env::remove_var(&name);
+        let mut fallbacks = HashMap::new();
+        fallbacks.insert(
+            name.clone(),
+            AgentTaskSecretSource {
+                source: "json-file".to_string(),
+                env_var: None,
+                path: Some(auth_path.to_string_lossy().to_string()),
+                scope: None,
+                name: None,
+                field: Some("tokens.refresh_token".to_string()),
+                value: None,
+            },
+        );
+
+        let status = secret_env_status_with_fallbacks(std::slice::from_ref(&name), &fallbacks);
+
+        assert_eq!(status[0].name, name);
+        assert!(status[0].configured);
+        assert_eq!(status[0].source, "json-file");
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("json-file-refresh-token"));
     }
 }

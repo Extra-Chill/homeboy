@@ -95,7 +95,8 @@ pub use super::agent_task_loop_controller::{
 
 // Secret-env status type is referenced from review/dispatch commands.
 pub use super::agent_task_secrets::{
-    resolve_secret_env_plan, secret_env_plan_status, secret_env_status, AgentTaskSecretEnvStatus,
+    resolve_secret_env_plan, secret_env_plan_status, secret_env_status,
+    secret_env_status_with_fallbacks, AgentTaskSecretEnvStatus,
 };
 pub use super::secret_env_plan::{
     SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
@@ -103,7 +104,9 @@ pub use super::secret_env_plan::{
 };
 
 // Provider helpers used directly from the facade root for common callers.
-pub use super::agent_task_provider::required_extension_ids_for_plan;
+pub use super::agent_task_provider::{
+    provider_secret_sources_for_discovered_providers, required_extension_ids_for_plan,
+};
 
 // ----------------------------------------------------------------------------
 // Explicit API groups
@@ -255,8 +258,8 @@ pub mod scheduler {
 pub mod secrets {
     pub use super::super::agent_task_secrets::{
         map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
-        resolve_secret_env, secret_env_status, set_config_secret, set_keychain_bundle,
-        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
+        resolve_secret_env, secret_env_status, secret_env_status_with_fallbacks, set_config_secret,
+        set_keychain_bundle, set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
         AgentTaskSecretResolutionError,
     };
 }

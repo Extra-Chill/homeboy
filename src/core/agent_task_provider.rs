@@ -356,6 +356,12 @@ pub fn provider_secret_sources_for_plan(
     provider_secret_sources_for_plan_with_providers(plan, &providers)
 }
 
+pub fn provider_secret_sources_for_discovered_providers(
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let providers = discover_agent_task_executor_providers();
+    provider_secret_sources_for_providers(&providers)
+}
+
 pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
@@ -435,6 +441,19 @@ fn provider_secret_sources_for_plan_with_providers(
             continue;
         };
         sources.extend(provider_secret_sources(provider, Some(request)));
+    }
+    sources
+}
+
+fn provider_secret_sources_for_providers(
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for provider in providers {
+        sources.extend(provider_secret_sources(provider, None));
+        for defaults in provider.provider_defaults.values() {
+            sources.extend(provider_config_secret_sources(defaults));
+        }
     }
     sources
 }
@@ -1994,6 +2013,33 @@ process.stdout.write(JSON.stringify({
                     .expect("sources json");
             assert!(!rendered.contains("provider-owned-access-token"));
         });
+    }
+
+    #[test]
+    fn provider_secret_sources_for_providers_include_default_json_sources() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.provider_defaults.insert(
+            "codex".to_string(),
+            json!({
+                "secret_env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "secret_env_sources": {
+                    "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                        "source": "json-file",
+                        "path": "~/.codex/auth.json",
+                        "field": "tokens.access_token"
+                    }
+                }
+            }),
+        );
+
+        let sources = provider_secret_sources_for_providers(&[provider]);
+
+        let source = sources
+            .get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+            .expect("provider default source discovered");
+        assert_eq!(source.source, "json-file");
+        assert_eq!(source.path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 
     #[test]
