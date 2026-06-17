@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.7] - 2026-06-17
+
+### Changed
+- Stabilize WP Codebox artifact helper
+
 ## [3.3.6] - 2026-06-17
 
 ### Fixed
