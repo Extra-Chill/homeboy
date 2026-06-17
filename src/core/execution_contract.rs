@@ -7,6 +7,7 @@
 pub struct ExecutionContract {
     pub artifacts: ArtifactUriContract,
     pub lab_offload: LabOffloadExecutionContract,
+    pub apply: ApplyChangeContract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,20 @@ pub struct LabOffloadExecutionContract {
     pub metadata_schema: &'static str,
 }
 
+/// Canonical apply/change wire contract shared by Lab, runners, and adapters.
+///
+/// `core::change_artifact` owns this schema's serializable payload structs.
+/// `core::execution` owns higher-level lifecycle envelopes that may reference
+/// these artifacts when describing execute/artifact/approve/apply/publish flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyChangeContract {
+    pub change_artifact_schema: &'static str,
+    pub change_apply_result_schema: &'static str,
+    pub runner_workspace_apply_adapter: &'static str,
+    pub unified_diff_patch_format: &'static str,
+    pub digest_algorithm_sha256: &'static str,
+}
+
 pub const EXECUTION_CONTRACT: ExecutionContract = ExecutionContract {
     artifacts: ArtifactUriContract {
         runner_artifact_scheme: "runner-artifact://",
@@ -55,6 +70,13 @@ pub const EXECUTION_CONTRACT: ExecutionContract = ExecutionContract {
     },
     lab_offload: LabOffloadExecutionContract {
         metadata_schema: "homeboy/lab-offload/v1",
+    },
+    apply: ApplyChangeContract {
+        change_artifact_schema: "homeboy/change-artifact/v1",
+        change_apply_result_schema: "homeboy/change-apply-result/v1",
+        runner_workspace_apply_adapter: "homeboy/runner-workspace-apply/v1",
+        unified_diff_patch_format: "unified_diff",
+        digest_algorithm_sha256: "sha256",
     },
 };
 
@@ -107,5 +129,22 @@ mod tests {
             "metadata-only:trace.zip"
         );
         assert_eq!(decode_uri_component("runner%2Fa"), "runner/a");
+    }
+
+    #[test]
+    fn apply_contract_names_canonical_wire_schemas() {
+        let apply = EXECUTION_CONTRACT.apply;
+
+        assert_eq!(apply.change_artifact_schema, "homeboy/change-artifact/v1");
+        assert_eq!(
+            apply.change_apply_result_schema,
+            "homeboy/change-apply-result/v1"
+        );
+        assert_eq!(
+            apply.runner_workspace_apply_adapter,
+            "homeboy/runner-workspace-apply/v1"
+        );
+        assert_eq!(apply.unified_diff_patch_format, "unified_diff");
+        assert_eq!(apply.digest_algorithm_sha256, "sha256");
     }
 }

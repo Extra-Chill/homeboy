@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::change_artifact::{
     ChangeApplyResult, ChangeApplyStatus, ChangeArtifact, ChangeDelta, ChangePatch,
+    UNIFIED_DIFF_PATCH_FORMAT,
 };
 use crate::core::engine::command::{wait_with_bounded_output, DEFAULT_CAPTURE_LIMIT_BYTES};
 use crate::core::error::{Error, Result};
@@ -168,7 +169,7 @@ fn local_source_path(snapshot: &SourceSnapshot) -> Result<PathBuf> {
 }
 
 fn apply_unified_patch(local_path: &Path, patch: ChangePatch) -> Result<Vec<String>> {
-    if patch.format != "unified_diff" {
+    if patch.format != UNIFIED_DIFF_PATCH_FORMAT {
         return Err(Error::validation_invalid_argument(
             "patch.format",
             "only unified_diff Lab patches are supported",
@@ -315,7 +316,7 @@ mod tests {
             serde_json::json!({
                 "source_snapshot": snapshot,
                 "patch": {
-                    "format": "unified_diff",
+                    "format": UNIFIED_DIFF_PATCH_FORMAT,
                     "content": "diff --git a/file.txt b/file.txt\nindex 5626abf..f719efd 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
                 }
             })
@@ -354,7 +355,7 @@ mod tests {
             serde_json::json!({
                 "source_snapshot": snapshot,
                 "patch": {
-                    "format": "unified_diff",
+                    "format": UNIFIED_DIFF_PATCH_FORMAT,
                     "content": "diff --git a/file.txt b/file.txt\nindex 5626abf..f719efd 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
                 }
             })
