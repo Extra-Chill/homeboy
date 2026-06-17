@@ -89,6 +89,7 @@ pub mod rig;
 pub mod run_lifecycle_record;
 pub mod runner;
 pub mod scope;
+pub mod secret_env_plan;
 pub mod self_status;
 pub mod server;
 pub mod source_snapshot;
