@@ -157,7 +157,8 @@
         "extension_selector"
       ],
       "path_translation_markers": [
-        "rewrite_component_remote_args"
+        "rewrite_component_remote_args",
+        "preflight_remote_argv_path_translation"
       ]
     },
     "source_policies": [
@@ -909,7 +910,6 @@
         "dead_code::src/core/agent_task_dispatch_service.rs::DeadCodeMarker",
         "dead_code::src/core/agent_task_fanout.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_loop_controller.rs::UnreferencedExport",
-        "dead_code::src/core/agent_task_provider.rs::UnreferencedExport",
         "dead_code::src/core/artifact_links.rs::UnreferencedExport",
         "dead_code::src/core/extension/bench/parsing.rs::UnreferencedExport",
         "dead_code::src/core/fleet/exec.rs::UnreferencedExport",
@@ -933,14 +933,12 @@
         "field_patterns::src/core/agent_task_controller_service.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_dispatch_service.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_fanout.rs::RepeatedFieldPattern",
-        "field_patterns::src/core/agent_task_lifecycle.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_loop_controller.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_promotion.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_schedule.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_service.rs::RepeatedFieldPattern",
         "field_patterns::src/core/context/report.rs::RepeatedFieldPattern",
         "field_patterns::src/core/daemon/broker_config.rs::RepeatedFieldPattern",
-        "field_patterns::src/core/daemon/patch_capture.rs::RepeatedFieldPattern",
         "field_patterns::src/core/engine/resource.rs::RepeatedFieldPattern",
         "field_patterns::src/core/engine/temp.rs::RepeatedFieldPattern",
         "field_patterns::src/core/extension/bench/artifact.rs::RepeatedFieldPattern",
@@ -984,7 +982,6 @@
         "intra-method-duplication::src/core/runner/execution.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/execution/extension_parity.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/git_dependency_materialization.rs::IntraMethodDuplicate",
-        "intra-method-duplication::src/core/runner/lab/offload.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/rig_materialization.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/validation_dependencies.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/worker.rs::IntraMethodDuplicate",
@@ -1005,7 +1002,6 @@
         "parallel-implementation::src/core/release/executor/publish.rs::ParallelImplementation",
         "remote_execution_preflight::src/commands/route.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/execution/policy.rs::RemoteExecutionPreflight",
-        "remote_execution_preflight::src/core/runner/lab/offload.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/lab_workspaces.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/rig_materialization.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/worker.rs::RemoteExecutionPreflight",

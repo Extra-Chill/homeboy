@@ -10,7 +10,7 @@ use crate::core::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::core::agent_task_provider::{
-    role_aliases_for_executor, timeout_artifact_discovery_for_executor,
+    role_aliases_for_executor, timeout_artifact_discovery_for_executor, wildcard_match,
     AgentTaskProviderArtifactPattern, AgentTaskProviderRoleAliases,
     AgentTaskProviderTimeoutArtifactDiscovery,
 };
@@ -512,30 +512,6 @@ fn artifact_pattern_matches(pattern: &AgentTaskProviderArtifactPattern, path: &P
             .iter()
             .map(|candidate| candidate.trim_start_matches('.').to_ascii_lowercase())
             .any(|candidate| candidate == extension)
-}
-
-fn wildcard_match(pattern: &str, value: &str) -> bool {
-    if !pattern.contains('*') {
-        return pattern == value;
-    }
-
-    let mut remainder = value;
-    let anchored_start = !pattern.starts_with('*');
-    let anchored_end = !pattern.ends_with('*');
-    let parts: Vec<&str> = pattern.split('*').filter(|part| !part.is_empty()).collect();
-    if parts.is_empty() {
-        return true;
-    }
-    if anchored_start && !value.starts_with(parts[0]) {
-        return false;
-    }
-    for part in &parts {
-        let Some(index) = remainder.find(part) else {
-            return false;
-        };
-        remainder = &remainder[index + part.len()..];
-    }
-    !anchored_end || value.ends_with(parts[parts.len() - 1])
 }
 
 fn merge_artifact_metadata(metadata: Value) -> Value {

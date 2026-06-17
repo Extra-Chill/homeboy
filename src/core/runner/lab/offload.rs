@@ -25,7 +25,6 @@ use crate::core::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use crate::core::engine::shell;
-use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
@@ -42,9 +41,8 @@ use super::super::lab_args::{
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
 use super::super::lab_env::{
-    build_lab_offload_env, forward_env_if_present, forward_release_ci_env,
-    forward_rig_component_path_env, misplaced_runner_exec_wait_timeout_warning,
-    settings_env_diagnostics,
+    build_lab_offload_env_with_passthroughs, forward_rig_component_path_env,
+    misplaced_runner_exec_wait_timeout_warning, settings_env_diagnostics,
 };
 use super::super::lab_plan::{base_lab_plan, disabled_select_runner_plan, with_step};
 use super::super::lab_selection::{
@@ -298,6 +296,105 @@ fn dirty_patch_provider_checkout_hints(source_path: &Path, status: &str) -> Vec<
     hints
 }
 
+/// Explicit path-translation preflight for the remote dispatch argv.
+///
+/// By the time this runs the argv has already passed through the Lab offload
+/// remap pipeline (`remap_path_settings_in_args`, `remap_provider_config_in_args`,
+/// `rewrite_lab_offload_args`, ...), which rewrites controller-local paths to
+/// their synced remote locations. This is the final gate before
+/// [`exec`]: it rejects any argument that still embeds the controller-local
+/// source-checkout root, so a missed remap fails loudly on the controller
+/// instead of handing a non-existent local path to the remote runner.
+fn preflight_remote_argv_path_translation(
+    runner_id: &str,
+    command: &[String],
+    source_path: &Path,
+    remote_cwd: &str,
+) -> Result<()> {
+    let local_root = source_path.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    if local_root.is_empty() {
+        return Ok(());
+    }
+
+    let leaked: Vec<String> = command
+        .iter()
+        .filter(|arg| arg_embeds_untranslated_local_path(arg, local_root, remote_cwd))
+        .cloned()
+        .collect();
+    if leaked.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "command",
+        format!(
+            "Lab offload refused to dispatch to runner `{runner_id}`: {} remote argv argument(s) still reference the controller-local source path `{local_root}` instead of the remote workspace `{remote_cwd}`",
+            leaked.len()
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            format!("Untranslated argument(s): {}", leaked.join(", ")),
+            "This is a path-translation defect in the Lab offload remap pipeline; the argument must be remapped to the remote workspace path before dispatch.".to_string(),
+        ]),
+    ))
+}
+
+/// True when `arg` embeds the controller-local source root but has not been
+/// translated to the remote workspace path. Arguments that already point at the
+/// remote workspace (or do not reference the local root at all) are accepted.
+fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &str) -> bool {
+    if !arg.contains(local_root) {
+        return false;
+    }
+    // A correctly translated argument addresses the remote workspace root; if it
+    // happens to share a prefix string with the local root that is fine.
+    if !remote_cwd.is_empty() && arg.contains(remote_cwd) {
+        return false;
+    }
+    true
+}
+
+/// Record a freshly synced, remapped agent-task workspace entry: append it to
+/// the workspace mapping and emit the matching Lab plan step. Shared by the
+/// inline tasks-arg and plan-arg materialization in `run_lab_offload_inner`.
+fn record_synced_remapped_workspace_entry(
+    plan: HomeboyPlan,
+    workspace_mapping: &mut Vec<super::super::lab_workspaces::LabWorkspaceMappingEntry>,
+    entry: Option<super::super::lab_workspaces::LabWorkspaceMappingEntry>,
+    step_id: &str,
+) -> HomeboyPlan {
+    let Some(entry) = entry else {
+        return plan;
+    };
+    workspace_mapping.push(entry.clone());
+    with_step(
+        plan,
+        PlanStep::ready(step_id, step_id)
+            .inputs(PlanValues::new().json("workspace", &entry))
+            .build(),
+    )
+}
+
+/// Build the `RunLocal` outcome used whenever automatic Lab offload is skipped
+/// for a portability/default-runner reason. Centralizes the repeated
+/// "automatic / skipped" metadata shape used by `execute_lab_offload`.
+fn skipped_automatic_run_local(plan: HomeboyPlan, reason: &str) -> LabOffloadOutcome {
+    LabOffloadOutcome::RunLocal {
+        metadata: Some(lab_offload_metadata(
+            &plan,
+            "automatic",
+            None,
+            None,
+            "skipped",
+            None,
+            Some(reason),
+        )),
+        plan,
+        messages: Vec::new(),
+    }
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -334,19 +431,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .unsupported_reason
             .unwrap_or("command is local-only");
         plan = disabled_select_runner_plan(plan, reason);
-        return Ok(LabOffloadOutcome::RunLocal {
-            metadata: Some(lab_offload_metadata(
-                &plan,
-                "automatic",
-                None,
-                None,
-                "skipped",
-                None,
-                Some(reason),
-            )),
-            plan,
-            messages: Vec::new(),
-        });
+        return Ok(skipped_automatic_run_local(plan, reason));
     }
 
     if request.explicit_runner.is_none() && !contract.default_lab_offload {
@@ -386,19 +471,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
-        return Ok(LabOffloadOutcome::RunLocal {
-            metadata: Some(lab_offload_metadata(
-                &plan,
-                "automatic",
-                None,
-                None,
-                "skipped",
-                None,
-                Some(reason),
-            )),
-            plan,
-            messages: Vec::new(),
-        });
+        return Ok(skipped_automatic_run_local(plan, reason));
     };
 
     let mut messages = Vec::new();
@@ -569,16 +642,10 @@ fn run_runner_resident_lab_offload(
         "runner_cwd": runner_workspace_root,
         "command_paths": "runner_side",
     });
-    let mut env = build_lab_offload_env(&lab_metadata);
-    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
-    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(&mut env);
+    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     let tunnel_secret_env = hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
     lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
-    env = build_lab_offload_env(&lab_metadata);
-    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
-    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(&mut env);
+    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
 
     let (exec_output, exit_code) = exec(
@@ -1110,32 +1177,20 @@ fn run_lab_offload_inner(
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
     let (remapped_args, synced_remapped_tasks) =
         materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
-    if let Some(entry) = synced_remapped_tasks {
-        workspace_mapping.push(entry.clone());
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.sync_remapped_agent_task_tasks",
-                "lab.sync_remapped_agent_task_tasks",
-            )
-            .inputs(PlanValues::new().json("workspace", &entry))
-            .build(),
-        );
-    }
+    plan = record_synced_remapped_workspace_entry(
+        plan,
+        &mut workspace_mapping,
+        synced_remapped_tasks,
+        "lab.sync_remapped_agent_task_tasks",
+    );
     let (remapped_args, synced_remapped_plan) =
         materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
-    if let Some(entry) = synced_remapped_plan {
-        workspace_mapping.push(entry.clone());
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.sync_remapped_agent_task_plan",
-                "lab.sync_remapped_agent_task_plan",
-            )
-            .inputs(PlanValues::new().json("workspace", &entry))
-            .build(),
-        );
-    }
+    plan = record_synced_remapped_workspace_entry(
+        plan,
+        &mut workspace_mapping,
+        synced_remapped_plan,
+        "lab.sync_remapped_agent_task_plan",
+    );
     let (remapped_args, agent_task_run_id) = ensure_agent_task_dispatch_run_id(&remapped_args)
         .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
@@ -1178,10 +1233,7 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    let mut env = build_lab_offload_env(&lab_metadata);
-    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
-    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(&mut env);
+    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
     let agent_task_secret_env =
@@ -1211,10 +1263,7 @@ fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
-    env = build_lab_offload_env(&lab_metadata);
-    forward_env_if_present(&mut env, PREVIEW_METADATA_ENV);
-    forward_env_if_present(&mut env, PREVIEW_PUBLIC_URL_ENV);
-    forward_release_ci_env(&mut env);
+    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
     hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
@@ -1238,6 +1287,12 @@ fn run_lab_offload_inner(
         &runner_homeboy,
         &runner_status,
     )?;
+    // Path-translation preflight: the argv has already been routed through the
+    // `rewrite_lab_offload_args` / `remap_*` translation pipeline above. Assert
+    // that no controller-local source-checkout path survived un-translated
+    // before we dispatch the command to the remote runner, so a missed remap
+    // fails loudly here instead of corrupting the remote run.
+    preflight_remote_argv_path_translation(runner_id, &command, &source_path, &remote_cwd)?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -1363,10 +1418,9 @@ fn run_lab_offload_inner(
             )? {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
-                        run_id,
+                        identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
                         local_command: request.normalized_args.to_vec(),
                         remote_command: remote_command.clone(),
-                        runner_id,
                         remote_workspace: &remote_cwd,
                         stdout: &exec_output.stdout,
                         stderr: &exec_output.stderr,
@@ -1392,10 +1446,9 @@ fn run_lab_offload_inner(
             stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
                 agent_task_lifecycle::AgentTaskPreDispatchFailure {
-                    run_id,
+                    identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
                     local_command: request.normalized_args.to_vec(),
                     remote_command: remote_command.clone(),
-                    runner_id,
                     remote_workspace: &remote_cwd,
                     failure_message: &failure_message,
                     stdout: &exec_output.stdout,

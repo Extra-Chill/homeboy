@@ -382,7 +382,7 @@ impl AgentTaskProviderRoleAliases {
         alias_matches(self.artifact_filenames.get(role), filename)
     }
 
-    pub fn role_for_artifact_kind(&self, kind: &str) -> Option<&str> {
+    fn role_for_artifact_kind(&self, kind: &str) -> Option<&str> {
         self.artifact_kinds
             .iter()
             .find_map(|(role, aliases)| alias_matches(Some(aliases), kind).then_some(role.as_str()))
@@ -413,7 +413,10 @@ fn alias_matches(aliases: Option<&Vec<String>>, value: &str) -> bool {
     })
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
+/// Shared glob-style matcher used by provider role-alias resolution and the
+/// timeout artifact discovery scanner. Supports `*` wildcards with optional
+/// start/end anchoring.
+pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == value;
     }
@@ -1802,6 +1805,13 @@ fn provider_command_env(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
+    // Both runtime path env vars resolve to the provider runtime_path, falling
+    // back to the extension_path when the runtime is not separately declared.
+    let runtime_path = provider
+        .runtime_path
+        .clone()
+        .or_else(|| provider.extension_path.clone())
+        .unwrap_or_default();
     let mut env = vec![
         (
             "HOMEBOY_AGENT_TASK_PROVIDER_ID".to_string(),
@@ -1840,26 +1850,12 @@ fn provider_command_env(
             "HOMEBOY_EXTENSION_PATH".to_string(),
             provider.extension_path.clone().unwrap_or_default(),
         ),
-        (
-            "HOMEBOY_RUNTIME_PATH".to_string(),
-            provider
-                .runtime_path
-                .clone()
-                .or_else(|| provider.extension_path.clone())
-                .unwrap_or_default(),
-        ),
+        ("HOMEBOY_RUNTIME_PATH".to_string(), runtime_path.clone()),
         (
             "HOMEBOY_AI_RUNTIME_ID".to_string(),
             provider.runtime_id.clone().unwrap_or_default(),
         ),
-        (
-            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
-            provider
-                .runtime_path
-                .clone()
-                .or_else(|| provider.extension_path.clone())
-                .unwrap_or_default(),
-        ),
+        ("HOMEBOY_AI_RUNTIME_PATH".to_string(), runtime_path),
     ];
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
     env.extend(

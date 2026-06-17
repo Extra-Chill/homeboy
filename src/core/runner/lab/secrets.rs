@@ -19,7 +19,6 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -566,6 +565,7 @@ fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::command_invocation::CommandInvocation;
     use crate::core::runner::RunnerKind;
     use crate::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
