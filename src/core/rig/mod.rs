@@ -64,7 +64,7 @@ pub use spec::{
     ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigResourcesSpec, RigSpec,
     ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
-    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
+    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
     TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
     TraceVariantSpec, WorkloadSpec,
 };
@@ -117,13 +117,13 @@ fn read_config(id: &str) -> Result<(RigSpec, Option<String>)> {
             Some(content.chars().take(200).collect()),
         )
     })?;
-    apply_trace_workload_defaults(&mut spec);
+    apply_trace_workload_defaults(&mut spec)?;
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
     Ok((spec, declared_id))
 }
 
-fn apply_trace_workload_defaults(spec: &mut RigSpec) {
+fn apply_trace_workload_defaults(spec: &mut RigSpec) -> Result<()> {
     for (extension_id, defaults) in spec.trace_workload_defaults.clone() {
         let Some(workloads) = spec.trace_workloads.get_mut(&extension_id) else {
             continue;
@@ -132,6 +132,29 @@ fn apply_trace_workload_defaults(spec: &mut RigSpec) {
             workload.apply_defaults(&defaults);
         }
     }
+
+    for (extension_id, workloads) in spec.trace_workloads.iter_mut() {
+        for workload in workloads {
+            let Some(template_name) = workload.trace_phase_template.as_deref() else {
+                continue;
+            };
+            let template = spec.trace_phase_templates.get(template_name).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "trace_phase_template",
+                    format!(
+                        "trace workload '{}' for extension '{}' references unknown trace phase template '{}'",
+                        workload.path(),
+                        extension_id,
+                        template_name
+                    ),
+                    Some(template_name.to_string()),
+                    Some(spec.trace_phase_templates.keys().cloned().collect()),
+                )
+            })?;
+            workload.apply_phase_template(template);
+        }
+    }
+    Ok(())
 }
 
 fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {

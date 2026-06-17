@@ -340,6 +340,53 @@ pub(super) fn write_trace_rig_with_span_metadata(
     .expect("write rig");
 }
 
+pub(super) fn write_trace_rig_with_phase_template(
+    home: &tempfile::TempDir,
+    rig_id: &str,
+    component_id: &str,
+    path: &std::path::Path,
+) {
+    let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+    fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+    fs::write(
+        rig_dir.join(format!("{}.json", rig_id)),
+        format!(
+            r#"{{
+                    "components": {{
+                        "{component_id}": {{ "path": "{}" }}
+                    }},
+                    "trace_phase_templates": {{
+                        "startup": {{
+                            "trace_default_phase_preset": "default",
+                            "trace_phase_presets": {{
+                                "default": ["boot:runner.boot", "ready:runner.ready"]
+                            }},
+                            "trace_span_metadata": {{
+                                "phase.boot_to_ready": {{
+                                    "critical": true,
+                                    "category": "startup"
+                                }}
+                            }}
+                        }}
+                    }},
+                    "trace_workload_defaults": {{
+                        "{TRACE_FIXTURE_EXTENSION_ID}": {{
+                            "trace_phase_template": "startup"
+                        }}
+                    }},
+                    "trace_workloads": {{ "{TRACE_FIXTURE_EXTENSION_ID}": [
+                        {{
+                            "path": "${{components.{component_id}.path}}/studio-app-create-site.trace.mjs",
+                            "check_groups": []
+                        }}
+                    ] }}
+                }}"#,
+            path.display()
+        ),
+    )
+    .expect("write rig");
+}
+
 pub(super) fn write_trace_rig_with_variant(
     home: &tempfile::TempDir,
     package_path: &std::path::Path,
