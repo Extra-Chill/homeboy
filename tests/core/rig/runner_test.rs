@@ -22,8 +22,9 @@ use crate::core::rig::runner::{
     UpReport,
 };
 use crate::core::rig::spec::{
-    ComponentSpec, PipelineStep, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp,
-    SharedPathSpec, SymlinkSpec,
+    ComponentSpec, ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec,
+    PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec,
+    SharedPathOp, SharedPathSpec, SymlinkSpec,
 };
 use crate::core::rig::state::RigState;
 use crate::test_support::with_isolated_home;
@@ -46,6 +47,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         symlinks: Vec::new(),
         shared_paths: Vec::new(),
         resources: Default::default(),
+        requirements: Default::default(),
         pipeline: HashMap::new(),
         bench: None,
         bench_workloads: HashMap::new(),
@@ -231,6 +233,40 @@ fn test_run_check() {
         let status = run_status(&rig).expect("run_status reads back state");
         assert_eq!(status.last_check_result.as_deref(), Some("pass"));
         assert!(status.last_check.is_some(), "last_check timestamp recorded");
+    });
+}
+
+#[test]
+fn test_run_check_includes_declarative_requirements() {
+    with_isolated_home(|dir| {
+        let marker = dir.path().join("marker.txt");
+        std::fs::write(&marker, "ok").expect("write marker");
+        let mut rig = minimal_spec("run-check-requirements-fixture");
+        rig.requirements = RigRequirementsSpec {
+            executables: vec![ExecutableRequirementSpec {
+                executable: "sh".to_string(),
+                ..Default::default()
+            }],
+            filesystem_assertions: vec![FilesystemAssertionSpec {
+                path: marker.to_string_lossy().to_string(),
+                kind: FilesystemAssertionKind::File,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let report = run_check(&rig).expect("run_check succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.pipeline.passed, 2);
+        assert!(report
+            .pipeline
+            .steps
+            .iter()
+            .any(|step| step.kind == "rig-requirement" && step.label == "require executable sh"));
+        assert!(report.pipeline.steps.iter().any(|step| {
+            step.kind == "rig-requirement" && step.label.starts_with("require file ")
+        }));
     });
 }
 
@@ -505,6 +541,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
                 target: target.to_string_lossy().into_owned(),
             }],
             resources: Default::default(),
+            requirements: Default::default(),
             pipeline,
             bench: None,
             bench_workloads: HashMap::new(),
@@ -572,6 +609,7 @@ fn test_run_status() {
             symlinks: Vec::new(),
             shared_paths: Vec::new(),
             resources: Default::default(),
+            requirements: Default::default(),
             pipeline: HashMap::new(),
             bench: None,
             app_launcher: None,
@@ -739,6 +777,7 @@ fn test_snapshot_state() {
         symlinks: Vec::new(),
         shared_paths: Vec::new(),
         resources: Default::default(),
+        requirements: Default::default(),
         pipeline: HashMap::new(),
         bench: None,
         bench_workloads: HashMap::new(),

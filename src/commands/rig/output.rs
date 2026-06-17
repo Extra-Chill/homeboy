@@ -184,6 +184,7 @@ mod tests {
                     paths: vec!["~/Developer/studio".to_string()],
                     ..Default::default()
                 },
+                requirements: Default::default(),
                 pipeline: Default::default(),
                 bench: None,
                 bench_workloads: Default::default(),

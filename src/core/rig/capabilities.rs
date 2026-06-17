@@ -1,0 +1,312 @@
+//! Generic declarative rig requirements and capability checks.
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use super::expand::expand_vars;
+use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
+use super::spec::{
+    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, RigSpec,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RigRequirementCheckPlan {
+    pub kind: String,
+    pub label: String,
+    pub target: String,
+}
+
+pub fn plan_requirement_checks(rig: &RigSpec) -> Vec<RigRequirementCheckPlan> {
+    rig.requirements
+        .executables
+        .iter()
+        .map(|requirement| RigRequirementCheckPlan {
+            kind: "executable".to_string(),
+            label: executable_label(requirement),
+            target: requirement.executable.clone(),
+        })
+        .chain(
+            rig.requirements
+                .filesystem_assertions
+                .iter()
+                .map(|assertion| RigRequirementCheckPlan {
+                    kind: "filesystem".to_string(),
+                    label: filesystem_label(assertion),
+                    target: assertion.path.clone(),
+                }),
+        )
+        .collect()
+}
+
+pub fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
+    let mut steps = Vec::new();
+
+    for requirement in &rig.requirements.executables {
+        steps.push(outcome_for_result(
+            "rig-requirement",
+            executable_label(requirement),
+            evaluate_executable(rig, requirement),
+        ));
+    }
+
+    for assertion in &rig.requirements.filesystem_assertions {
+        steps.push(outcome_for_result(
+            "rig-requirement",
+            filesystem_label(assertion),
+            evaluate_filesystem_assertion(rig, assertion),
+        ));
+    }
+
+    PipelineOutcome {
+        name: "check".to_string(),
+        passed: steps.iter().filter(|step| step.status == "pass").count(),
+        failed: steps.iter().filter(|step| step.status == "fail").count(),
+        steps,
+    }
+}
+
+fn outcome_for_result(
+    kind: &str,
+    label: String,
+    result: Result<(), String>,
+) -> PipelineStepOutcome {
+    match result {
+        Ok(()) => PipelineStepOutcome {
+            kind: kind.to_string(),
+            label,
+            status: "pass".to_string(),
+            error: None,
+        },
+        Err(error) => PipelineStepOutcome {
+            kind: kind.to_string(),
+            label,
+            status: "fail".to_string(),
+            error: Some(error),
+        },
+    }
+}
+
+fn evaluate_executable(
+    rig: &RigSpec,
+    requirement: &ExecutableRequirementSpec,
+) -> Result<(), String> {
+    if requirement.executable.trim().is_empty() {
+        return Err("executable requirement must declare a non-empty executable".to_string());
+    }
+
+    let declared = expand_vars(rig, &requirement.executable);
+    let env_override = requirement
+        .env
+        .as_deref()
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| expand_vars(rig, &value));
+    let candidate = env_override.as_deref().unwrap_or(&declared);
+
+    if find_executable(candidate).is_some() {
+        return Ok(());
+    }
+
+    let mut message = match (&requirement.env, env_override) {
+        (Some(name), Some(value)) => format!(
+            "executable `{}` does not exist or is not executable from {}={}",
+            declared, name, value
+        ),
+        (Some(name), None) => format!(
+            "executable `{}` not found on PATH ({} is unset or empty)",
+            declared, name
+        ),
+        (None, _) => format!("executable `{}` not found on PATH", declared),
+    };
+
+    if let Some(remediation) = &requirement.remediation {
+        message.push_str(&format!(". Remediation: {}", expand_vars(rig, remediation)));
+    }
+
+    Err(message)
+}
+
+fn evaluate_filesystem_assertion(
+    rig: &RigSpec,
+    assertion: &FilesystemAssertionSpec,
+) -> Result<(), String> {
+    if assertion.path.trim().is_empty() {
+        return Err("filesystem assertion must declare a non-empty path".to_string());
+    }
+
+    let resolved = resolve_filesystem_assertion_path(rig, assertion);
+    let exists = match assertion.kind {
+        FilesystemAssertionKind::Path => resolved.exists(),
+        FilesystemAssertionKind::File => resolved.is_file(),
+        FilesystemAssertionKind::Dir => resolved.is_dir(),
+    };
+
+    if exists {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "{} assertion failed: {} (declared: {})",
+        filesystem_kind_label(assertion.kind),
+        resolved.display(),
+        assertion.path
+    );
+    if let Some(remediation) = &assertion.remediation {
+        message.push_str(&format!(". Remediation: {}", expand_vars(rig, remediation)));
+    }
+
+    Err(message)
+}
+
+fn resolve_filesystem_assertion_path(
+    rig: &RigSpec,
+    assertion: &FilesystemAssertionSpec,
+) -> PathBuf {
+    let expanded = expand_vars(rig, &assertion.path);
+    let path = PathBuf::from(&expanded);
+    if path.is_absolute() {
+        path
+    } else if let Some(cwd) = &assertion.cwd {
+        PathBuf::from(expand_vars(rig, cwd)).join(path)
+    } else {
+        path
+    }
+}
+
+fn executable_label(requirement: &ExecutableRequirementSpec) -> String {
+    requirement
+        .label
+        .clone()
+        .unwrap_or_else(|| format!("require executable {}", requirement.executable))
+}
+
+fn filesystem_label(assertion: &FilesystemAssertionSpec) -> String {
+    assertion.label.clone().unwrap_or_else(|| {
+        format!(
+            "require {} {}",
+            filesystem_kind_label(assertion.kind),
+            assertion.path
+        )
+    })
+}
+
+fn filesystem_kind_label(kind: FilesystemAssertionKind) -> &'static str {
+    match kind {
+        FilesystemAssertionKind::Path => "path",
+        FilesystemAssertionKind::File => "file",
+        FilesystemAssertionKind::Dir => "dir",
+    }
+}
+
+fn find_executable(candidate: &str) -> Option<PathBuf> {
+    let path = Path::new(candidate);
+    if candidate.contains(std::path::MAIN_SEPARATOR) || path.is_absolute() {
+        return is_executable_file(path).then(|| path.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH").map(OsString::from)?;
+
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(candidate))
+        .find(|path| is_executable_file(path))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::core::rig::spec::{RigRequirementsSpec, RigSpec};
+
+    #[test]
+    fn plans_executable_and_filesystem_requirements() {
+        let rig = RigSpec {
+            requirements: RigRequirementsSpec {
+                executables: vec![ExecutableRequirementSpec {
+                    executable: "sh".to_string(),
+                    ..Default::default()
+                }],
+                filesystem_assertions: vec![FilesystemAssertionSpec {
+                    path: "Cargo.toml".to_string(),
+                    kind: FilesystemAssertionKind::File,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let plan = plan_requirement_checks(&rig);
+
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].kind, "executable");
+        assert_eq!(plan[1].kind, "filesystem");
+    }
+
+    #[test]
+    fn evaluates_filesystem_assertions() {
+        let temp = tempdir().expect("tempdir");
+        let file = temp.path().join("artifact.json");
+        fs::write(&file, "{}").expect("write file");
+        let rig = RigSpec {
+            requirements: RigRequirementsSpec {
+                filesystem_assertions: vec![FilesystemAssertionSpec {
+                    path: file.to_string_lossy().to_string(),
+                    kind: FilesystemAssertionKind::File,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = evaluate_requirements(&rig);
+
+        assert_eq!(outcome.passed, 1);
+        assert_eq!(outcome.failed, 0);
+    }
+
+    #[test]
+    fn reports_missing_executable() {
+        let rig = RigSpec {
+            requirements: RigRequirementsSpec {
+                executables: vec![ExecutableRequirementSpec {
+                    executable: "homeboy-definitely-missing-tool".to_string(),
+                    remediation: Some("install it".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = evaluate_requirements(&rig);
+
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.steps[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Remediation: install it"));
+    }
+}

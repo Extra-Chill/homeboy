@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use super::artifact_index::{self, RigRunArtifactIndex};
 
+use super::capabilities::evaluate_requirements;
 use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
@@ -186,9 +187,10 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
     let observer = RigRunObserver::start(rig, "check");
 
     let mut result = (|| {
+        let requirements = evaluate_requirements(rig);
         let package_lint = run_package_lint(rig)?;
         let check_outcome = run_pipeline(rig, "check", false)?;
-        let outcome = merge_check_outcomes(package_lint, check_outcome);
+        let outcome = merge_check_outcomes(vec![requirements, package_lint, check_outcome]);
 
         let mut state = RigState::load(&rig.id)?;
         state.last_check = Some(now_rfc3339());
@@ -218,23 +220,20 @@ pub fn run_check(rig: &RigSpec) -> Result<CheckReport> {
     result
 }
 
-fn merge_check_outcomes(
-    package_lint: PipelineOutcome,
-    check_outcome: PipelineOutcome,
-) -> PipelineOutcome {
-    if package_lint.steps.is_empty() {
-        return check_outcome;
-    }
-    if check_outcome.steps.is_empty() {
-        return package_lint;
+fn merge_check_outcomes(outcomes: Vec<PipelineOutcome>) -> PipelineOutcome {
+    let mut steps = Vec::new();
+    let mut passed = 0;
+    let mut failed = 0;
+    for outcome in outcomes {
+        passed += outcome.passed;
+        failed += outcome.failed;
+        steps.extend(outcome.steps);
     }
 
-    let mut steps = package_lint.steps;
-    steps.extend(check_outcome.steps);
     PipelineOutcome {
-        name: check_outcome.name,
-        passed: package_lint.passed + check_outcome.passed,
-        failed: package_lint.failed + check_outcome.failed,
+        name: "check".to_string(),
+        passed,
+        failed,
         steps,
     }
 }

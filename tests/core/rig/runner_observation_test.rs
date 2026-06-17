@@ -19,6 +19,7 @@ fn observation_spec(id: &str) -> RigSpec {
         symlinks: Vec::new(),
         shared_paths: Vec::new(),
         resources: Default::default(),
+        requirements: Default::default(),
         pipeline: HashMap::new(),
         bench: None,
         bench_workloads: HashMap::new(),
