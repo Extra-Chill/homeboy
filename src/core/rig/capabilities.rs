@@ -97,35 +97,57 @@ fn evaluate_executable(
     }
 
     let declared = expand_vars(rig, &requirement.executable);
-    let env_override = requirement
-        .env
-        .as_deref()
-        .and_then(|name| std::env::var(name).ok())
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| expand_vars(rig, &value));
-    let candidate = env_override.as_deref().unwrap_or(&declared);
+    let mut attempts = Vec::new();
 
-    if find_executable(candidate).is_some() {
+    for name in executable_env_names(requirement) {
+        match std::env::var(name) {
+            Ok(value) if !value.trim().is_empty() => {
+                let candidate = expand_vars(rig, &value);
+                if find_executable(&candidate).is_some() {
+                    return Ok(());
+                }
+                attempts.push(format!("{}={} (not executable)", name, candidate));
+            }
+            _ => attempts.push(format!("{} is unset or empty", name)),
+        }
+    }
+
+    if find_executable(&declared).is_some() {
         return Ok(());
     }
 
-    let mut message = match (&requirement.env, env_override) {
-        (Some(name), Some(value)) => format!(
-            "executable `{}` does not exist or is not executable from {}={}",
-            declared, name, value
-        ),
-        (Some(name), None) => format!(
-            "executable `{}` not found on PATH ({} is unset or empty)",
-            declared, name
-        ),
-        (None, _) => format!("executable `{}` not found on PATH", declared),
-    };
+    attempts.push(declared_executable_attempt(&declared));
+
+    let mut message = format!(
+        "executable `{}` could not be resolved; tried {}",
+        declared,
+        attempts.join(", ")
+    );
 
     if let Some(remediation) = &requirement.remediation {
         message.push_str(&format!(". Remediation: {}", expand_vars(rig, remediation)));
     }
 
     Err(message)
+}
+
+fn executable_env_names(requirement: &ExecutableRequirementSpec) -> Vec<&str> {
+    requirement
+        .env
+        .iter()
+        .map(String::as_str)
+        .chain(requirement.env_aliases.iter().map(String::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .collect()
+}
+
+fn declared_executable_attempt(declared: &str) -> String {
+    let path = Path::new(declared);
+    if declared.contains(std::path::MAIN_SEPARATOR) || path.is_absolute() {
+        format!("declared executable `{}`", declared)
+    } else {
+        format!("PATH lookup for `{}`", declared)
+    }
 }
 
 fn evaluate_filesystem_assertion(
@@ -309,4 +331,88 @@ mod tests {
             .unwrap()
             .contains("Remediation: install it"));
     }
+
+    #[test]
+    fn executable_requirement_uses_env_aliases_before_path() {
+        let temp = tempdir().expect("tempdir");
+        let alias_bin = temp.path().join("alias-tool");
+        fs::write(&alias_bin, "#!/bin/sh\nexit 0\n").expect("write executable");
+        make_executable(&alias_bin);
+
+        let primary_env = "HOMEBOY_TEST_PRIMARY_TOOL_BIN";
+        let alias_env = "HOMEBOY_TEST_ALIAS_TOOL_BIN";
+        std::env::set_var(primary_env, temp.path().join("missing-tool"));
+        std::env::set_var(alias_env, &alias_bin);
+
+        let rig = RigSpec {
+            requirements: RigRequirementsSpec {
+                executables: vec![ExecutableRequirementSpec {
+                    executable: "demo-tool".to_string(),
+                    env: Some(primary_env.to_string()),
+                    env_aliases: vec![alias_env.to_string()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = evaluate_requirements(&rig);
+
+        std::env::remove_var(primary_env);
+        std::env::remove_var(alias_env);
+        assert_eq!(outcome.failed, 0, "outcome: {:?}", outcome.steps);
+    }
+
+    #[test]
+    fn executable_requirement_reports_resolution_sources() {
+        let primary_env = "HOMEBOY_TEST_MISSING_PRIMARY_TOOL_BIN";
+        let alias_env = "HOMEBOY_TEST_EMPTY_ALIAS_TOOL_BIN";
+        std::env::set_var(primary_env, "/nonexistent/primary-tool");
+        std::env::set_var(alias_env, "");
+
+        let rig = RigSpec {
+            requirements: RigRequirementsSpec {
+                executables: vec![ExecutableRequirementSpec {
+                    executable: "/nonexistent/missing-tool".to_string(),
+                    env: Some(primary_env.to_string()),
+                    env_aliases: vec![alias_env.to_string()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let outcome = evaluate_requirements(&rig);
+
+        std::env::remove_var(primary_env);
+        std::env::remove_var(alias_env);
+        assert_eq!(outcome.failed, 1);
+        let error = outcome.steps[0].error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("HOMEBOY_TEST_MISSING_PRIMARY_TOOL_BIN=/nonexistent/primary-tool"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("HOMEBOY_TEST_EMPTY_ALIAS_TOOL_BIN is unset or empty"),
+            "error: {error}"
+        );
+        assert!(
+            error.contains("declared executable `/nonexistent/missing-tool`"),
+            "error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &std::path::Path) {}
 }
