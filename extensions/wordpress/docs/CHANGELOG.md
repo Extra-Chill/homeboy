@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.3] - 2026-06-17
+
+### Changed
+- Add WordPress bench JSON artifact helper
+
 ## [3.3.2] - 2026-06-17
 
 ### Changed
