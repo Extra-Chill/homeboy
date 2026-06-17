@@ -7,6 +7,9 @@ const path = require('node:path');
 
 function wpCodeboxArtifactDirectory(codeboxResult, fallbackDirectory) {
   return codeboxResult?.artifacts?.directory
+    || codeboxResult?.artifacts?.path
+    || codeboxResult?.artifactsDirectory
+    || codeboxResult?.artifacts_directory
     || codeboxResult?.artifactDirectory
     || codeboxResult?.artifact_directory
     || fallbackDirectory
@@ -29,6 +32,8 @@ function wpCodeboxArtifactByKey(source, key) {
   }
   return source?.artifacts?.[key]
     || source?.files?.[key]
+    || source?.artifactFiles?.[key]
+    || source?.artifact_files?.[key]
     || source?.artifact?.files?.[key]
     || source?.summary?.files?.[key]
     || source?.artifact?.summary?.files?.[key]
