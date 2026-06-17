@@ -148,6 +148,10 @@ function codexOAuthTokenUrl() {
   return process.env.HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL || CODEX_OAUTH_TOKEN_URL;
 }
 
+function codexAuthPath() {
+  return process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || (process.env.HOME ? path.join(process.env.HOME, '.codex', 'auth.json') : '');
+}
+
 function postForm(url, body, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     let parsedUrl;
@@ -214,7 +218,7 @@ async function refreshCodexAuthEnv() {
   }
 
   const expiresIn = Number.isFinite(Number(data.expires_in)) ? Number(data.expires_in) : 3600;
-  return Object.fromEntries(Object.entries({
+  const refreshedEnv = Object.fromEntries(Object.entries({
     AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: data.access_token,
     AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: typeof data.refresh_token === 'string' && data.refresh_token !== ''
       ? data.refresh_token
@@ -223,6 +227,38 @@ async function refreshCodexAuthEnv() {
     AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: process.env.AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID,
     AI_PROVIDER_OPENAI_CODEX_FEDRAMP: process.env.AI_PROVIDER_OPENAI_CODEX_FEDRAMP,
   }).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+  persistRefreshedCodexAuth(refreshedEnv);
+  return refreshedEnv;
+}
+
+function persistRefreshedCodexAuth(refreshedEnv) {
+  const authPath = codexAuthPath();
+  if (!authPath || (!process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH && !fs.existsSync(authPath))) {
+    return;
+  }
+
+  const auth = readJsonIfAvailable(authPath) || {};
+  const next = {
+    ...auth,
+    tokens: {
+      ...(plainObject(auth.tokens) ? auth.tokens : {}),
+      access_token: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN,
+      refresh_token: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
+      expires_at: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT,
+      account_id: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID,
+      fedramp: refreshedEnv.AI_PROVIDER_OPENAI_CODEX_FEDRAMP,
+    },
+  };
+  try {
+    fs.mkdirSync(path.dirname(authPath), { recursive: true, mode: 0o700 });
+    const tempPath = `${authPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(tempPath, authPath);
+    fs.chmodSync(authPath, 0o600);
+  } catch {
+    // Auth refresh is still valid for this run. A later run will surface stale
+    // credentials if the host cannot persist the rotated refresh token.
+  }
 }
 
 async function codexAuthPreflightEnv(request) {

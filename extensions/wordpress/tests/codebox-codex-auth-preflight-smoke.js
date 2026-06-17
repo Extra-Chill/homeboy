@@ -16,6 +16,16 @@ const wpCodeboxRuntimeExecutor = path.join(
   'agent',
   'homeboy-codebox-agent-task-executor.cjs'
 );
+const wpCodeboxTaskRunner = path.join(
+  __dirname,
+  '..',
+  '..',
+  'agent-runtimes',
+  'wp-codebox',
+  'scripts',
+  'agent',
+  'homeboy-wp-codebox-task-runner.cjs'
+);
 
 const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -51,6 +61,33 @@ const server = http.createServer((request, response) => {
   request.resume();
   response.writeHead(401, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify({ error: 'invalid_grant' }));
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(portPath, String(server.address().port));
+});
+`);
+  const child = spawn(process.execPath, [script, portPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const port = waitForFile(portPath);
+  return {
+    url: `http://127.0.0.1:${port}/oauth/token`,
+    stop() {
+      child.kill();
+    },
+  };
+}
+
+function createRotatingOAuthServer() {
+  const script = path.join(root, 'fixture-rotating-codex-oauth-server.js');
+  const portPath = path.join(root, 'fixture-rotating-codex-oauth-port');
+  fs.writeFileSync(script, `#!/usr/bin/env node
+'use strict';
+const fs = require('node:fs');
+const http = require('node:http');
+const portPath = process.argv[2];
+const server = http.createServer((request, response) => {
+  request.resume();
+  response.writeHead(200, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify({ access_token: 'fresh-access-token-value', refresh_token: 'fresh-refresh-token-value', expires_in: 3600 }));
 });
 server.listen(0, '127.0.0.1', () => {
   fs.writeFileSync(portPath, String(server.address().port));
@@ -110,6 +147,59 @@ try {
   assert.match(outcome.diagnostics[0].data.stderr, /Refresh Codex OAuth credentials/);
   assert(!JSON.stringify(outcome).includes('stale-access-token-value'));
   assert(!JSON.stringify(outcome).includes('stale-refresh-token-value'));
+
+  oauthServer.stop();
+  oauthServer = createRotatingOAuthServer();
+  const authPath = path.join(root, 'codex-auth.json');
+  fs.writeFileSync(authPath, JSON.stringify({
+    tokens: {
+      access_token: 'stale-access-token-value',
+      refresh_token: 'stale-refresh-token-value',
+      expires_at: '4102444800',
+      account_id: 'account-id-value',
+      fedramp: '0',
+    },
+    preserved: true,
+  }, null, 2));
+
+  const refreshResult = spawnSync(process.execPath, [wpCodeboxTaskRunner], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      schema: 'wp-codebox/task-input/v1',
+      version: 1,
+      goal: 'Refresh Codex auth before launching WP Codebox.',
+      target: {},
+      allowed_tools: [],
+      expected_artifacts: [],
+      structured_artifacts: [],
+      agent_bundles: [],
+      sandbox_tool_policy: {},
+      policy: {},
+      context: {},
+      provider: 'codex',
+      model: 'gpt-5.5',
+      secret_env: codexSecretEnv,
+      wp_codebox_bin: '/bin/false',
+    }),
+    env: {
+      ...process.env,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'stale-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'stale-refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: oauthServer.url,
+      HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH: authPath,
+    },
+  });
+  assert.notEqual(refreshResult.status, 0, 'fake WP Codebox command should fail after auth preflight');
+  const persisted = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+  assert.equal(persisted.preserved, true);
+  assert.equal(persisted.tokens.access_token, 'fresh-access-token-value');
+  assert.equal(persisted.tokens.refresh_token, 'fresh-refresh-token-value');
+  assert.equal(persisted.tokens.account_id, 'account-id-value');
+  assert.equal(persisted.tokens.expires_at.length > 0, true);
+  assert(!`${refreshResult.stdout}${refreshResult.stderr}`.includes('fresh-refresh-token-value'));
 } finally {
   if (oauthServer) {
     oauthServer.stop();
