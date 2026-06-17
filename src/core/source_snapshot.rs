@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::core::git;
 
 const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".git/",
@@ -49,13 +50,12 @@ impl SourceSnapshot {
         sync_mode: &str,
     ) -> Self {
         let local_path = path.display().to_string();
-        let git_root = git_output(path, &["rev-parse", "--show-toplevel"]);
-        let git_branch = git_output(path, &["branch", "--show-current"])
+        let git_root = git::toplevel(path);
+        let git_branch = git::current_branch(path)
             .filter(|branch| !branch.is_empty())
-            .or_else(|| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]));
-        let git_sha = git_output(path, &["rev-parse", "HEAD"]);
-        let status =
-            git_output_bytes(path, &["status", "--porcelain=v1", "-z"]).unwrap_or_default();
+            .or_else(|| git::output_optional(path, &["rev-parse", "--abbrev-ref", "HEAD"]));
+        let git_sha = git::head_sha(path);
+        let status = git::status_porcelain_bytes(path).unwrap_or_default();
         let dirty = !status.is_empty();
         let snapshot_hash = if git_sha.is_some() {
             git_snapshot_hash(path, git_sha.as_deref(), &status)
@@ -126,17 +126,17 @@ fn git_snapshot_hash(path: &Path, git_sha: Option<&str>, status: &[u8]) -> Strin
     hasher.update(status);
 
     if status.is_empty() {
-        if let Some(tree) = git_output(path, &["rev-parse", "HEAD^{tree}"]) {
+        if let Some(tree) = git::output_optional(path, &["rev-parse", "HEAD^{tree}"]) {
             hasher.update(b"\0tree\0");
             hasher.update(tree.as_bytes());
         }
     } else {
-        if let Some(diff) = git_output_bytes(path, &["diff", "--binary", "HEAD"]) {
+        if let Some(diff) = git::output_optional_bytes(path, &["diff", "--binary", "HEAD"]) {
             hasher.update(b"\0diff\0");
             hasher.update(diff);
         }
         if let Some(untracked) =
-            git_output_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])
+            git::output_optional_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])
         {
             hasher.update(b"\0untracked\0");
             for relative in untracked
@@ -165,27 +165,11 @@ fn generic_snapshot_hash(identity: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = git_output_bytes(path, args)?;
-    let value = String::from_utf8_lossy(&output).trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-fn git_output_bytes(path: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    output.status.success().then_some(output.stdout)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::process::Command;
 
     #[test]
     fn test_default_sync_excludes() {
