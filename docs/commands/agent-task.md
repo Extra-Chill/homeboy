@@ -240,7 +240,7 @@ patch-producing provider, `--cwd` must point at a clean git checkout with
 runner-side git checkout/worktree before provider dispatch so generated files can
 come back as patch artifacts. Non-git directories, dirty worktrees, and checkouts
 without `origin` fail on the controller before offload with a supported-path
-diagnostic; use a Homeboy/Data Machine Code worktree or another clean checkout
+diagnostic; use a Homeboy worktree or another clean checkout
 for write-capable agent tasks.
 
 ## Durable Loop Controllers

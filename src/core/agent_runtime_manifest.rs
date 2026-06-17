@@ -40,12 +40,6 @@ fn discover_standalone_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
             paths::agent_runtime_manifest,
         ));
     }
-    if let Ok(runtime_dir) = paths::ai_runtimes() {
-        manifests.extend(discover_standalone_agent_runtime_manifests_in(
-            runtime_dir,
-            paths::ai_runtime_manifest,
-        ));
-    }
     manifests.sort_by(|a, b| a.id.cmp(&b.id));
     manifests
 }
@@ -107,27 +101,6 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
                 runtime_path: extension.extension_path.clone(),
             });
         }
-
-        let Some(legacy_providers) = extension.extra.get("agent_task_executors") else {
-            continue;
-        };
-        let Ok(providers) =
-            serde_json::from_value::<Vec<AgentTaskExecutorProvider>>(legacy_providers.clone())
-        else {
-            continue;
-        };
-        if providers.is_empty() {
-            continue;
-        }
-        runtime_manifests.push(AgentRuntimeManifest {
-            schema: AGENT_RUNTIME_MANIFEST_SCHEMA.to_string(),
-            id: format!("{}.legacy-agent-task-executors", extension.id),
-            label: Some("Legacy agent-task executors".to_string()),
-            agent_task_executors: providers,
-            extension_id: Some(extension.id.clone()),
-            extension_path: extension.extension_path.clone(),
-            runtime_path: extension.extension_path.clone(),
-        });
     }
     runtime_manifests
 }
@@ -240,24 +213,6 @@ mod tests {
             manifests[0].runtime_path.as_deref(),
             Some("/extensions/runtime-extension")
         );
-    }
-
-    #[test]
-    fn keeps_legacy_agent_task_executor_manifest_discovery() {
-        let mut extension = extension("legacy-extension");
-        extension.extra.insert(
-            "agent_task_executors".to_string(),
-            json!([provider_json("legacy.default", "legacy")]),
-        );
-
-        let manifests = discover_agent_runtime_manifests_from_extensions(&[extension]);
-
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(
-            manifests[0].id,
-            "legacy-extension.legacy-agent-task-executors"
-        );
-        assert_eq!(manifests[0].agent_task_executors[0].backend, "legacy");
     }
 
     #[test]

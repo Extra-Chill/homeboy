@@ -316,7 +316,7 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
         return Ok(());
     };
 
-    for shared_dir in ["scripts", "agent-runtimes", "ai-runtimes"] {
+    for shared_dir in ["scripts", "agent-runtimes"] {
         let source = source_root.join(shared_dir);
         if !source.is_dir() {
             continue;

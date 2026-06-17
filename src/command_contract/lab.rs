@@ -193,7 +193,12 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
 ) -> bool {
     match command {
         agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
-            if !args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty()) {
+            let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
+                || args
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| !workspace.trim().is_empty());
+            if !has_workspace {
                 return false;
             }
             let backend = args.backend.clone().or_else(default_backend);
@@ -837,6 +842,28 @@ mod tests {
             &args.command,
             || Some("default-patch-provider".to_string()),
             |backend, _| backend == "default-patch-provider",
+        ));
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_treats_workspace_like_cwd() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "dispatch",
+            "--workspace",
+            "/work/repo",
+            "--prompt",
+            "cook",
+        ]);
+        let Commands::AgentTask(args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || Some("default-patch-provider".to_string()),
+            |backend, selector| backend == "default-patch-provider" && selector.is_none(),
         ));
     }
 

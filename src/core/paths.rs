@@ -181,11 +181,6 @@ pub fn agent_runtimes() -> Result<PathBuf> {
     Ok(homeboy()?.join("agent-runtimes"))
 }
 
-/// First-class AI runtimes directory.
-pub fn ai_runtimes() -> Result<PathBuf> {
-    Ok(homeboy()?.join("ai-runtimes"))
-}
-
 /// Keys directory
 pub fn keys() -> Result<PathBuf> {
     Ok(homeboy()?.join("keys"))
@@ -256,11 +251,6 @@ pub fn extension_manifest(id: &str) -> Result<PathBuf> {
 /// Agent runtime manifest file path
 pub fn agent_runtime_manifest(id: &str) -> Result<PathBuf> {
     Ok(agent_runtimes()?.join(id).join(format!("{}.json", id)))
-}
-
-/// AI runtime manifest file path
-pub fn ai_runtime_manifest(id: &str) -> Result<PathBuf> {
-    Ok(ai_runtimes()?.join(id).join(format!("{}.json", id)))
 }
 
 /// Key file path
