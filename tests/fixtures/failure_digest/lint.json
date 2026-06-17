@@ -5,6 +5,37 @@
     "summary": "3 lint finding(s)",
     "phpcs_summary": "2 PHPCS error(s)",
     "phpstan_summary": "1 PHPStan error(s)",
+    "autofix": {
+      "files_modified": 1,
+      "rerun_recommended": true,
+      "changed_files": ["src/widget.php"]
+    },
+    "findings": [
+      {
+        "tool": "phpcs",
+        "rule": "Squiz.Commenting.FunctionComment.Missing",
+        "severity": "error",
+        "file": "src/widget.php",
+        "line": 12,
+        "message": "Missing function doc comment"
+      },
+      {
+        "tool": "phpcs",
+        "rule": "Squiz.Commenting.FunctionComment.Missing",
+        "severity": "error",
+        "file": "src/widget.php",
+        "line": 24,
+        "message": "Missing function doc comment"
+      },
+      {
+        "tool": "phpstan",
+        "rule": "undefined-method",
+        "severity": "error",
+        "file": "src/service.php",
+        "line": 7,
+        "message": "Call to undefined method App\\Service::missing()"
+      }
+    ],
     "top_violations": [
       "Squiz.Commenting.FunctionComment.Missing — 2",
       "PHPStan: Call to undefined method — 1"
