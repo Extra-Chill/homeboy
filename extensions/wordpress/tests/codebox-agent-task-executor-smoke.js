@@ -1781,6 +1781,93 @@ assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_pr_url, 'ht
 assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_slug, 'issue-451-design-direction');
 assert.equal(canonicalTopLevelAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/453'), true);
 
+const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'projected-typed-artifact-bundle-task-123',
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'static_site_candidate',
+    type: 'StaticSiteCandidate',
+    artifact_schema: 'static-site-importer/static-site-candidate/v1',
+    required: true,
+  }],
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  artifacts: '/tmp/wp-codebox-artifacts',
+  metadata: {
+    agent_runtime: {
+      bundle: {
+        engine_data_outputs: {
+          static_site_candidate: 'outputs.typed_artifacts.static_site_candidate.payload',
+        },
+      },
+      workload: {
+        scenarios: [{
+          id: 'agent-bundle',
+          metadata: {
+            schema: 'datamachine/agent-bundle-run/v1',
+            outputs: {
+              typed_artifacts: {
+                static_site_candidate: {
+                  schema: 'homeboy/agent-task-typed-artifact/v1',
+                  type: 'StaticSiteCandidate',
+                  artifact_schema: 'static-site-importer/static-site-candidate/v1',
+                  payload: { slug: 'projected-candidate', import_ready: true },
+                  provenance: { bundle_slug: 'static-site-agent' },
+                  file_refs: [{ path: '/tmp/wp-codebox-artifacts/projected-candidate.json', mime: 'application/json' }],
+                },
+              },
+            },
+          },
+        }],
+      },
+    },
+  },
+});
+assert.equal(projectedTypedArtifactBundleOutcome.status, 'succeeded');
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.static_site_candidate.import_ready, true);
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.static_site_candidate.payload.slug, 'projected-candidate');
+assert.equal(projectedTypedArtifactBundleOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+assert.equal(projectedTypedArtifactBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.path === '/tmp/wp-codebox-artifacts/projected-candidate.json'), true);
+
+const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'failed-projected-typed-artifact-bundle-task-123',
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  outputs: {
+    agent_runtime: {
+      success: false,
+      result: {
+        success: false,
+        error_reason: 'empty_data_packet_returned',
+        error_message: 'Data Machine bundle returned an empty data packet.',
+        terminal_status: 'failed - empty_data_packet_returned',
+        outputs: {
+          typed_artifacts: {
+            failure_report: {
+              type: 'FailureReport',
+              artifact_schema: 'example/failure-report/v1',
+              payload: { reason: 'empty_data_packet_returned' },
+            },
+          },
+        },
+      },
+    },
+  },
+});
+assert.equal(failedProjectedTypedArtifactBundleOutcome.status, 'failed');
+assert.equal(failedProjectedTypedArtifactBundleOutcome.diagnostics[0].class, 'agent_runtime.failed');
+assert.equal(failedProjectedTypedArtifactBundleOutcome.diagnostics[0].data.reason, 'empty_data_packet_returned');
+assert.equal(failedProjectedTypedArtifactBundleOutcome.outputs.typed_artifacts.failure_report.payload.reason, 'empty_data_packet_returned');
+assert.equal(failedProjectedTypedArtifactBundleOutcome.metadata.typed_artifacts.failure_report.artifact_schema, 'example/failure-report/v1');
+
 const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'single-result-agent-bundle-task-123',

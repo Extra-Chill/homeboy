@@ -12,7 +12,7 @@ const { spawnSync } = require('node:child_process');
 
 const SCRIPT_DIR = __dirname;
 const EXTENSION_PATH = path.resolve(SCRIPT_DIR, '..', '..');
-const EXECUTOR = path.join(SCRIPT_DIR, 'homeboy-codebox-agent-task-executor.cjs');
+const EXECUTOR = path.resolve(SCRIPT_DIR, '..', '..', '..', 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 
 function readConfigPath() {
   const configPath = process.argv[2] || process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH || '';

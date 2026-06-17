@@ -1737,16 +1737,38 @@ function typedArtifactsFromResult(result) {
     result.metadata?.agent_runtime?.result?.typedArtifacts,
     result.metadata?.agent_runtime?.result?.outputs?.typed_artifacts,
     result.metadata?.agent_runtime?.result?.outputs?.typedArtifacts,
+    result.metadata?.agent_runtime?.result?.outputs?.outputs?.typed_artifacts,
+    result.metadata?.agent_runtime?.result?.outputs?.outputs?.typedArtifacts,
     workload.typed_artifacts,
     workload.typedArtifacts,
     workload.outputs?.typed_artifacts,
     workload.outputs?.typedArtifacts,
+    workload.outputs?.outputs?.typed_artifacts,
+    workload.outputs?.outputs?.typedArtifacts,
     ...scenarios.map((scenario) => scenario?.typed_artifacts),
     ...scenarios.map((scenario) => scenario?.typedArtifacts),
+    ...scenarios.map((scenario) => scenario?.outputs?.typed_artifacts),
+    ...scenarios.map((scenario) => scenario?.outputs?.typedArtifacts),
+    ...scenarios.map((scenario) => scenario?.metadata?.outputs?.typed_artifacts),
+    ...scenarios.map((scenario) => scenario?.metadata?.outputs?.typedArtifacts),
     ...scenarios.map((scenario) => scenario?.metadata?.typed_artifacts),
     ...scenarios.map((scenario) => scenario?.metadata?.typedArtifacts),
   ];
   return Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
+}
+
+function typedArtifactProjectionFromOutputPath(outputPath, value, typedArtifacts) {
+  const match = String(outputPath || '').match(/(?:^|\.)typed_?artifacts\.([^.]+)\.payload$/i);
+  if (!match) {
+    return null;
+  }
+  const artifactName = match[1];
+  const existing = typedArtifacts[artifactName] || {};
+  return normalizeTypedArtifactEntry(artifactName, {
+    ...existing,
+    name: existing.name || artifactName,
+    payload: value,
+  });
 }
 
 function typedArtifactFileRefs(typedArtifact) {
@@ -1872,6 +1894,8 @@ function normalizeOutputs(result) {
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   const configuredOutputSources = [
     ...scenarios,
+    ...scenarios.map((scenario) => scenario?.metadata),
+    ...scenarios.map((scenario) => scenario?.outputs),
     result.run?.agentResult,
     result.agentResult,
     result.agent_result,
@@ -1891,6 +1915,10 @@ function normalizeOutputs(result) {
       const value = pathValue(source, outputPath);
       if (value !== undefined && value !== null && value !== '') {
         outputs[name] = value;
+        const typedArtifact = typedArtifactProjectionFromOutputPath(outputPath, value, typedArtifacts);
+        if (typedArtifact) {
+          typedArtifacts[typedArtifact.name] = typedArtifact;
+        }
         break;
       }
     }
