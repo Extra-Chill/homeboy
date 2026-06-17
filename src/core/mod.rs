@@ -48,6 +48,7 @@ pub mod ci_profile;
 pub mod cleanup;
 pub mod code_audit;
 pub mod command_execution_plan;
+pub mod command_invocation;
 pub mod component;
 pub mod context;
 pub mod daemon;

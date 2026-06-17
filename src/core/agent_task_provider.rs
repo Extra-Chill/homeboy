@@ -20,6 +20,7 @@ use crate::core::agent_task_secrets::{
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
+use crate::core::command_invocation::CommandInvocation;
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
@@ -57,6 +58,8 @@ pub struct AgentTaskExecutorProvider {
     pub command: String,
     #[serde(default, alias = "argv", skip_serializing_if = "Vec::is_empty")]
     pub command_argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "CommandInvocation::is_empty")]
+    pub invocation: CommandInvocation,
     #[serde(default = "default_request_schema")]
     pub request_schema: String,
     #[serde(default = "default_outcome_schema")]
@@ -1310,7 +1313,7 @@ fn run_provider_command(
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
     let command = render_provider_command_display(provider);
-    let Some((program, args)) = provider_command_parts(provider) else {
+    let Some((program, args, cwd)) = provider_command_parts(provider) else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -1354,12 +1357,16 @@ fn run_provider_command(
         }
     };
 
-    let mut child = match Command::new(&program)
-        .args(&args)
-        .envs(
-            env.iter()
-                .map(|(key, value)| (key.as_str(), value.as_str())),
-        )
+    let mut command_builder = Command::new(&program);
+    command_builder.args(&args).envs(
+        env.iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    if let Some(cwd) = cwd {
+        command_builder.current_dir(cwd);
+    }
+
+    let mut child = match command_builder
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1540,6 +1547,12 @@ fn output_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
+    if let Some(display) = provider.invocation.display.as_deref() {
+        return render_provider_command_template(display, provider);
+    }
+    if !provider.invocation.argv.is_empty() {
+        return render_provider_invocation_argv(provider).join(" ");
+    }
     if !provider.command_argv.is_empty() {
         return render_provider_command_argv(provider).join(" ");
     }
@@ -1548,41 +1561,66 @@ fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> Stri
 }
 
 fn render_provider_command_string(provider: &AgentTaskExecutorProvider) -> String {
+    render_provider_command_template(&provider.command, provider)
+}
+
+fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
-    provider
-        .command
+    value
         .replace("{{extension_path}}", extension_path)
         .replace("{{runtime_path}}", runtime_path)
 }
 
 fn render_provider_command_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
-    let extension_path = provider.extension_path.as_deref().unwrap_or_default();
-    let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
     provider
         .command_argv
         .iter()
-        .map(|arg| {
-            arg.replace("{{extension_path}}", extension_path)
-                .replace("{{runtime_path}}", runtime_path)
-        })
+        .map(|arg| render_provider_command_template(arg, provider))
         .collect()
 }
 
-fn provider_command_parts(provider: &AgentTaskExecutorProvider) -> Option<(String, Vec<String>)> {
-    let argv = if provider.command_argv.is_empty() {
+fn render_provider_invocation_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
+    provider
+        .invocation
+        .argv
+        .iter()
+        .map(|arg| render_provider_command_template(arg, provider))
+        .collect()
+}
+
+fn provider_command_parts(
+    provider: &AgentTaskExecutorProvider,
+) -> Option<(String, Vec<String>, Option<PathBuf>)> {
+    let (argv, cwd) = if !provider.invocation.argv.is_empty() {
+        (
+            render_provider_invocation_argv(provider),
+            provider
+                .invocation
+                .cwd
+                .as_deref()
+                .map(|cwd| PathBuf::from(render_provider_command_template(cwd, provider))),
+        )
+    } else if provider.command_argv.is_empty() {
         // Legacy string commands retain their historical split behavior for
         // compatibility. New provider manifests should use command_argv/argv.
-        render_provider_command_string(provider)
-            .split_whitespace()
-            .map(str::to_string)
-            .collect()
+        eprintln!(
+            "Warning: agent task provider '{}' uses deprecated string command; use invocation.argv or argv instead",
+            provider.id
+        );
+        (
+            render_provider_command_string(provider)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            None,
+        )
     } else {
-        render_provider_command_argv(provider)
+        (render_provider_command_argv(provider), None)
     };
     let mut parts = argv.into_iter();
     let program = parts.next()?;
-    Some((program, parts.collect()))
+    Some((program, parts.collect(), cwd))
 }
 
 fn provider_command_env(
@@ -1733,6 +1771,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_manifest_accepts_command_invocation_contract() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "invocation.provider",
+            "backend": "invocation",
+            "command": "legacy-provider --legacy",
+            "invocation": {
+                "schema": "homeboy/command-invocation/v1",
+                "argv": ["{{runtime_path}}/bin/provider", "--json"],
+                "cwd": "{{runtime_path}}",
+                "env": [{ "name": "TOKEN", "source": "secret_env", "redacted": true }],
+                "display": "provider --json",
+                "redaction": { "env": ["TOKEN"] }
+            }
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(provider.invocation.argv[0], "{{runtime_path}}/bin/provider");
+        assert_eq!(provider.invocation.cwd.as_deref(), Some("{{runtime_path}}"));
+        assert_eq!(provider.invocation.env[0].name, "TOKEN");
+        assert_eq!(
+            provider.invocation.display.as_deref(),
+            Some("provider --json")
+        );
+        assert_eq!(provider.invocation.redaction.env, vec!["TOKEN"]);
+    }
+
+    #[test]
+    fn provider_command_parts_warns_for_legacy_string_command() {
+        let (_request, provider) =
+            request("task-legacy-command", "legacy-provider --flag".to_string());
+
+        let (program, args, cwd) = provider_command_parts(&provider).expect("command parts");
+
+        assert_eq!(program, "legacy-provider");
+        assert_eq!(args, vec!["--flag"]);
+        assert_eq!(cwd, None);
+    }
+
+    #[test]
     fn provider_manifest_preserves_unknown_metadata_on_export() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "metadata.provider",
@@ -1851,6 +1928,7 @@ mod tests {
             default_backend: false,
             command,
             command_argv: Vec::new(),
+            invocation: CommandInvocation::default(),
             request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
@@ -2101,6 +2179,40 @@ process.stdout.write(JSON.stringify({
             .as_deref()
             .unwrap_or_default()
             .contains("extension path with spaces"));
+    }
+
+    #[test]
+    fn provider_invocation_argv_and_cwd_preserve_paths_with_spaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("runtime path with spaces");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        fs::write(
+            runtime_dir.join("provider.js"),
+            r#"
+const fs = require('fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify({
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: input.task_id,
+  status: process.cwd().includes('runtime path with spaces') ? 'succeeded' : 'failed',
+  summary: process.cwd()
+}));
+"#,
+        )
+        .expect("provider script");
+        let (request, mut provider) = request("task-invocation-cwd", "legacy unused".to_string());
+        provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
+        provider.invocation.argv = vec!["node".to_string(), "provider.js".to_string()];
+        provider.invocation.cwd = Some("{{runtime_path}}".to_string());
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(outcome
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("runtime path with spaces"));
     }
 
     #[test]

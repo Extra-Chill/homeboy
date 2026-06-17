@@ -21,6 +21,7 @@ use crate::core::agent_task_provider::{
 use crate::core::agent_task_schedule::{
     AgentTaskAggregateStatus, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
 };
+use crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use crate::core::redaction::RedactionPolicy;
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 
@@ -60,6 +61,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub loop_controller_status: String,
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
+    pub command_invocation: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -123,6 +125,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             loop_controller_status: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
+            command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),
         },
         provider_capability: AgentTaskCoreProviderCapabilityContract {
             schema: provider_capability.schema,
@@ -150,6 +153,8 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "backend",
                 "default_backend",
                 "command",
+                "command_argv",
+                "invocation",
                 "request_schema",
                 "outcome_schema",
                 "capabilities",
@@ -337,6 +342,10 @@ mod tests {
             SECRET_ENV_REQUIREMENT_SCHEMA
         );
         assert_eq!(
+            contract.schemas.command_invocation,
+            COMMAND_INVOCATION_SCHEMA
+        );
+        assert_eq!(
             contract.provider_capability.request_required_fields,
             agent_task_request_required_fields()
         );
@@ -352,6 +361,10 @@ mod tests {
             contract.provider_capability.redacted_metadata_keys,
             agent_task_redacted_metadata_keys()
         );
+        assert!(contract
+            .provider_capability
+            .executor_provider_fields
+            .contains(&"invocation".to_string()));
         assert!(contract
             .enums
             .outcome_status
