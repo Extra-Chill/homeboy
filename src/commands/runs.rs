@@ -51,7 +51,7 @@ use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use loop_sync::{loop_sync, RunsLoopSyncArgs, RunsLoopSyncOutput};
 use query::{runs_query, RunsQueryArgs, RunsQueryOutput};
 use reconcile::{reconcile_runs, RunsReconcileArgs, RunsReconcileOutput};
-use refs::{runs_refs, RunsRefsArgs, RunsRefsOutput};
+use refs::{runs_refs, RunsRefsArgs};
 
 #[cfg(test)]
 pub(crate) use common::SkippedArtifactRow;
@@ -61,6 +61,11 @@ pub(crate) use drift::{DriftValue, RunsDriftFilters};
 #[cfg(test)]
 pub(crate) use query::{
     QueryGroup, QueryRow, RunsQueryFilters, RunsQueryOutput as TestRunsQueryOutput,
+};
+pub(crate) use refs::RunsRefsOutput;
+#[cfg(test)]
+pub(crate) use refs::{
+    ArtifactRef as RunsRefsArtifactRef, RunRef as RunsRefsRunRef, RunsRefsFilters,
 };
 
 const DEFAULT_LIMIT: i64 = 20;

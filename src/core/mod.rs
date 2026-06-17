@@ -52,6 +52,7 @@ pub mod deploy;
 pub mod deps;
 pub mod engine;
 pub mod error;
+pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub(crate) mod expand;

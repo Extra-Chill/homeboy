@@ -13,7 +13,8 @@ use super::deploy::{DeployCommandOutput, DeployOutput, MultiProjectDeployOutput}
 use super::release::{BatchReleaseOutput, ReleaseCommandOutput, ReleaseOutput};
 use super::runs::{
     DriftValue, QueryGroup, QueryRow, RunsDriftFilters, RunsDriftOutput, RunsQueryFilters,
-    SkippedArtifactRow, TestRunsQueryOutput as RunsQueryOutput,
+    RunsRefsArtifactRef, RunsRefsFilters, RunsRefsOutput, RunsRefsRunRef, SkippedArtifactRow,
+    TestRunsQueryOutput as RunsQueryOutput,
 };
 use super::runs::{
     RunDetail, RunSummary, RunsArtifactsOutput, RunsListOutput, RunsOutput, RunsShowOutput,
@@ -81,6 +82,37 @@ fn runs_command_json_contract_matches_golden_fixture() {
                 scenario("runs list", RunsOutput::List(RunsListOutput {
                     command: "runs.list",
                     runs: vec![run_summary()],
+                })),
+                scenario("runs refs json", RunsOutput::Refs(RunsRefsOutput {
+                    command: "runs.refs",
+                    filters: RunsRefsFilters {
+                        component_id: Some("homeboy".to_string()),
+                        kind: Some("bench".to_string()),
+                        rig: Some("contract-rig".to_string()),
+                        status: Some("pass".to_string()),
+                        since: None,
+                        limit: 50,
+                        artifact_kinds: Vec::new(),
+                        aggregate_artifact_kinds: Vec::new(),
+                    },
+                    run_count: 1,
+                    artifact_count: 1,
+                    aggregate_artifact_count: 1,
+                    runs: vec![RunsRefsRunRef {
+                        run_id: "run-contract-1".to_string(),
+                        ref_id: "homeboy://run/run-contract-1".to_string(),
+                        kind: "bench".to_string(),
+                        status: "pass".to_string(),
+                        started_at: "2026-05-24T00:00:00Z".to_string(),
+                        finished_at: Some("2026-05-24T00:01:00Z".to_string()),
+                        component_id: Some("homeboy".to_string()),
+                        rig_id: Some("contract-rig".to_string()),
+                        git_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+                        evidence_command: "homeboy runs evidence run-contract-1".to_string(),
+                        artifacts_command: "homeboy runs artifacts run-contract-1".to_string(),
+                    }],
+                    artifacts: vec![runs_refs_artifact_record()],
+                    aggregate_artifacts: vec![runs_refs_artifact_record()],
                 })),
                 scenario("runs show", RunsOutput::Show(RunsShowOutput {
                     command: "runs.show",
@@ -361,6 +393,24 @@ fn artifact_record() -> ArtifactRecord {
         mime: Some("application/json".to_string()),
         metadata_json: serde_json::json!({}),
         created_at: "2026-05-24T00:01:00Z".to_string(),
+    }
+}
+
+fn runs_refs_artifact_record() -> RunsRefsArtifactRef {
+    RunsRefsArtifactRef {
+        run_id: "run-contract-1".to_string(),
+        artifact_id: "artifact-aggregate".to_string(),
+        ref_id: "homeboy://run/run-contract-1/artifact/artifact-aggregate".to_string(),
+        kind: "trace_aggregate".to_string(),
+        artifact_type: "file".to_string(),
+        path: "artifacts/aggregate.json".to_string(),
+        url: None,
+        mime: Some("application/json".to_string()),
+        size_bytes: Some(1234),
+        sha256: Some(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        ),
+        get_command: "homeboy runs artifact get run-contract-1 artifact-aggregate".to_string(),
     }
 }
 
