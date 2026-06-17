@@ -54,6 +54,28 @@ assert.deepEqual(provider.provider_defaults.codex.secret_env, [
 assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, [
   'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
 ]);
+assert.deepEqual(provider.workspace_tools.readonly, [
+  'workspace_ls',
+  'workspace_read',
+  'workspace_git_status',
+]);
+assert.equal(provider.component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
+assert.equal(provider.component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
+
+const customContract = providerContract({
+  capabilities: ['wordpress_sandbox', 'tool:example/run-workflow'],
+  workspaceTools: {
+    readonly: ['example_workspace_read'],
+    readwrite: ['example_workspace_write'],
+  },
+  componentPathDefaults: {
+    contract_slug_map: { 'example-runtime': 'agent_runtime' },
+    path_aliases: { agent_runtime: ['runtime_component:example_runtime'] },
+  },
+});
+assert.deepEqual(customContract.capabilities, ['wordpress_sandbox', 'tool:example/run-workflow']);
+assert.deepEqual(customContract.workspace_tools.readwrite, ['example_workspace_write']);
+assert.deepEqual(customContract.component_path_defaults.contract_slug_map, { 'example-runtime': 'agent_runtime' });
 
 const taskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -97,6 +119,39 @@ assert.equal(
   taskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'wordpress.read-post'),
   true
 );
+
+const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'custom-runtime-policy-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      component_contracts: [{ slug: 'example-runtime', path: '/components/example-runtime' }],
+      runtime_components: { example_tools: '/components/example-tools' },
+    },
+  },
+  instructions: 'Run against caller-declared runtime defaults.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+}, {
+  workspaceTools: {
+    readonly: ['example_workspace_read'],
+    readwrite: ['example_workspace_write'],
+  },
+  componentPathDefaults: {
+    contract_slug_map: { 'example-runtime': 'agent_runtime' },
+    path_aliases: {
+      agent_runtime: ['contract:agent_runtime'],
+      agent_runtime_tools: ['runtime_component:example_tools'],
+    },
+  },
+});
+assert.deepEqual(customRuntimePolicyTaskInput.allowed_tools, [
+  'example_workspace_read',
+  'example_workspace_write',
+]);
+assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime, '/components/example-runtime');
+assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime_tools, '/components/example-tools');
 
 const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
