@@ -25,6 +25,10 @@ use crate::core::redaction::RedactionPolicy;
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 
 pub const AGENT_TASK_CORE_CONTRACT_SCHEMA: &str = "homeboy/agent-task-core-contract/v1";
+pub const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA: &str =
+    "homeboy/agent-task-artifact-declaration/v1";
+pub const AGENT_TASK_EVIDENCE_REF_SCHEMA: &str = "homeboy/agent-task-evidence-ref/v1";
+pub const SECRET_ENV_REQUIREMENT_SCHEMA: &str = "homeboy/secret-env-requirement/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskCoreContract {
@@ -40,6 +44,8 @@ pub struct AgentTaskCoreContractSchemas {
     pub request: String,
     pub outcome: String,
     pub artifact: String,
+    pub artifact_declaration: String,
+    pub evidence_ref: String,
     pub workflow: String,
     pub plan: String,
     pub aggregate: String,
@@ -53,6 +59,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub loop_controller: String,
     pub loop_controller_status: String,
     pub secret_env_plan: String,
+    pub secret_env_requirement: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -61,6 +68,10 @@ pub struct AgentTaskCoreProviderCapabilityContract {
     pub provider_schema: String,
     pub request_schema: String,
     pub outcome_schema: String,
+    pub request_required_fields: Vec<String>,
+    pub outcome_statuses: Vec<String>,
+    pub failure_classifications: Vec<String>,
+    pub redacted_metadata_keys: Vec<String>,
     pub provider_capability_fields: Vec<String>,
     pub executor_provider_fields: Vec<String>,
 }
@@ -93,6 +104,8 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             request: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             artifact: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            artifact_declaration: AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA.to_string(),
+            evidence_ref: AGENT_TASK_EVIDENCE_REF_SCHEMA.to_string(),
             workflow: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
             plan: AGENT_TASK_PLAN_SCHEMA.to_string(),
             aggregate: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -107,17 +120,26 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             loop_controller: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
             loop_controller_status: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
+            secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
         },
         provider_capability: AgentTaskCoreProviderCapabilityContract {
             schema: provider_capability.schema,
             provider_schema: provider_capability.provider_schema,
             request_schema: provider_capability.request_schema,
             outcome_schema: provider_capability.outcome_schema,
+            request_required_fields: agent_task_request_required_fields(),
+            outcome_statuses: agent_task_outcome_statuses(),
+            failure_classifications: agent_task_failure_classifications(),
+            redacted_metadata_keys: agent_task_redacted_metadata_keys(),
             provider_capability_fields: string_vec(&[
                 "schema",
                 "provider_schema",
                 "request_schema",
                 "outcome_schema",
+                "request_required_fields",
+                "outcome_statuses",
+                "failure_classifications",
+                "redacted_metadata_keys",
             ]),
             executor_provider_fields: string_vec(&[
                 "schema",
@@ -214,6 +236,39 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
     }
 }
 
+pub fn agent_task_request_required_fields() -> Vec<String> {
+    string_vec(&["schema", "task_id", "executor.backend", "instructions"])
+}
+
+pub fn agent_task_outcome_statuses() -> Vec<String> {
+    enum_values(&[
+        AgentTaskOutcomeStatus::Succeeded,
+        AgentTaskOutcomeStatus::NoOp,
+        AgentTaskOutcomeStatus::UnableToRemediate,
+        AgentTaskOutcomeStatus::ProviderError,
+        AgentTaskOutcomeStatus::Timeout,
+        AgentTaskOutcomeStatus::Failed,
+        AgentTaskOutcomeStatus::FollowUpIssue,
+        AgentTaskOutcomeStatus::Cancelled,
+    ])
+}
+
+pub fn agent_task_failure_classifications() -> Vec<String> {
+    enum_values(&[
+        AgentTaskFailureClassification::Provider,
+        AgentTaskFailureClassification::Timeout,
+        AgentTaskFailureClassification::PolicyDenied,
+        AgentTaskFailureClassification::CapabilityMissing,
+        AgentTaskFailureClassification::InvalidInput,
+        AgentTaskFailureClassification::ExecutionFailed,
+        AgentTaskFailureClassification::Unknown,
+    ])
+}
+
+pub fn agent_task_redacted_metadata_keys() -> Vec<String> {
+    string_vec(&["secret_env_values", "secretEnvValues", "secrets"])
+}
+
 fn string_vec(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
@@ -247,6 +302,34 @@ mod tests {
         assert_eq!(
             contract.provider_capability.schema,
             AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.artifact_declaration,
+            AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.evidence_ref,
+            AGENT_TASK_EVIDENCE_REF_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.secret_env_requirement,
+            SECRET_ENV_REQUIREMENT_SCHEMA
+        );
+        assert_eq!(
+            contract.provider_capability.request_required_fields,
+            agent_task_request_required_fields()
+        );
+        assert_eq!(
+            contract.provider_capability.outcome_statuses,
+            agent_task_outcome_statuses()
+        );
+        assert_eq!(
+            contract.provider_capability.failure_classifications,
+            agent_task_failure_classifications()
+        );
+        assert_eq!(
+            contract.provider_capability.redacted_metadata_keys,
+            agent_task_redacted_metadata_keys()
         );
         assert!(contract
             .enums
