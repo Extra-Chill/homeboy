@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use homeboy::core::artifact_ref::{ArtifactRef, EvidenceRef};
+use homeboy::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
 use serde::Serialize;
 use serde_json::Value;
@@ -21,6 +22,10 @@ pub struct RunsEvidenceOutput {
     pub failure: RunsEvidenceFailureSummary,
     pub disk_budget: RunsEvidenceDiskBudget,
     pub evidence_links: Vec<RunsEvidenceLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_manifest: Option<EvidenceManifest>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence_manifest_errors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -117,6 +122,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let metadata = evidence_metadata(&run.metadata_json);
     let failure = evidence_failure_summary(&run);
     let links = evidence_links(&artifacts);
+    let (evidence_manifest, evidence_manifest_errors) = evidence_manifest(&run, &artifacts);
 
     Ok((
         RunsOutput::Evidence(RunsEvidenceOutput {
@@ -147,6 +153,8 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
             failure,
             disk_budget,
             evidence_links: links,
+            evidence_manifest,
+            evidence_manifest_errors,
         }),
         0,
     ))
@@ -380,6 +388,47 @@ fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
         .collect()
 }
 
+fn evidence_manifest(
+    run: &RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> (Option<EvidenceManifest>, Vec<String>) {
+    let mut errors = Vec::new();
+    if let Some(value) = run.metadata_json.get("evidence_manifest") {
+        match EvidenceManifest::parse_value(value.clone()) {
+            Ok(manifest) => return (Some(manifest), errors),
+            Err(err) => errors.push(format!("metadata.evidence_manifest: {err}")),
+        }
+    }
+
+    for artifact in artifacts {
+        if !is_evidence_manifest_artifact(artifact) {
+            continue;
+        }
+        let value = match fs::read_to_string(&artifact.path)
+            .map_err(|err| err.to_string())
+            .and_then(|body| serde_json::from_str::<Value>(&body).map_err(|err| err.to_string()))
+        {
+            Ok(value) => value,
+            Err(err) => {
+                errors.push(format!("artifact.{}: {err}", artifact.id));
+                continue;
+            }
+        };
+        match EvidenceManifest::parse_value(value) {
+            Ok(manifest) => return (Some(manifest), errors),
+            Err(err) => errors.push(format!("artifact.{}: {err}", artifact.id)),
+        }
+    }
+
+    (None, errors)
+}
+
+fn is_evidence_manifest_artifact(artifact: &ArtifactRecord) -> bool {
+    artifact.kind == "evidence_manifest"
+        || artifact.metadata_json.get("schema").and_then(Value::as_str)
+            == Some(EVIDENCE_MANIFEST_SCHEMA)
+}
+
 #[cfg(test)]
 mod tests {
     use homeboy::core::artifact_links::PUBLIC_ARTIFACT_BASE_URL_ENV;
@@ -460,6 +509,23 @@ mod tests {
                         "error": "boom",
                         "gate_failures": ["p95_ms exceeded"],
                         "hints": ["inspect artifacts"],
+                        "evidence_manifest": {
+                            "schema": "homeboy/evidence-manifest/v1",
+                            "status": { "state": "blocked" },
+                            "interpretation": {
+                                "summary": "Evidence is blocked on reviewer confirmation.",
+                                "confidence": "medium"
+                            },
+                            "tracker_refs": [{
+                                "kind": "github_issue",
+                                "id": "Extra-Chill/homeboy#123"
+                            }],
+                            "blocking_conditions": [{
+                                "kind": "review_needed",
+                                "summary": "Maintainer review is required.",
+                                "severity": "warning"
+                            }]
+                        },
                         "scenario_metrics": [{"scenario_id":"cold","metrics":{"p95_ms":42.0}}],
                         "resource_policy": {"hot_command":"bench"}
                     }),
@@ -543,6 +609,11 @@ mod tests {
             assert_eq!(output.failure.exit_code, Some(1));
             assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
             assert_eq!(output.failure.hints, vec!["inspect artifacts"]);
+            let manifest = output.evidence_manifest.expect("evidence manifest");
+            assert_eq!(manifest.schema, "homeboy/evidence-manifest/v1");
+            assert_eq!(manifest.tracker_refs[0].id, "Extra-Chill/homeboy#123");
+            assert_eq!(manifest.blocking_conditions[0].kind, "review_needed");
+            assert!(output.evidence_manifest_errors.is_empty());
             assert!(
                 output.disk_budget.available_bytes.is_some()
                     || output.disk_budget.warning.is_some()
