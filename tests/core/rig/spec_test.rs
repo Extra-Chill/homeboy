@@ -2,8 +2,8 @@
 //! service-kind parsing. Covers `src/core/rig/spec.rs`.
 
 use crate::core::rig::{
-    PipelineStep, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec,
-    TraceVariantSpec, WorkloadSpec,
+    FilesystemAssertionKind, PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec,
+    ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec, TraceVariantSpec, WorkloadSpec,
 };
 
 /// Canonical fixture matching the studio-playground-dev shape used as the
@@ -236,8 +236,52 @@ fn test_spec_resources_block_parses_full_shape() {
 fn test_spec_resources_defaults_and_serializes_away_when_missing() {
     let spec: RigSpec = serde_json::from_str(r#"{"id":"tiny"}"#).expect("parse");
     assert_eq!(spec.resources, RigResourcesSpec::default());
+    assert_eq!(spec.requirements, RigRequirementsSpec::default());
     let json = serde_json::to_string(&spec).expect("serialize");
     assert!(!json.contains("resources"));
+    assert!(!json.contains("requirements"));
+}
+
+#[test]
+fn test_spec_requirements_parse_generic_executables_and_filesystem_assertions() {
+    let json = r#"{
+        "id": "dev-rig",
+        "requirements": {
+            "executables": [
+                {
+                    "executable": "node",
+                    "env": "NODE_BIN",
+                    "remediation": "install Node.js"
+                }
+            ],
+            "filesystem_assertions": [
+                {
+                    "path": "${components.app.path}/package.json",
+                    "kind": "file",
+                    "label": "app package manifest exists"
+                }
+            ],
+            "extensions": {
+                "example-provider": { "capability": "custom" }
+            }
+        }
+    }"#;
+
+    let spec: RigSpec = serde_json::from_str(json).expect("parse requirements");
+
+    assert_eq!(spec.requirements.executables[0].executable, "node");
+    assert_eq!(
+        spec.requirements.executables[0].env.as_deref(),
+        Some("NODE_BIN")
+    );
+    assert_eq!(
+        spec.requirements.filesystem_assertions[0].kind,
+        FilesystemAssertionKind::File
+    );
+    assert!(spec
+        .requirements
+        .extensions
+        .contains_key("example-provider"));
 }
 
 #[test]

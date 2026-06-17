@@ -19,6 +19,7 @@
 
 pub mod app;
 pub mod artifact_index;
+pub mod capabilities;
 pub mod check;
 pub mod expand;
 pub mod install;
@@ -39,6 +40,7 @@ pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use artifact_index::{
     for_run as artifact_index_for_run, RigRunArtifactIndex, RigRunArtifactRef, RigRunFailedStepRef,
 };
+pub use capabilities::{evaluate_requirements, plan_requirement_checks, RigRequirementCheckPlan};
 pub use install::{
     discover_rigs, discover_stacks, install, read_source_metadata, read_stack_source_metadata,
     DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata,
@@ -61,12 +63,14 @@ pub use source::{
 };
 pub use spec::{
     AppLauncherPlatform, AppLauncherPreflight, AppLauncherSpec, BenchSpec, CheckSpec,
-    ComponentSpec, DiscoverSpec, NewerThanSpec, PatchOp, PipelineStep, RigResourcesSpec, RigSpec,
-    ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource,
-    TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
-    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
-    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
-    TraceVariantSpec, WorkloadSpec,
+    ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
+    FilesystemAssertionSpec, NewerThanSpec, PatchOp, PipelineStep, RigRequirementsSpec,
+    RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
+    SymlinkSpec, TimeSource, TraceDependencySpec, TraceExperimentArtifactSpec,
+    TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
+    TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
+    TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
+    WorkloadSpec,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,

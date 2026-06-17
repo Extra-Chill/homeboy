@@ -14,7 +14,7 @@ mod workload;
 /// A rig: components + services + pipelines.
 ///
 /// Lives at `~/.config/homeboy/rigs/{id}.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RigSpec {
     /// Rig identifier. Populated from filename if empty in JSON.
     #[serde(default)]
@@ -52,6 +52,11 @@ pub struct RigSpec {
     /// displayed for operators. Runtime lock/conflict enforcement is deferred.
     #[serde(default, skip_serializing_if = "RigResourcesSpec::is_empty")]
     pub resources: RigResourcesSpec,
+
+    /// Generic environment requirements and filesystem assertions checked by
+    /// Homeboy core before rig-specific check pipelines run.
+    #[serde(default, skip_serializing_if = "RigRequirementsSpec::is_empty")]
+    pub requirements: RigRequirementsSpec,
 
     /// Pipelines for `up`, `check`, `down`, and custom verbs. MVP uses `up`,
     /// `check`, and `down`; future phases will add `sync`, `bench`, etc.
@@ -154,6 +159,103 @@ impl RigResourcesSpec {
             && self.paths.is_empty()
             && self.ports.is_empty()
             && self.process_patterns.is_empty()
+    }
+}
+
+/// Declarative rig requirements checked by core without domain-specific logic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RigRequirementsSpec {
+    /// Executables that must be available before the rig can be considered healthy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executables: Vec<ExecutableRequirementSpec>,
+
+    /// Filesystem paths/files/directories the rig expects to exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filesystem_assertions: Vec<FilesystemAssertionSpec>,
+
+    /// Extension/provider-owned requirement declarations. Core preserves these
+    /// for downstream planners without interpreting domain-specific shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl RigRequirementsSpec {
+    pub fn is_empty(&self) -> bool {
+        self.executables.is_empty()
+            && self.filesystem_assertions.is_empty()
+            && self.extensions.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutableRequirementSpec {
+    /// Executable name or path. Bare names are resolved from PATH.
+    pub executable: String,
+
+    /// Optional environment variable whose value points to the executable path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+
+    /// Human-readable label shown in `rig check` output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Human remediation shown when the requirement is not satisfied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesystemAssertionSpec {
+    /// Path to assert. Supports `~`, `${env.NAME}`, and rig component tokens.
+    pub path: String,
+
+    /// Required path type. Defaults to any existing filesystem path.
+    #[serde(default, skip_serializing_if = "FilesystemAssertionKind::is_path")]
+    pub kind: FilesystemAssertionKind,
+
+    /// Base directory for relative paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
+    /// Human-readable label shown in `rig check` output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Human remediation shown when the assertion is not satisfied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+impl Default for FilesystemAssertionSpec {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            kind: FilesystemAssertionKind::Path,
+            cwd: None,
+            label: None,
+            remediation: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemAssertionKind {
+    Path,
+    File,
+    Dir,
+}
+
+impl Default for FilesystemAssertionKind {
+    fn default() -> Self {
+        Self::Path
+    }
+}
+
+impl FilesystemAssertionKind {
+    pub fn is_path(&self) -> bool {
+        matches!(self, Self::Path)
     }
 }
 
