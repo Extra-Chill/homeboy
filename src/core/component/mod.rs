@@ -16,8 +16,8 @@ pub use artifacts::{cleanup_artifact_report, CleanupArtifactCandidate, CleanupAr
 pub use audit::{
     ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
     CommandStatusContractScenario, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
-    ConventionTagGlob, CoreBoundaryLeakConfig, DuplicationDetectorConfig, KnownSymbolEntry,
-    KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
+    ConventionTagGlob, CoreBoundaryLeakConfig, DetectorProfileConfig, DuplicationDetectorConfig,
+    KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
     MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
     RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode,
     SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm, TestWiringConfig, TestWiringPolicy,

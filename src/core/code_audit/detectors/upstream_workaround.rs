@@ -22,14 +22,13 @@
 //! Tier C (`function_exists` polyfill body detection) is intentionally
 //! deferred from v1; adjacent to `dead_guard.rs`.
 
-use std::sync::LazyLock;
-
 use regex::Regex;
 
 use super::comment_blocks;
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use crate::core::component::DetectorProfileConfig;
 
 // ============================================================================
 // Tier A — marker + tracker reference catalogues
@@ -72,22 +71,18 @@ const MARKER_LITERALS: &[&str] = &[
 /// "Hackathon" mid-paragraph.
 const LEADING_MARKERS: &[&str] = &["hack ", "hack:", "hack to", "hack for"];
 
-/// Regex variant of "until X merged/landed/..." — catches phrasing like
-/// "until #1117 merges" where the verb tense varies.
-static UNTIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"until\s+\S+\s+(?:merged|landed|shipped|fixed|released|patched|merges|lands|ships|fixes|releases|patches|in core)\b")
-        .unwrap()
-});
+const DEFAULT_MARKER_REGEXES: &[&str] = &[
+    r"until\s+\S+\s+(?:merged|landed|shipped|fixed|released|patched|merges|lands|ships|fixes|releases|patches|in core)\b",
+];
 
 /// Single alternation regex covering all tracker-reference shapes. Bare `#NNN`
 /// is intentionally NOT included — Tier A requires a marker AND a concrete
 /// URL/ticket, never a bare reference.
-static REFERENCE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+|core\.trac\.wordpress\.org/ticket/\d+|@see\s+https?://[^\s)]+)",
-    )
-    .unwrap()
-});
+const DEFAULT_TRACKER_REFERENCE_REGEXES: &[&str] = &[
+    r"https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+",
+    r"core\.trac\.wordpress\.org/ticket/\d+",
+    r"@see\s+https?://[^\s)]+",
+];
 
 // ============================================================================
 // Tier B — version-compare guard catalogue
@@ -103,12 +98,13 @@ const VERSION_CONSTANTS: &[&str] = &[
     "AKISMET_VERSION",
 ];
 
-static VERSION_COMPARE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"version_compare\s*\(\s*([A-Z_][A-Z0-9_]*|\$wp_version|PHP_VERSION)\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]<=?['"]\s*\)"#,
-    )
-    .unwrap()
-});
+const DEFAULT_VERSION_GUARD_REGEXES: &[&str] = &[
+    r#"version_compare\s*\(\s*([A-Z_][A-Z0-9_]*|\$wp_version|PHP_VERSION)\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]<=?['"]\s*\)"#,
+];
+
+const DEFAULT_VERSION_GUARD_LANGUAGES: &[&str] = &["php"];
+const DEFAULT_VENDORED_PATH_MARKERS: &[&str] =
+    &["/vendor/", "vendor/", "/node_modules/", "node_modules/"];
 
 // ============================================================================
 // Public entry point
@@ -117,37 +113,34 @@ static VERSION_COMPARE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Run both upstream-workaround tiers across the fingerprint set. Vendored
 /// paths (`/vendor/`, `/node_modules/`) are skipped — `LegacyComment` and
 /// `TodoMarker` still scan vendor files; only this rule is conservative.
-pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    config: &DetectorProfileConfig,
+) -> Vec<Finding> {
+    let profile = EffectiveDetectorProfile::from_config(config);
     let mut findings = Vec::new();
     for fp in fingerprints {
-        if is_vendored_path(&fp.relative_path) {
+        if profile.is_vendored_path(&fp.relative_path) {
             continue;
         }
-        findings.extend(scan_blocks(fp));
-        findings.extend(scan_version_guards(fp));
+        findings.extend(scan_blocks(fp, &profile));
+        findings.extend(scan_version_guards(fp, &profile));
     }
     findings
-}
-
-fn is_vendored_path(path: &str) -> bool {
-    path.contains("/vendor/")
-        || path.starts_with("vendor/")
-        || path.contains("/node_modules/")
-        || path.starts_with("node_modules/")
 }
 
 // ============================================================================
 // Tier A — marker + reference pass
 // ============================================================================
 
-fn scan_blocks(fp: &FileFingerprint) -> Vec<Finding> {
+fn scan_blocks(fp: &FileFingerprint, profile: &EffectiveDetectorProfile) -> Vec<Finding> {
     let mut findings = Vec::new();
     for block in comment_blocks::extract(fp) {
         let lower = block.text.to_lowercase();
-        if !block_has_marker(&block.text, &lower) {
+        if !block_has_marker(&block.text, &lower, profile) {
             continue;
         }
-        let reference = match REFERENCE_RE.find(&block.text) {
+        let reference = match profile.find_tracker_reference(&block.text) {
             Some(m) => m.as_str().to_string(),
             None => continue,
         };
@@ -177,11 +170,19 @@ fn scan_blocks(fp: &FileFingerprint) -> Vec<Finding> {
     findings
 }
 
-fn block_has_marker(raw: &str, lower: &str) -> bool {
-    if MARKER_LITERALS.iter().any(|m| lower.contains(m)) {
+fn block_has_marker(raw: &str, lower: &str, profile: &EffectiveDetectorProfile) -> bool {
+    if profile
+        .workaround_marker_literals
+        .iter()
+        .any(|m| lower.contains(m))
+    {
         return true;
     }
-    if UNTIL_PATTERN.is_match(lower) {
+    if profile
+        .marker_regexes
+        .iter()
+        .any(|regex| regex.is_match(lower))
+    {
         return true;
     }
     let leading_line = raw
@@ -190,46 +191,255 @@ fn block_has_marker(raw: &str, lower: &str) -> bool {
         .unwrap_or("")
         .trim_start()
         .to_lowercase();
-    LEADING_MARKERS.iter().any(|l| leading_line.starts_with(l))
+    profile
+        .workaround_leading_markers
+        .iter()
+        .any(|l| leading_line.starts_with(l))
 }
 
 // ============================================================================
 // Tier B — version-compare guard pass
 // ============================================================================
 
-fn scan_version_guards(fp: &FileFingerprint) -> Vec<Finding> {
-    if !matches!(fp.language, Language::Php) {
+fn scan_version_guards(fp: &FileFingerprint, profile: &EffectiveDetectorProfile) -> Vec<Finding> {
+    if !profile.language_allows_version_guard(&fp.language) {
         return Vec::new();
     }
     let mut findings = Vec::new();
-    for caps in VERSION_COMPARE_RE.captures_iter(&fp.content) {
-        let constant = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let version = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        if !VERSION_CONSTANTS.contains(&constant) {
-            continue;
+    for regex in &profile.version_guard_regexes {
+        for caps in regex.captures_iter(&fp.content) {
+            let constant = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let version = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+            if !profile
+                .version_guard_constants
+                .iter()
+                .any(|c| c == constant)
+            {
+                continue;
+            }
+            let m = caps.get(0).unwrap();
+            let line_number = fp.content[..m.start()]
+                .chars()
+                .filter(|c| *c == '\n')
+                .count()
+                + 1;
+            findings.push(Finding {
+                convention: "comment_hygiene".to_string(),
+                severity: Severity::Info,
+                file: fp.relative_path.clone(),
+                description: version_guard_description(line_number, constant, version, m.as_str()),
+                suggestion: format!(
+                    "Branch only fires on {} < {}. If the minimum supported version is now ≥ {}, this branch is dead and can be removed.",
+                    constant, version, version
+                ),
+                kind: AuditFinding::UpstreamWorkaround,
+            });
         }
-        let m = caps.get(0).unwrap();
-        let line_number = fp.content[..m.start()]
-            .chars()
-            .filter(|c| *c == '\n')
-            .count()
-            + 1;
-        findings.push(Finding {
-            convention: "comment_hygiene".to_string(),
-            severity: Severity::Info,
-            file: fp.relative_path.clone(),
-            description: format!(
-                "Version-compat guard at line {}: version_compare({}, '{}', '<')",
-                line_number, constant, version
-            ),
-            suggestion: format!(
-                "Branch only fires on {} < {}. If the minimum supported version is now ≥ {}, this branch is dead and can be removed.",
-                constant, version, version
-            ),
-            kind: AuditFinding::UpstreamWorkaround,
-        });
     }
     findings
+}
+
+struct EffectiveDetectorProfile {
+    workaround_marker_literals: Vec<String>,
+    workaround_leading_markers: Vec<String>,
+    marker_regexes: Vec<Regex>,
+    tracker_reference_regexes: Vec<Regex>,
+    version_guard_regexes: Vec<Regex>,
+    version_guard_constants: Vec<String>,
+    version_guard_languages: Vec<String>,
+    vendored_path_markers: Vec<String>,
+}
+
+impl EffectiveDetectorProfile {
+    fn from_config(config: &DetectorProfileConfig) -> Self {
+        let mut profile = Self {
+            workaround_marker_literals: Vec::new(),
+            workaround_leading_markers: Vec::new(),
+            marker_regexes: Vec::new(),
+            tracker_reference_regexes: Vec::new(),
+            version_guard_regexes: Vec::new(),
+            version_guard_constants: Vec::new(),
+            version_guard_languages: Vec::new(),
+            vendored_path_markers: Vec::new(),
+        };
+
+        if config.use_builtin_defaults {
+            profile.extend_literals(MARKER_LITERALS, LEADING_MARKERS, VERSION_CONSTANTS);
+            profile.extend_regexes(DEFAULT_MARKER_REGEXES, DetectorRegexKind::Marker);
+            profile.extend_regexes(
+                DEFAULT_TRACKER_REFERENCE_REGEXES,
+                DetectorRegexKind::TrackerReference,
+            );
+            profile.extend_regexes(
+                DEFAULT_VERSION_GUARD_REGEXES,
+                DetectorRegexKind::VersionGuard,
+            );
+            profile.extend_strings(
+                DEFAULT_VERSION_GUARD_LANGUAGES,
+                DetectorProfileField::VersionGuardLanguage,
+            );
+            profile.extend_strings(
+                DEFAULT_VENDORED_PATH_MARKERS,
+                DetectorProfileField::VendoredPathMarker,
+            );
+        }
+
+        profile.extend_owned_strings(
+            &config.workaround_marker_literals,
+            DetectorProfileField::WorkaroundMarkerLiteral,
+        );
+        profile.extend_owned_strings(
+            &config.workaround_leading_markers,
+            DetectorProfileField::WorkaroundLeadingMarker,
+        );
+        profile.extend_owned_regexes(&config.workaround_marker_regexes, DetectorRegexKind::Marker);
+        profile.extend_owned_regexes(
+            &config.tracker_reference_regexes,
+            DetectorRegexKind::TrackerReference,
+        );
+        profile.extend_owned_regexes(
+            &config.version_guard_regexes,
+            DetectorRegexKind::VersionGuard,
+        );
+        profile.extend_owned_strings(
+            &config.version_guard_constants,
+            DetectorProfileField::VersionGuardConstant,
+        );
+        profile.extend_owned_strings(
+            &config.version_guard_languages,
+            DetectorProfileField::VersionGuardLanguage,
+        );
+        profile.extend_owned_strings(
+            &config.vendored_path_markers,
+            DetectorProfileField::VendoredPathMarker,
+        );
+
+        profile
+    }
+
+    fn find_tracker_reference<'a>(&self, text: &'a str) -> Option<regex::Match<'a>> {
+        self.tracker_reference_regexes
+            .iter()
+            .find_map(|regex| regex.find(text))
+    }
+
+    fn is_vendored_path(&self, path: &str) -> bool {
+        self.vendored_path_markers
+            .iter()
+            .any(|marker| path.starts_with(marker) || path.contains(marker))
+    }
+
+    fn language_allows_version_guard(&self, language: &Language) -> bool {
+        self.version_guard_languages
+            .iter()
+            .any(|configured| language_matches(configured, language))
+    }
+
+    fn extend_literals(&mut self, markers: &[&str], leading: &[&str], constants: &[&str]) {
+        self.extend_strings(markers, DetectorProfileField::WorkaroundMarkerLiteral);
+        self.extend_strings(leading, DetectorProfileField::WorkaroundLeadingMarker);
+        self.extend_strings(constants, DetectorProfileField::VersionGuardConstant);
+    }
+
+    fn extend_regexes(&mut self, patterns: &[&str], kind: DetectorRegexKind) {
+        for pattern in patterns {
+            if let Ok(regex) = Regex::new(pattern) {
+                self.push_regex(regex, kind);
+            }
+        }
+    }
+
+    fn extend_owned_regexes(&mut self, patterns: &[String], kind: DetectorRegexKind) {
+        for pattern in patterns {
+            if let Ok(regex) = Regex::new(pattern) {
+                self.push_regex(regex, kind);
+            }
+        }
+    }
+
+    fn extend_strings(&mut self, values: &[&str], field: DetectorProfileField) {
+        for value in values {
+            self.push_string((*value).to_string(), field);
+        }
+    }
+
+    fn extend_owned_strings(&mut self, values: &[String], field: DetectorProfileField) {
+        for value in values {
+            self.push_string(value.to_string(), field);
+        }
+    }
+
+    fn push_regex(&mut self, regex: Regex, kind: DetectorRegexKind) {
+        match kind {
+            DetectorRegexKind::Marker => self.marker_regexes.push(regex),
+            DetectorRegexKind::TrackerReference => self.tracker_reference_regexes.push(regex),
+            DetectorRegexKind::VersionGuard => self.version_guard_regexes.push(regex),
+        }
+    }
+
+    fn push_string(&mut self, value: String, field: DetectorProfileField) {
+        if value.trim().is_empty() {
+            return;
+        }
+        let target = match field {
+            DetectorProfileField::WorkaroundMarkerLiteral => &mut self.workaround_marker_literals,
+            DetectorProfileField::WorkaroundLeadingMarker => &mut self.workaround_leading_markers,
+            DetectorProfileField::VersionGuardConstant => &mut self.version_guard_constants,
+            DetectorProfileField::VersionGuardLanguage => &mut self.version_guard_languages,
+            DetectorProfileField::VendoredPathMarker => &mut self.vendored_path_markers,
+        };
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DetectorRegexKind {
+    Marker,
+    TrackerReference,
+    VersionGuard,
+}
+
+#[derive(Clone, Copy)]
+enum DetectorProfileField {
+    WorkaroundMarkerLiteral,
+    WorkaroundLeadingMarker,
+    VersionGuardConstant,
+    VersionGuardLanguage,
+    VendoredPathMarker,
+}
+
+fn language_matches(configured: &str, language: &Language) -> bool {
+    matches!(
+        (configured.trim().to_ascii_lowercase().as_str(), language),
+        ("php", Language::Php)
+            | ("javascript", Language::JavaScript)
+            | ("js", Language::JavaScript)
+            | ("typescript", Language::TypeScript)
+            | ("ts", Language::TypeScript)
+            | ("rust", Language::Rust)
+            | ("rs", Language::Rust)
+    )
+}
+
+fn version_guard_description(
+    line_number: usize,
+    constant: &str,
+    version: &str,
+    matched: &str,
+) -> String {
+    if matched.trim_start().starts_with("version_compare") {
+        return format!(
+            "Version-compat guard at line {}: version_compare({}, '{}', '<')",
+            line_number, constant, version
+        );
+    }
+
+    format!(
+        "Version-compat guard at line {}: {} < {}",
+        line_number, constant, version
+    )
 }
 
 // ============================================================================
@@ -261,6 +471,10 @@ mod tests {
         }
     }
 
+    fn default_config() -> DetectorProfileConfig {
+        DetectorProfileConfig::default()
+    }
+
     #[test]
     fn test_run_combines_tier_a_and_tier_b() {
         let fp = make_fp(
@@ -268,7 +482,7 @@ mod tests {
             Language::Php,
             "<?php\n/**\n * transitional shim\n * @see https://github.com/foo/bar/issues/1\n */\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert_eq!(findings.len(), 2);
         assert!(findings.iter().any(|f| f.severity == Severity::Warning));
         assert!(findings.iter().any(|f| f.severity == Severity::Info));
@@ -281,7 +495,7 @@ mod tests {
             Language::Php,
             "<?php\n/**\n * Kept only as a transitional shim for older callers.\n *\n * @see https://github.com/Extra-Chill/data-machine/issues/1179\n * @deprecated\n */\nclass Verifier {}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, AuditFinding::UpstreamWorkaround);
         assert_eq!(findings[0].severity, Severity::Warning);
@@ -298,7 +512,7 @@ mod tests {
             "<?php\n/**\n * Webhook auth config resolver.\n *\n * Produces a canonical verifier config for an HMAC flow.\n *\n * @see https://github.com/Extra-Chill/data-machine/issues/1179\n */\nclass WebhookAuthResolver {}\n",
         );
 
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert!(
             findings.is_empty(),
             "bare @see references are design provenance, not workarounds"
@@ -312,7 +526,7 @@ mod tests {
             Language::Php,
             "<?php\n// Hack to load utf-8 HTML\n// see https://core.trac.wordpress.org/ticket/24730\n$x = 1;\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert_eq!(findings.len(), 1);
         assert!(findings[0]
             .suggestion
@@ -326,7 +540,7 @@ mod tests {
             Language::Php,
             "<?php\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {\n    Jetpack::load_xml_rpc_client();\n}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Info);
         assert!(findings[0].description.contains("JETPACK__VERSION"));
@@ -339,7 +553,7 @@ mod tests {
             Language::Php,
             "<?php\n// legacy: do not remove\nfunction foo() {}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert!(findings.is_empty());
     }
 
@@ -350,7 +564,45 @@ mod tests {
             Language::Php,
             "<?php\n// Hack to load utf-8 HTML\n// @see https://github.com/league/html-to-markdown/issues/212\n\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &default_config());
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_custom_profile_can_disable_builtin_wordpress_defaults() {
+        let fp = make_fp(
+            "src/example.php",
+            Language::Php,
+            "<?php\n// Hack to load utf-8 HTML\n// see https://core.trac.wordpress.org/ticket/24730\nif ( version_compare( JETPACK__VERSION, '7.7', '<' ) ) {}\n",
+        );
+        let config = DetectorProfileConfig {
+            use_builtin_defaults: false,
+            ..Default::default()
+        };
+
+        let findings = run(&[&fp], &config);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_custom_profile_adds_non_php_version_guard() {
+        let fp = make_fp(
+            "src/runtime.rs",
+            Language::Rust,
+            "fn compat() { if runtime_version_less_than(RUNTIME_VERSION, \"2.0\") {} }\n",
+        );
+        let config = DetectorProfileConfig {
+            use_builtin_defaults: false,
+            version_guard_regexes: vec![
+                r#"runtime_version_less_than\((RUNTIME_VERSION),\s*\"([^\"]+)\"\)"#.to_string(),
+            ],
+            version_guard_constants: vec!["RUNTIME_VERSION".to_string()],
+            version_guard_languages: vec!["rust".to_string()],
+            ..Default::default()
+        };
+
+        let findings = run(&[&fp], &config);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("RUNTIME_VERSION"));
     }
 }
