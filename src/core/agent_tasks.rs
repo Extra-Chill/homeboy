@@ -104,7 +104,9 @@ pub use super::secret_env_plan::{
 };
 
 // Provider helpers used directly from the facade root for common callers.
-pub use super::agent_task_provider::required_extension_ids_for_plan;
+pub use super::agent_task_provider::{
+    provider_secret_sources_for_discovered_providers, required_extension_ids_for_plan,
+};
 
 // ----------------------------------------------------------------------------
 // Explicit API groups

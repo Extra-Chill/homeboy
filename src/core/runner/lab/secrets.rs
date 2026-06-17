@@ -39,8 +39,8 @@ pub(super) fn hydrate_agent_task_secret_env(
         }));
     }
 
+    let fallback_sources = declared_agent_task_controller_secret_sources(args);
     if !names.is_empty() {
-        let fallback_sources = declared_agent_task_controller_secret_sources(args);
         let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(&names, &fallback_sources).map_err(|error| {
             Error::validation_invalid_argument(
                 "secret-env",
@@ -58,7 +58,7 @@ pub(super) fn hydrate_agent_task_secret_env(
 
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
-        "secret_env": agent_task_secrets::secret_env_status(&names),
+        "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),
         "runner_deferred_secret_env": runner_deferred_names
             .into_iter()
             .map(|name| serde_json::json!({
