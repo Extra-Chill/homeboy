@@ -98,3 +98,50 @@ homeboy_wp_codebox_resolved_bin_path() {
 
     printf '%s\n' "$bin"
 }
+
+homeboy_wp_codebox_run_recipe() {
+    local recipe_file="$1"
+    local artifacts_dir="$2"
+    local output_file="$3"
+    local stderr_file="${4:-}"
+    local bin="${5:-${WP_CODEBOX_BIN:-}}"
+    local had_errexit=0
+    local status
+
+    if [ -z "$bin" ]; then
+        bin="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || return 1
+    fi
+    homeboy_wp_codebox_set_command "$bin"
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+    set +e
+    if [ -n "$stderr_file" ]; then
+        "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" recipe-run --recipe "$recipe_file" --artifacts "$artifacts_dir" --json > "$output_file" 2> "$stderr_file"
+    else
+        "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" recipe-run --recipe "$recipe_file" --artifacts "$artifacts_dir" --json > "$output_file" 2>&1
+    fi
+    status=$?
+    if [ "$had_errexit" -eq 1 ]; then
+        set -e
+    fi
+
+    return "$status"
+}
+
+homeboy_wp_codebox_recipe_last_stdout() {
+    jq -r '(.executions // [])[-1].stdout // empty' "$1" 2>/dev/null
+}
+
+homeboy_wp_codebox_recipe_last_stderr() {
+    jq -r '(.executions // [])[-1].stderr // empty' "$1" 2>/dev/null
+}
+
+homeboy_wp_codebox_recipe_succeeded() {
+    jq -e '.success == true' "$1" >/dev/null 2>&1
+}
+
+homeboy_wp_codebox_recipe_artifact_directory() {
+    jq -r '.artifacts.directory // empty' "$1" 2>/dev/null
+}
