@@ -46,6 +46,8 @@ pub const RESUME_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-resum
 pub const LIST_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-list/v1";
 /// Schema for repo-authored loop-spec initialization reports.
 pub const FROM_SPEC_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-from-spec-result/v1";
+/// Schema for dry controller-spec plan reports.
+pub const PLAN_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-plan-result/v1";
 
 /// Request to create a new durable controller record.
 #[derive(Debug, Clone)]
@@ -58,6 +60,12 @@ pub struct ControllerInitRequest {
 /// Request to initialize or resume a durable controller from a repo-authored loop spec.
 #[derive(Debug, Clone)]
 pub struct ControllerFromSpecRequest {
+    pub spec: AgentTaskRepoLoopSpec,
+}
+
+/// Request to compile a declarative controller spec without mutating controller state.
+#[derive(Debug, Clone)]
+pub struct ControllerPlanRequest {
     pub spec: AgentTaskRepoLoopSpec,
 }
 
@@ -448,6 +456,18 @@ pub struct ControllerFromSpecReport {
     pub controller: AgentTaskLoopControllerRecord,
 }
 
+/// Typed report returned by `controller plan`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerPlanReport {
+    pub schema: &'static str,
+    pub loop_id: String,
+    pub spec_fingerprint: String,
+    pub plan: HomeboyPlan,
+    pub actions: Vec<AgentTaskLoopPolicyActionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_command: Option<String>,
+}
+
 /// Typed report returned by `run_next` and `run_action`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ControllerActionReport {
@@ -612,6 +632,65 @@ pub fn init_from_spec(request: ControllerFromSpecRequest) -> Result<ControllerFr
     })
 }
 
+/// Compile a declarative controller spec into a generic Homeboy plan without writing state.
+pub fn plan_from_spec(request: ControllerPlanRequest) -> Result<ControllerPlanReport> {
+    let spec = request.spec;
+    validate_loop_spec(&spec)?;
+    let spec_fingerprint = repo_loop_spec_fingerprint(&spec)?;
+    let mut record = AgentTaskLoopControllerRecord::new(
+        spec.loop_id.clone(),
+        spec.phase.clone(),
+        spec.config_version.clone(),
+    );
+    if !spec.metadata.is_null() {
+        record.metadata = spec.metadata.clone();
+    }
+    for entity in &spec.entities {
+        record.upsert_entity(
+            entity.entity_type.clone(),
+            entity.key.clone(),
+            entity.parent_entity_ids.clone(),
+            entity.metadata.clone(),
+        );
+    }
+    record.gate_bundles.extend(spec.gate_bundles.clone());
+
+    let mut actions = Vec::new();
+    for action in compile_loop_spec_workflows(&spec)? {
+        actions.push(record.record_action(action, REPO_LOOP_SPEC_WORKFLOW_REASON));
+    }
+    for action in &spec.actions {
+        actions.push(record.record_action(action.clone(), REPO_LOOP_SPEC_ACTION_REASON));
+    }
+    if let Some(policy) = compile_loop_spec_policy(&spec) {
+        if let Some(event) = spec.initial_event.clone() {
+            let event_id = event
+                .event_id
+                .unwrap_or_else(|| format!("loop-spec-event-{}", record.history.len() + 1));
+            let payload = merge_policy_into_event_payload(event.payload, policy);
+            actions.extend(record.apply_event(AgentTaskLoopExternalEvent {
+                event_id,
+                event_type: event.event_type,
+                event_key: event.event_key,
+                entity_id: event.entity_id,
+                payload,
+            }));
+        } else {
+            actions.extend(record.evaluate_policy(&policy, None));
+        }
+    }
+
+    let plan = controller_spec_homeboy_plan(&spec, &spec_fingerprint, &record, &actions)?;
+    Ok(ControllerPlanReport {
+        schema: PLAN_RESULT_SCHEMA,
+        loop_id: record.loop_id,
+        spec_fingerprint,
+        plan,
+        actions,
+        run_command: Some("homeboy agent-task controller from-spec <spec> --resume".to_string()),
+    })
+}
+
 /// Read a durable controller record.
 pub fn status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     controller::load_controller(loop_id)
@@ -685,6 +764,148 @@ fn set_repo_loop_spec_metadata(
         }),
     );
     record.metadata = Value::Object(metadata);
+}
+
+fn controller_spec_homeboy_plan(
+    spec: &AgentTaskRepoLoopSpec,
+    spec_fingerprint: &str,
+    record: &AgentTaskLoopControllerRecord,
+    actions: &[AgentTaskLoopPolicyActionRecord],
+) -> Result<HomeboyPlan> {
+    let mut plan = HomeboyPlan::for_description(
+        PlanKind::Controller,
+        format!("controller spec {}", record.loop_id),
+    );
+    plan.id = format!("controller.{}", record.loop_id);
+    plan.mode = Some("plan".to_string());
+    plan.inputs.insert(
+        "schema".to_string(),
+        Value::String("homeboy/controller-spec-plan/v1".to_string()),
+    );
+    plan.inputs
+        .insert("loop_id".to_string(), Value::String(record.loop_id.clone()));
+    plan.inputs
+        .insert("phase".to_string(), Value::String(record.phase.clone()));
+    plan.inputs.insert(
+        "config_version".to_string(),
+        Value::String(record.config_version.clone()),
+    );
+    plan.inputs.insert(
+        "spec_fingerprint".to_string(),
+        Value::String(spec_fingerprint.to_string()),
+    );
+    plan.inputs.insert(
+        "controller".to_string(),
+        serde_json::to_value(record)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    );
+    plan.inputs.insert(
+        "declarations".to_string(),
+        controller_spec_declarations(spec)?,
+    );
+    plan.steps = actions
+        .iter()
+        .map(controller_action_plan_step)
+        .collect::<Result<Vec<_>>>()?;
+    plan.summary = Some(crate::core::plan::PlanSummary {
+        total_steps: plan.steps.len(),
+        ready: plan
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Ready)
+            .count(),
+        blocked: plan
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Missing)
+            .count(),
+        skipped: plan
+            .steps
+            .iter()
+            .filter(|step| matches!(step.status, PlanStepStatus::Skipped | PlanStepStatus::Disabled))
+            .count(),
+        next_actions: vec!["Run `homeboy agent-task controller from-spec <spec> --resume` to persist and execute this controller spec.".to_string()],
+    });
+    Ok(plan)
+}
+
+fn controller_spec_declarations(spec: &AgentTaskRepoLoopSpec) -> Result<Value> {
+    Ok(serde_json::json!({
+        "agents": spec.agents,
+        "tools": spec.tools,
+        "abilities": spec.abilities,
+        "workflows": spec.workflows,
+        "artifacts": spec.artifacts,
+        "dependencies": spec.dependencies,
+        "gates": spec.gates,
+        "metrics": spec.metrics,
+        "gate_bundles": spec.gate_bundles,
+        "phases": spec.phases,
+        "policy": spec.policy,
+    }))
+}
+
+fn controller_action_plan_step(action: &AgentTaskLoopPolicyActionRecord) -> Result<PlanStep> {
+    let action_value = serde_json::to_value(&action.action)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let action_name = action_value
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let status = match action.status {
+        AgentTaskLoopActionStatus::Pending => PlanStepStatus::Ready,
+        AgentTaskLoopActionStatus::AlreadySatisfied => PlanStepStatus::Skipped,
+        AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+        | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+        | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied => PlanStepStatus::Missing,
+        AgentTaskLoopActionStatus::Running => PlanStepStatus::Running,
+        AgentTaskLoopActionStatus::Completed => PlanStepStatus::Success,
+        AgentTaskLoopActionStatus::Failed => PlanStepStatus::Failed,
+    };
+    let mut inputs = HashMap::from([
+        ("action".to_string(), action_value),
+        ("reason".to_string(), Value::String(action.reason.clone())),
+    ]);
+    if let Some(dedupe_key) = &action.dedupe_key {
+        inputs.insert("dedupe_key".to_string(), Value::String(dedupe_key.clone()));
+    }
+    let mut outputs = HashMap::new();
+    outputs.insert(
+        "controller_action".to_string(),
+        serde_json::to_value(action)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    );
+
+    Ok(PlanStep {
+        id: action.action_id.clone(),
+        kind: format!("controller.{action_name}"),
+        label: action
+            .dedupe_key
+            .clone()
+            .or_else(|| Some(action_name.to_string())),
+        blocking: !matches!(
+            action_name.as_str(),
+            "wait_for_event" | "wait_for_controller"
+        ),
+        scope: action
+            .dedupe_key
+            .as_ref()
+            .map(|value| vec![value.clone()])
+            .unwrap_or_default(),
+        needs: Vec::new(),
+        status,
+        inputs,
+        outputs,
+        skip_reason: (action.status == AgentTaskLoopActionStatus::AlreadySatisfied)
+            .then(|| "controller action dedupe key is already satisfied".to_string()),
+        policy: HashMap::new(),
+        missing: action
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.clone())
+            .collect(),
+    })
 }
 
 fn reconcile_repo_loop_spec_actions(
@@ -2993,6 +3214,82 @@ mod tests {
                 0,
             ))
         }
+    }
+
+    #[test]
+    fn plan_from_spec_projects_controller_actions_without_writing_state() {
+        with_isolated_home(|_| {
+            let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+                "loop_id": "controller-plan-fixture",
+                "phase": "review",
+                "agents": {
+                    "builder": {
+                        "role": "builder",
+                        "tools": ["patch"]
+                    }
+                },
+                "tools": {
+                    "patch": {
+                        "description": "produce a patch",
+                        "input_schema": {"type": "object"}
+                    }
+                },
+                "workflows": {
+                    "build-candidate": {
+                        "agent_id": "builder",
+                        "prompt": "Build a candidate patch.",
+                        "artifacts": ["patch-artifact"],
+                        "gates": ["tests"]
+                    }
+                },
+                "artifacts": {
+                    "patch-artifact": {
+                        "kind": "patch",
+                        "required": true
+                    }
+                },
+                "gates": {
+                    "tests": {
+                        "description": "tests pass"
+                    }
+                },
+                "gate_bundles": [{
+                    "bundle_id": "review-gates",
+                    "status": "pending",
+                    "checks": []
+                }],
+                "phases": [{
+                    "phase": "review",
+                    "actions": [{
+                        "action": "run_gates",
+                        "bundle_id": "review-gates",
+                        "entity_id": "candidate:1"
+                    }]
+                }]
+            }))
+            .expect("spec parses");
+
+            let report = plan_from_spec(ControllerPlanRequest { spec }).expect("plan compiles");
+
+            assert_eq!(report.schema, PLAN_RESULT_SCHEMA);
+            assert_eq!(report.loop_id, "controller-plan-fixture");
+            assert_eq!(report.plan.kind, PlanKind::Controller);
+            assert_eq!(report.plan.mode.as_deref(), Some("plan"));
+            assert_eq!(report.actions.len(), 2);
+            assert_eq!(report.plan.steps.len(), 2);
+            assert!(report
+                .plan
+                .steps
+                .iter()
+                .any(|step| step.kind == "controller.spawn_task"));
+            assert!(report
+                .plan
+                .steps
+                .iter()
+                .any(|step| step.kind == "controller.run_gates"));
+            assert!(report.spec_fingerprint.starts_with("sha256:"));
+            assert!(controller::load_controller("controller-plan-fixture").is_err());
+        });
     }
 
     impl AgentTaskExecutorAdapter for CapturingExecutor {
