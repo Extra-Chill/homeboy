@@ -158,7 +158,19 @@ function sanitizeMetadata(value) {
   if (!plainObject(value)) {
     return {};
   }
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !/secret|token|password|credential/i.test(key)));
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !/secret|token|password|credential/i.test(key))
+    .map(([key, entry]) => [key, sanitizeMetadataValue(entry)]));
+}
+
+function sanitizeMetadataValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeMetadataValue);
+  }
+  if (plainObject(value)) {
+    return sanitizeMetadata(value);
+  }
+  return value;
 }
 
 function envNames(value) {

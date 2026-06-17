@@ -24,7 +24,12 @@ const commandRequest = normalizeDelegatedRunRequest({
 				argv: ['npm', 'test'],
 				cwd: 'workspace',
 				env: { NODE_ENV: 'test' },
-				metadata: { visible: true, secret_token: 'must-not-leak' },
+				metadata: {
+					visible: true,
+					secret_token: 'must-not-leak',
+					nested: { visible: true, password: 'must-not-leak' },
+					entries: [{ visible: true, credential: 'must-not-leak' }],
+				},
 			},
 		},
 	},
@@ -42,6 +47,10 @@ assert.deepEqual(commandRequest.execution, {
 });
 assert.equal(commandRequest.metadata.visible, true);
 assert.equal(Object.hasOwn(commandRequest.metadata, 'secret_token'), false);
+assert.equal(commandRequest.metadata.nested.visible, true);
+assert.equal(Object.hasOwn(commandRequest.metadata.nested, 'password'), false);
+assert.equal(commandRequest.metadata.entries[0].visible, true);
+assert.equal(Object.hasOwn(commandRequest.metadata.entries[0], 'credential'), false);
 
 const agentRequest = normalizeDelegatedRunRequest({
 	schema: 'homeboy/agent-task-request/v1',
@@ -68,8 +77,8 @@ const result = normalizeDelegatedRunResult({
 	task_id: 'delegated-command-smoke',
 	status: 'completed',
 	outputs: { changed: false },
-	artifacts: [{ path: '/tmp/run.json', metadata: { token: 'must-not-leak', visible: true } }],
-	diagnostics: ['finished'],
+	artifacts: [{ path: '/tmp/run.json', metadata: { token: 'must-not-leak', visible: true, nested: { token: 'must-not-leak' } } }],
+	diagnostics: [{ message: 'finished', data: { visible: true, nested: { secret: 'must-not-leak' } } }],
 	metadata: { credential: 'must-not-leak', visible: true },
 });
 
@@ -79,7 +88,10 @@ assert.deepEqual(result.outputs, { changed: false });
 assert.equal(result.artifacts[0].kind, 'delegated-run-artifact');
 assert.equal(result.artifacts[0].metadata.visible, true);
 assert.equal(Object.hasOwn(result.artifacts[0].metadata, 'token'), false);
+assert.equal(Object.hasOwn(result.artifacts[0].metadata.nested, 'token'), false);
 assert.equal(result.diagnostics[0].class, 'delegated_run');
+assert.equal(result.diagnostics[0].data.visible, true);
+assert.equal(Object.hasOwn(result.diagnostics[0].data.nested, 'secret'), false);
 assert.equal(Object.hasOwn(result.metadata, 'credential'), false);
 
 assert.equal(normalizeDelegatedRunRequest({
