@@ -4,7 +4,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
 use super::utils::{response as output, tty};
-use super::{changelog, docs, file, report, review, runs, trace, GlobalArgs};
+use super::{changelog, docs, file, report, review, runs, runtime, trace, GlobalArgs};
 
 pub enum RawExecution {
     Handled(i32),
@@ -101,6 +101,7 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> RawCommandRun {
             )),
             Err(err) => Err(err),
         }),
+        Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
         _ => raw_stdout_only(unsupported_output("plain text")),
     }
 }

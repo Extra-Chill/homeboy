@@ -22,6 +22,10 @@ enum RuntimeCommand {
 enum RuntimeHelperCommand {
     /// Print the materialized path for a runtime helper.
     Path {
+        /// Print only the path, for shell bootstrap usage.
+        #[arg(long)]
+        plain: bool,
+
         /// Helper filename or HOMEBOY_RUNTIME_* env var name.
         helper: String,
     },
@@ -43,7 +47,26 @@ pub struct RuntimeHelperPathOutput {
 pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RuntimeOutput> {
     match args.command {
         RuntimeCommand::Helper { command } => match command {
-            RuntimeHelperCommand::Path { helper } => helper_path(&helper),
+            RuntimeHelperCommand::Path { helper, .. } => helper_path(&helper),
+        },
+    }
+}
+
+pub fn is_plain_mode(args: &RuntimeArgs) -> bool {
+    match &args.command {
+        RuntimeCommand::Helper { command } => match command {
+            RuntimeHelperCommand::Path { plain, .. } => *plain,
+        },
+    }
+}
+
+pub fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)> {
+    match args.command {
+        RuntimeCommand::Helper { command } => match command {
+            RuntimeHelperCommand::Path { helper, .. } => {
+                let path = homeboy::core::extension::helper_path(&helper)?;
+                Ok((format!("{}\n", path.to_string_lossy()), 0))
+            }
         },
     }
 }
@@ -74,6 +97,26 @@ mod tests {
             let RuntimeOutput::HelperPath(output) = output;
             assert!(output.path.ends_with("command-capture.sh"));
             assert!(std::path::Path::new(&output.path).is_file());
+        });
+    }
+
+    #[test]
+    fn helper_path_plain_prints_only_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let args = RuntimeArgs {
+                command: RuntimeCommand::Helper {
+                    command: RuntimeHelperCommand::Path {
+                        plain: true,
+                        helper: "runner-prelude.sh".to_string(),
+                    },
+                },
+            };
+
+            let (output, exit_code) = run_plain_text(args).unwrap();
+
+            assert_eq!(exit_code, 0);
+            assert!(output.ends_with("runner-prelude.sh\n"));
+            assert!(std::path::Path::new(output.trim()).is_file());
         });
     }
 }
