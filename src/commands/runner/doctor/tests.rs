@@ -2,6 +2,7 @@ use super::*;
 use homeboy::core::agent_tasks::provider::{
     AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
 };
+use std::collections::BTreeMap;
 use types::{HomeboyProbe, RunnerDoctorStatus};
 
 #[test]
@@ -193,8 +194,10 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
             revision: Some(true),
             canonical_path: None,
+            extra: BTreeMap::new(),
         }),
         remediation: Some("Refresh the fake runtime cache".to_string()),
+        extra: BTreeMap::new(),
     };
 
     let check = probes::provider_env_path_readiness_check_from_probe(
@@ -228,8 +231,10 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
             revision: Some(true),
             canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
+            extra: BTreeMap::new(),
         }),
         remediation: Some("Refresh the managed source checkout".to_string()),
+        extra: BTreeMap::new(),
     };
 
     let check = probes::provider_env_path_readiness_check_from_probe(
@@ -262,8 +267,10 @@ fn provider_readiness_ok_when_path_within_canonical_root() {
             env: vec!["FAKE_RUNTIME_BIN".to_string()],
             revision: None,
             canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
+            extra: BTreeMap::new(),
         }),
         remediation: None,
+        extra: BTreeMap::new(),
     };
 
     let check = probes::provider_env_path_readiness_check_from_probe(

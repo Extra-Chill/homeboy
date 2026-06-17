@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::core::git;
 
+const SOURCE_SYNC_EXCLUDES_ENV: &str = "HOMEBOY_SOURCE_SYNC_EXCLUDES";
+
 const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".git/",
     "node_modules/",
@@ -14,13 +16,45 @@ const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".homeboy-build/",
     ".homeboy-bin/",
     ".homeboy/",
-    ".datamachine/",
     ".DS_Store",
     "._*",
     "**/._*",
     ".env",
     ".env.*",
 ];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSnapshotPolicy {
+    pub sync_excludes: Vec<String>,
+}
+
+impl SourceSnapshotPolicy {
+    pub fn from_env() -> Self {
+        let mut policy = Self::default();
+        policy
+            .sync_excludes
+            .extend(split_env_list(SOURCE_SYNC_EXCLUDES_ENV));
+        policy
+    }
+
+    pub fn with_sync_excludes<I, S>(mut self, excludes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.sync_excludes
+            .extend(excludes.into_iter().map(Into::into));
+        self
+    }
+}
+
+impl Default for SourceSnapshotPolicy {
+    fn default() -> Self {
+        Self {
+            sync_excludes: default_sync_excludes(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceSnapshot {
@@ -49,6 +83,17 @@ impl SourceSnapshot {
         remote_path: Option<&str>,
         sync_mode: &str,
     ) -> Self {
+        let policy = SourceSnapshotPolicy::from_env();
+        Self::collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
+    }
+
+    pub fn collect_local_with_policy(
+        runner_id: &str,
+        path: &Path,
+        remote_path: Option<&str>,
+        sync_mode: &str,
+        policy: &SourceSnapshotPolicy,
+    ) -> Self {
         let local_path = path.display().to_string();
         let git_root = git::toplevel(path);
         let git_branch = git::current_branch(path)
@@ -74,7 +119,7 @@ impl SourceSnapshot {
             sync_mode: sync_mode.to_string(),
             snapshot_hash,
             synced_at: chrono::Utc::now().to_rfc3339(),
-            sync_excludes: default_sync_excludes(),
+            sync_excludes: policy.sync_excludes.clone(),
         }
     }
 
@@ -82,6 +127,16 @@ impl SourceSnapshot {
         runner_id: &str,
         remote_path: &str,
         workspace_root: Option<&str>,
+    ) -> Self {
+        let policy = SourceSnapshotPolicy::from_env();
+        Self::existing_remote_with_policy(runner_id, remote_path, workspace_root, &policy)
+    }
+
+    pub fn existing_remote_with_policy(
+        runner_id: &str,
+        remote_path: &str,
+        workspace_root: Option<&str>,
+        policy: &SourceSnapshotPolicy,
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"existing_remote\0");
@@ -104,7 +159,7 @@ impl SourceSnapshot {
             sync_mode: "existing_remote".to_string(),
             snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
             synced_at: chrono::Utc::now().to_rfc3339(),
-            sync_excludes: default_sync_excludes(),
+            sync_excludes: policy.sync_excludes.clone(),
         }
     }
 }
@@ -113,6 +168,20 @@ pub fn default_sync_excludes() -> Vec<String> {
     DEFAULT_SYNC_EXCLUDES
         .iter()
         .map(|value| value.to_string())
+        .collect()
+}
+
+fn split_env_list(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .into_iter()
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -179,6 +248,23 @@ mod tests {
         assert!(excludes.contains(&"node_modules/".to_string()));
         assert!(excludes.contains(&".homeboy-build/".to_string()));
         assert!(excludes.contains(&".env".to_string()));
+        assert!(!excludes.contains(&".datamachine/".to_string()));
+    }
+
+    #[test]
+    fn source_snapshot_policy_allows_product_specific_excludes() {
+        let policy = SourceSnapshotPolicy::default().with_sync_excludes([".datamachine/"]);
+        let snapshot = SourceSnapshot::existing_remote_with_policy(
+            "lab",
+            "/srv/homeboy/repo",
+            Some("/srv/homeboy"),
+            &policy,
+        );
+
+        assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
+        assert!(snapshot
+            .sync_excludes
+            .contains(&".datamachine/".to_string()));
     }
 
     #[test]

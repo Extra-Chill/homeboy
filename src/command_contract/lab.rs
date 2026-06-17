@@ -63,6 +63,63 @@ pub enum LabCommandRequiredTool {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
+const LAB_RUNNER_SUPPORTED_ERROR_LABELS: &[&str] = &[
+    "agent-task dispatch/cook/loop/run-plan",
+    "agent-task retry --run",
+    "agent-task status/logs/artifacts/review/providers",
+    "agent-task auth status",
+    "lint",
+    "test",
+    "audit",
+    "bench",
+    "trace",
+    "refactor source runs",
+    "tunnel preview-consumer run",
+    "tunnel service expose",
+    "tunnel service start",
+];
+const LAB_RUNNER_SUPPORTED_HINT_LABELS: &[&str] = &[
+    "agent-task dispatch/cook/loop/run-plan",
+    "agent-task retry --run",
+    "agent-task status/logs/artifacts/review/providers",
+    "agent-task auth status",
+    "audit",
+    "bench run",
+    "full lint",
+    "full test",
+    "trace",
+    "refactor source runs",
+    "tunnel preview-consumer run",
+    "tunnel service expose",
+    "tunnel service start",
+];
+
+pub fn lab_runner_supported_labels() -> &'static [&'static str] {
+    LAB_RUNNER_SUPPORTED_ERROR_LABELS
+}
+
+pub fn lab_runner_unsupported_message() -> String {
+    format!(
+        "--runner is only supported for commands with portable Lab offload support: {}",
+        human_join(lab_runner_supported_labels())
+    )
+}
+
+pub fn lab_runner_unsupported_hint() -> String {
+    format!(
+        "Current Lab offload support: {}.",
+        human_join(LAB_RUNNER_SUPPORTED_HINT_LABELS)
+    )
+}
+
+fn human_join(labels: &[&str]) -> String {
+    match labels {
+        [] => String::new(),
+        [label] => (*label).to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
@@ -451,6 +508,36 @@ mod tests {
 
     fn parsed_cli(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("CLI args should parse")
+    }
+
+    #[test]
+    fn test_lab_runner_supported_labels_are_contract_owned() {
+        assert_eq!(
+            lab_runner_supported_labels(),
+            &[
+                "agent-task dispatch/cook/loop/run-plan",
+                "agent-task retry --run",
+                "agent-task status/logs/artifacts/review/providers",
+                "agent-task auth status",
+                "lint",
+                "test",
+                "audit",
+                "bench",
+                "trace",
+                "refactor source runs",
+                "tunnel preview-consumer run",
+                "tunnel service expose",
+                "tunnel service start",
+            ]
+        );
+        assert_eq!(
+            lab_runner_unsupported_message(),
+            "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+        );
+        assert_eq!(
+            lab_runner_unsupported_hint(),
+            "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+        );
     }
 
     #[test]
