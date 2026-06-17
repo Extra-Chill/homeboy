@@ -251,6 +251,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 read: "workspace".to_string(),
                 write: "patch".to_string(),
                 apply: "manual".to_string(),
+                tools: Default::default(),
             },
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec![

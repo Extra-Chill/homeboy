@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
+    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -33,6 +34,9 @@ pub struct AgentTaskProviderCapabilityContract {
     pub provider_schema: String,
     pub request_schema: String,
     pub outcome_schema: String,
+    pub tool_request_schema: String,
+    pub tool_result_schema: String,
+    pub tool_policy_schema: String,
 }
 
 pub fn provider_capability_contract() -> AgentTaskProviderCapabilityContract {
@@ -41,6 +45,9 @@ pub fn provider_capability_contract() -> AgentTaskProviderCapabilityContract {
         provider_schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
         request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
         outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+        tool_request_schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+        tool_result_schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+        tool_policy_schema: AGENT_TOOL_POLICY_SCHEMA.to_string(),
     }
 }
 
@@ -1810,6 +1817,22 @@ fn provider_command_env(
                 .unwrap_or_else(|_| "null".to_string()),
         ),
         (
+            "HOMEBOY_AGENT_TOOL_POLICY_JSON".to_string(),
+            serde_json::to_string(&request.policy.tools).unwrap_or_else(|_| "null".to_string()),
+        ),
+        (
+            "HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA".to_string(),
+            AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+        ),
+        (
+            "HOMEBOY_AGENT_TOOL_RESULT_SCHEMA".to_string(),
+            AGENT_TOOL_RESULT_SCHEMA.to_string(),
+        ),
+        (
+            "HOMEBOY_AGENT_TOOL_POLICY_SCHEMA".to_string(),
+            AGENT_TOOL_POLICY_SCHEMA.to_string(),
+        ),
+        (
             "HOMEBOY_EXTENSION_ID".to_string(),
             provider.extension_id.clone().unwrap_or_default(),
         ),
@@ -1887,6 +1910,7 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
+        AgentToolExecutionLocation, AgentToolPolicyRule,
     };
     use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
     use std::fs;
@@ -1905,6 +1929,9 @@ mod tests {
         );
         assert_eq!(contract.request_schema, AGENT_TASK_REQUEST_SCHEMA);
         assert_eq!(contract.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+        assert_eq!(contract.tool_request_schema, AGENT_TOOL_REQUEST_SCHEMA);
+        assert_eq!(contract.tool_result_schema, AGENT_TOOL_RESULT_SCHEMA);
+        assert_eq!(contract.tool_policy_schema, AGENT_TOOL_POLICY_SCHEMA);
     }
 
     #[test]
@@ -2101,6 +2128,52 @@ mod tests {
         assert_eq!(
             exported["workspace_materialization"]["provider_workspace_mode"],
             "linked"
+        );
+    }
+
+    #[test]
+    fn provider_command_env_exposes_generic_agent_tool_contracts() {
+        let (mut request, provider) = request("task-1", "minimal-provider".to_string());
+        request.policy.tools.tools.insert(
+            "lookup".to_string(),
+            AgentToolPolicyRule {
+                execution_location: AgentToolExecutionLocation::ControlPlane,
+                timeout_ms: Some(500),
+                reason: Some("test policy".to_string()),
+            },
+        );
+
+        let env = provider_command_env(&request, &provider).expect("provider env");
+        let env: BTreeMap<String, String> = env.into_iter().collect();
+
+        assert_eq!(
+            env.get("HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA")
+                .map(String::as_str),
+            Some(AGENT_TOOL_REQUEST_SCHEMA)
+        );
+        assert_eq!(
+            env.get("HOMEBOY_AGENT_TOOL_RESULT_SCHEMA")
+                .map(String::as_str),
+            Some(AGENT_TOOL_RESULT_SCHEMA)
+        );
+        assert_eq!(
+            env.get("HOMEBOY_AGENT_TOOL_POLICY_SCHEMA")
+                .map(String::as_str),
+            Some(AGENT_TOOL_POLICY_SCHEMA)
+        );
+
+        let policy: crate::core::agent_task::AgentToolPolicy = serde_json::from_str(
+            env.get("HOMEBOY_AGENT_TOOL_POLICY_JSON")
+                .expect("tool policy env"),
+        )
+        .expect("tool policy json");
+        assert_eq!(
+            policy.execution_location_for("lookup"),
+            AgentToolExecutionLocation::ControlPlane
+        );
+        assert_eq!(
+            policy.execution_location_for("unknown"),
+            AgentToolExecutionLocation::Disabled
         );
     }
 

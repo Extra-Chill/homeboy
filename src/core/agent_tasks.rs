@@ -44,9 +44,11 @@ pub use super::agent_task::{
     AgentTaskPreparedWorkspace, AgentTaskProgress, AgentTaskRequest, AgentTaskSourceRef,
     AgentTaskStart, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
     AgentTaskWorkflowStepStatus, AgentTaskWorkflowStepSuggestion, AgentTaskWorkspace,
-    AgentTaskWorkspaceMode, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
-    AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskWorkspaceMode, AgentToolExecutionLocation, AgentToolPolicy, AgentToolPolicyRule,
+    AgentToolRequest, AgentToolResult, AgentToolResultStatus, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
+    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 
 pub use super::agent_task_aggregate::{
@@ -87,6 +89,12 @@ pub use super::agent_task_schedule::{
 pub use super::agent_task_schedule::AgentTaskProgressEvent;
 
 pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
+
+pub use super::agent_tool_control_plane::{
+    dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
+    AgentToolDispatchOutcome, UnsupportedAgentToolControlPlaneDispatcher,
+    AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
+};
 
 // Matrix expansion is `pub(crate)` on the implementation module; expose it
 // through the facade for callers inside the crate that need to expand a plan
