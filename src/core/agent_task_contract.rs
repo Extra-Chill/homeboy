@@ -142,6 +142,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "extension_path",
                 "runtime_id",
                 "runtime_path",
+                "extra",
             ]),
         },
         enums: AgentTaskCoreContractEnums {
