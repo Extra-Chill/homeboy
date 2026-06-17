@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.7] - 2026-06-17
+
+### Changed
+- Add WP Codebox recipe helper
+
+### Fixed
+- fix(wp-codebox): declare Codex credential sources
+
 ## [3.2.6] - 2026-06-17
 
 ### Fixed
