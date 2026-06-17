@@ -6,7 +6,7 @@ use crate::core::error::{Error, Result};
 use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::server::{self, SshClient};
 
-use super::Runner;
+use super::{Runner, RunnerToolRegistry};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunnerCapabilityPreflight {
@@ -216,18 +216,7 @@ impl RunnerCapabilitySnapshot {
     ) -> Result<Self> {
         let client = Self::ssh_client_for_runner(runner)?;
         let mut tools = BTreeSet::new();
-        for tool in [
-            RunnerRequiredTool::Homeboy,
-            RunnerRequiredTool::Cargo,
-            RunnerRequiredTool::Git,
-            RunnerRequiredTool::Node,
-            RunnerRequiredTool::Npm,
-            RunnerRequiredTool::Pnpm,
-            RunnerRequiredTool::Php,
-            RunnerRequiredTool::Composer,
-            RunnerRequiredTool::Docker,
-            RunnerRequiredTool::Playwright,
-        ] {
+        for tool in RunnerToolRegistry::required_tools().iter().copied() {
             if Self::tool_available(runner, &client, tool) {
                 tools.insert(tool);
             }
@@ -264,19 +253,15 @@ impl RunnerCapabilitySnapshot {
     }
 
     fn tool_available(runner: &Runner, client: &SshClient, tool: RunnerRequiredTool) -> bool {
-        let command = match tool {
-            RunnerRequiredTool::Homeboy => {
-                runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
-            }
-            RunnerRequiredTool::Cargo => "cargo",
-            RunnerRequiredTool::Git => "git",
-            RunnerRequiredTool::Node => "node",
-            RunnerRequiredTool::Npm => concat!("n", "pm"),
-            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
-            RunnerRequiredTool::Php => concat!("p", "hp"),
-            RunnerRequiredTool::Composer => concat!("com", "poser"),
-            RunnerRequiredTool::Docker => "docker",
-            RunnerRequiredTool::Playwright => return Self::playwright_ready(client),
+        if tool == RunnerRequiredTool::Playwright {
+            return Self::playwright_ready(client);
+        }
+        let command = if tool == RunnerRequiredTool::Homeboy {
+            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+        } else {
+            RunnerToolRegistry::spec_for_required_tool(tool)
+                .map(|spec| spec.command)
+                .unwrap_or_else(|| tool.id())
         };
         client
             .execute(&format!(
@@ -430,57 +415,15 @@ impl RunnerCapabilityPreflight {
 
 impl RunnerRequiredTool {
     pub fn id(self) -> &'static str {
-        match self {
-            RunnerRequiredTool::Homeboy => "homeboy",
-            RunnerRequiredTool::Cargo => "cargo",
-            RunnerRequiredTool::Git => "git",
-            RunnerRequiredTool::Node => "node",
-            RunnerRequiredTool::Npm => concat!("n", "pm"),
-            RunnerRequiredTool::Pnpm => concat!("p", "n", "pm"),
-            RunnerRequiredTool::Php => concat!("p", "hp"),
-            RunnerRequiredTool::Composer => concat!("com", "poser"),
-            RunnerRequiredTool::Docker => "docker",
-            RunnerRequiredTool::Playwright => "playwright+browsers",
-        }
+        RunnerToolRegistry::spec_for_required_tool(self)
+            .map(|spec| spec.capability_id)
+            .unwrap_or("unknown")
     }
 
     pub(crate) fn remediation(self) -> &'static str {
-        match self {
-            RunnerRequiredTool::Homeboy => {
-                "Install Homeboy on the runner and ensure the configured homeboy_path works."
-            }
-            RunnerRequiredTool::Cargo => {
-                "Install Rust/Cargo and ensure cargo is on the runner PATH."
-            }
-            RunnerRequiredTool::Git => "Install git and ensure it is on the runner PATH.",
-            RunnerRequiredTool::Node => "Install Node.js and ensure node is on the runner PATH.",
-            RunnerRequiredTool::Npm => concat!(
-                "Install n",
-                "pm with Node.js and ensure n",
-                "pm is on the runner PATH."
-            ),
-            RunnerRequiredTool::Pnpm => concat!(
-                "Install p",
-                "n",
-                "pm for repositories with p",
-                "n",
-                "pm-lock.yaml."
-            ),
-            RunnerRequiredTool::Php => {
-                concat!("Install P", "HP for repositories with com", "poser.json.")
-            }
-            RunnerRequiredTool::Composer => concat!(
-                "Install Com",
-                "poser for repositories with com",
-                "poser.json."
-            ),
-            RunnerRequiredTool::Docker => {
-                "Install and start Docker for container-backed repositories."
-            }
-            RunnerRequiredTool::Playwright => {
-                "Install Playwright CLI and browser binaries on the runner."
-            }
-        }
+        RunnerToolRegistry::spec_for_required_tool(self)
+            .map(|spec| spec.capability_remediation)
+            .unwrap_or("Install the missing tool on the runner and ensure it is on PATH.")
     }
 }
 
@@ -792,6 +735,22 @@ mod tests {
 
         validate_runner_capability_preflight("lab", &preflight, &capabilities, &env)
             .expect("capability parity passes");
+    }
+
+    #[test]
+    fn every_required_runner_tool_has_doctor_metadata() {
+        for tool in RunnerToolRegistry::required_tools() {
+            let spec = RunnerToolRegistry::spec_for_required_tool(*tool)
+                .unwrap_or_else(|| panic!("missing doctor metadata for {tool:?}"));
+
+            assert_eq!(spec.tool, Some(*tool));
+            assert!(!spec.id.is_empty());
+            assert!(!spec.capability_id.is_empty());
+            assert!(!spec.check_id.is_empty());
+            assert!(!spec.command.is_empty());
+            assert!(!spec.remediation.is_empty());
+            assert!(!spec.capability_remediation.is_empty());
+        }
     }
 
     #[test]

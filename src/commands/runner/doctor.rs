@@ -7,7 +7,9 @@ use std::process::Command;
 use homeboy::core::agent_tasks::provider::{
     AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
 };
-use homeboy::core::runners::{self as runner, Runner, RunnerKind, RunnerTunnelMode};
+use homeboy::core::runners::{
+    self as runner, Runner, RunnerKind, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
+};
 use homeboy::core::server::{self, Server, SshClient};
 use serde::Serialize;
 
@@ -350,6 +352,9 @@ mod local {
         });
 
         for spec in probes::tool_specs() {
+            if spec.id == "homeboy" {
+                continue;
+            }
             let probe = probes::local_tool_probe(spec.command, spec.version_args);
             checks.push(checks::tool_check(*spec, &probe));
             tools.insert(spec.id.to_string(), probe);
@@ -559,6 +564,9 @@ mod remote {
         });
 
         for spec in probes::tool_specs() {
+            if spec.id == "homeboy" {
+                continue;
+            }
             let probe = probes::remote_tool_probe(client, spec.command, spec.version_args);
             checks.push(checks::tool_check(*spec, &probe));
             tools.insert(spec.id.to_string(), probe);
@@ -697,91 +705,8 @@ mod probes {
     use super::*;
     use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
-    #[derive(Clone, Copy)]
-    pub struct ToolSpec {
-        pub id: &'static str,
-        pub check_id: &'static str,
-        pub command: &'static str,
-        pub version_args: &'static [&'static str],
-        pub required: bool,
-        pub remediation: &'static str,
-    }
-
-    pub fn tool_specs() -> &'static [ToolSpec] {
-        &[
-            ToolSpec {
-                id: "git",
-                check_id: "tool.git",
-                command: "git",
-                version_args: &["--version"],
-                required: true,
-                remediation: "Install git and ensure it is on PATH",
-            },
-            ToolSpec {
-                id: "gh",
-                check_id: "tool.github_cli",
-                command: "gh",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install GitHub CLI (`gh`) for PR and issue workflows",
-            },
-            ToolSpec {
-                id: "node",
-                check_id: "tool.node",
-                command: "node",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install Node.js for JavaScript/TypeScript components",
-            },
-            ToolSpec {
-                id: "npm",
-                check_id: "tool.npm",
-                command: "npm",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install npm with Node.js",
-            },
-            ToolSpec {
-                id: "pnpm",
-                check_id: "tool.pnpm",
-                command: "pnpm",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install pnpm for repos that use pnpm-lock.yaml",
-            },
-            ToolSpec {
-                id: "php",
-                check_id: "tool.php",
-                command: "php",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install PHP for WordPress/PHP components",
-            },
-            ToolSpec {
-                id: "composer",
-                check_id: "tool.composer",
-                command: "composer",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install Composer for PHP dependencies",
-            },
-            ToolSpec {
-                id: "docker",
-                check_id: "tool.docker",
-                command: "docker",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install and start Docker for container-backed rigs",
-            },
-            ToolSpec {
-                id: "playwright",
-                check_id: "tool.playwright",
-                command: "playwright",
-                version_args: &["--version"],
-                required: false,
-                remediation: "Install Playwright CLI and browsers for browser traces",
-            },
-        ]
+    pub fn tool_specs() -> &'static [RunnerToolSpec] {
+        RunnerToolRegistry::doctor_tools()
     }
 
     pub fn capabilities_from(
@@ -1732,7 +1657,7 @@ mod checks {
     use super::*;
     use types::{RunnerCheck, RunnerDoctorStatus, ToolProbe};
 
-    pub fn tool_check(spec: probes::ToolSpec, probe: &ToolProbe) -> RunnerCheck {
+    pub fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
         if probe.available {
             ok(
                 spec.check_id,
