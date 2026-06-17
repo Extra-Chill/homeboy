@@ -4,7 +4,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::CommandJsonFamily;
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
-use super::output_runtime::JsonCommandRun;
+use super::output_runtime::{CommandPresentation, JsonCommandRun};
 use super::{runner, GlobalArgs};
 
 mod ops;
@@ -27,17 +27,16 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
         Commands::AgentTask(args) => {
             let summary_kind = agent_task_summary_kind_for_output(&args);
             let (stdout_result, exit_code) = dispatch(Commands::AgentTask(args), global);
-            let human_stdout = stdout_result.as_ref().ok().and_then(|payload| {
+            let summary_stdout = stdout_result.as_ref().ok().and_then(|payload| {
                 summary_kind.and_then(|kind| render_agent_task_summary(kind, payload))
             });
 
-            JsonCommandRun {
-                stdout_result,
-                exit_code,
-                output_file_result: None,
-                human_stdout,
-                human_stderr: None,
-            }
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                CommandPresentation {
+                    stdout: summary_stdout,
+                    stderr: None,
+                },
+            )
         }
         Commands::Runner(args) => runner::run_command_output(args, global),
         command => {

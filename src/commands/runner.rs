@@ -17,7 +17,7 @@ use homeboy::core::runners::{
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
-use super::output_runtime::JsonCommandRun;
+use super::output_runtime::{CommandPresentation, JsonCommandRun};
 use super::{CmdResult, DynamicSetArgs};
 
 pub mod doctor;
@@ -703,20 +703,19 @@ fn run_raw_exec(
 }
 
 fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommandRun {
-    let human_stdout = output.stdout.clone();
-    let human_stderr = output.stderr.clone();
+    let presentation_stdout = output.stdout.clone();
+    let presentation_stderr = output.stderr.clone();
     let (stdout_result, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
         RunnerCommandOutput::Execution(output),
         exit_code,
     )));
 
-    JsonCommandRun {
-        stdout_result,
-        exit_code,
-        output_file_result: None,
-        human_stdout: Some(human_stdout),
-        human_stderr: Some(human_stderr),
-    }
+    JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+        CommandPresentation {
+            stdout: Some(presentation_stdout),
+            stderr: Some(presentation_stderr),
+        },
+    )
 }
 
 fn map_registry(result: CmdResult<RunnerOutput>) -> CmdResult<RunnerCommandOutput> {
@@ -1460,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_exec_command_run_keeps_structured_output_and_human_streams() {
+    fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
         let run = raw_exec_command_run(
             RunnerExecOutput {
                 command: "runner.exec",
@@ -1486,8 +1485,8 @@ mod tests {
         );
 
         assert_eq!(run.exit_code, 7);
-        assert_eq!(run.human_stdout.as_deref(), Some("hello\n"));
-        assert_eq!(run.human_stderr.as_deref(), Some("warn\n"));
+        assert_eq!(run.presentation.stdout.as_deref(), Some("hello\n"));
+        assert_eq!(run.presentation.stderr.as_deref(), Some("warn\n"));
 
         let value = run.stdout_result.expect("structured output");
         assert_eq!(value["command"], "runner.exec");
