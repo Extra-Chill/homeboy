@@ -1,6 +1,6 @@
 {
-  "name": "homeboy-ai-runtime-wp-codebox",
-  "version": "1.0.0",
+  "name": "homeboy-agent-runtime-wp-codebox",
+  "version": "1.1.0",
   "private": true,
   "main": "index.js",
   "exports": {
@@ -11,7 +11,6 @@
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
   },
   "scripts": {
-    "test:codebox-agent-task-boundary": "node ../../wordpress/tests/codebox-agent-task-boundary-smoke.js",
     "test:codebox-agent-task-executor-boundary": "node ../../wordpress/tests/codebox-agent-task-executor-boundary.test.js",
     "test:codebox-agent-task-executor": "node ../../wordpress/tests/codebox-agent-task-executor-smoke.js"
   },

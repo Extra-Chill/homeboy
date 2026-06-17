@@ -1,7 +1,9 @@
 {
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "wp-codebox",
   "name": "WP Codebox",
-  "version": "1.0.0",
-  "description": "WP Codebox agent task runtime for Homeboy.",
+  "version": "1.1.0",
+  "description": "WP Codebox agent runtime for Homeboy agent tasks.",
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
@@ -34,6 +36,50 @@
         "secret_env_values",
         "secretEnvValues",
         "secrets"
+      ],
+      "secret_env_requirements": [
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": ["OPENAI_API_KEY"],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "openai" },
+              { "path": "executor.provider", "equals": "openai" },
+              { "path": "provider", "equals": "openai" }
+            ]
+          }
+        },
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
+          ],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "codex" },
+              { "path": "executor.provider", "equals": "codex" },
+              { "path": "provider", "equals": "codex" }
+            ]
+          }
+        },
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "claude-code" },
+              { "path": "executor.provider", "equals": "claude-code" },
+              { "path": "provider", "equals": "claude-code" }
+            ]
+          }
+        }
       ],
       "capabilities": [
         "browser_runtime",

@@ -10,10 +10,10 @@ const {
   agentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
-} = require('../../ai-runtimes/wp-codebox');
+} = require('../../agent-runtimes/wp-codebox');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
-const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox');
+const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
 const wpCodeboxRuntimeExecutor = path.join(wpCodeboxRuntimeRoot, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
 const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -329,7 +329,8 @@ for (const capability of repoLoopCapabilities) {
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
-assert.equal(manifest.agent_runtimes?.some((runtime) => runtime.id === 'wp-codebox'), false);
+assert.equal(manifest.agent_runtimes, undefined);
+assert.equal(manifest.agent_task.default_backend, undefined);
 assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'homeboy-wordpress-agent-task/v1');
 const runtimeManifest = JSON.parse(fs.readFileSync(path.join(wpCodeboxRuntimeRoot, 'wp-codebox.json'), 'utf8'));
 const manifestProvider = runtimeManifest.agent_task_executors.find((executor) => executor.id === provider.id);
@@ -392,7 +393,7 @@ const providerDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'provider-default-secret-task-123',
   executor: {
-    backend: 'wordpress',
+    backend: 'codebox',
     config: {
       provider: 'claude-code',
       model: 'opus-4.7',
@@ -405,7 +406,7 @@ const codexDefaultSecretRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'codex-default-secret-task-123',
   executor: {
-    backend: 'wordpress',
+    backend: 'codebox',
     config: {
       provider: 'codex',
       model: 'gpt-5.5',
@@ -862,17 +863,9 @@ try {
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 
-  const codexAuthPath = path.join(defaultsRoot, 'codex-auth.json');
-  fs.writeFileSync(codexAuthPath, JSON.stringify({
-    tokens: {
-      access_token: 'fixture-access-token',
-      refresh_token: 'fixture-refresh-token',
-      account_id: 'fixture-account-id',
-    },
-  }));
-  const codexSubscriptionDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
+  const configuredDefaultProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
-    task_id: 'codex-secret-default-task-123',
+    task_id: 'configured-provider-default-task-123',
     executor: {
       backend: 'codebox',
       config: {},
@@ -882,15 +875,21 @@ try {
     },
   }, {
     settings: {
-      wp_codebox_codex_auth_path: codexAuthPath,
+      wp_codebox_default_provider: 'codex',
+      wp_codebox_provider_defaults: {
+        codex: {
+          model: 'gpt-5.5',
+          secret_env: codexSecretEnv,
+        },
+      },
     },
   });
-  assert.equal(codexSubscriptionDefaultedRequest.provider, 'codex');
-  assert.equal(codexSubscriptionDefaultedRequest.model, 'gpt-5.5');
-  assert.deepEqual(codexSubscriptionDefaultedRequest.provider_plugin_paths, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlay_profiles, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.runtime_overlays, []);
-  assert.deepEqual(codexSubscriptionDefaultedRequest.secret_env, codexSecretEnv);
+  assert.equal(configuredDefaultProviderRequest.provider, 'codex');
+  assert.equal(configuredDefaultProviderRequest.model, 'gpt-5.5');
+  assert.deepEqual(configuredDefaultProviderRequest.provider_plugin_paths, []);
+  assert.deepEqual(configuredDefaultProviderRequest.runtime_overlay_profiles, []);
+  assert.deepEqual(configuredDefaultProviderRequest.runtime_overlays, []);
+  assert.deepEqual(configuredDefaultProviderRequest.secret_env, codexSecretEnv);
 
   const openAiDefaultedRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
@@ -1029,9 +1028,23 @@ try {
   });
   assert.equal(alternateDefaultedRequest.runtime_component_paths.agents_api, alternateBundledAgentsApiPath);
 
-  const configuredProviderPath = path.join(defaultsRoot, 'ai-provider-for-openai');
-  fs.mkdirSync(path.join(configuredProviderPath, 'src', 'Codex'), { recursive: true });
-  fs.writeFileSync(path.join(configuredProviderPath, 'src', 'Codex', 'CodexProvider.php'), '<?php\n// Registers the codex provider.\n');
+  const explicitProviderPath = path.join(defaultsRoot, 'provider-plugin');
+  fs.mkdirSync(explicitProviderPath, { recursive: true });
+  const explicitProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'explicit-provider-path-task-123',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex' },
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    settings: { wp_codebox_provider_plugin_paths: { codex: [explicitProviderPath] } },
+  });
+  assert.deepEqual(explicitProviderRequest.provider_plugin_paths, [explicitProviderPath]);
+
   const configuredLibraryPath = path.join(defaultsRoot, 'configured-library');
   const configuredRuntimeOverlays = [{
     kind: 'bundled-library',
@@ -1051,13 +1064,13 @@ try {
     },
   }, {
     settings: {
-      wp_codebox_provider_plugin_paths: [configuredProviderPath],
+      wp_codebox_provider_plugin_paths: [explicitProviderPath],
       wp_codebox_runtime_overlay_profiles: ['configured-profile'],
       wp_codebox_runtime_overlays: configuredRuntimeOverlays,
       wp_codebox_secret_env: ['CONFIGURED_SECRET'],
     },
   });
-  assert.deepEqual(configuredGenericStackRequest.provider_plugin_paths, [configuredProviderPath]);
+  assert.deepEqual(configuredGenericStackRequest.provider_plugin_paths, [explicitProviderPath]);
   assert.deepEqual(configuredGenericStackRequest.runtime_overlay_profiles, ['configured-profile']);
   assert.deepEqual(configuredGenericStackRequest.runtime_overlays, configuredRuntimeOverlays);
   assert.deepEqual(configuredGenericStackRequest.secret_env, ['CONFIGURED_SECRET']);
@@ -1920,11 +1933,10 @@ const codexProviderNotRegisteredOutcome = agentTaskOutcomeFromCodeboxResult({
     provider_plugin_paths: ['/components/ai-provider-for-openai'],
   },
 });
-const codexGuidanceDiagnostic = codexProviderNotRegisteredOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_provider_plugin_guidance');
-assert(codexGuidanceDiagnostic);
-assert.match(codexGuidanceDiagnostic.message, /Codex-capable provider plugin checkout/);
-assert.match(codexGuidanceDiagnostic.message, /Released ai-provider-for-openai trunk registers openai, not codex/);
-assert.deepEqual(codexGuidanceDiagnostic.data.provider_plugin_paths, ['/components/ai-provider-for-openai']);
+const providerNotRegisteredDiagnostic = codexProviderNotRegisteredOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.provider_not_registered');
+assert(providerNotRegisteredDiagnostic);
+assert.match(providerNotRegisteredDiagnostic.message, /registered codex provider/);
+assert.deepEqual(providerNotRegisteredDiagnostic.data.provider_plugin_paths, ['/components/ai-provider-for-openai']);
 
 const codexMissingProviderPluginOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
@@ -1943,47 +1955,10 @@ const codexMissingProviderPluginOutcome = agentTaskOutcomeFromCodeboxResult({
     provider_plugin_paths: [],
   },
 });
-const codexMissingProviderPluginDiagnostic = codexMissingProviderPluginOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_provider_plugin_guidance');
-assert(codexMissingProviderPluginDiagnostic);
-assert.equal(codexMissingProviderPluginDiagnostic.data.missing_provider_plugin_path, true);
-assert.deepEqual(codexMissingProviderPluginDiagnostic.data.provider_plugin_paths, []);
-
-const codexBearerTokenOutcome = agentTaskOutcomeFromCodeboxResult({
-  ...request,
-  task_id: 'codex-bearer-token-task-123',
-  executor: {
-    backend: 'codebox',
-    config: { provider: 'codex' },
-  },
-}, {
-  success: false,
-  status: 'failed',
-  summary: 'Fatal error: Call to undefined method WordPress\\AiClient\\Authentication\\RequestAuthenticationMethod::bearerToken()',
-  task_input: { provider: 'codex' },
-});
-const codexBearerTokenDiagnostic = codexBearerTokenOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_php_ai_client_missing_bearer_token_auth');
-assert(codexBearerTokenDiagnostic);
-assert.match(codexBearerTokenDiagnostic.message, /bearer-token auth/);
-
-const codexVendorOutcome = agentTaskOutcomeFromCodeboxResult({
-  ...request,
-  task_id: 'codex-vendor-task-123',
-  executor: {
-    backend: 'codebox',
-    config: { provider: 'codex' },
-  },
-}, {
-  success: false,
-  status: 'failed',
-  diagnostics: [{
-    class: 'wp_codebox_overlay_prepare_failed',
-    message: 'Unable to prepare php-ai-client overlay: vendor/autoload.php missing; run composer install before dispatch.',
-  }],
-  task_input: { provider: 'codex' },
-});
-const codexVendorDiagnostic = codexVendorOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.codex_php_ai_client_vendor_missing');
-assert(codexVendorDiagnostic);
-assert.match(codexVendorDiagnostic.message, /Composer vendor dependencies are missing/);
+const missingProviderPluginDiagnostic = codexMissingProviderPluginOutcome.diagnostics.find((diagnostic) => diagnostic.class === 'codebox.provider_not_registered');
+assert(missingProviderPluginDiagnostic);
+assert.equal(missingProviderPluginDiagnostic.data.missing_provider_plugin_path, true);
+assert.deepEqual(missingProviderPluginDiagnostic.data.provider_plugin_paths, []);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {

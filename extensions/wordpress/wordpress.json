@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "2.124.0",
+  "version": "3.0.0",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -19,7 +19,6 @@
     "annotations": false
   },
   "agent_task": {
-    "default_backend": "codebox",
     "runtime_requirements": {
       "required_capabilities": [
         "browser_runtime",
@@ -34,124 +33,6 @@
       "integration_contract": "homeboy-wordpress-agent-task/v1"
     }
   },
-  "agent_runtimes": [
-    {
-      "id": "opencode",
-      "label": "OpenCode",
-      "agent_task_executors": [
-        {
-          "schema": "homeboy/agent-task-executor-provider/v1",
-          "id": "opencode.agent-task-executor",
-          "label": "OpenCode agent task executor",
-          "backend": "opencode",
-          "command": "node {{extension_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs",
-          "request_schema": "homeboy/agent-task-request/v1",
-          "outcome_schema": "homeboy/agent-task-outcome/v1",
-          "request_required_fields": [
-            "schema",
-            "task_id",
-            "executor.backend",
-            "instructions"
-          ],
-          "outcome_statuses": [
-            "succeeded",
-            "failed",
-            "no_op",
-            "unable_to_remediate",
-            "timeout",
-            "provider_error"
-          ],
-          "failure_classifications": [
-            "provider",
-            "timeout",
-            "execution_failed"
-          ],
-          "redacted_metadata_keys": [
-            "secret_env_values",
-            "secretEnvValues",
-            "secrets",
-            "codex_auth",
-            "opencode_auth"
-          ],
-          "secret_env_requirements": [
-            {
-              "schema": "homeboy/secret-env-requirement/v1",
-              "source": "provider_default",
-              "env": [
-                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
-                "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
-                "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
-                "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
-                "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
-              ],
-              "when": {
-                "any": [
-                  {
-                    "path": "executor.config.provider",
-                    "equals": "codex"
-                  },
-                  {
-                    "path": "executor.provider",
-                    "equals": "codex"
-                  },
-                  {
-                    "path": "provider",
-                    "equals": "codex"
-                  }
-                ]
-              }
-            }
-          ],
-          "capabilities": [
-            "cli_runtime",
-            "repo_workspace",
-            "workspace_tools",
-            "patch_artifacts",
-            "report_artifacts",
-            "structured_outcome",
-            "provider_owned_auth",
-            "provider_owned_session",
-            "provider_owned_cancellation"
-          ],
-          "workspace_materialization": {
-            "cwd": "git_checkout"
-          },
-          "provider_defaults": {
-            "codex": {
-              "model": "gpt-5.5",
-              "secret_env": [
-                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
-                "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
-                "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
-                "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
-                "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
-              ]
-            }
-          },
-          "lifecycle": {
-            "completion": "synchronous_process",
-            "cancellation": "provider_signal",
-            "max_concurrency_default": 1
-          },
-          "artifact_contract": {
-            "patch": [
-              "git-diff",
-              "patch"
-            ],
-            "report": [
-              "json",
-              "markdown"
-            ]
-          },
-          "status": "experimental",
-          "integration_contract": "homeboy-opencode-agent-task/v1",
-          "runtime_gap_trackers": [
-            "https://github.com/Extra-Chill/homeboy-extensions/issues/967"
-          ]
-        }
-      ]
-    }
-  ],
   "scripts": {
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
