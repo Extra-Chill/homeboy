@@ -2,6 +2,9 @@
 
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
+const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
+const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA = 'homeboy/agent-task-artifact-declaration/v1';
+const AGENT_TASK_EVIDENCE_REF_SCHEMA = 'homeboy/agent-task-evidence-ref/v1';
 const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA = 'homeboy/agent-task-executor-provider/v1';
 const SECRET_ENV_REQUIREMENT_SCHEMA = 'homeboy/secret-env-requirement/v1';
 
@@ -28,6 +31,31 @@ const AGENT_TASK_REDACTED_METADATA_KEYS = [
   'secrets',
 ];
 
+const AGENT_TASK_SECRET_SELECTOR_PATHS = [
+  'executor.config.provider',
+  'executor.provider',
+  'provider',
+];
+
+const AGENT_TASK_ARTIFACT_FIELDS = [
+  'schema',
+  'id',
+  'kind',
+  'name',
+  'path',
+  'url',
+  'mime',
+  'size_bytes',
+  'sha256',
+  'metadata',
+];
+
+const AGENT_TASK_EVIDENCE_REF_FIELDS = [
+  'kind',
+  'uri',
+  'label',
+];
+
 function agentTaskProviderContractFields() {
   return {
     request_schema: AGENT_TASK_REQUEST_SCHEMA,
@@ -45,12 +73,36 @@ function providerSecretEnvRequirement(provider, env) {
     source: 'provider_default',
     env,
     when: {
-      any: [
-        { path: 'executor.config.provider', equals: provider },
-        { path: 'executor.provider', equals: provider },
-        { path: 'provider', equals: provider },
-      ],
+      any: AGENT_TASK_SECRET_SELECTOR_PATHS.map((selectorPath) => ({ path: selectorPath, equals: provider })),
     },
+  };
+}
+
+function extendRedactedMetadataKeys(...keys) {
+  return Array.from(new Set([...AGENT_TASK_REDACTED_METADATA_KEYS, ...keys.flatMap(normalizeList)]));
+}
+
+function agentTaskArtifactFromRef(ref = {}, index = 0, sanitizeMetadata = passthroughObject) {
+  const id = ref.id || ref.sha256 || ref.path || ref.url || `agent-task-artifact-${index + 1}`;
+  return {
+    schema: AGENT_TASK_ARTIFACT_SCHEMA,
+    id,
+    kind: ref.kind || ref.type || 'agent_task_artifact',
+    name: ref.name,
+    path: ref.path || ref.directory,
+    url: ref.url,
+    mime: ref.mime,
+    size_bytes: ref.size_bytes,
+    sha256: ref.sha256,
+    metadata: sanitizeMetadata(ref.metadata || {}),
+  };
+}
+
+function agentTaskEvidenceRefFromRef(ref = {}, fallbackKind = 'agent_task_evidence') {
+  return {
+    kind: ref.kind || ref.type || fallbackKind,
+    uri: ref.uri || ref.url || ref.path,
+    label: ref.label || ref.name,
   };
 }
 
@@ -65,14 +117,31 @@ function normalizeArray(value) {
   return Array.isArray(value) ? value.filter((entry) => entry !== undefined && entry !== null) : [];
 }
 
+function normalizeList(value) {
+  return Array.isArray(value) ? normalizeArray(value) : normalizeArray([value]);
+}
+
+function passthroughObject(value) {
+  return value;
+}
+
 module.exports = {
+  AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
+  AGENT_TASK_ARTIFACT_FIELDS,
+  AGENT_TASK_ARTIFACT_SCHEMA,
+  AGENT_TASK_EVIDENCE_REF_FIELDS,
+  AGENT_TASK_EVIDENCE_REF_SCHEMA,
   AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_OUTCOME_SCHEMA,
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
+  AGENT_TASK_SECRET_SELECTOR_PATHS,
+  agentTaskArtifactFromRef,
+  agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
+  extendRedactedMetadataKeys,
   providerDefaultsContract,
   providerSecretEnvRequirement,
 };

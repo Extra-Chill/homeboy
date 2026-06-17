@@ -92,6 +92,21 @@ Failure outcomes should include a normalized classification from
 `failure_classifications` plus enough diagnostic context for Homeboy to route the
 result without parsing backend-native logs.
 
+## Homeboy Contract Adapter
+
+Extension runtime packages should consume generic Homeboy contract constants
+through `agent-runtimes/lib/agent-task-provider-contract.js`. That adapter is the
+local compatibility seam while the matching Homeboy core contracts are released.
+It owns schema identifiers, the default provider fields, secret-env requirement
+selectors, redacted metadata keys, and artifact/evidence reference projection
+helpers.
+
+Runtime packages may add backend-specific capabilities, secret names, role
+aliases, and metadata keys, but should extend the adapter output instead of
+copying schema strings or selector paths into each backend. Domain policy, such
+as WordPress or Data Machine defaults, belongs in the caller/runtime package and
+not in the generic adapter.
+
 ## Secret Requirements
 
 Runtime manifests should declare secret inputs by name, never by value:
@@ -111,7 +126,8 @@ Runtime manifests should declare secret inputs by name, never by value:
 Provider commands receive secret values through environment variables or the
 request's secret-name declarations. They must redact secret-like metadata in
 outcomes and diagnostics. If a runtime adds a secret-bearing metadata key, it
-must add that key to `redacted_metadata_keys`.
+must add that key to `redacted_metadata_keys`, preferably with
+`extendRedactedMetadataKeys()` from the adapter.
 
 ## Capability Declarations
 
