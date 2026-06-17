@@ -22,4 +22,5 @@ module.exports = {
 	...require('./lib/wp-codebox-apply-adapter'),
 	...require('./lib/wp-codebox-recipe-helper'),
 	...require('./lib/wordpress-workload-profile'),
+	...require('./lib/static-visual-parity'),
 };
