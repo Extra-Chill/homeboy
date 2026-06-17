@@ -21,6 +21,62 @@ pub(super) struct LabPathRemap {
     pub remote: String,
 }
 
+struct ArgTransformSpec<'a, C> {
+    value_transforms: &'a [ArgValueTransform<'a, C>],
+}
+
+struct ArgValueTransform<'a, C> {
+    flag: &'a str,
+    transform: fn(&str, &C, &str) -> Result<String>,
+}
+
+impl<'a, C> ArgTransformSpec<'a, C> {
+    fn transform_args(&self, args: &[String], context: &C) -> Result<Vec<String>> {
+        let mut out = Vec::with_capacity(args.len());
+        let mut iter = args.iter().peekable();
+        let mut passthrough = false;
+        while let Some(arg) = iter.next() {
+            if passthrough {
+                out.push(arg.clone());
+                continue;
+            }
+            if arg == "--" {
+                passthrough = true;
+                out.push(arg.clone());
+                continue;
+            }
+
+            if let Some(transform) = self.value_transforms.iter().find(|item| item.flag == arg) {
+                out.push(arg.clone());
+                if let Some(value) = iter.next() {
+                    out.push((transform.transform)(value, context, transform.flag)?);
+                }
+                continue;
+            }
+
+            let mut transformed = false;
+            for transform in self.value_transforms {
+                if let Some(value) = arg
+                    .strip_prefix(transform.flag)
+                    .and_then(|rest| rest.strip_prefix('='))
+                {
+                    out.push(format!(
+                        "{}={}",
+                        transform.flag,
+                        (transform.transform)(value, context, transform.flag)?
+                    ));
+                    transformed = true;
+                    break;
+                }
+            }
+            if !transformed {
+                out.push(arg.clone());
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Rewrite controller-local absolute paths inside a `--provider-config` value to
 /// their synced remote equivalents, and inline the result so the runner does not
 /// need to read a controller-local file.
@@ -177,50 +233,33 @@ pub(super) fn inline_agent_task_prompt_files_in_args(
     args: &[String],
     source_path: &Path,
 ) -> Result<Vec<String>> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
-        if matches!(arg.as_str(), "--prompt" | "--task" | "--tasks") {
-            out.push(arg.clone());
-            if let Some(spec) = iter.next() {
-                out.push(read_agent_task_text_spec_to_inline(spec, source_path, arg)?);
-            }
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--prompt=") {
-            out.push(format!(
-                "--prompt={}",
-                read_agent_task_text_spec_to_inline(spec, source_path, "--prompt")?
-            ));
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--task=") {
-            out.push(format!(
-                "--task={}",
-                read_agent_task_text_spec_to_inline(spec, source_path, "--task")?
-            ));
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--tasks=") {
-            out.push(format!(
-                "--tasks={}",
-                read_agent_task_text_spec_to_inline(spec, source_path, "--tasks")?
-            ));
-            continue;
-        }
-        out.push(arg.clone());
+    const AGENT_TASK_TEXT_FILE_TRANSFORMS: &[ArgValueTransform<'static, PathBuf>] = &[
+        ArgValueTransform {
+            flag: "--prompt",
+            transform: inline_agent_task_text_file_arg,
+        },
+        ArgValueTransform {
+            flag: "--task",
+            transform: inline_agent_task_text_file_arg,
+        },
+        ArgValueTransform {
+            flag: "--tasks",
+            transform: inline_agent_task_text_file_arg,
+        },
+    ];
+
+    ArgTransformSpec {
+        value_transforms: AGENT_TASK_TEXT_FILE_TRANSFORMS,
     }
-    Ok(out)
+    .transform_args(args, &source_path.to_path_buf())
+}
+
+fn inline_agent_task_text_file_arg(
+    spec: &str,
+    source_path: &PathBuf,
+    flag: &str,
+) -> Result<String> {
+    read_agent_task_text_spec_to_inline(spec, source_path, flag)
 }
 
 pub(super) fn remap_path_settings_in_args(
@@ -1503,6 +1542,30 @@ mod tests {
 
         assert_eq!(out[3], "--task=Fix issue 1");
         assert_eq!(out[5], "[\"Fix issue 2\"]");
+    }
+
+    #[test]
+    fn inline_agent_task_prompt_files_preserves_passthrough_args() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("prompt.md"), "Inline before passthrough")
+            .expect("write prompt");
+        std::fs::write(temp.path().join("ignored.md"), "must stay referenced")
+            .expect("write ignored");
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt=@prompt.md".to_string(),
+            "--".to_string(),
+            "--task".to_string(),
+            "@ignored.md".to_string(),
+        ];
+
+        let out = inline_agent_task_prompt_files_in_args(&args, temp.path()).expect("inline files");
+
+        assert_eq!(out[3], "--prompt=Inline before passthrough");
+        assert_eq!(out[5], "--task");
+        assert_eq!(out[6], "@ignored.md");
     }
 
     #[test]
