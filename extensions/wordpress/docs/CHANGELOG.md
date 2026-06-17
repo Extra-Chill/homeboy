@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.11] - 2026-06-17
+
+### Changed
+- Split Codebox runtime from Data Machine CI policy
+
 ## [3.2.10] - 2026-06-17
 
 ### Changed
