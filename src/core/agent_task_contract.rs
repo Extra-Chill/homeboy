@@ -186,6 +186,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "dependency_failure_patterns",
                 "timeout_artifact_discovery",
                 "role_aliases",
+                "runtime_contract",
                 "extension_id",
                 "extension_path",
                 "runtime_id",
