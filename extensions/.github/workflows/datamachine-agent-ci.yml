@@ -522,17 +522,7 @@ jobs:
             exit 1
           fi
           effective_runtime_ref="$AGENT_RUNTIME_REF"
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
-            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
-            | if type == "object" then . else error("provider_plugin must be a JSON object") end
-            | {
-                repo: (.repo // ""),
-                ref: (.ref // ""),
-                path: (.path // "."),
-                register_function: (.register_function // ""),
-                credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
-              }
-          ')"
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials true)"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_ref="$(jq -r '.ref // ""' <<< "$provider_plugin_json")"
           dependency_entries+=("Automattic/wp-codebox@${effective_runtime_ref}")
@@ -660,14 +650,7 @@ jobs:
             [ "$component_dir" != ".ci/homeboy-extensions/wordpress" ] || continue
             composer install --working-dir="$component_dir" --no-interaction --no-progress --prefer-dist
           done
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
-            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
-            | if type == "object" then . else error("provider_plugin must be a JSON object") end
-            | {
-                repo: (.repo // ""),
-                path: (.path // ".")
-              }
-          ')"
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials false)"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
           if [ -n "$provider_plugin_repo" ]; then
@@ -781,18 +764,7 @@ jobs:
             execute_workflow_mounts_json="$(jq -nc --arg type "$execute_workflow_mount_type" --arg source "$execute_workflow_host_path" --arg target "$execute_workflow_guest_path" '[{type: $type, source: $source, target: $target, mode: "readonly"}]')"
           fi
           mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | jq -Rsc --arg provider "$PROVIDER" --arg openaiRef "$OPENAI_PROVIDER_REF" '
-            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then {} else fromjson end
-            | if type == "object" then . else error("provider_plugin must be a JSON object") end
-            | {
-                repo: (.repo // ""),
-                ref: (.ref // ""),
-                path: (.path // "."),
-                register_function: (.register_function // ""),
-                credentials: (.credentials // (if $provider == "openai" then {connectors_ai_openai_api_key: "OPENAI_API_KEY"} else {} end))
-              }
-              | if (.credentials | type) == "object" then . else error("provider_plugin.credentials must be a JSON object") end
-          ')"
+          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials true)"
           provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
           provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
           provider_plugin_host_path=""
