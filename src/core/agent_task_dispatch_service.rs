@@ -258,6 +258,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "agent_result".to_string(),
                 "transcript".to_string(),
             ],
+            artifact_declarations: Vec::new(),
             metadata: serde_json::json!({
                 "repo": repo,
                 "client_context": client_context,
@@ -1108,6 +1109,7 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs: Value::Null,
@@ -1145,6 +1147,7 @@ mod tests {
                     sha256: None,
                     metadata: Value::Null,
                 }],
+                typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs: Value::Null,

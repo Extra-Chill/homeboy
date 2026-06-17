@@ -3012,6 +3012,7 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs: Value::Null,
@@ -3047,6 +3048,7 @@ mod tests {
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         )

@@ -215,6 +215,7 @@ fn matrix_template_request(
         policy: Default::default(),
         limits: Default::default(),
         expected_artifacts: run_args.expected_artifact.clone(),
+        artifact_declarations: Vec::new(),
         metadata: serde_json::json!({ "product_command": "bench.matrix" }),
     }
 }
@@ -238,6 +239,7 @@ impl homeboy::core::agent_tasks::AgentTaskExecutorAdapter for LocalBenchMatrixEx
             )),
             failure_classification: None,
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
             outputs: serde_json::Value::Null,

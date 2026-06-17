@@ -439,6 +439,7 @@ fn build_agent_task_matrix_summary(
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],
+            artifact_declarations: Vec::new(),
             metadata: json!({ "source": "bench.comparison" }),
         },
     )
@@ -520,6 +521,7 @@ fn agent_task_outcome_for_entry(
                 schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
             })
             .collect(),
+        typed_artifacts: Vec::new(),
         evidence_refs: Vec::new(),
         diagnostics: entry
             .diagnostics

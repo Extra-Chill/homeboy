@@ -686,6 +686,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["patch".to_string()],
+            artifact_declarations: Vec::new(),
             metadata: Value::Null,
         }
     }

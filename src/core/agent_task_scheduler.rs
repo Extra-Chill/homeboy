@@ -704,6 +704,7 @@ impl AgentTaskScheduleSupport {
             summary: Some(summary.clone()),
             failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/output-dependency-skipped".to_string(),
@@ -964,6 +965,7 @@ impl AgentTaskScheduleSupport {
             summary: Some(summary),
             failure_classification: None,
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/cancelled".to_string(),
@@ -990,6 +992,7 @@ impl AgentTaskScheduleSupport {
             summary: Some(format!("task exceeded timeout_ms={timeout_ms}")),
             failure_classification: Some(AgentTaskFailureClassification::Timeout),
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/timeout".to_string(),
@@ -1090,6 +1093,7 @@ impl AgentTaskScheduleSupport {
             summary: Some(summary.clone()),
             failure_classification: Some(AgentTaskFailureClassification::PolicyDenied),
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "scheduler".to_string(),
                 uri: "homeboy://agent-task/backpressure".to_string(),
@@ -2008,6 +2012,7 @@ mod tests {
                     sha256: None,
                     metadata: json!({ "role": "patch" }),
                 }],
+                typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
                     kind: "runtime_bundle".to_string(),
                     uri: artifact_root.display().to_string(),
@@ -3222,6 +3227,7 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts,
+                typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs,
@@ -3307,6 +3313,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
             metadata: Value::Null,
         }
     }
@@ -3324,6 +3331,7 @@ mod tests {
                 _ => None,
             },
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "log".to_string(),
                 uri: "artifact://task/log".to_string(),
