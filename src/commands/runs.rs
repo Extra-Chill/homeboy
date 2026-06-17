@@ -18,6 +18,7 @@ mod latest;
 mod loop_sync;
 mod query;
 mod reconcile;
+mod refs;
 mod remote;
 mod remote_artifact;
 
@@ -50,6 +51,7 @@ use latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use loop_sync::{loop_sync, RunsLoopSyncArgs, RunsLoopSyncOutput};
 use query::{runs_query, RunsQueryArgs, RunsQueryOutput};
 use reconcile::{reconcile_runs, RunsReconcileArgs, RunsReconcileOutput};
+use refs::{runs_refs, RunsRefsArgs, RunsRefsOutput};
 
 #[cfg(test)]
 pub(crate) use common::SkippedArtifactRow;
@@ -104,6 +106,8 @@ enum RunsCommand {
     Import(RunsImportArgs),
     /// Project JSONPath expressions over imported run artifact rows.
     Query(RunsQueryArgs),
+    /// Emit stable run/artifact refs for matching runs.
+    Refs(RunsRefsArgs),
     /// Window-based distribution drift over a JSONPath metric.
     Drift(RunsDriftArgs),
     /// Sync continuous-loop archive directories into observation artifacts.
@@ -156,6 +160,7 @@ pub enum RunsOutput {
     Import(RunsImportOutput),
     ImportFromGhActions(GhActionsImportOutput),
     Query(RunsQueryOutput),
+    Refs(RunsRefsOutput),
     Drift(RunsDriftOutput),
     LoopSync(RunsLoopSyncOutput),
 }
@@ -334,6 +339,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Export(args) => export_runs(args),
         RunsCommand::Import(args) => import_runs(args),
         RunsCommand::Query(args) => runs_query(args),
+        RunsCommand::Refs(args) => runs_refs(args),
         RunsCommand::Drift(args) => runs_drift(args),
         RunsCommand::LoopSync(args) => loop_sync(args),
     }
