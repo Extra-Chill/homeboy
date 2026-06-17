@@ -36,7 +36,7 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
         "exclusive": ["studio-runtime"],
         "paths": ["~/Developer/studio@bfb-mu-plugin-agent-output"],
         "ports": [9724],
-        "process_patterns": ["wordpress-server-child.mjs"]
+        "process_patterns": ["app-server-child.mjs"]
     },
     "pipeline": {
         "up": [
@@ -216,7 +216,7 @@ fn test_spec_resources_block_parses_full_shape() {
             "exclusive": ["studio-runtime"],
             "paths": ["~/Developer/studio@bfb-mu-plugin-agent-output"],
             "ports": [9724],
-            "process_patterns": ["wordpress-server-child.mjs"]
+            "process_patterns": ["app-server-child.mjs"]
         }
     }"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
@@ -228,7 +228,7 @@ fn test_spec_resources_block_parses_full_shape() {
     assert_eq!(spec.resources.ports, vec![9724]);
     assert_eq!(
         spec.resources.process_patterns,
-        vec!["wordpress-server-child.mjs"]
+        vec!["app-server-child.mjs"]
     );
 }
 
@@ -736,8 +736,8 @@ fn test_spec_external_service_kind_with_discover() {
             "studio-daemon": {
                 "kind": "external",
                 "discover": {
-                    "pattern": "wordpress-server-child.mjs",
-                    "argv_contains": ["studio@bfb-mu-plugin", "playground-server-child.mjs"]
+                    "pattern": "app-server-child.mjs",
+                    "argv_contains": ["sample-app@feature-a", "preview-server-child.mjs"]
                 }
             }
         }
@@ -747,13 +747,13 @@ fn test_spec_external_service_kind_with_discover() {
     assert_eq!(svc.kind, ServiceKind::External);
     assert_eq!(
         svc.discover.as_ref().unwrap().pattern,
-        "wordpress-server-child.mjs"
+        "app-server-child.mjs"
     );
     assert_eq!(
         svc.discover.as_ref().unwrap().argv_contains,
         vec![
-            "studio@bfb-mu-plugin".to_string(),
-            "playground-server-child.mjs".to_string()
+            "sample-app@feature-a".to_string(),
+            "preview-server-child.mjs".to_string()
         ]
     );
 }
@@ -769,7 +769,7 @@ fn test_spec_newer_than_check_parses() {
                     "kind": "check",
                     "label": "Daemon newer than bundle",
                     "newer_than": {
-                        "left":  { "process_start": { "pattern": "wordpress-server-child.mjs" } },
+                        "left":  { "process_start": { "pattern": "app-server-child.mjs" } },
                         "right": { "file_mtime": "${components.studio.path}/apps/cli/dist/cli/main.mjs" }
                     }
                 }
@@ -782,7 +782,7 @@ fn test_spec_newer_than_check_parses() {
             let nt = spec.newer_than.as_ref().expect("newer_than present");
             assert_eq!(
                 nt.left.process_start.as_ref().unwrap().pattern,
-                "wordpress-server-child.mjs"
+                "app-server-child.mjs"
             );
             assert!(nt
                 .right
