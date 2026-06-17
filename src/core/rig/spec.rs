@@ -1324,10 +1324,10 @@ pub enum PipelineStep {
 
     /// Declarative local requirement for common rig preflight checks.
     ///
-    /// Use this for simple filesystem/component-path assertions instead of
-    /// inline shell. When `prepare_command` is set, it runs only in listed
-    /// `prepare_phases`; normal `check` remains read-only and reports the
-    /// declared remediation.
+    /// Use this for simple filesystem/component-path/executable assertions
+    /// instead of inline shell. When `prepare_command` is set, it runs only in
+    /// listed `prepare_phases`; normal `check` remains read-only and reports
+    /// the declared remediation.
     Requirement {
         /// Optional stable node ID for dependency-aware pipeline ordering.
         #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
@@ -1350,6 +1350,12 @@ pub enum PipelineStep {
         /// Required substring in the resolved component path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         component_path_contains: Option<String>,
+        /// Executable name or path. Bare names are resolved from PATH.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executable: Option<String>,
+        /// Environment variable whose value overrides `executable` lookup.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        executable_env: Option<String>,
         /// Command to run when the filesystem requirement is missing and the
         /// current pipeline name appears in `prepare_phases`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

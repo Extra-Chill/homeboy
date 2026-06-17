@@ -259,6 +259,115 @@ fn test_requirement_validates_component_path_contains() {
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
+#[test]
+fn test_requirement_executable_uses_env_override_before_path() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let path_bin_dir = tmp.path().join("path-bin");
+    std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
+    write_executable(&path_bin_dir.join("demo-tool"));
+    let missing_override = tmp.path().join("missing-override-tool");
+
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-executable-env",
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "executable": "demo-tool",
+                    "executable_env": "DEMO_TOOL_BIN",
+                    "env": {{
+                        "DEMO_TOOL_BIN": "{}",
+                        "PATH": "{}"
+                    }}
+                }}]
+            }}
+        }}"#,
+        missing_override.to_string_lossy(),
+        path_bin_dir.to_string_lossy()
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(!out.is_success(), "outcomes: {:?}", out.steps);
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("DEMO_TOOL_BIN"), "error: {error}");
+    assert!(error.contains("missing-override-tool"), "error: {error}");
+}
+
+#[test]
+fn test_requirement_executable_falls_back_to_path_when_env_override_is_empty() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let path_bin_dir = tmp.path().join("path-bin");
+    std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
+    write_executable(&path_bin_dir.join("demo-tool"));
+
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-executable-path",
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "executable": "demo-tool",
+                    "executable_env": "DEMO_TOOL_BIN",
+                    "env": {{
+                        "DEMO_TOOL_BIN": "",
+                        "PATH": "{}"
+                    }}
+                }}]
+            }}
+        }}"#,
+        path_bin_dir.to_string_lossy()
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+}
+
+#[test]
+fn test_requirement_executable_reports_missing_tool() {
+    let rig: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "requirement-executable-missing",
+            "pipeline": {
+                "check": [{
+                    "kind": "requirement",
+                    "executable": "missing-homeboy-test-tool",
+                    "env": { "PATH": "/nonexistent" },
+                    "remediation": "install the tool"
+                }]
+            }
+        }"#,
+    )
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(!out.is_success());
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("missing-homeboy-test-tool"),
+        "error: {error}"
+    );
+    assert!(error.contains("install the tool"), "error: {error}");
+}
+
+fn write_executable(path: &std::path::Path) {
+    std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write executable");
+    make_executable(path);
+}
+
+#[cfg(unix)]
+fn make_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("chmod");
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &std::path::Path) {}
+
 // ---- Dependency-aware ordering ---------------------------------------------
 
 mod dag {
