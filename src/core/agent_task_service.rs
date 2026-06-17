@@ -21,6 +21,7 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler, AgentTaskState,
 };
 use crate::core::agent_task_secrets::validate_secret_env;
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::{config, Error, Result};
 
 #[derive(Debug, Clone)]
@@ -620,16 +621,13 @@ fn prepare_plan_for_execution(plan: &mut AgentTaskPlan) -> Result<()> {
 }
 
 fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
-    let mut names = Vec::new();
-    for task in &plan.tasks {
-        for name in &task.executor.secret_env {
-            if !names.contains(name) {
-                names.push(name.clone());
-            }
-        }
-    }
+    let secret_env_plan = SecretEnvPlan::from_secret_env_names(
+        plan.tasks
+            .iter()
+            .flat_map(|task| task.executor.secret_env.iter().cloned()),
+    );
 
-    validate_secret_env(&names).map_err(|error| {
+    validate_secret_env(&secret_env_plan.secret_env_names()).map_err(|error| {
         Error::validation_invalid_argument(
             "secret_env",
             error.message,

@@ -94,7 +94,13 @@ pub use super::agent_task_loop_controller::{
 };
 
 // Secret-env status type is referenced from review/dispatch commands.
-pub use super::agent_task_secrets::{secret_env_status, AgentTaskSecretEnvStatus};
+pub use super::agent_task_secrets::{
+    resolve_secret_env_plan, secret_env_plan_status, secret_env_status, AgentTaskSecretEnvStatus,
+};
+pub use super::secret_env_plan::{
+    SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
+    SecretEnvRedactionPolicy, SECRET_ENV_PLAN_SCHEMA,
+};
 
 // Provider helpers used directly from the facade root for common callers.
 pub use super::agent_task_provider::required_extension_ids_for_plan;

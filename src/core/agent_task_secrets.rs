@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use crate::core::defaults::{self, AgentTaskSecretSource};
 use crate::core::keychain;
 use crate::core::paths;
+use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,8 +30,18 @@ pub fn resolve_secret_env(
     resolve_secret_env_with_config(names, &AgentTaskSecretConfig::load())
 }
 
+pub fn resolve_secret_env_plan(
+    plan: &SecretEnvPlan,
+) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    resolve_secret_env(&plan.secret_env_names())
+}
+
 pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
     secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+}
+
+pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status(&plan.secret_env_names())
 }
 
 pub fn map_secret_to_env(
