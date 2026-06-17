@@ -6,6 +6,7 @@
   "exports": {
     ".": "./index.js",
     "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
+    "./delegated-run-contract": "./lib/delegated-run-contract.js",
     "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js"
   },
   "bin": {
