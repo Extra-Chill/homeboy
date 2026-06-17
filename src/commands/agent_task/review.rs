@@ -120,6 +120,7 @@ impl From<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
                 evidence_discriminators: args.evidence_discriminators,
                 nearby_contracts_preserved: args.nearby_contracts_preserved,
             },
+            lifecycle: None,
         }
     }
 }

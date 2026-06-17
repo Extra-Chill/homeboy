@@ -20,13 +20,14 @@ pub(crate) fn render_pr_body(
     changed_files: &[String],
 ) -> String {
     format!(
-        "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Proof provenance\n{}\n\n## Source refs\n{}\n\n{}{}## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Verification capability\n{}\n\n## CI-equivalent coverage\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n{}## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}\n",
+        "## Summary\n- Finalized Homeboy agent-task cook run `{}` into review-ready branch `{}`.\n\n## Proof provenance\n{}\n\n## Source refs\n{}\n\n{}{}{}## Attempt summary\n{}\n\n## Gate results\n{}\n\n## Verification capability\n{}\n\n## CI-equivalent coverage\n{}\n\n## Changed files\n{}\n\n## Artifact refs\n{}\n\n{}## Final status\n- **Status:** review-ready\n- **Base:** `{}`\n- **Head:** `{}`\n- **Merge/deploy:** not performed\n\n## AI assistance\n- **AI assistance:** Yes\n- **Tool(s):** {}\n- **Model:** {}\n- **Used for:** {}\n",
         options.run_id,
         head,
         proof_provenance(proof),
         bullets(&options.evidence.source_refs),
         source_relationship_section(options),
         runtime_guardrails_section(options),
+        lifecycle_section(options),
         options.evidence.attempt_summary,
         gate_bullets(&proof.gates),
         verification_bullets(options),
@@ -44,6 +45,37 @@ pub(crate) fn render_pr_body(
             .unwrap_or(AI_MODEL_NOT_RECORDED),
         options.ai_used_for
     )
+}
+
+fn lifecycle_section(options: &AgentTaskPrFinalizationOptions) -> String {
+    let Some(lifecycle) = options.evidence.lifecycle.as_ref() else {
+        return String::new();
+    };
+
+    format!(
+        "## Run lifecycle\n- **Execution state:** `{:?}`\n- **Provider runtime state:** `{:?}`\n- **External runtime IDs:** {}\n- **Artifact retention:** `{:?}`\n- **Cleanup:** `{:?}`\n- **Finalization:** `{:?}`\n\n",
+        lifecycle.execution.state,
+        lifecycle.provider_runtime_state(),
+        lifecycle_runtime_ids(lifecycle),
+        lifecycle.artifact_retention.status,
+        lifecycle.cleanup.state,
+        lifecycle.finalization.state,
+    )
+}
+
+fn lifecycle_runtime_ids(
+    lifecycle: &crate::core::run_lifecycle_record::RunLifecycleRecord,
+) -> String {
+    if lifecycle.external_runtime_ids.is_empty() {
+        return NONE_RECORDED.to_string();
+    }
+
+    lifecycle
+        .external_runtime_ids
+        .iter()
+        .map(|id| format!("{}:{}", id.kind, id.value))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn proof_provenance(proof: &HomeboyProof) -> String {

@@ -742,6 +742,9 @@ fn finalize_loop_pr(
                 manual_reviewer_check: None,
             },
             runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+            lifecycle: crate::core::agent_task_lifecycle::status(loop_id)
+                .ok()
+                .map(|record| record.lifecycle),
         },
         ai_used_for: options.ai_used_for.clone(),
         protected_branches: options.protected_branches.clone(),
