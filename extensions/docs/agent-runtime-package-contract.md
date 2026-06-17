@@ -101,6 +101,13 @@ It owns schema identifiers, the default provider fields, secret-env requirement
 selectors, redacted metadata keys, and artifact/evidence reference projection
 helpers.
 
+Reusable CI callers that need to describe a runner without embedding workflow
+glue should consume `agent-runtimes/lib/agent-task-runner-contract.js`. That
+adapter owns `homeboy/agent-task-runner-spec/v1` validation and projection into
+the generic request fields consumed by executor providers. Extension-specific
+exports, such as the WordPress `agent-task-runner-spec` module, should re-export
+that adapter instead of copying schema and lifecycle validation logic.
+
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of
 copying schema strings or selector paths into each backend. Domain policy, such
