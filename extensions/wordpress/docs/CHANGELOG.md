@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.1] - 2026-06-17
+
+### Changed
+- Add WordPress runtime task planner
+
 ## [3.4.0] - 2026-06-17
 
 ### Added
