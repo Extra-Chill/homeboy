@@ -3457,6 +3457,7 @@ mod tests {
         let exec_output = RunnerExecOutput {
             command: "runner.exec",
             runner_id: "lab-default".to_string(),
+            dry_run: false,
             mode: RunnerExecMode::Daemon,
             argv: vec![
                 "homeboy".to_string(),

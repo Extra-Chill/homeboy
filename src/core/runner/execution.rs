@@ -65,6 +65,8 @@ pub enum RunnerExecMode {
 pub struct RunnerExecOutput {
     pub command: &'static str,
     pub runner_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
     pub mode: RunnerExecMode,
     pub argv: Vec<String>,
     pub remote_cwd: String,
@@ -443,6 +445,7 @@ fn exec_via_reverse_broker(
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: runner.id.clone(),
+            dry_run: false,
             mode: RunnerExecMode::ReverseBroker,
             argv: command,
             remote_cwd: cwd,
@@ -594,6 +597,7 @@ fn exec_via_daemon(
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: runner.id.clone(),
+            dry_run: false,
             mode: RunnerExecMode::Daemon,
             argv: command,
             remote_cwd: cwd,
@@ -1433,6 +1437,7 @@ fn exec_output(
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: runner.id.clone(),
+            dry_run: false,
             mode,
             argv: command,
             remote_cwd: cwd,
@@ -1818,6 +1823,7 @@ mod tests {
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: "lab".to_string(),
+            dry_run: false,
             mode: RunnerExecMode::Daemon,
             argv: vec![
                 "homeboy".to_string(),

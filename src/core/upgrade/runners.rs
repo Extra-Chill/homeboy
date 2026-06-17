@@ -2497,6 +2497,7 @@ mod tests {
         RunnerExecOutput {
             command: "runner.exec",
             runner_id: runner_id.to_string(),
+            dry_run: false,
             mode: RunnerExecMode::DiagnosticSsh,
             argv,
             remote_cwd: "/home/chubes/workspace".to_string(),
