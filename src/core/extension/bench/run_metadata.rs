@@ -190,6 +190,7 @@ mod tests {
             extension_path: extension_dir.path().to_path_buf(),
             script_path: "bench-runner.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
         let args = BenchRunWorkflowArgs {
             component_label: "homeboy".to_string(),
@@ -199,6 +200,7 @@ mod tests {
             settings_json: Vec::new(),
             iterations: 7,
             warmup_iterations: None,
+            run_id: None,
             execution: BenchRunExecution {
                 runs: 3,
                 concurrency: 2,

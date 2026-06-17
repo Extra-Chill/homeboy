@@ -645,6 +645,22 @@ impl ExtensionManifest {
         self.cli.is_some()
     }
 
+    /// Setting keys this extension declares it understands.
+    ///
+    /// Used to validate `--setting` / `--setting-json` overrides before a
+    /// run: a key the extension never consumes (a typo like `bench_env`
+    /// vs `workflow_bench_env`) silently does nothing today and can waste
+    /// a long proof run. Returns the declared `id`s from the manifest's
+    /// `settings` block. An empty result means the extension declares no
+    /// settings — callers should treat that as "cannot validate" rather
+    /// than "rejects everything".
+    pub fn accepted_setting_keys(&self) -> Vec<String> {
+        self.settings
+            .iter()
+            .map(|setting| setting.id.clone())
+            .collect()
+    }
+
     pub fn has_build(&self) -> bool {
         self.build.is_some()
     }

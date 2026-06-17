@@ -500,6 +500,7 @@ fn run_component_with_rig_context(
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
+    super::warn_unknown_setting_keys(&ctx, &args.setting_args);
     homeboy::core::hygiene::require_dependency_hygiene_for_source_with_settings(
         &ctx.source_path,
         ctx.extension_path.as_deref(),
@@ -552,6 +553,7 @@ fn run_component_with_rig_context(
             settings_json: ctx.resolved_settings().json_overrides(),
             iterations: args.iterations,
             warmup_iterations: effective_warmup_iterations(args, rig_spec),
+            run_id: args.run_id.clone(),
             execution: BenchRunExecution {
                 runs: args.runs,
                 concurrency: args.concurrency,
@@ -719,6 +721,7 @@ mod tests {
             iterations: 1,
             warmup: None,
             runs: 1,
+            run_id: None,
             shared_state: None,
             concurrency: 1,
             matrix: Vec::new(),

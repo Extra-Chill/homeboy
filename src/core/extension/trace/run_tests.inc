@@ -827,6 +827,7 @@ exit 7
             extension_path: extension_dir.to_path_buf(),
             script_path: "trace-runner.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         }
     }
 

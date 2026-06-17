@@ -98,6 +98,11 @@ pub struct ExtensionExecutionContext {
     pub extension_path: PathBuf,
     pub script_path: String,
     pub settings: Vec<(String, serde_json::Value)>,
+    /// Setting keys the resolved extension declares it understands (from
+    /// the manifest `settings` block). Used to validate `--setting` /
+    /// `--setting-json` overrides before a run. Empty means the extension
+    /// declares no settings, in which case validation is skipped.
+    pub accepted_setting_keys: Vec<String>,
 }
 
 pub struct ScenarioRunnerOptions<'a> {
@@ -353,5 +358,6 @@ pub fn resolve_execution_context(
         extension_path,
         script_path,
         settings: extract_component_extension_settings(component, &extension_id),
+        accepted_setting_keys: manifest.accepted_setting_keys(),
     })
 }

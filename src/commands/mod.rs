@@ -46,6 +46,24 @@ pub fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), String> {
     Ok((key, value))
 }
 
+/// Parse the `--runs` repetition count, surfacing a helpful hint when the
+/// operator passes a non-integer.
+///
+/// `--runs` is a numeric repetition count, but operators frequently confuse
+/// it with wanting a stable proof label (e.g. `--runs proof-2026-06`). Clap's
+/// default `u64` parser would emit a raw `invalid digit found in string`
+/// error that gives no guidance. This parser points them at `--run-id`
+/// instead.
+pub fn parse_runs_count(s: &str) -> Result<u64, String> {
+    s.parse::<u64>().map_err(|_| {
+        format!(
+            "`{s}` is not a valid number. --runs is a numeric repetition count \
+             (how many independent substrate spawns to run); use --run-id for a \
+             custom proof label."
+        )
+    })
+}
+
 pub struct GlobalArgs {}
 
 /// Shared arguments for dynamic set commands.

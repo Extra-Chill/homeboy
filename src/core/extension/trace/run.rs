@@ -1653,6 +1653,7 @@ mod tests {
             extension_path: extension_dir,
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         }
     }
 

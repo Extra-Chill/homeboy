@@ -49,6 +49,13 @@ pub struct ExecutionContext {
 
     /// Merged settings (manifest defaults → component → overrides).
     pub settings: Vec<(String, serde_json::Value)>,
+
+    /// Setting keys the resolved extension declares it understands (from
+    /// the manifest `settings` block). Empty when no extension capability
+    /// was requested or the extension declares no settings. Used to warn
+    /// on `--setting` / `--setting-json` keys the runner never consumes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accepted_setting_keys: Vec<String>,
 }
 
 /// What to resolve when building an execution context.
@@ -240,44 +247,47 @@ pub fn resolve_with_component(
     apply_extension_overrides(&mut component, &options.extension_overrides);
 
     // 2. Optionally resolve extension context
-    let (extension_id, extension_path, settings) = if let Some(capability) = options.capability {
-        let ext_context =
-            extension::resolve_execution_context(&component, capability).map_err(|err| {
-                add_extension_override_hints(
-                    err,
-                    &options.extension_overrides,
-                    &declared_extension_ids,
-                )
-            })?;
-        let mut settings = ext_context.settings.clone();
-        // Merge CLI string overrides on top (CLI string values stay strings).
-        for (key, value) in &options.settings_overrides {
-            // Remove existing key if present (override semantics)
-            settings.retain(|(k, _)| k != key);
-            settings.push((key.clone(), serde_json::Value::String(value.clone())));
-        }
-        // Then merge typed-JSON overrides — these win against both
-        // manifest defaults / component settings AND --setting string
-        // overrides. Strictly more expressive: an --setting-json on the
-        // same key represents intentional type preservation that string
-        // coercion can't represent.
-        for (key, value) in &options.settings_json_overrides {
-            settings.retain(|(k, _)| k != key);
-            settings.push((key.clone(), value.clone()));
-        }
-        (
-            Some(ext_context.extension_id.clone()),
-            Some(ext_context.extension_path.clone()),
-            settings,
-        )
-    } else {
-        // No extension context — only CLI overrides, wrapped as JSON strings.
-        let mut settings = Vec::new();
-        for (key, value) in &options.settings_overrides {
-            merge_string_setting_override(&mut settings, key, value);
-        }
-        (None, None, settings)
-    };
+    let (extension_id, extension_path, settings, accepted_setting_keys) =
+        if let Some(capability) = options.capability {
+            let ext_context = extension::resolve_execution_context(&component, capability)
+                .map_err(|err| {
+                    add_extension_override_hints(
+                        err,
+                        &options.extension_overrides,
+                        &declared_extension_ids,
+                    )
+                })?;
+            let accepted_setting_keys = ext_context.accepted_setting_keys.clone();
+            let mut settings = ext_context.settings.clone();
+            // Merge CLI string overrides on top (CLI string values stay strings).
+            for (key, value) in &options.settings_overrides {
+                // Remove existing key if present (override semantics)
+                settings.retain(|(k, _)| k != key);
+                settings.push((key.clone(), serde_json::Value::String(value.clone())));
+            }
+            // Then merge typed-JSON overrides — these win against both
+            // manifest defaults / component settings AND --setting string
+            // overrides. Strictly more expressive: an --setting-json on the
+            // same key represents intentional type preservation that string
+            // coercion can't represent.
+            for (key, value) in &options.settings_json_overrides {
+                settings.retain(|(k, _)| k != key);
+                settings.push((key.clone(), value.clone()));
+            }
+            (
+                Some(ext_context.extension_id.clone()),
+                Some(ext_context.extension_path.clone()),
+                settings,
+                accepted_setting_keys,
+            )
+        } else {
+            // No extension context — only CLI overrides, wrapped as JSON strings.
+            let mut settings = Vec::new();
+            for (key, value) in &options.settings_overrides {
+                merge_string_setting_override(&mut settings, key, value);
+            }
+            (None, None, settings, Vec::new())
+        };
 
     Ok(ExecutionContext {
         component_id: component.id.clone(),
@@ -287,6 +297,7 @@ pub fn resolve_with_component(
         extension_id,
         extension_path,
         settings,
+        accepted_setting_keys,
     })
 }
 
@@ -350,6 +361,53 @@ impl ExecutionContext {
     /// Return an explicit view over resolved extension settings.
     pub fn resolved_settings(&self) -> ResolvedSettings<'_> {
         ResolvedSettings::new(&self.settings)
+    }
+
+    /// Identify caller-supplied setting override keys the resolved
+    /// extension does not declare it understands.
+    ///
+    /// A `--setting`/`--setting-json` key the extension never consumes
+    /// (a typo like `bench_env` vs `workflow_bench_env`) silently does
+    /// nothing today and can waste a long proof run. This compares the
+    /// *root* of each provided key (so `bench_env.FOO` validates against
+    /// the `bench_env` declaration) against
+    /// [`Self::accepted_setting_keys`]. Provided keys are deduplicated and
+    /// returned in input order.
+    ///
+    /// Returns an empty `Vec` when the extension declares no accepted
+    /// setting keys: with nothing to validate against, every key is
+    /// treated as potentially valid rather than universally unknown.
+    pub fn unknown_setting_overrides<'a, S, J>(
+        &self,
+        string_overrides: S,
+        json_overrides: J,
+    ) -> Vec<String>
+    where
+        S: IntoIterator<Item = &'a str>,
+        J: IntoIterator<Item = &'a str>,
+    {
+        if self.accepted_setting_keys.is_empty() {
+            return Vec::new();
+        }
+
+        let accepted: std::collections::HashSet<&str> = self
+            .accepted_setting_keys
+            .iter()
+            .map(String::as_str)
+            .collect();
+
+        let mut unknown = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for key in string_overrides.into_iter().chain(json_overrides) {
+            let root = key.split_once('.').map(|(root, _)| root).unwrap_or(key);
+            if root.is_empty() || accepted.contains(root) {
+                continue;
+            }
+            if seen.insert(root.to_string()) {
+                unknown.push(root.to_string());
+            }
+        }
+        unknown
     }
 
     /// Get the effective working directory for command execution.
@@ -885,9 +943,60 @@ mod tests {
             extension_id: None,
             extension_path: None,
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
 
         assert_eq!(ctx.working_dir(), dir.path().to_str().unwrap());
+    }
+
+    fn ctx_with_accepted_keys(accepted: &[&str]) -> ExecutionContext {
+        ExecutionContext {
+            component: Component::default(),
+            component_id: "component".to_string(),
+            source_path: PathBuf::from("/tmp/component"),
+            git_root: None,
+            extension_id: Some("rust".to_string()),
+            extension_path: None,
+            settings: Vec::new(),
+            accepted_setting_keys: accepted.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn unknown_setting_overrides_flags_undeclared_keys() {
+        let ctx = ctx_with_accepted_keys(&["workflow_bench_env", "iterations"]);
+
+        let unknown =
+            ctx.unknown_setting_overrides(["bench_env"].into_iter(), ["iterations"].into_iter());
+
+        assert_eq!(unknown, vec!["bench_env".to_string()]);
+    }
+
+    #[test]
+    fn unknown_setting_overrides_validates_dotted_key_root() {
+        let ctx = ctx_with_accepted_keys(&["workflow_bench_env"]);
+
+        // Dotted child of an accepted root is fine; dotted child of an
+        // unknown root surfaces the root once.
+        let unknown = ctx.unknown_setting_overrides(
+            ["workflow_bench_env.FOO", "bench_env.BAR", "bench_env.BAZ"].into_iter(),
+            std::iter::empty(),
+        );
+
+        assert_eq!(unknown, vec!["bench_env".to_string()]);
+    }
+
+    #[test]
+    fn unknown_setting_overrides_skips_validation_without_declaration() {
+        // No declared settings → cannot validate → treat all as valid.
+        let ctx = ctx_with_accepted_keys(&[]);
+
+        let unknown = ctx.unknown_setting_overrides(
+            ["anything", "at_all"].into_iter(),
+            ["json_key"].into_iter(),
+        );
+
+        assert!(unknown.is_empty());
     }
 
     fn resolved_settings_entries() -> Vec<(String, serde_json::Value)> {
@@ -979,6 +1088,7 @@ mod tests {
             extension_id: None,
             extension_path: None,
             settings: vec![("mode".to_string(), serde_json::json!("test"))],
+            accepted_setting_keys: Vec::new(),
         };
 
         ctx.log_debug();

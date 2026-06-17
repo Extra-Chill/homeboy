@@ -202,13 +202,24 @@ pub struct BenchRunArgs {
     #[arg(long, value_name = "N", allow_hyphen_values = true)]
     warmup: Option<u64>,
 
-    /// Number of independent substrate spawns. Default 1 preserves today's
-    /// exact behaviour. When > 1, the bench dispatcher is invoked N times in
-    /// sequence and per-scenario metrics carry both the cross-run p50
-    /// (top-level, unchanged shape) and a runs array with each run's raw
-    /// metrics, plus a runs_summary object with n/min/max/mean/stdev/cv_pct/p50/p95.
-    #[arg(long, default_value_t = 1)]
+    /// Number of repetitions (independent substrate spawns). Default 1
+    /// preserves today's exact behaviour. This is a numeric COUNT, not a
+    /// proof label — use --run-id to tag a run with a stable identifier.
+    /// When > 1, the bench dispatcher is invoked N times in sequence and
+    /// per-scenario metrics carry both the cross-run p50 (top-level,
+    /// unchanged shape) and a runs array with each run's raw metrics, plus
+    /// a runs_summary object with n/min/max/mean/stdev/cv_pct/p50/p95.
+    #[arg(long, default_value_t = 1, value_name = "COUNT", value_parser = crate::commands::parse_runs_count)]
     runs: u64,
+
+    /// Caller-supplied stable proof label for this run. Forwarded to
+    /// component bench scripts via HOMEBOY_BENCH_RUN_ID so a run can be
+    /// correlated across systems (CI logs, dashboards, proof archives).
+    /// This is NOT a repetition count — use --runs for that. Components
+    /// whose bench runner does not consume HOMEBOY_BENCH_RUN_ID simply
+    /// ignore it; homeboy emits a notice rather than a hard error.
+    #[arg(long = "run-id", value_name = "ID")]
+    run_id: Option<String>,
 
     /// Directory shared across bench runner instances.
     #[arg(long, value_name = "DIR")]
@@ -342,6 +353,59 @@ pub enum BenchRigOrder {
 #[serde(rename_all = "kebab-case")]
 pub enum BenchReportFormat {
     SideBySide,
+}
+
+/// Warn — before a (potentially long) bench run starts — when a
+/// `--setting` / `--setting-json` key is not declared by the resolved
+/// extension's manifest `settings` block.
+///
+/// Silently accepting a key the component bench script never consumes
+/// (e.g. `bench_env` typo vs the correct `workflow_bench_env`) wastes
+/// long proof runs: the operator believes they configured the run, but
+/// the value was dropped on the floor. A warning is the safe default —
+/// it surfaces the typo without failing runs whose extension legitimately
+/// declares no settings (where validation can't be performed).
+fn warn_unknown_setting_keys(
+    ctx: &execution_context::ExecutionContext,
+    setting_args: &SettingArgs,
+) {
+    if let Some(message) = unknown_setting_keys_warning(ctx, setting_args) {
+        eprintln!("{message}");
+    }
+}
+
+/// Build the unknown-setting-key warning message, or `None` when every
+/// provided override is declared (or the extension declares no settings,
+/// in which case validation is skipped). Split out from
+/// [`warn_unknown_setting_keys`] so the message content is unit-testable
+/// without capturing stderr.
+fn unknown_setting_keys_warning(
+    ctx: &execution_context::ExecutionContext,
+    setting_args: &SettingArgs,
+) -> Option<String> {
+    let unknown = ctx.unknown_setting_overrides(
+        setting_args.setting.iter().map(|(k, _)| k.as_str()),
+        setting_args.setting_json.iter().map(|(k, _)| k.as_str()),
+    );
+    if unknown.is_empty() {
+        return None;
+    }
+
+    let mut accepted = ctx.accepted_setting_keys.clone();
+    accepted.sort();
+    let extension = ctx.extension_id.as_deref().unwrap_or("<unknown>");
+    Some(format!(
+        "warning: bench ignored {} unknown setting key(s) not declared by extension '{}': {}. \
+         Accepted settings: {}. Check for a typo before relying on this run.",
+        unknown.len(),
+        extension,
+        unknown.join(", "),
+        if accepted.is_empty() {
+            "<none declared>".to_string()
+        } else {
+            accepted.join(", ")
+        },
+    ))
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to
@@ -700,6 +764,7 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     resolve_options.extension_overrides = args.extension_override.extensions.clone();
 
     let ctx = execution_context::resolve_with_component(&resolve_options, component_override)?;
+    warn_unknown_setting_keys(&ctx, &args.setting_args);
     let extra_workloads = rig_spec
         .as_ref()
         .and_then(|spec| {

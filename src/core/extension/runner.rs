@@ -374,6 +374,7 @@ mod tests {
             extension_path: PathBuf::from("/tmp/fixture-extension"),
             script_path: "lint.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         }
     }
 

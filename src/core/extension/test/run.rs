@@ -1003,6 +1003,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
                 extension_path: extension_dir,
                 script_path: "test.sh".to_string(),
                 settings: Vec::new(),
+                accepted_setting_keys: Vec::new(),
             };
             let spec = ParseSpec {
                 extension_script: Some("parse-results.sh".to_string()),
@@ -1062,6 +1063,7 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
             extension_path: extension_dir.clone(),
             script_path: "test.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
         let spec = ParseSpec {
             extension_script: Some("missing-parser.sh".to_string()),
@@ -1128,6 +1130,7 @@ exit 23
             extension_path: extension_dir,
             script_path: "test.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
         let spec = ParseSpec {
             extension_script: Some("parse-results.sh".to_string()),
@@ -1195,6 +1198,7 @@ printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
                 extension_path: extension_dir,
                 script_path: "test.sh".to_string(),
                 settings: Vec::new(),
+                accepted_setting_keys: Vec::new(),
             };
             let spec = ParseSpec {
                 extension_script: Some("parse-results.sh".to_string()),
@@ -1257,6 +1261,7 @@ printf 'not json\n'
             extension_path: extension_dir,
             script_path: "test.sh".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
         let spec = ParseSpec {
             extension_script: Some("parse-results.sh".to_string()),

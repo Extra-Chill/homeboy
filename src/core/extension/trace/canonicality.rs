@@ -877,6 +877,7 @@ mod tests {
             extension_path: extension_dir.path().to_path_buf(),
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
 
         let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
@@ -902,6 +903,7 @@ mod tests {
             extension_path: extension_dir.path().to_path_buf(),
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         };
 
         let report = evaluate_trace_canonicality(Some(&context), &component, &args).unwrap();
@@ -975,6 +977,7 @@ mod tests {
             extension_path: extension_dir,
             script_path: "trace.js".to_string(),
             settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
         }
     }
 

@@ -271,6 +271,7 @@ pub(super) fn run_args(
             iterations: 1,
             warmup: None,
             runs: 1,
+            run_id: None,
             shared_state: None,
             concurrency: 1,
             matrix: Vec::new(),
@@ -1435,6 +1436,59 @@ fn bench_output_comparison_serializes_with_tagged_payload() {
         Some(&serde_json::Value::String("cross_rig".to_string()))
     );
 }
+
+fn ctx_with_accepted_setting_keys(
+    accepted: &[&str],
+) -> homeboy::core::engine::execution_context::ExecutionContext {
+    use homeboy::core::engine::execution_context::ExecutionContext;
+    ExecutionContext {
+        component: Default::default(),
+        component_id: "studio".to_string(),
+        source_path: std::path::PathBuf::from("/tmp/studio"),
+        git_root: None,
+        extension_id: Some("rust".to_string()),
+        extension_path: None,
+        settings: Vec::new(),
+        accepted_setting_keys: accepted.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn unknown_setting_key_warns_before_run() {
+    let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env", "iterations"]);
+    let setting_args = SettingArgs {
+        // `bench_env` is a typo for the declared `workflow_bench_env`.
+        setting: vec![("bench_env.CORPUS".to_string(), "1000".to_string())],
+        setting_json: Vec::new(),
+    };
+
+    let warning =
+        unknown_setting_keys_warning(&ctx, &setting_args).expect("unknown key should warn");
+    assert!(
+        warning.contains("bench_env"),
+        "warning names the typo: {warning}"
+    );
+    assert!(
+        warning.contains("workflow_bench_env"),
+        "warning lists accepted settings: {warning}"
+    );
+    assert!(
+        warning.contains("extension 'rust'"),
+        "warning names the resolved extension: {warning}"
+    );
+}
+
+#[test]
+fn declared_setting_key_does_not_warn() {
+    let ctx = ctx_with_accepted_setting_keys(&["workflow_bench_env"]);
+    let setting_args = SettingArgs {
+        setting: vec![("workflow_bench_env.CORPUS".to_string(), "1000".to_string())],
+        setting_json: Vec::new(),
+    };
+
+    assert!(unknown_setting_keys_warning(&ctx, &setting_args).is_none());
+}
+
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_dispatch_test.rs"]
 mod bench_default_baseline_dispatch_test;
