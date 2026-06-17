@@ -18,6 +18,7 @@ module.exports = {
 	...require('./lib/webperf-evidence-summary'),
 	...require('./lib/benchmark-matrix-report'),
 	...require('./lib/agent-terminal-actions'),
+	...require('./lib/agent-task-runner-spec'),
 	...require('./lib/datamachine-agent-ci-plan'),
 	...require('./lib/wp-codebox-apply-adapter'),
 	...require('./lib/wp-codebox-recipe-helper'),

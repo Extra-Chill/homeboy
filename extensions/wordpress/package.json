@@ -19,6 +19,7 @@
     "./editor-canvas-probes": "./lib/editor-canvas-probes.js",
     "./fidelity-comparison": "./lib/fidelity-comparison.js",
     "./agent-terminal-actions": "./lib/agent-terminal-actions.js",
+    "./agent-task-runner-spec": "./lib/agent-task-runner-spec.js",
     "./datamachine-agent-ci-plan": "./lib/datamachine-agent-ci-plan.js",
     "./timing-correlator": "./lib/timing-correlator.js",
     "./codebox-memory-report": "./lib/codebox-memory-report.js",

@@ -3,9 +3,13 @@
 const assert = require('node:assert/strict');
 
 const {
+  AGENT_TASK_RUNNER_SPEC_SCHEMA,
+  agentTaskRequestFromRunnerSpec,
   datamachineAgentCiAbilityTaskRequest,
   datamachineAgentCiBundleTaskRequest,
   datamachineAgentCiPlan,
+  datamachineAgentCiRunnerSpec,
+  validateAgentTaskRunnerSpec,
 } = require('../lib/datamachine-agent-ci-plan');
 
 const bundleTask = datamachineAgentCiBundleTaskRequest({
@@ -67,6 +71,28 @@ assert.equal(bundleTask.executor.config.runtime_requirements.component_path_defa
 assert.equal(bundleTask.limits.task_timeout_seconds, 1200);
 assert.deepEqual(bundleTask.expected_artifacts, ['datamachine-transcript', 'ConceptPacket']);
 
+const bundleRunnerSpec = datamachineAgentCiRunnerSpec({
+  taskId: 'concept-agent',
+  source: '/workspace/example-repo/bundles/concept-agent',
+  agentSlug: 'concept-agent',
+  pipelineSlug: 'concept-pipeline',
+  flowSlug: 'concept-flow',
+  provider: 'openai',
+  secretEnv: ['AI_PROVIDER_OPENAI_API_KEY'],
+  expectedArtifacts: ['datamachine-transcript'],
+});
+
+assert.equal(bundleRunnerSpec.schema, AGENT_TASK_RUNNER_SPEC_SCHEMA);
+assert.equal(bundleRunnerSpec.executor.backend, 'codebox');
+assert.equal(bundleRunnerSpec.executor.config.provider, 'openai');
+assert.deepEqual(bundleRunnerSpec.executor.secret_env, ['AI_PROVIDER_OPENAI_API_KEY']);
+assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec: bundleRunnerSpec }), {
+  executor: bundleRunnerSpec.executor,
+  limits: { task_timeout_seconds: 900 },
+  expected_artifacts: ['datamachine-transcript'],
+});
+assert.equal(validateAgentTaskRunnerSpec(bundleRunnerSpec), bundleRunnerSpec);
+
 const abilityTask = datamachineAgentCiAbilityTaskRequest({
   taskId: 'validate-artifact',
   ability: 'example/validate-artifact',
@@ -98,4 +124,8 @@ assert.throws(
 assert.throws(
   () => datamachineAgentCiPlan({ planId: 'empty-plan', tasks: [] }),
   /tasks must contain at least one task request/
+);
+assert.throws(
+  () => validateAgentTaskRunnerSpec({ schema: AGENT_TASK_RUNNER_SPEC_SCHEMA }),
+  /runner spec executor is required/
 );
