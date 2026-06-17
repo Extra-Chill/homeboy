@@ -9,7 +9,7 @@ const resultsFile = path.join(root, 'trace-results.json');
 process.env.HOMEBOY_TRACE_ARTIFACT_DIR = artifactDir;
 
 try {
-    const { createTraceReporter } = await import('./lib/timeline.mjs');
+    const { createTraceReporter, createTraceWorkload } = await import('./lib/timeline.mjs');
     const { createBrowserWaterfallCollector, normalizeBrowserWaterfall } = await import('./lib/browser-waterfall.mjs');
 
     const artifactPath = path.join(artifactDir, 'metrics.json');
@@ -47,6 +47,22 @@ try {
     const failEnvelope = await failReporter.fail(new Error('boom'), { failed: true });
     assert.equal(failEnvelope.status, 'fail');
     assert.equal(failEnvelope.failure.message, 'boom');
+
+    const workload = createTraceWorkload({
+        componentId: 'fixture-component',
+        scenarioId: 'fixture-workload',
+        resultsFile: path.join(root, 'trace-workload.json'),
+    });
+    workload.event('fixture', 'workload.start', { cookie: 'secret-cookie', ok: true });
+    workload.artifact('Workload metrics', artifactPath, 'json');
+    workload.assertion('workload-direct-assertion', 'pass', 'Direct assertion passed.');
+    workload.check('workload-check-helper', true, 'Check helper passed.', { authorization: 'bearer secret' });
+    const workloadEnvelope = await workload.pass({ visible: true }, { summary: 'Workload helper trace passed.' });
+    assert.equal(workloadEnvelope.status, 'pass');
+    assert.equal(workloadEnvelope.timeline[0].source, 'fixture');
+    assert.equal(workloadEnvelope.timeline[0].data.cookie, '[Redacted]');
+    assert.equal(workloadEnvelope.artifacts.find((artifact) => artifact.label === 'Workload metrics')?.path, 'metrics.json');
+    assert.equal(workloadEnvelope.assertions.find((assertion) => assertion.id === 'workload-check-helper')?.data.authorization, '[Redacted]');
 
     const snapshot = {
         page_url: 'https://example.test/wp-admin/site-editor.php',
