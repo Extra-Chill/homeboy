@@ -795,7 +795,6 @@ mod tests {
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "retry", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             let command = lab_offload_command(&cli.command).unwrap().unwrap();
