@@ -23,6 +23,10 @@ pub struct CleanupArtifactsArgs {
     #[arg(long)]
     pub apply: bool,
 
+    /// Clean artifacts from the Homeboy source checkout that built this binary.
+    #[arg(long = "self", conflicts_with = "path")]
+    pub self_artifacts: bool,
+
     /// Resolve managed worktrees from this checkout instead of the current directory.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
@@ -33,6 +37,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Artifact
         CleanupCommand::Artifacts(args) => cleanup::cleanup_artifacts(ArtifactCleanupOptions {
             path: args.path,
             apply: args.apply,
+            self_artifacts: args.self_artifacts,
         })
         .map(|output| (output, 0)),
     }

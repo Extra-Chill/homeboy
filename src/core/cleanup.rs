@@ -16,6 +16,7 @@ const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
 pub struct ArtifactCleanupOptions {
     pub path: Option<PathBuf>,
     pub apply: bool,
+    pub self_artifacts: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -85,7 +86,7 @@ struct GitSafety {
 }
 
 pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactCleanupOutput> {
-    let root = resolve_root(options.path.as_deref())?;
+    let root = resolve_root(&options)?;
     let worktrees = discover_worktrees(&root)?;
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
@@ -165,14 +166,65 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     })
 }
 
-fn resolve_root(path: Option<&Path>) -> Result<PathBuf> {
-    let start = match path {
+fn resolve_root(options: &ArtifactCleanupOptions) -> Result<PathBuf> {
+    if options.path.is_some() && options.self_artifacts {
+        return Err(Error::validation_invalid_argument(
+            "self_artifacts",
+            "cannot be combined with path",
+            None,
+            None,
+        ));
+    }
+
+    let start = match options.path.as_deref() {
         Some(path) => path.to_path_buf(),
+        None if options.self_artifacts => homeboy_source_checkout()?,
         None => std::env::current_dir().map_err(|e| {
             Error::internal_io(e.to_string(), Some("read current directory".to_string()))
         })?,
     };
     git_root(&start)
+}
+
+fn homeboy_source_checkout() -> Result<PathBuf> {
+    let manifest_dir = option_env!("CARGO_MANIFEST_DIR").ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "self_artifacts",
+            "Homeboy source checkout is unavailable for this binary",
+            None,
+            None,
+        )
+    })?;
+    validate_homeboy_manifest_dir(Path::new(manifest_dir))
+}
+
+fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathBuf> {
+    let cargo_toml = manifest_dir.join("Cargo.toml");
+    if !cargo_toml.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "self_artifacts",
+            format!("{} does not contain Cargo.toml", manifest_dir.display()),
+            None,
+            None,
+        ));
+    }
+
+    let raw = fs::read_to_string(&cargo_toml).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read {}", cargo_toml.display())),
+        )
+    })?;
+    if !raw.lines().any(|line| line.trim() == "name = \"homeboy\"") {
+        return Err(Error::validation_invalid_argument(
+            "self_artifacts",
+            format!("{} is not the Homeboy crate manifest", cargo_toml.display()),
+            None,
+            None,
+        ));
+    }
+
+    Ok(manifest_dir.to_path_buf())
 }
 
 fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
@@ -413,6 +465,47 @@ mod tests {
     }
 
     #[test]
+    fn self_artifact_manifest_must_be_homeboy_crate() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"other\"\n",
+        )
+        .expect("write manifest");
+
+        let err = validate_homeboy_manifest_dir(tmp.path()).expect_err("reject non-homeboy crate");
+
+        assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn self_artifact_manifest_resolves_homeboy_crate() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        )
+        .expect("write manifest");
+
+        let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
+
+        assert_eq!(root, tmp.path());
+    }
+
+    #[test]
+    fn self_artifacts_cannot_be_combined_with_explicit_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let err = resolve_root(&ArtifactCleanupOptions {
+            path: Some(tmp.path().to_path_buf()),
+            apply: false,
+            self_artifacts: true,
+        })
+        .expect_err("reject ambiguous cleanup root");
+
+        assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
     fn dry_run_reports_artifact_candidates_across_worktrees() {
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
@@ -427,6 +520,7 @@ mod tests {
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
             apply: false,
+            self_artifacts: false,
         })
         .expect("dry-run cleanup");
 
@@ -454,6 +548,7 @@ mod tests {
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
             apply: true,
+            self_artifacts: false,
         })
         .expect("apply cleanup");
 
@@ -495,6 +590,7 @@ mod tests {
         let output = cleanup_artifacts(ArtifactCleanupOptions {
             path: Some(repo.path().to_path_buf()),
             apply: true,
+            self_artifacts: false,
         })
         .expect("apply cleanup");
 
