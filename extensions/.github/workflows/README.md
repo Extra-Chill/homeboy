@@ -51,6 +51,13 @@ Playground runner is no longer selectable by callers.
 See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the WP Codebox contract, runtime surface, and evaluation notes.
 
+The workflow intentionally stays a thin GitHub Actions wrapper around scripts in
+`.github/scripts/datamachine-agent-ci/`. Those scripts own GitHub token scope
+validation, dependency checkout planning/materialization, runtime setup, runner
+config synthesis, engine-data projection, artifact path resolution, and comment
+payload preparation. Keep consumer-specific semantics in workflow inputs and
+bundle files rather than baking domain policy into those generic helpers.
+
 The reusable workflow exposes `engine_data_json` as one combined JSON object.
 Dynamic per-key `workflow_call` outputs are not possible in GitHub Actions, so
 callers should parse this object in their own workflow when they need named
