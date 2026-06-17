@@ -366,19 +366,27 @@ jobs:
         if: ${{ inputs.run_agent }}
         uses: actions/checkout@v4
 
+      - name: Checkout homeboy-extensions
+        if: ${{ inputs.run_agent }}
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-extensions
+          ref: ${{ inputs.homeboy_extensions_ref }}
+          path: .ci/homeboy-extensions
+
+      - name: Set up Node.js
+        if: ${{ inputs.run_agent }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Detect Homeboy app credentials
         id: homeboy-app-creds
         if: ${{ inputs.run_agent }}
         env:
           HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
           HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "$HOMEBOY_APP_ID" ] && [ -n "$HOMEBOY_APP_PRIVATE_KEY" ]; then
-            printf 'available=true\n' >> "$GITHUB_OUTPUT"
-          else
-            printf 'available=false\n' >> "$GITHUB_OUTPUT"
-          fi
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs detect-credentials
 
       - name: Require Homeboy app credentials
         if: ${{ inputs.run_agent && ! inputs.dry_run && inputs.require_homeboy_app_token && steps.homeboy-app-creds.outputs.available != 'true' }}
@@ -399,44 +407,7 @@ jobs:
           APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
           TARGET_REPO: ${{ inputs.target_repo }}
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
-        run: |
-          set -euo pipefail
-          context_repos="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse '
-            gsub("^\\s+|\\s+$"; "")
-            | if length == 0 then [] else fromjson end
-            | if type == "array" then . else error("context_repositories must be a JSON array") end
-            | .[]
-            | if type == "object" and (.repo? | type == "string") and (.repo | test("^[^/[:space:]]+/[^/[:space:]]+$")) then .repo else error("context_repositories entries require repo as OWNER/REPO") end
-          ' | paste -sd, -)"
-          repos_input="${APP_TOKEN_REPOS:-$TARGET_REPO}"
-          if [ -z "$APP_TOKEN_REPOS" ] && [ -n "$context_repos" ]; then
-            repos_input="${repos_input},${context_repos}"
-          fi
-          IFS=',' read -ra entries <<< "$repos_input"
-          owner=""
-          repositories=()
-          for raw_entry in "${entries[@]}"; do
-            entry="$(printf '%s' "$raw_entry" | xargs)"
-            [ -n "$entry" ] || continue
-            case "$entry" in
-              */*) ;;
-              *) echo "app_token_repos entries must be OWNER/REPO: $entry" >&2; exit 1 ;;
-            esac
-            entry_owner="${entry%%/*}"
-            repo_name="${entry#*/}"
-            if [ -z "$owner" ]; then
-              owner="$entry_owner"
-            elif [ "$owner" != "$entry_owner" ]; then
-              echo "actions/create-github-app-token supports one owner per token; got $owner and $entry_owner" >&2
-              exit 1
-            fi
-            repositories+=("$repo_name")
-          done
-          [ -n "$owner" ] || { echo "No repositories resolved for app token." >&2; exit 1; }
-          {
-            printf 'owner=%s\n' "$owner"
-            printf 'repositories=%s\n' "$(IFS=','; printf '%s' "${repositories[*]}")"
-          } >> "$GITHUB_OUTPUT"
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs resolve-token-scope
 
       - name: Generate Homeboy app token
         id: app-token
@@ -463,41 +434,7 @@ jobs:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
           DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          if [ -n "$APP_TOKEN" ]; then
-            auth_mode="homeboy_app_token"
-            token_scope="${APP_TOKEN_OWNER}/${APP_TOKEN_REPOSITORIES}"
-            token_note="Generated Homeboy GitHub App installation token."
-          else
-            auth_mode="github_token_fallback"
-            token_scope="$TARGET_REPO"
-            token_note="Using repository-scoped github.token fallback."
-          fi
-          printf 'auth_mode=%s\n' "$auth_mode" >> "$GITHUB_OUTPUT"
-          printf 'Data Machine agent CI auth_mode: %s\n' "$auth_mode"
-          printf 'Token scope: %s\n' "$token_scope"
-          printf 'require_homeboy_app_token: %s\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
-          printf 'dry_run: %s\n' "$DRY_RUN"
-          {
-            printf '## Data Machine Agent CI Auth\n\n'
-            printf -- '- Auth mode: `%s`\n' "$auth_mode"
-            printf -- '- Target repository: `%s`\n' "$TARGET_REPO"
-            printf -- '- Token scope: `%s`\n' "$token_scope"
-            printf -- '- Homeboy App token repos input: `%s`\n' "${APP_TOKEN_REPOS_INPUT:-default target_repo}"
-            context_count="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse 'gsub("^\\s+|\\s+$"; "") | if length == 0 then [] else fromjson end | if type == "array" then length else error("context_repositories must be a JSON array") end')"
-            printf -- '- Context repositories: `%s`\n' "$context_count"
-            printf -- '- Require Homeboy App token: `%s`\n' "$REQUIRE_HOMEBOY_APP_TOKEN"
-            printf -- '- Note: %s\n' "$token_note"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Checkout homeboy-extensions
-        if: ${{ inputs.run_agent }}
-        uses: actions/checkout@v4
-        with:
-          repository: Extra-Chill/homeboy-extensions
-          ref: ${{ inputs.homeboy_extensions_ref }}
-          path: .ci/homeboy-extensions
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs report-mode
 
       - name: Checkout validation dependencies
         if: ${{ inputs.run_agent }}
@@ -513,80 +450,7 @@ jobs:
           OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: |
-          set -euo pipefail
-          dependency_entries=()
-          effective_runtime_id="$AGENT_RUNTIME"
-          if [ "$effective_runtime_id" != "wp-codebox" ]; then
-            echo "Unsupported agent_runtime: $effective_runtime_id. Only wp-codebox is currently supported." >&2
-            exit 1
-          fi
-          effective_runtime_ref="$AGENT_RUNTIME_REF"
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials true)"
-          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
-          provider_plugin_ref="$(jq -r '.ref // ""' <<< "$provider_plugin_json")"
-          dependency_entries+=("Automattic/wp-codebox@${effective_runtime_ref}")
-          if [ "$INCLUDE_AGENT_RUNTIME_DEPENDENCIES" = "true" ]; then
-            dependency_entries+=("Automattic/agents-api@${AGENTS_API_REF}")
-            dependency_entries+=("Extra-Chill/data-machine@${DATA_MACHINE_REF}")
-            dependency_entries+=("Extra-Chill/data-machine-code@${DATA_MACHINE_CODE_REF}")
-            if [ "$PROVIDER" = "openai" ] && [ -z "$provider_plugin_repo" ]; then
-              dependency_entries+=("WordPress/ai-provider-for-openai@${OPENAI_PROVIDER_REF}")
-            fi
-            if [ -n "$provider_plugin_repo" ]; then
-              if [ -n "$provider_plugin_ref" ]; then
-                dependency_entries+=("${provider_plugin_repo}@${provider_plugin_ref}")
-              else
-                dependency_entries+=("${provider_plugin_repo}")
-              fi
-            fi
-          fi
-          if [ -n "$VALIDATION_DEPENDENCIES" ]; then
-            IFS=',' read -ra extra_entries <<< "$VALIDATION_DEPENDENCIES"
-            dependency_entries+=("${extra_entries[@]}")
-          fi
-          [ "${#dependency_entries[@]}" -gt 0 ] || exit 0
-          declare -A seen_dependencies=()
-          for raw_entry in "${dependency_entries[@]}"; do
-            entry="$(printf '%s' "$raw_entry" | xargs)"
-            [ -n "$entry" ] || continue
-            repo_ref="$entry"
-            ref=""
-            if [[ "$entry" == *@* ]]; then
-              repo_ref="${entry%@*}"
-              ref="${entry##*@}"
-            fi
-            if [ -z "$repo_ref" ] || [[ "$repo_ref" != */* ]]; then
-              echo "validation_dependencies entries must be OWNER/REPO or OWNER/REPO@REF: $entry" >&2
-              exit 1
-            fi
-            if [[ "$entry" == *@* && -z "$ref" ]]; then
-              echo "validation_dependencies entries must include a non-empty ref after @: $entry" >&2
-              exit 1
-            fi
-            if [ -z "$ref" ]; then
-              ref="$(gh repo view "$repo_ref" --json defaultBranchRef --jq '.defaultBranchRef.name')"
-              [ -n "$ref" ] || { echo "Could not resolve default branch for validation dependency: $repo_ref" >&2; exit 1; }
-            fi
-            dedupe_key="${repo_ref}@${ref}"
-            if [ -n "${seen_dependencies[$dedupe_key]:-}" ]; then
-              continue
-            fi
-            seen_dependencies[$dedupe_key]=1
-            repo_name="${repo_ref#*/}"
-            target=".ci/$repo_name"
-            rm -rf "$target"
-            echo "Checking out validation dependency $repo_ref@$ref into $target"
-            gh repo clone "$repo_ref" "$target" -- --depth=1
-            git -C "$target" fetch --depth=1 origin "$ref"
-            git -C "$target" checkout --quiet FETCH_HEAD
-          done
-
-      - name: Set up Node.js
-        if: ${{ inputs.run_agent }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/materialize-dependencies.cjs
 
       - name: Download workflow input artifacts
         if: ${{ inputs.run_agent && inputs.actions_artifact_downloads != '[]' && inputs.actions_artifact_downloads != '' }}
@@ -619,49 +483,12 @@ jobs:
           set -euo pipefail
           bash -lc "$EXECUTE_WORKFLOW_BUILDER_COMMAND"
 
-      - name: Install Homeboy WordPress extension dependencies
-        if: ${{ inputs.run_agent }}
-        working-directory: .ci/homeboy-extensions/wordpress
-        run: |
-          set -euo pipefail
-          composer install --no-interaction --no-progress --prefer-dist
-          npm install
-
-      - name: Build WP Codebox runtime dependency
-        if: ${{ inputs.run_agent }}
-        working-directory: .ci/wp-codebox
-        run: |
-          set -euo pipefail
-          npm install
-          npm run build
-
-      - name: Install checked-out PHP dependencies
+      - name: Install and build runtime dependencies
         if: ${{ inputs.run_agent }}
         env:
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
-        run: |
-          set -euo pipefail
-          for composer_file in .ci/*/composer.json; do
-            [ -f "$composer_file" ] || continue
-            component_dir="$(dirname "$composer_file")"
-            [ "$component_dir" != ".ci/homeboy-extensions" ] || continue
-            [ "$component_dir" != ".ci/homeboy-extensions/wordpress" ] || continue
-            composer install --working-dir="$component_dir" --no-interaction --no-progress --prefer-dist
-          done
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials false)"
-          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
-          provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
-          if [ -n "$provider_plugin_repo" ]; then
-            provider_plugin_dir=".ci/${provider_plugin_repo#*/}"
-            if [ "$provider_plugin_path" != "." ]; then
-              provider_plugin_dir="${provider_plugin_dir}/${provider_plugin_path}"
-            fi
-            if [ -f "${provider_plugin_dir}/composer.json" ]; then
-              composer install --working-dir="$provider_plugin_dir" --no-interaction --no-progress --prefer-dist
-            fi
-          fi
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/setup-runtime.cjs
 
       - name: Pre-flight bundle validation
         if: ${{ inputs.run_agent && inputs.bundle_validator_spec != '' }}
@@ -736,354 +563,7 @@ jobs:
           PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
           PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
-        run: |
-          set -euo pipefail
-          config_path="${RUNNER_TEMP}/datamachine-agent-config.json"
-          bundle_abs="${GITHUB_WORKSPACE}/${BUNDLE_PATH}"
-          bundle_repo_value="${BUNDLE_REPO:-https://github.com/${TARGET_REPO}.git}"
-          bundle_ref_value="${BUNDLE_REF:-$GITHUB_SHA}"
-          bundle_path_in_repo_value="${BUNDLE_PATH_IN_REPO:-$BUNDLE_PATH}"
-          component_slug="$(basename "$GITHUB_WORKSPACE")"
-          transcript_host_dir="${GITHUB_WORKSPACE}/datamachine-agent-artifacts/${AGENT_SLUG}"
-          transcript_guest_dir="/wordpress/wp-content/plugins/${component_slug}/datamachine-agent-artifacts/${AGENT_SLUG}"
-          effective_runtime_id="$AGENT_RUNTIME"
-          if [ "$effective_runtime_id" != "wp-codebox" ]; then
-            echo "Unsupported agent_runtime: $effective_runtime_id. Only wp-codebox is currently supported." >&2
-            exit 1
-          fi
-          effective_runtime_ref="$AGENT_RUNTIME_REF"
-          execute_workflow_guest_path="$EXECUTE_WORKFLOW_PATH"
-          execute_workflow_mounts_json="[]"
-          if [ -n "$EXECUTE_WORKFLOW_PATH" ] && [[ "$EXECUTE_WORKFLOW_PATH" != /* ]]; then
-            execute_workflow_host_path="${GITHUB_WORKSPACE}/${EXECUTE_WORKFLOW_PATH}"
-            execute_workflow_mount_type="directory"
-            if [ -f "$execute_workflow_host_path" ]; then
-              execute_workflow_mount_type="file"
-            fi
-            execute_workflow_guest_path="/wordpress/wp-content/plugins/${component_slug}/${EXECUTE_WORKFLOW_PATH}"
-            execute_workflow_mounts_json="$(jq -nc --arg type "$execute_workflow_mount_type" --arg source "$execute_workflow_host_path" --arg target "$execute_workflow_guest_path" '[{type: $type, source: $source, target: $target, mode: "readonly"}]')"
-          fi
-          mapfile -t validation_paths < <(find "${GITHUB_WORKSPACE}/.ci" -mindepth 1 -maxdepth 1 -type d | sort)
-          provider_plugin_json="$(printf '%s' "$PROVIDER_PLUGIN" | node .ci/homeboy-extensions/.github/scripts/normalize-provider-plugin.cjs --input - --provider "$PROVIDER" --includeCredentials true)"
-          provider_plugin_repo="$(jq -r '.repo // ""' <<< "$provider_plugin_json")"
-          provider_plugin_path="$(jq -r '.path // "."' <<< "$provider_plugin_json")"
-          provider_plugin_host_path=""
-          if [ -z "$provider_plugin_repo" ] && [ "$PROVIDER" = "openai" ] && [ -d "${GITHUB_WORKSPACE}/.ci/ai-provider-for-openai" ]; then
-            provider_plugin_host_path="${GITHUB_WORKSPACE}/.ci/ai-provider-for-openai"
-          fi
-          if [ -n "$provider_plugin_repo" ]; then
-            provider_plugin_repo_name="${provider_plugin_repo#*/}"
-            provider_plugin_root="${GITHUB_WORKSPACE}/.ci/${provider_plugin_repo_name}"
-            provider_plugin_host_path="$provider_plugin_root"
-            if [ "$provider_plugin_path" != "." ]; then
-              provider_plugin_host_path="${provider_plugin_root}/${provider_plugin_path}"
-            fi
-            if [ -d "$provider_plugin_host_path" ]; then
-              filtered_validation_paths=()
-              for validation_path in "${validation_paths[@]}"; do
-                [ "$validation_path" != "$provider_plugin_root" ] || continue
-                filtered_validation_paths+=("$validation_path")
-              done
-              validation_paths=("${filtered_validation_paths[@]}" "$provider_plugin_host_path")
-            fi
-          fi
-          validation_json="$(printf '%s\n' "${validation_paths[@]}" | jq -Rsc 'split("\n") | map(select(. != ""))')"
-          validate_json_input() {
-            local name="$1"
-            local expected_type="$2"
-            local value="$3"
-            if ! printf '%s' "$value" | jq -Rse --arg expected_type "$expected_type" 'gsub("^\\s+|\\s+$"; "") | fromjson | if type == $expected_type then . else error("expected " + $expected_type + ", got " + type) end'; then
-              echo "Invalid $name: expected JSON $expected_type." >&2
-              return 1
-            fi
-          }
-          context_repositories_json="$(printf '%s' "$CONTEXT_REPOSITORIES" | jq -Rse '
-            if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
-            | if type == "array" then . else error("expected array, got " + type) end
-            | map(
-                if type != "object" then error("context_repositories entries must be objects") else . end
-                | .repo as $repo
-                | if ($repo | type) != "string" or ($repo | test("^[^/[:space:]]+/[^/[:space:]]+$") | not) then error("context_repositories[].repo must be OWNER/REPO") else . end
-                | .alias as $alias
-                | if has("alias") and (($alias | type) != "string" or ($alias | test("^[A-Za-z0-9][A-Za-z0-9._-]*$") | not)) then error("context_repositories[].alias must be a stable slug") else . end
-                | .ref as $ref
-                | if has("ref") and (($ref | type) != "string" or ($ref | length) == 0) then error("context_repositories[].ref must be a non-empty string") else . end
-                | .paths as $paths
-                | if has("paths") and (($paths | type) != "array" or any($paths[]; type != "string" or length == 0)) then error("context_repositories[].paths must be an array of non-empty strings") else . end
-                | {repo, ref: (.ref // ""), alias: (.alias // (.repo | split("/")[1])), paths: (.paths // [])}
-              )
-          ')"
-          normalize_command_list() {
-            local name="$1"
-            local value="$2"
-            printf '%s' "$value" | jq -Rse --arg name "$name" '
-              if (gsub("^\\s+|\\s+$"; "") | length) == 0 then [] else fromjson end
-              | if type == "array" then . else error($name + " must be a JSON array") end
-              | map(
-                  if type == "string" then {command: ., description: ""}
-                  elif type == "object" then {command: (.command // ""), description: (.description // "")}
-                  else error($name + " entries must be strings or objects") end
-                  | if (.command | type) != "string" or (.command | length) == 0 then error($name + " entries require a non-empty command") else . end
-                  | if (.description | type) != "string" then error($name + " descriptions must be strings") else . end
-                )
-            '
-          }
-          verification_commands_json="$(normalize_command_list verification_commands "$VERIFICATION_COMMANDS")"
-          drift_checks_json="$(normalize_command_list drift_checks "$DRIFT_CHECKS")"
-          writable_paths_json="$(printf '%s' "$WRITABLE_PATHS" | jq -Rse '
-            gsub("^\\s+|\\s+$"; "") as $value
-            | if $value == "" then []
-              elif ($value | startswith("[")) then ($value | fromjson | if type == "array" then . else error("writable_paths JSON must be an array") end)
-              else ($value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
-              end
-            | map(if type == "string" and length > 0 then . else error("writable_paths entries must be non-empty strings") end)
-          ')"
-          workspace_contract_checks_json="$(validate_json_input workspace_contract_checks object "$WORKSPACE_CONTRACT_CHECKS")"
-          extra_wp_config_defines_json="$(validate_json_input extra_wp_config_defines object "$EXTRA_WP_CONFIG_DEFINES")"
-          normalize_mounts_input() {
-            local name="$1"
-            local value="$2"
-            validate_json_input "$name" array "$value" | jq -c --arg workspace "$GITHUB_WORKSPACE" '
-              map(
-                if type == "object" and (.source? | type == "string") and (.source | startswith("/") | not) then
-                  .source = ($workspace + "/" + .source)
-                else
-                  .
-                end
-              )
-            '
-          }
-          runtime_mounts_json="$(normalize_mounts_input runtime_mounts "$RUNTIME_MOUNTS")"
-          runtime_overlays_json="$(validate_json_input runtime_overlays array "$RUNTIME_OVERLAYS" | jq -c --arg workspace "$GITHUB_WORKSPACE" '
-            map(
-              if type == "object" and (.source? | type == "string") and (.source | startswith("/") | not) then
-                .source = ($workspace + "/" + .source)
-              else
-                .
-              end
-            )
-          ')"
-          workload_run_before_json="$(validate_json_input workload_run_before array "$WORKLOAD_RUN_BEFORE")"
-          workload_run_after_json="$(validate_json_input workload_run_after array "$WORKLOAD_RUN_AFTER")"
-          extra_required_abilities_json="$(validate_json_input extra_required_abilities array "$EXTRA_REQUIRED_ABILITIES")"
-          success_completion_outcomes_json="$(validate_json_input success_completion_outcomes array "$SUCCESS_COMPLETION_OUTCOMES")"
-          expected_artifacts_json="$(validate_json_input expected_artifacts array "$EXPECTED_ARTIFACTS")"
-          artifact_declarations_json="$(validate_json_input artifact_declarations array "$ARTIFACT_DECLARATIONS")"
-          allowed_repos_json="$(validate_json_input allowed_repos array "$ALLOWED_REPOS")"
-          app_token_repos_json="$(jq -Rsc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))' <<< "${APP_TOKEN_REPOS:-$TARGET_REPO}")"
-          effective_allowed_repos_json="$(jq -nc --arg target "$TARGET_REPO" --argjson allowed "$allowed_repos_json" --argjson appTokenRepos "$app_token_repos_json" 'if ($allowed | length) > 0 then $allowed elif ($appTokenRepos | length) > 0 then $appTokenRepos else [$target] end')"
-          ability_tools_json="$(validate_json_input ability_tools array "$ABILITY_TOOLS")"
-          tool_recorders_json="$(validate_json_input tool_recorders array "$TOOL_RECORDERS")"
-          pipeline_step_patches_json="$(validate_json_input pipeline_step_patches array "$PIPELINE_STEP_PATCHES")"
-          flow_step_patches_json="$(validate_json_input flow_step_patches array "$FLOW_STEP_PATCHES")"
-          runner_workspace_json="$(validate_json_input runner_workspace object "$RUNNER_WORKSPACE_CONFIG")"
-          runner_workspace_repo="${TARGET_REPO#*/}"
-          runner_workspace_repo="${runner_workspace_repo%.git}"
-          runner_workspace_guest_root="/workspace"
-          runner_workspace_guest_checkout="${runner_workspace_guest_root}/${runner_workspace_repo}"
-          runner_workspace_mounts_json="[]"
-          if jq -e '.enabled == true' <<< "$runner_workspace_json" >/dev/null; then
-            runner_workspace_mounts_json="$(jq -nc --arg source "$GITHUB_WORKSPACE" --arg target "$runner_workspace_guest_checkout" '[{type: "directory", source: $source, target: $target, mode: "readwrite", metadata: {kind: "runner-workspace", artifactExcludePaths: [".ci/**"]}}]')"
-            runner_workspace_json="$(jq -c --arg checkout "$runner_workspace_guest_checkout" '. + {checkout_path: $checkout}' <<< "$runner_workspace_json")"
-          fi
-          rules_json="$(validate_json_input rules object "$RULES")"
-          general_rules_json="$(validate_json_input general_rules array "$GENERAL_RULES")"
-          task_rules_json="$(validate_json_input task_rules array "$TASK_RULES")"
-          probes_json="$(validate_json_input probes object "$PROBES")"
-          provider_register_function="$(jq -r '.register_function // ""' <<< "$provider_plugin_json")"
-          provider_credentials_json="$(jq -c '.credentials // {}' <<< "$provider_plugin_json")"
-          provider_bench_env_json="{}"
-          runtime_bin="${GITHUB_WORKSPACE}/.ci/wp-codebox/packages/cli/dist/index.js"
-          [ -f "$runtime_bin" ] || { echo "Runtime CLI build missing at $runtime_bin" >&2; exit 1; }
-          while IFS= read -r provider_env_name; do
-            [ -n "$provider_env_name" ] || continue
-            case "$provider_env_name" in
-              (*[!A-Za-z0-9_]*|[0-9]*|'') echo "Invalid provider credential env name: $provider_env_name" >&2; exit 1 ;;
-            esac
-            provider_env_value="${!provider_env_name:-}"
-            if [ -n "$provider_env_value" ]; then
-              provider_bench_env_json="$(jq -c --arg name "$provider_env_name" --arg value "$provider_env_value" '. + {($name): $value}' <<< "$provider_bench_env_json")"
-            fi
-          done < <(jq -r 'to_entries[] | .value | select(type == "string" and length > 0)' <<< "$provider_credentials_json")
-          jq -n \
-            --arg componentPath "$GITHUB_WORKSPACE" \
-            --arg bundlePath "$bundle_abs" \
-            --arg bundlePathInRepo "$bundle_path_in_repo_value" \
-            --arg bundleRepo "$bundle_repo_value" \
-            --arg bundleRef "$bundle_ref_value" \
-            --arg agentSlug "$AGENT_SLUG" \
-            --arg pipelineSlug "$PIPELINE_SLUG" \
-            --arg flowSlug "$FLOW_SLUG" \
-            --arg targetRepo "$TARGET_REPO" \
-            --argjson contextRepositories "$context_repositories_json" \
-            --argjson verificationCommands "$verification_commands_json" \
-            --argjson driftChecks "$drift_checks_json" \
-            --argjson writablePaths "$writable_paths_json" \
-            --argjson workspaceContractChecks "$workspace_contract_checks_json" \
-            --arg prompt "$PROMPT" \
-            --arg provider "$PROVIDER" \
-            --arg model "$MODEL" \
-            --arg runtimeBin "$runtime_bin" \
-            --arg providerPluginHostPath "$provider_plugin_host_path" \
-            --arg engineKey "$ENGINE_KEY" \
-            --arg toolResultsKey "$TOOL_RESULTS_KEY" \
-            --arg runtimeWordPressVersion "$RUNTIME_WORDPRESS_VERSION" \
-            --arg homeboyExtensionsPath "${GITHUB_WORKSPACE}/.ci/homeboy-extensions" \
-            --arg transcriptHostDir "$transcript_host_dir" \
-            --arg transcriptGuestDir "$transcript_guest_dir" \
-            --arg githubAppToken "$GITHUB_APP_TOKEN_VALUE" \
-            --arg githubRepositoryToken "$GITHUB_REPOSITORY_TOKEN_VALUE" \
-            --arg githubRunId "$GITHUB_RUN_ID_VALUE" \
-            --arg githubRunAttempt "$GITHUB_RUN_ATTEMPT_VALUE" \
-            --arg executeWorkflowPath "$execute_workflow_guest_path" \
-            --arg providerRegisterFunction "$provider_register_function" \
-            --arg wpCliToolName "$WP_CLI_TOOL_NAME" \
-            --arg runtimeId "$effective_runtime_id" \
-            --arg runtimeRef "$effective_runtime_ref" \
-            --argjson validationDependencies "$validation_json" \
-            --argjson providerCredentials "$provider_credentials_json" \
-            --argjson providerBenchEnv "$provider_bench_env_json" \
-            --argjson artifactExportConfig "$ARTIFACT_EXPORT_CONFIG" \
-            --argjson successRequiresPr "$SUCCESS_REQUIRES_PR" \
-            --argjson successCompletionOutcomes "$success_completion_outcomes_json" \
-            --argjson maxTurns "$MAX_TURNS" \
-            --argjson stepBudget "$STEP_BUDGET" \
-            --argjson timeBudgetMs "$TIME_BUDGET_MS" \
-            --argjson expectedArtifacts "$expected_artifacts_json" \
-            --argjson artifactDeclarations "$artifact_declarations_json" \
-            --argjson dryRun "$DRY_RUN" \
-            --argjson extraWpConfigDefines "$extra_wp_config_defines_json" \
-            --argjson runtimeMounts "$runtime_mounts_json" \
-            --argjson runtimeOverlays "$runtime_overlays_json" \
-            --argjson executeWorkflowMounts "$execute_workflow_mounts_json" \
-            --argjson runnerWorkspaceMounts "$runner_workspace_mounts_json" \
-            --argjson workloadRunBefore "$workload_run_before_json" \
-            --argjson workloadRunAfter "$workload_run_after_json" \
-            --argjson dailyMemoryEnabled "$DAILY_MEMORY_ENABLED" \
-            --argjson disableDatamachineDirectives "$DISABLE_DATAMACHINE_DIRECTIVES" \
-            --argjson extraRequiredAbilities "$extra_required_abilities_json" \
-            --argjson allowedRepos "$effective_allowed_repos_json" \
-            --argjson abilityTools "$ability_tools_json" \
-            --argjson toolRecorders "$tool_recorders_json" \
-            --argjson enableTerminalActions "$ENABLE_TERMINAL_ACTIONS" \
-            --argjson pipelineStepPatches "$pipeline_step_patches_json" \
-            --argjson flowStepPatches "$flow_step_patches_json" \
-            --argjson runnerWorkspace "$runner_workspace_json" \
-            --argjson rules "$rules_json" \
-            --argjson generalRules "$general_rules_json" \
-            --argjson taskRules "$task_rules_json" \
-            --argjson probes "$probes_json" \
-            --argjson wpGymBenchmarkMode "$WP_GYM_BENCHMARK_MODE" \
-            '{
-              component_id: "datamachine-agent-ci-driver",
-              component_path: $componentPath,
-              workload_id: $flowSlug,
-              workload_label: ("Run " + $agentSlug + " Data Machine agent"),
-              validation_dependencies: $validationDependencies,
-              runtime_id: $runtimeId,
-              runtime_ref: $runtimeRef,
-              runtime_wordpress_version: $runtimeWordPressVersion,
-              runtime_mounts: ([
-                {
-                  type: "file",
-                  source: ($homeboyExtensionsPath + "/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php"),
-                  target: "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php",
-                  mode: "readonly"
-                }
-              ] + $runtimeMounts + $executeWorkflowMounts + $runnerWorkspaceMounts),
-              wp_config_defines: $extraWpConfigDefines,
-              runtime_overlays: $runtimeOverlays,
-              workload_run_before: $workloadRunBefore,
-              workload_run_after: $workloadRunAfter,
-              required_abilities: (((if $executeWorkflowPath != "" then ["datamachine/import-agent", "datamachine/execute-workflow", "datamachine/drain-job"] else ["datamachine/import-agent", "datamachine/run-flow", "datamachine/drain-job"] end) + $extraRequiredAbilities) | reduce .[] as $ability ([]; if index($ability) then . else . + [$ability] end)),
-              bundle_path: $bundlePath,
-              bundle_repo: $bundleRepo,
-              bundle_ref: $bundleRef,
-              bundle_path_in_repo: $bundlePathInRepo,
-              agent_slug: $agentSlug,
-              pipeline_slug: $pipelineSlug,
-              flow_slug: $flowSlug,
-              provider: $provider,
-              model: $model,
-              provider_register_function: $providerRegisterFunction,
-              provider_credentials: $providerCredentials,
-              runtime_bin: $runtimeBin,
-              runtime_components: ({
-                runtime: ($componentPath + "/.ci/wp-codebox/packages/wordpress-plugin"),
-                agents_api: ($componentPath + "/.ci/agents-api"),
-                data_machine: ($componentPath + "/.ci/data-machine"),
-                data_machine_code: ($componentPath + "/.ci/data-machine-code")
-              }),
-              provider_plugin_paths: (if $providerPluginHostPath != "" then [$providerPluginHostPath] else [] end),
-              github_token_env: "HOMEBOY_GITHUB_APP_TOKEN",
-              github_repository_token_env: "GITHUB_TOKEN",
-              github_profile_id: ($agentSlug + "-ci"),
-              target_repo: $targetRepo,
-              context_repositories: $contextRepositories,
-              verification_commands: $verificationCommands,
-              drift_checks: $driftChecks,
-              writable_paths: $writablePaths,
-              workspace_contract_checks: $workspaceContractChecks,
-              host_runner_lifecycle: true,
-              datamachine_code_policy_attestation: {
-                schema: "homeboy/datamachine-agent-ci-dmc-policy/v1",
-                target_repo: $targetRepo,
-                write_boundary: $targetRepo,
-                context_repositories: $contextRepositories,
-                context_repository_api: {
-                  upstream_issue: "https://github.com/Extra-Chill/data-machine-code/issues/617",
-                  status: (if ($contextRepositories | length) > 0 then "blocked_until_available" else "not_requested" end)
-                }
-              },
-              allowed_repos: (if ($allowedRepos | length) > 0 then $allowedRepos else [$targetRepo] end),
-              engine_key: $engineKey,
-              tool_results_key: $toolResultsKey,
-              enable_terminal_actions: $enableTerminalActions,
-              wp_cli_tool_name: $wpCliToolName,
-              max_turns: $maxTurns,
-              prompt: $prompt,
-              step_budget: $stepBudget,
-              time_budget_ms: $timeBudgetMs,
-              expected_artifacts: $expectedArtifacts,
-              artifact_declarations: $artifactDeclarations,
-              ability_tools: $abilityTools,
-              tool_recorders: $toolRecorders,
-              pipeline_step_patches: $pipelineStepPatches,
-              flow_step_patches: $flowStepPatches,
-              runner_workspace: $runnerWorkspace,
-              rules: $rules,
-              general_rules: $generalRules,
-              task_rules: $taskRules,
-              probes: $probes,
-              wp_gym_eval: {
-                benchmark_mode: $wpGymBenchmarkMode
-              },
-              execute_workflow_path: $executeWorkflowPath,
-              success_requires_pr: $successRequiresPr,
-              success_completion_outcomes: $successCompletionOutcomes,
-              artifact_export: ({
-                enabled: true,
-                only_when_no_pr: true,
-                repo: $targetRepo,
-                path_prefix: $bundlePathInRepo,
-                include_job_artifacts: false,
-                branch_template: "agent-artifacts/{agent_slug}-{run_id}-{provider}-{model}-{job_id}",
-                commit_message_template: "chore: persist {type} artifact",
-                pr_title_template: "[{agent_slug}] {task_id} - {model_label} - {result_label}",
-                pr_body_template: "## Result\n{result_table}\n\n## Checks\n{checks_table}\n\n## Tools\n{tools_table}\n\n## Review Artifacts\n{links_table}\n"
-              } * $artifactExportConfig),
-              dry_run: $dryRun,
-              transcript_dir: $transcriptGuestDir,
-              transcript_host_dir: $transcriptHostDir,
-              bench_env: ({
-                GITHUB_TOKEN: $githubRepositoryToken,
-                HOMEBOY_GITHUB_APP_TOKEN: $githubAppToken,
-                GITHUB_RUN_ID: $githubRunId,
-                GITHUB_RUN_ATTEMPT: $githubRunAttempt
-              } + $providerBenchEnv)
-            } + (if $dailyMemoryEnabled then {daily_memory_enabled: true} else {} end) + (if $disableDatamachineDirectives then {disable_datamachine_directives: true} else {} end)' > "$config_path"
-          printf 'config_path=%s\n' "$config_path" >> "$GITHUB_OUTPUT"
-          printf 'transcript_host_dir=%s\n' "$transcript_host_dir" >> "$GITHUB_OUTPUT"
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/build-runner-config.cjs
 
       - name: Run Data Machine agent
         if: ${{ inputs.run_agent }}
@@ -1168,64 +648,16 @@ jobs:
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
           ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
-        run: |
-          set -euo pipefail
-          if [ "$ENGINE_DATA_OUTPUTS" = "{}" ] || [ -z "$ENGINE_DATA_OUTPUTS" ]; then
-            printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
-          projected="{}"
-          while IFS=$'\t' read -r key path; do
-            [ -n "$key" ] || continue
-            jq_path="$path"
-            case "$jq_path" in .*) ;; *) jq_path=".$jq_path" ;; esac
-            value="$(jq -c "($jq_path) // null" <<< "$scenario_json")"
-            projected="$(jq -c --arg key "$key" --argjson value "$value" '. + {($key): $value}' <<< "$projected")"
-          done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<< "$ENGINE_DATA_OUTPUTS")
-          {
-            printf 'engine_data_json<<EOF\n'
-            printf '%s\n' "$projected"
-            printf 'EOF\n'
-          } >> "$GITHUB_OUTPUT"
+          FLOW_SLUG: ${{ inputs.flow_slug }}
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/project-engine-data.cjs
 
       - name: Assert success
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
-        run: |
-          set -euo pipefail
-          scenario_json="$(jq -ec --arg scenario "${{ inputs.flow_slug }}" '.scenarios[] | select(.id == $scenario)' "$RESULTS_FILE")"
-          job_status="$(jq -r '.metadata.job_status // ""' <<< "$scenario_json")"
-          success_status="$(jq -r '.metadata.success_status // ""' <<< "$scenario_json")"
-          error_message="$(jq -r '.metadata.error_message // ""' <<< "$scenario_json")"
-          completion_outcome_satisfied="$(jq -r 'if .metadata.completion_outcome_satisfied == true then "true" else "false" end' <<< "$scenario_json")"
-          no_changes_allowed="${{ inputs.success_requires_pr && 'false' || 'true' }}"
-
-          printf 'job_status:                      %s\n' "$job_status"
-          printf 'success_status:                  %s\n' "$success_status"
-          printf 'error_message:                   %s\n' "$error_message"
-          printf 'completion_outcome_satisfied:    %s\n' "$completion_outcome_satisfied"
-          printf 'no_changes_allowed:              %s\n' "$no_changes_allowed"
-
-          if [ -n "$error_message" ]; then
-            printf 'ERROR: scenario %s completed with error_message=%s\n' \
-              "${{ inputs.flow_slug }}" \
-              "$error_message" >&2
-            exit 1
-          fi
-
-          if [ "$success_status" = "pr_opened" ] || [ "$completion_outcome_satisfied" = "true" ] || { [ "$success_status" = "no_changes" ] && [ "$no_changes_allowed" = "true" ]; }; then
-            exit 0
-          fi
-
-          printf 'ERROR: scenario %s expected opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=%s success_status=%s completion_outcome_satisfied=%s no_changes_allowed=%s\n' \
-            "${{ inputs.flow_slug }}" \
-            "$job_status" \
-            "$success_status" \
-            "$completion_outcome_satisfied" \
-            "$no_changes_allowed" >&2
-          exit 1
+          FLOW_SLUG: ${{ inputs.flow_slug }}
+          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/assert-success.cjs
 
       - name: Resolve transcript artifact path
         id: transcript-artifact
@@ -1235,22 +667,7 @@ jobs:
           FLOW_SLUG: ${{ inputs.flow_slug }}
           TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
           TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
-        run: |
-          set -euo pipefail
-          transcript_path=""
-          if [ -n "$TRANSCRIPT_JSON" ] && [ -f "$TRANSCRIPT_JSON" ]; then
-            transcript_path="$TRANSCRIPT_JSON"
-          elif [ -n "$TRANSCRIPT_JSON" ] && [ -n "$TRANSCRIPT_HOST_DIR" ]; then
-            candidate="${TRANSCRIPT_HOST_DIR}/$(basename "$TRANSCRIPT_JSON")"
-            if [ -f "$candidate" ]; then
-              transcript_path="$candidate"
-            fi
-          fi
-          if [ -z "$transcript_path" ]; then
-            echo "Transcript artifact file not found for path: $TRANSCRIPT_JSON"
-            exit 0
-          fi
-          printf 'path=%s\n' "$transcript_path" >> "$GITHUB_OUTPUT"
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/artifacts-and-comments.cjs resolve-transcript
 
       - name: Upload transcript artifact
         if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
@@ -1285,19 +702,12 @@ jobs:
           JOB_STATUS: ${{ steps.extract.outputs.job_status }}
           TRANSCRIPT_ARTIFACT_NAME: ${{ inputs.transcript_artifact_name }}
           ENGINE_DATA_JSON: ${{ steps.engine-data.outputs.engine_data_json }}
+        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/artifacts-and-comments.cjs prepare-pr-comment
+
+      - name: Comment prepared PR summary
+        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         run: |
           set -euo pipefail
-          body_file="${RUNNER_TEMP}/datamachine-agent-comment.md"
-          {
-            printf '## Data Machine Agent CI\n\n'
-            printf -- '- Agent: `%s`\n' "$AGENT_SLUG"
-            printf -- '- Flow: `%s`\n' "$FLOW_SLUG"
-            printf -- '- Job status: `%s`\n' "${JOB_STATUS:-unknown}"
-            if [ -n "$TRANSCRIPT_ARTIFACT_NAME" ]; then
-              printf -- '- Transcript artifact: `%s`\n' "$TRANSCRIPT_ARTIFACT_NAME"
-            fi
-            if [ -n "$ENGINE_DATA_JSON" ] && [ "$ENGINE_DATA_JSON" != "{}" ]; then
-              printf -- '- Engine data: `%s`\n' "$ENGINE_DATA_JSON"
-            fi
-          } > "$body_file"
-          gh pr comment "${{ github.event.pull_request.number }}" --body-file "$body_file"
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file "${RUNNER_TEMP}/datamachine-agent-comment.md"

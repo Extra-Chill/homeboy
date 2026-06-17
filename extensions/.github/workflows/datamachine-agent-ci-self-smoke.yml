@@ -13,6 +13,7 @@ jobs:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
+      homeboy_extensions_ref: ${{ github.sha }}
       agent_slug: self-smoke-agent
       pipeline_slug: self-smoke-pipeline
       flow_slug: self-smoke-flow
@@ -36,6 +37,7 @@ jobs:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
+      homeboy_extensions_ref: ${{ github.sha }}
       agent_slug: self-smoke-agent
       pipeline_slug: self-smoke-pipeline
       flow_slug: self-smoke-generic-provider-flow
@@ -65,6 +67,7 @@ jobs:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
+      homeboy_extensions_ref: ${{ github.sha }}
       agent_slug: self-smoke-agent
       pipeline_slug: self-smoke-pipeline
       flow_slug: self-smoke-wp-codebox-flow

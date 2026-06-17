@@ -1,0 +1,142 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import assert from 'node:assert/strict';
+
+const repoRoot = path.resolve(import.meta.dirname, '..');
+const scriptsDir = path.join(repoRoot, '.github/scripts/datamachine-agent-ci');
+
+function run(script, args = [], env = {}) {
+  const result = spawnSync(process.execPath, [path.join(scriptsDir, script), ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, ...env },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, `${script} failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+  return result.stdout;
+}
+
+function readOutput(file) {
+  return fs.readFileSync(file, 'utf8');
+}
+
+const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'datamachine-agent-ci-'));
+const workspace = path.join(tempRoot, 'component');
+const runnerTemp = path.join(tempRoot, 'runner');
+fs.mkdirSync(path.join(workspace, '.ci/homeboy-extensions/wordpress/tests/fixtures/datamachine-agent-ci-driver'), { recursive: true });
+fs.mkdirSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist'), { recursive: true });
+fs.mkdirSync(path.join(workspace, '.ci/wp-codebox/packages/wordpress-plugin'), { recursive: true });
+fs.mkdirSync(path.join(workspace, '.ci/agents-api'), { recursive: true });
+fs.mkdirSync(path.join(workspace, '.ci/data-machine'), { recursive: true });
+fs.mkdirSync(path.join(workspace, '.ci/data-machine-code'), { recursive: true });
+fs.mkdirSync(runnerTemp, { recursive: true });
+fs.writeFileSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js'), '');
+fs.writeFileSync(path.join(workspace, '.ci/homeboy-extensions/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php'), '');
+
+const githubOutput = path.join(tempRoot, 'github-output.txt');
+run('auth.cjs', ['resolve-token-scope'], {
+  GITHUB_OUTPUT: githubOutput,
+  TARGET_REPO: 'Extra-Chill/homeboy-extensions',
+  CONTEXT_REPOSITORIES: '[{"repo":"Extra-Chill/data-machine","ref":"main"}]',
+});
+assert.match(readOutput(githubOutput), /owner=Extra-Chill/);
+assert.match(readOutput(githubOutput), /repositories=homeboy-extensions,data-machine/);
+
+const dependencyPlan = JSON.parse(run('materialize-dependencies.cjs', ['--print-plan'], {
+  VALIDATION_DEPENDENCIES: 'Extra-Chill/example@main,Extra-Chill/example@main',
+  INCLUDE_AGENT_RUNTIME_DEPENDENCIES: 'true',
+  AGENT_RUNTIME: 'wp-codebox',
+  AGENT_RUNTIME_REF: 'main',
+  AGENTS_API_REF: 'main',
+  DATA_MACHINE_REF: 'main',
+  DATA_MACHINE_CODE_REF: 'main',
+  OPENAI_PROVIDER_REF: 'trunk',
+  PROVIDER: 'openai',
+  PROVIDER_PLUGIN: '{}',
+}));
+assert.equal(dependencyPlan.filter((entry) => entry.repo === 'Extra-Chill/example').length, 1);
+assert.ok(dependencyPlan.some((entry) => entry.repo === 'WordPress/ai-provider-for-openai'));
+
+fs.writeFileSync(githubOutput, '');
+run('build-runner-config.cjs', [], {
+  GITHUB_OUTPUT: githubOutput,
+  GITHUB_WORKSPACE: workspace,
+  RUNNER_TEMP: runnerTemp,
+  GITHUB_SHA: 'abc123',
+  AGENT_SLUG: 'agent',
+  PIPELINE_SLUG: 'pipeline',
+  FLOW_SLUG: 'flow',
+  BUNDLE_PATH: 'bundle',
+  TARGET_REPO: 'Extra-Chill/homeboy-extensions',
+  CONTEXT_REPOSITORIES: '[{"repo":"Extra-Chill/data-machine","paths":["src"]}]',
+  VERIFICATION_COMMANDS: '["npm test"]',
+  DRIFT_CHECKS: '[]',
+  WRITABLE_PATHS: 'src,tests',
+  WORKSPACE_CONTRACT_CHECKS: '{}',
+  PROVIDER: 'openai',
+  MODEL: 'gpt-5.5',
+  AGENT_RUNTIME: 'wp-codebox',
+  AGENT_RUNTIME_REF: 'main',
+  SUCCESS_REQUIRES_PR: 'true',
+  SUCCESS_COMPLETION_OUTCOMES: '[]',
+  MAX_TURNS: '12',
+  STEP_BUDGET: '16',
+  TIME_BUDGET_MS: '600000',
+  EXPECTED_ARTIFACTS: '[]',
+  ARTIFACT_DECLARATIONS: '[]',
+  ARTIFACT_EXPORT_CONFIG: '{}',
+  RULES: '{}',
+  GENERAL_RULES: '[]',
+  TASK_RULES: '[]',
+  PROBES: '{}',
+  WP_GYM_BENCHMARK_MODE: 'false',
+  DRY_RUN: 'true',
+  EXTRA_WP_CONFIG_DEFINES: '{}',
+  RUNTIME_MOUNTS: '[]',
+  RUNTIME_OVERLAYS: '[]',
+  WORKLOAD_RUN_BEFORE: '[]',
+  WORKLOAD_RUN_AFTER: '[]',
+  DAILY_MEMORY_ENABLED: 'false',
+  DISABLE_DATAMACHINE_DIRECTIVES: 'false',
+  EXTRA_REQUIRED_ABILITIES: '[]',
+  APP_TOKEN_REPOS: '',
+  ALLOWED_REPOS: '[]',
+  TOOL_RESULTS_KEY: 'github_tool_results',
+  ABILITY_TOOLS: '[]',
+  TOOL_RECORDERS: '[]',
+  ENABLE_TERMINAL_ACTIONS: 'false',
+  WP_CLI_TOOL_NAME: 'run_wp_cli',
+  PIPELINE_STEP_PATCHES: '[]',
+  FLOW_STEP_PATCHES: '[]',
+  RUNNER_WORKSPACE_CONFIG: '{"enabled":true}',
+  PROVIDER_PLUGIN: '{}',
+});
+const config = JSON.parse(fs.readFileSync(path.join(runnerTemp, 'datamachine-agent-config.json'), 'utf8'));
+assert.equal(config.runtime_id, 'wp-codebox');
+assert.equal(config.runner_workspace.checkout_path, '/workspace/homeboy-extensions');
+assert.deepEqual(config.writable_paths, ['src', 'tests']);
+assert.equal(config.provider_credentials.connectors_ai_openai_api_key, 'OPENAI_API_KEY');
+
+const resultsFile = path.join(tempRoot, 'results.json');
+fs.writeFileSync(resultsFile, JSON.stringify({ scenarios: [{ id: 'flow', metadata: { job_status: 'completed', engine_data: { value: 7 } } }] }));
+fs.writeFileSync(githubOutput, '');
+run('project-engine-data.cjs', [], {
+  GITHUB_OUTPUT: githubOutput,
+  RESULTS_FILE: resultsFile,
+  FLOW_SLUG: 'flow',
+  ENGINE_DATA_OUTPUTS: '{"value":"metadata.engine_data.value"}',
+});
+assert.match(readOutput(githubOutput), /engine_data_json=\{"value":7\}/);
+
+fs.writeFileSync(githubOutput, '');
+const transcript = path.join(tempRoot, 'transcript.json');
+fs.writeFileSync(transcript, '{}');
+run('artifacts-and-comments.cjs', ['resolve-transcript'], {
+  GITHUB_OUTPUT: githubOutput,
+  TRANSCRIPT_JSON: transcript,
+  TRANSCRIPT_HOST_DIR: tempRoot,
+});
+assert.match(readOutput(githubOutput), new RegExp(`path=${transcript.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+fs.rmSync(tempRoot, { recursive: true, force: true });
