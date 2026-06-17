@@ -5,6 +5,7 @@
 
 use crate::core::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -21,12 +22,22 @@ pub struct ArtifactManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactManifestEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub path: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ArtifactManifestProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ArtifactManifestViewer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url_state: Option<ArtifactManifestPublicUrlState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +49,49 @@ pub struct ArtifactManifestEntry {
         skip_serializing_if = "is_empty_metadata"
     )]
     pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifestProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(
+        default = "default_metadata",
+        skip_serializing_if = "is_empty_metadata"
+    )]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifestViewer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<ArtifactManifestViewerLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifestViewerLink {
+    pub kind: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactManifestPublicUrlState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +114,23 @@ impl ArtifactManifest {
             schema: ARTIFACT_MANIFEST_SCHEMA.to_string(),
             artifacts,
         }
+    }
+
+    pub fn artifact_contracts(
+        &self,
+    ) -> Result<Vec<crate::core::artifact_contract::ArtifactContract>> {
+        if self.schema != ARTIFACT_MANIFEST_SCHEMA {
+            return Err(Error::validation_invalid_argument(
+                "schema",
+                format!("expected {ARTIFACT_MANIFEST_SCHEMA}"),
+                Some(self.schema.clone()),
+                None,
+            ));
+        }
+        self.artifacts
+            .iter()
+            .map(ArtifactManifestEntry::to_artifact_contract)
+            .collect()
     }
 
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
@@ -180,6 +251,71 @@ impl ArtifactManifest {
     }
 }
 
+impl ArtifactManifestEntry {
+    pub fn to_artifact_contract(&self) -> Result<crate::core::artifact_contract::ArtifactContract> {
+        validate_entry_shape(self)?;
+        let mut extra = std::collections::BTreeMap::new();
+        if let Some(id) = &self.id {
+            extra.insert("id".to_string(), Value::String(id.clone()));
+        }
+        if let Some(provenance) = &self.provenance {
+            extra.insert(
+                "provenance".to_string(),
+                serde_json::to_value(provenance).map_err(|e| {
+                    Error::internal_json(
+                        e.to_string(),
+                        Some("serialize artifact provenance".to_string()),
+                    )
+                })?,
+            );
+        }
+        if let Some(viewer) = &self.viewer {
+            extra.insert(
+                "viewer".to_string(),
+                serde_json::to_value(viewer).map_err(|e| {
+                    Error::internal_json(
+                        e.to_string(),
+                        Some("serialize artifact viewer".to_string()),
+                    )
+                })?,
+            );
+        }
+        if let Some(public_url_state) = &self.public_url_state {
+            extra.insert(
+                "public_url_state".to_string(),
+                serde_json::to_value(public_url_state).map_err(|e| {
+                    Error::internal_json(
+                        e.to_string(),
+                        Some("serialize artifact public URL state".to_string()),
+                    )
+                })?,
+            );
+        }
+
+        Ok(crate::core::artifact_contract::ArtifactContract {
+            schema: crate::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA.to_string(),
+            kind: self.kind.clone(),
+            artifact_type: "file".to_string(),
+            path: Some(self.path.clone()),
+            url: None,
+            public_url: self.public_url.clone(),
+            label: self.label.clone(),
+            size_bytes: self.size_bytes,
+            sha256: self.sha256.clone(),
+            metadata: self.metadata.clone(),
+            extra,
+        })
+    }
+
+    pub fn to_artifact_ref(
+        &self,
+        id: impl Into<String>,
+        run_id: impl Into<String>,
+    ) -> Result<crate::core::artifact_ref::ArtifactRef> {
+        Ok(self.to_artifact_contract()?.to_artifact_ref(id, run_id))
+    }
+}
+
 fn manifest_path(root: impl AsRef<Path>) -> PathBuf {
     root.as_ref().join(ARTIFACT_MANIFEST_FILE)
 }
@@ -242,9 +378,14 @@ fn collect_manifest_entries(
                 continue;
             }
             artifacts.push(ArtifactManifestEntry {
+                id: None,
                 kind: "file".to_string(),
                 label: None,
                 content_type: crate::core::artifact_metadata::content_type_from_path(&path),
+                provenance: None,
+                viewer: None,
+                public_url: None,
+                public_url_state: None,
                 size_bytes: Some(metadata.len()),
                 sha256: Some(crate::core::artifact_metadata::sha256_file(&path)?),
                 redaction: None,
@@ -257,6 +398,9 @@ fn collect_manifest_entries(
 }
 
 fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
+    if let Some(id) = &entry.id {
+        validate_non_empty("id", id)?;
+    }
     validate_non_empty("path", &entry.path)?;
     validate_non_empty("kind", &entry.kind)?;
     if let Some(label) = &entry.label {
@@ -264,6 +408,33 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
     }
     if let Some(content_type) = &entry.content_type {
         validate_non_empty("content_type", content_type)?;
+    }
+    if let Some(public_url) = &entry.public_url {
+        validate_non_empty("public_url", public_url)?;
+    }
+    if let Some(provenance) = &entry.provenance {
+        validate_optional_non_empty("provenance.producer", provenance.producer.as_deref())?;
+        validate_optional_non_empty("provenance.run_id", provenance.run_id.as_deref())?;
+        validate_optional_non_empty("provenance.source", provenance.source.as_deref())?;
+        if !provenance.metadata.is_object() {
+            return Err(Error::validation_invalid_argument(
+                "provenance.metadata",
+                "must be an object",
+                Some(entry.path.clone()),
+                None,
+            ));
+        }
+    }
+    if let Some(viewer) = &entry.viewer {
+        validate_optional_non_empty("viewer.url", viewer.url.as_deref())?;
+        for link in &viewer.links {
+            validate_non_empty("viewer.links.kind", &link.kind)?;
+            validate_non_empty("viewer.links.url", &link.url)?;
+        }
+    }
+    if let Some(public_url_state) = &entry.public_url_state {
+        validate_optional_non_empty("public_url_state.url", public_url_state.url.as_deref())?;
+        validate_optional_non_empty("public_url_state.error", public_url_state.error.as_deref())?;
     }
     if let Some(sha256) = &entry.sha256 {
         if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -282,6 +453,13 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
             Some(entry.path.clone()),
             None,
         ));
+    }
+    Ok(())
+}
+
+fn validate_optional_non_empty(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        validate_non_empty(field, value)?;
     }
     Ok(())
 }
@@ -404,10 +582,15 @@ mod tests {
         fs::create_dir_all(dir.path().join("logs")).expect("mkdir");
         fs::write(dir.path().join("logs/output.log"), "hello").expect("write artifact");
         let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+            id: None,
             path: "logs/output.log".to_string(),
             kind: "log".to_string(),
             label: Some("Output log".to_string()),
             content_type: None,
+            provenance: None,
+            viewer: None,
+            public_url: None,
+            public_url_state: None,
             size_bytes: None,
             sha256: None,
             redaction: Some(ArtifactRedactionState::Redacted),
@@ -430,10 +613,15 @@ mod tests {
     fn rejects_parent_path_escape_before_touching_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+            id: None,
             path: "../secret.txt".to_string(),
             kind: "log".to_string(),
             label: None,
             content_type: None,
+            provenance: None,
+            viewer: None,
+            public_url: None,
+            public_url_state: None,
             size_bytes: None,
             sha256: None,
             redaction: None,
@@ -478,10 +666,15 @@ mod tests {
             std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt"))
                 .expect("symlink");
             let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+                id: None,
                 path: "link.txt".to_string(),
                 kind: "log".to_string(),
                 label: None,
                 content_type: None,
+                provenance: None,
+                viewer: None,
+                public_url: None,
+                public_url_state: None,
                 size_bytes: None,
                 sha256: None,
                 redaction: None,
@@ -514,5 +707,103 @@ mod tests {
             manifest.artifacts[0].content_type.as_deref(),
             Some("application/json")
         );
+    }
+
+    #[test]
+    fn validates_descriptor_fields_and_projects_artifact_contracts() {
+        let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+            id: Some("artifact-1".to_string()),
+            path: "reports/summary.json".to_string(),
+            kind: "summary".to_string(),
+            label: Some("Summary".to_string()),
+            content_type: Some("application/json".to_string()),
+            provenance: Some(ArtifactManifestProvenance {
+                producer: Some("homeboy-extension".to_string()),
+                run_id: Some("run-1".to_string()),
+                source: Some("invocation".to_string()),
+                metadata: json!({ "step": "report" }),
+            }),
+            viewer: Some(ArtifactManifestViewer {
+                url: Some("https://viewer.example.test/report".to_string()),
+                links: vec![ArtifactManifestViewerLink {
+                    kind: "report-viewer".to_string(),
+                    url: "https://viewer.example.test/report".to_string(),
+                    replay: Some(json!({ "mode": "summary" })),
+                }],
+            }),
+            public_url: Some("https://artifacts.example.test/reports/summary.json".to_string()),
+            public_url_state: Some(ArtifactManifestPublicUrlState {
+                url: Some("https://artifacts.example.test/reports/summary.json".to_string()),
+                reachable: Some(true),
+                status_code: Some(200),
+                error: None,
+            }),
+            size_bytes: Some(17),
+            sha256: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
+            redaction: Some(ArtifactRedactionState::Raw),
+            metadata: json!({ "format": "homeboy-proof" }),
+        }]);
+
+        let contracts = manifest.artifact_contracts().expect("contracts");
+
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(
+            contracts[0].schema,
+            crate::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA
+        );
+        assert_eq!(contracts[0].kind, "summary");
+        assert_eq!(contracts[0].path.as_deref(), Some("reports/summary.json"));
+        assert_eq!(
+            contracts[0].public_url.as_deref(),
+            Some("https://artifacts.example.test/reports/summary.json")
+        );
+        assert_eq!(contracts[0].label.as_deref(), Some("Summary"));
+        assert_eq!(contracts[0].size_bytes, Some(17));
+        assert_eq!(contracts[0].metadata, json!({ "format": "homeboy-proof" }));
+        assert_eq!(contracts[0].extra["id"], "artifact-1");
+        assert_eq!(
+            contracts[0].extra["provenance"]["producer"],
+            "homeboy-extension"
+        );
+        assert_eq!(
+            contracts[0].extra["viewer"]["links"][0]["kind"],
+            "report-viewer"
+        );
+        assert_eq!(contracts[0].extra["public_url_state"]["reachable"], true);
+    }
+
+    #[test]
+    fn descriptor_projection_rejects_empty_viewer_links() {
+        let entry = ArtifactManifestEntry {
+            id: None,
+            path: "report.json".to_string(),
+            kind: "summary".to_string(),
+            label: None,
+            content_type: None,
+            provenance: None,
+            viewer: Some(ArtifactManifestViewer {
+                url: None,
+                links: vec![ArtifactManifestViewerLink {
+                    kind: " ".to_string(),
+                    url: "https://viewer.example.test/report".to_string(),
+                    replay: None,
+                }],
+            }),
+            public_url: None,
+            public_url_state: None,
+            size_bytes: None,
+            sha256: None,
+            redaction: None,
+            metadata: json!({}),
+        };
+
+        let err = entry
+            .to_artifact_contract()
+            .expect_err("invalid viewer link should fail");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("viewer.links.kind"));
     }
 }

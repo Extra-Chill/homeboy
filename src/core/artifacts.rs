@@ -19,8 +19,9 @@ pub use super::artifact_links::{
 };
 pub use super::artifact_manifest::{
     manifest_for_existing_files, read_manifest_from_root, write_manifest_to_root, ArtifactManifest,
-    ArtifactManifestEntry, ArtifactRedactionState, ValidatedArtifactManifestEntry,
-    ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
+    ArtifactManifestEntry, ArtifactManifestProvenance, ArtifactManifestPublicUrlState,
+    ArtifactManifestViewer, ArtifactManifestViewerLink, ArtifactRedactionState,
+    ValidatedArtifactManifestEntry, ARTIFACT_MANIFEST_FILE, ARTIFACT_MANIFEST_SCHEMA,
 };
 pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
