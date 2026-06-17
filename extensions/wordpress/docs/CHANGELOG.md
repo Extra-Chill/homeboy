@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.9] - 2026-06-17
+
+### Changed
+- split datamachine agent ci helpers
+
 ## [3.3.8] - 2026-06-17
 
 ### Fixed
