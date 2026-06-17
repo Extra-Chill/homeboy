@@ -99,6 +99,70 @@ the workload should be configured by the repo instead of living under
 bootstrap, `wp_codebox_blueprint`, dependency mounts, and component load through
 a generated WP Codebox recipe.
 
+### Portable workload profile helper
+
+Consumers that need the same WordPress workload shape across GitHub Actions,
+bench scripts, and agent runners can describe the workload once with schema
+`homeboy/wordpress-workload-profile/v1` and normalize it through
+`wordpress/lib/wordpress-workload-profile.js`. The helper maps a generic profile
+onto the reusable workflow inputs Homeboy Extensions already owns:
+
+- `dependencies` become `validation_dependencies` entries.
+- `wp_config_defines` becomes `extra_wp_config_defines` JSON.
+- `mounts` becomes `runtime_mounts` JSON.
+- `run_before` and `run_after` become workload lifecycle hook arrays.
+- `workloads` becomes `wp_codebox_workloads` JSON.
+- `visual_comparisons` append generic `visual-compare` verifier steps to
+  `workload_run_after`.
+
+Example profile:
+
+```json
+{
+  "schema": "homeboy/wordpress-workload-profile/v1",
+  "id": "static-import-visual-check",
+  "label": "Static import visual check",
+  "dependencies": ["example/static-importer@main"],
+  "mounts": [
+    "/tmp/source:/wordpress/wp-content/uploads/source:readonly"
+  ],
+  "run_before": [
+    { "type": "wp-cli", "command": "plugin install safe-svg --activate" }
+  ],
+  "workloads": [
+    {
+      "id": "import-and-snapshot",
+      "run": [
+        {
+          "type": "ability",
+          "ability": "example/import-static-site",
+          "input": { "source": "/wordpress/wp-content/uploads/source" }
+        }
+      ],
+      "artifacts": {
+        "import_report": {
+          "path": "wp-content/uploads/import-report.json",
+          "kind": "json"
+        }
+      }
+    }
+  ],
+  "visual_comparisons": [
+    {
+      "id": "home-page",
+      "source_url": "https://source.example/",
+      "candidate_url": "https://candidate.example/",
+      "threshold": 0.01
+    }
+  ]
+}
+```
+
+The profile is intentionally product-agnostic: import, fixture setup, crawling,
+and verification are ordinary WordPress recipe steps, while visual comparison is
+carried as a verifier step that a runtime can implement with its own browser
+capture and artifact policy.
+
 ```json
 {
   "extensions": {
