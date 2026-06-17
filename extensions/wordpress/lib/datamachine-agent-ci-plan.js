@@ -1,8 +1,17 @@
 'use strict';
 
+/**
+ * Internal dependencies
+ */
 const {
   datamachineAgentCiCodeboxExecutorConfig,
 } = require('./datamachine-agent-ci-codebox-adapter');
+const {
+  AGENT_TASK_RUNNER_SPEC_SCHEMA,
+  agentTaskRequestFromRunnerSpec,
+  agentTaskRunnerSpec,
+  validateAgentTaskRunnerSpec,
+} = require('./agent-task-runner-spec');
 
 const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
@@ -49,8 +58,11 @@ function datamachineAgentCiBundleTaskRequest(options = {}) {
 function datamachineAgentCiAbilityTaskRequest(options = {}) {
   const taskId = requiredString(options.taskId || options.task_id, 'taskId');
   const ability = requiredString(options.ability, 'ability');
-  const config = datamachineAgentCiTaskExecutorConfig(options);
-  const secretEnv = normalizeArray(config.secret_env);
+  const runnerSpec = datamachineAgentCiRunnerSpec({
+    ...options,
+    ability,
+  });
+  const runnerRequest = agentTaskRequestFromRunnerSpec({ runnerSpec });
 
   return stripUndefined({
     schema: AGENT_TASK_REQUEST_SCHEMA,
@@ -60,21 +72,26 @@ function datamachineAgentCiAbilityTaskRequest(options = {}) {
     cwd: options.cwd,
     repo: options.repo,
     workspace: options.workspace,
-    executor: {
-      backend: options.backend || 'codebox',
-      ...(secretEnv.length > 0 ? { secret_env: secretEnv } : {}),
-      config,
-    },
+    executor: runnerRequest.executor,
     instructions: options.instructions || '',
     inputs: {
       ...(options.inputs || {}),
       ...(options.title ? { title: options.title } : {}),
     },
-    limits: {
-      task_timeout_seconds: config.task_timeout_seconds || options.taskTimeoutSeconds || options.task_timeout_seconds || 900,
-      ...(options.limits || {}),
-    },
-    expected_artifacts: normalizeArray(options.expectedArtifacts || options.expected_artifacts),
+    limits: runnerRequest.limits,
+    expected_artifacts: runnerRequest.expected_artifacts,
+  });
+}
+
+function datamachineAgentCiRunnerSpec(options = {}) {
+  const config = datamachineAgentCiTaskExecutorConfig(options);
+  return agentTaskRunnerSpec({
+    backend: options.backend || 'codebox',
+    config,
+    secret_env: normalizeArray(config.secret_env),
+    task_timeout_seconds: config.task_timeout_seconds || options.taskTimeoutSeconds || options.task_timeout_seconds || 900,
+    limits: options.limits,
+    expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
   });
 }
 
@@ -147,9 +164,13 @@ function stripUndefined(value) {
 module.exports = {
   AGENT_TASK_PLAN_SCHEMA,
   AGENT_TASK_REQUEST_SCHEMA,
+  AGENT_TASK_RUNNER_SPEC_SCHEMA,
   DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
+  agentTaskRequestFromRunnerSpec,
   datamachineAgentCiAbilityTaskRequest,
   datamachineAgentCiBundleTaskRequest,
   datamachineAgentCiPlan,
+  datamachineAgentCiRunnerSpec,
   datamachineAgentCiTaskExecutorConfig,
+  validateAgentTaskRunnerSpec,
 };

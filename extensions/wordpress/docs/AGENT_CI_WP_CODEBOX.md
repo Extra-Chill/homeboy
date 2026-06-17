@@ -415,6 +415,13 @@ The same Data Machine bundle run can be expressed as a Homeboy agent-task plan,
 which lets `homeboy agent-task run-plan --plan ...` replace a bespoke workflow
 wrapper such as `wp-site-generator`'s site-generation loop:
 
+`homeboy/agent-task-runner-spec/v1` is the normalized runner boundary inside each
+task. It contains only generic execution details: `executor.backend`,
+`executor.config`, optional `executor.secret_env`, `limits`, and
+`expected_artifacts`. Caller-specific policy, evaluation semantics, and workflow
+outputs stay outside this object so a future Homeboy core command can consume the
+same spec without inheriting GitHub Actions glue.
+
 ```json
 {
   "schema": "homeboy/agent-task-plan/v1",
