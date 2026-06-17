@@ -17,6 +17,29 @@ const TASK_AFFECTING_ENV_VARS: &[&str] = &["STUDIO_RUNTIME"];
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
 
+/// Shared deterministic-gate verification fields used by every agent-task
+/// options/report type that runs `--verify` / `--private-verify` gates. Embed
+/// this via `#[serde(flatten)]` so the serialized JSON keeps the historical
+/// flat `verify` / `private_verify` / `private_gate_reveal` shape while the
+/// field group lives in exactly one place.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VerifyGateOptions {
+    /// Deterministic verification commands run after each promotion/apply.
+    #[serde(default)]
+    pub verify: Vec<String>,
+    /// Private deterministic verification commands whose full failure detail is
+    /// gated from follow-up agents.
+    #[serde(default)]
+    pub private_verify: Vec<String>,
+    /// Feedback policy for failed private gates.
+    #[serde(default = "default_private_gate_reveal")]
+    pub private_gate_reveal: AgentTaskGateRevealPolicy,
+}
+
+fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
+    AgentTaskGateRevealPolicy::SummaryOnly
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
     #[serde(default = "gate_report_schema")]

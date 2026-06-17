@@ -9,7 +9,7 @@ use crate::core::agent_task_finalization::{
     finalize_pr, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions, AgentTaskPrRuntimeGuardrails,
     AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use crate::core::agent_task_gate::AgentTaskGateRevealPolicy;
+use crate::core::agent_task_gate::VerifyGateOptions;
 use crate::core::agent_task_lifecycle::{
     self, AgentTaskRunArtifacts, AgentTaskRunLog, AgentTaskRunRecord,
 };
@@ -95,9 +95,9 @@ pub struct AgentTaskLoopServiceOptions {
     pub initial_run_id: String,
     pub to_worktree: String,
     pub provider_command: Option<String>,
-    pub verify: Vec<String>,
-    pub private_verify: Vec<String>,
-    pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    /// Shared deterministic verification gate fields, factored out of the
+    /// per-field duplication that previously spanned the loop/promote types.
+    pub gates: VerifyGateOptions,
     pub max_attempts: u32,
     pub no_finalize: bool,
     pub base: String,
@@ -677,9 +677,7 @@ fn promote_attempt(
         task_id: None,
         artifact_id: None,
         dry_run: false,
-        verify: options.verify.clone(),
-        private_verify: options.private_verify.clone(),
-        private_gate_reveal: options.private_gate_reveal,
+        gates: options.gates.clone(),
         provider_command: options.provider_command.clone(),
     })
 }
@@ -740,7 +738,7 @@ fn finalize_loop_pr(
             ai_model: options.ai_model.clone(),
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
-                targeted_checks_run: options.verify.clone(),
+                targeted_checks_run: options.gates.verify.clone(),
                 targeted_checks_unavailable: None,
                 ci_expected: vec!["Homeboy CI after push".to_string()],
                 manual_reviewer_check: None,

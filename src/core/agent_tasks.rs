@@ -167,7 +167,7 @@ pub mod gate {
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentVariable, AgentTaskGateFailureEvidence,
         AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
-        AgentTaskGateVisibility, AGENT_TASK_GATE_REPORT_SCHEMA,
+        AgentTaskGateVisibility, VerifyGateOptions, AGENT_TASK_GATE_REPORT_SCHEMA,
     };
 }
 
