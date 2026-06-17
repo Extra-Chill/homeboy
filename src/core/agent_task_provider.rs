@@ -32,8 +32,14 @@ pub struct AgentTaskExecutorProvider {
     pub outcome_schema: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_requirements: Vec<AgentTaskProviderSecretRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env_requirements: Vec<AgentTaskProviderSecretEnvRequirement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_materialization: Option<AgentTaskProviderWorkspaceMaterialization>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -53,6 +59,49 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderSecretRequirement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderSecretEnvRequirement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(item)) => vec![item],
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|item| item.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 fn is_false(value: &bool) -> bool {
@@ -210,6 +259,12 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 pub struct AgentTaskProviderWorkspaceMaterialization {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_git: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,8 +377,11 @@ fn provider_requires_cwd_git_checkout_with_providers(
 ) -> bool {
     select_provider_by_backend(providers, backend, selector)
         .and_then(|provider| provider.workspace_materialization.as_ref())
-        .and_then(|materialization| materialization.cwd.as_deref())
-        == Some("git_checkout")
+        .map(|materialization| {
+            materialization.requires_git == Some(true)
+                || materialization.cwd.as_deref() == Some("git_checkout")
+        })
+        .unwrap_or(false)
 }
 
 fn apply_provider_runner_secret_env_contracts_with_providers(
@@ -334,7 +392,7 @@ fn apply_provider_runner_secret_env_contracts_with_providers(
         let Some(provider) = select_provider(providers, request) else {
             continue;
         };
-        for name in provider_runner_secret_env(provider) {
+        for name in provider_secret_env(provider, Some(request)) {
             if !request.executor.secret_env.contains(&name) {
                 request.executor.secret_env.push(name);
             }
@@ -351,21 +409,110 @@ fn provider_runner_secret_env_for_plan_with_providers(
         let Some(provider) = select_provider(providers, request) else {
             continue;
         };
-        names.extend(provider_runner_secret_env(provider));
+        names.extend(provider_secret_env(provider, Some(request)));
     }
     names.sort();
     names.dedup();
     names
 }
 
-fn provider_runner_secret_env(provider: &AgentTaskExecutorProvider) -> Vec<String> {
+fn provider_secret_env(
+    provider: &AgentTaskExecutorProvider,
+    request: Option<&AgentTaskRequest>,
+) -> Vec<String> {
     let mut names = Vec::new();
     for readiness in &provider.runner_readiness {
         names.extend(readiness.secret_env.iter().cloned());
     }
+    for requirement in &provider.secret_requirements {
+        if requirement.required == Some(false) {
+            continue;
+        }
+        if let Some(name) = &requirement.name {
+            names.push(name.clone());
+        }
+        names.extend(requirement.env.iter().cloned());
+    }
+    for requirement in &provider.secret_env_requirements {
+        if requirement_matches_request(requirement.when.as_ref(), request) {
+            names.extend(requirement.env.iter().cloned());
+        }
+    }
+    if let Some(request) = request {
+        if let Some(provider_name) = request
+            .executor
+            .config
+            .get("provider")
+            .and_then(Value::as_str)
+        {
+            if let Some(defaults) = provider.provider_defaults.get(provider_name) {
+                names.extend(provider_config_secret_env(defaults));
+            }
+        }
+    }
     names.sort();
     names.dedup();
     names
+}
+
+fn provider_config_secret_env(config: &Value) -> Vec<String> {
+    let Some(config) = config.as_object() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for key in ["secret_env", "secretEnv"] {
+        match config.get(key) {
+            Some(Value::String(name)) => names.push(name.clone()),
+            Some(Value::Array(items)) => names.extend(
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string)),
+            ),
+            _ => {}
+        }
+    }
+    names
+}
+
+fn requirement_matches_request(when: Option<&Value>, request: Option<&AgentTaskRequest>) -> bool {
+    let Some(when) = when else {
+        return true;
+    };
+    let Some(request) = request else {
+        return false;
+    };
+    let Ok(request_value) = serde_json::to_value(request) else {
+        return false;
+    };
+    condition_matches(when, &request_value)
+}
+
+fn condition_matches(condition: &Value, request: &Value) -> bool {
+    if let Some(any) = condition.get("any").and_then(Value::as_array) {
+        return any.iter().any(|item| condition_matches(item, request));
+    }
+    if let Some(all) = condition.get("all").and_then(Value::as_array) {
+        return all.iter().all(|item| condition_matches(item, request));
+    }
+    let Some(path) = condition.get("path").and_then(Value::as_str) else {
+        return false;
+    };
+    let actual = value_at_contract_path(request, path);
+    match condition.get("equals") {
+        Some(expected) => actual == Some(expected),
+        None => actual.is_some(),
+    }
+}
+
+fn value_at_contract_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    if path == "provider" {
+        return value_at_contract_path(value, "executor.config.provider");
+    }
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
 }
 
 fn default_backend_from_policy(component_id: Option<&str>) -> crate::core::Result<Option<String>> {
@@ -1066,7 +1213,10 @@ mod tests {
             request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
+            secret_requirements: Vec::new(),
+            secret_env_requirements: Vec::new(),
             workspace_materialization: None,
+            provider_defaults: BTreeMap::new(),
             runner_readiness: Vec::new(),
             runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
@@ -1616,6 +1766,26 @@ mod tests {
         let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
         provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
             cwd: Some("git_checkout".to_string()),
+            requires_git: None,
+            write_scope: None,
+            artifact_paths: Vec::new(),
+        });
+
+        assert!(provider_requires_cwd_git_checkout_with_providers(
+            &[provider],
+            "test",
+            None
+        ));
+    }
+
+    #[test]
+    fn provider_workspace_materialization_declares_requires_git_requirement() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
+            cwd: None,
+            requires_git: Some(true),
+            write_scope: Some("artifacts".to_string()),
+            artifact_paths: vec![".homeboy/provider".to_string()],
         });
 
         assert!(provider_requires_cwd_git_checkout_with_providers(
@@ -1630,6 +1800,9 @@ mod tests {
         let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
         provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
             cwd: Some("git_checkout".to_string()),
+            requires_git: None,
+            write_scope: None,
+            artifact_paths: Vec::new(),
         });
 
         assert!(!provider_requires_cwd_git_checkout_with_providers(
@@ -1637,6 +1810,50 @@ mod tests {
             "other",
             None
         ));
+    }
+
+    #[test]
+    fn provider_secret_contracts_are_applied_generically() {
+        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        request.executor.config = json!({ "provider": "codex" });
+        provider.secret_requirements = vec![
+            AgentTaskProviderSecretRequirement {
+                name: Some("REQUIRED_TOKEN".to_string()),
+                required: Some(true),
+                ..AgentTaskProviderSecretRequirement::default()
+            },
+            AgentTaskProviderSecretRequirement {
+                name: Some("OPTIONAL_TOKEN".to_string()),
+                required: Some(false),
+                ..AgentTaskProviderSecretRequirement::default()
+            },
+        ];
+        provider.secret_env_requirements = vec![AgentTaskProviderSecretEnvRequirement {
+            env: vec!["CODEX_TOKEN".to_string()],
+            when: Some(json!({
+                "any": [
+                    { "path": "executor.config.provider", "equals": "codex" },
+                    { "path": "provider", "equals": "codex" }
+                ]
+            })),
+            ..AgentTaskProviderSecretEnvRequirement::default()
+        }];
+        provider.provider_defaults.insert(
+            "codex".to_string(),
+            json!({ "secret_env": ["CODEX_REFRESH_TOKEN"] }),
+        );
+        let mut plan = AgentTaskPlan::new("plan-a", vec![request]);
+
+        apply_provider_runner_secret_env_contracts_with_providers(&mut plan, &[provider]);
+
+        assert_eq!(
+            plan.tasks[0].executor.secret_env,
+            vec![
+                "CODEX_REFRESH_TOKEN".to_string(),
+                "CODEX_TOKEN".to_string(),
+                "REQUIRED_TOKEN".to_string(),
+            ]
+        );
     }
 
     #[test]

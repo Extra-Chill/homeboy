@@ -228,8 +228,37 @@ mod tests {
                 json!({
                     "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
                     "id": "ignored-on-disk",
+                    "name": "Standalone Codex Package",
+                    "version": "1.0.0",
+                    "description": "Standalone runtime package fixture.",
                     "label": "Standalone Codex",
-                    "agent_task_executors": [provider_json("standalone-codex.default", "codex")]
+                    "agent_task_executors": [{
+                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "id": "standalone-codex.default",
+                        "backend": "codex",
+                        "command": "agent-task-provider",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
+                        "workspace_materialization": {
+                            "cwd": "git_checkout",
+                            "requires_git": true,
+                            "write_scope": "artifacts",
+                            "artifact_paths": [".homeboy/codex"]
+                        },
+                        "secret_requirements": [{
+                            "name": "CODEX_TOKEN",
+                            "required": true,
+                            "purpose": "fixture"
+                        }],
+                        "secret_env_requirements": [{
+                            "schema": "homeboy/secret-env-requirement/v1",
+                            "env": ["CODEX_REFRESH_TOKEN"],
+                            "when": { "path": "executor.config.provider", "equals": "codex" }
+                        }],
+                        "provider_defaults": {
+                            "codex": { "secret_env": ["CODEX_REFRESH_TOKEN"] }
+                        }
+                    }]
                 })
                 .to_string(),
             )
@@ -246,6 +275,26 @@ mod tests {
                 Some(runtime_dir.to_str().expect("runtime dir utf-8"))
             );
             assert_eq!(manifests[0].agent_task_executors[0].backend, "codex");
+            let provider = &manifests[0].agent_task_executors[0];
+            let materialization = provider
+                .workspace_materialization
+                .as_ref()
+                .expect("workspace materialization");
+            assert_eq!(materialization.requires_git, Some(true));
+            assert_eq!(materialization.write_scope.as_deref(), Some("artifacts"));
+            assert_eq!(materialization.artifact_paths, vec![".homeboy/codex"]);
+            assert_eq!(
+                provider.secret_requirements[0].name.as_deref(),
+                Some("CODEX_TOKEN")
+            );
+            assert_eq!(
+                provider.secret_env_requirements[0].env,
+                vec!["CODEX_REFRESH_TOKEN"]
+            );
+            assert_eq!(
+                provider.provider_defaults["codex"]["secret_env"][0],
+                "CODEX_REFRESH_TOKEN"
+            );
         });
     }
 }
