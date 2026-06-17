@@ -16,6 +16,10 @@ pub struct SecretEnvPlan {
     pub secret_env_names: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_credentials: BTreeMap<String, SecretEnvProviderCredentialMapping>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_name_mapping: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<SecretEnvStatus>,
     #[serde(default, skip_serializing_if = "SecretEnvRedactionPolicy::is_default")]
     pub redaction: SecretEnvRedactionPolicy,
 }
@@ -124,6 +128,8 @@ impl Default for SecretEnvPlan {
             public_env: BTreeMap::new(),
             secret_env_names: Vec::new(),
             provider_credentials: BTreeMap::new(),
+            env_name_mapping: BTreeMap::new(),
+            status: Vec::new(),
             redaction: SecretEnvRedactionPolicy::default(),
         }
     }
@@ -141,7 +147,37 @@ impl SecretEnvPlan {
             .provider_credentials
             .values()
             .flat_map(|mapping| mapping.secret_env.iter().cloned());
-        normalize_names(self.secret_env_names.iter().cloned().chain(mapped_names))
+        let env_name_mapping_names = self
+            .env_name_mapping
+            .values()
+            .flat_map(|names| names.iter().cloned());
+        normalize_names(
+            self.secret_env_names
+                .iter()
+                .cloned()
+                .chain(mapped_names)
+                .chain(env_name_mapping_names),
+        )
+    }
+
+    pub fn extend_secret_env_names(&mut self, names: impl IntoIterator<Item = String>) {
+        self.secret_env_names = normalize_names(self.secret_env_names.iter().cloned().chain(names));
+    }
+
+    pub fn map_env_names(
+        &mut self,
+        key: impl Into<String>,
+        names: impl IntoIterator<Item = String>,
+    ) {
+        let names = normalize_names(names);
+        if !names.is_empty() {
+            self.env_name_mapping.insert(key.into(), names);
+        }
+    }
+
+    pub fn with_status(mut self, status: impl IntoIterator<Item = SecretEnvStatus>) -> Self {
+        self.status = status.into_iter().collect();
+        self
     }
 
     pub fn materialize(
@@ -351,6 +387,27 @@ mod tests {
                 "B_SECRET".to_string(),
                 "C_SECRET".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn secret_env_plan_includes_mapped_env_names() {
+        let mut plan = SecretEnvPlan::from_secret_env_names(["DIRECT_SECRET".to_string()]);
+        plan.map_env_names(
+            "provider.example",
+            ["MAPPED_SECRET".to_string(), "DIRECT_SECRET".to_string()],
+        );
+
+        assert_eq!(
+            plan.secret_env_names(),
+            vec!["DIRECT_SECRET".to_string(), "MAPPED_SECRET".to_string()]
+        );
+        assert_eq!(
+            plan.env_name_mapping.get("provider.example"),
+            Some(&vec![
+                "DIRECT_SECRET".to_string(),
+                "MAPPED_SECRET".to_string()
+            ])
         );
     }
 
