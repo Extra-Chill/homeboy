@@ -10,6 +10,7 @@ const {
 const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY = 'datamachine/run-agent-bundle';
+const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID = 'datamachine-agent-ci';
 
 const DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS = {
   contract_slug_map: {
@@ -102,6 +103,22 @@ const DATAMACHINE_AGENT_CI_CAPABILITIES = [
   'ability:github_pull_request_publish',
   'ability:comment_github_pull_request',
 ];
+
+const DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS = [
+  DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
+  'github_issue_publish',
+  'github_pull_request_publish',
+  'comment_github_pull_request',
+];
+
+const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE = {
+  schema: 'homeboy/runtime-profile/v1',
+  id: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
+  component_path_defaults: DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
+  workspace_tools: DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
+  capabilities: DATAMACHINE_AGENT_CI_CAPABILITIES,
+  ability_requirements: DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS,
+};
 
 function datamachineAgentCiBundleTaskRequest(options = {}, context = {}) {
   const taskId = requiredString(options.taskId || options.task_id, 'taskId');
@@ -251,7 +268,10 @@ module.exports = {
   AGENT_TASK_REQUEST_SCHEMA,
   AGENT_TASK_RUNNER_SPEC_SCHEMA,
   DATAMACHINE_AGENT_CI_CAPABILITIES,
+  DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS,
   DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
   DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
   DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
   agentTaskRequestFromRunnerSpec,

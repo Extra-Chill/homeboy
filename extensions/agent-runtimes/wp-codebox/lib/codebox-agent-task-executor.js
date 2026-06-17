@@ -296,16 +296,39 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
 
 function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
   const directComponentPathDefaults = firstObject(config.component_path_defaults, config.componentPathDefaults);
+  const runtimeProfile = runtimeProfileFromExecutorConfig(config, options);
   const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
-  const componentPathDefaults = directComponentPathDefaults || firstObject(options.componentPathDefaults, options.component_path_defaults, runtimeRequirements.component_path_defaults, runtimeRequirements.componentPathDefaults);
+  const componentPathDefaults = directComponentPathDefaults || firstObject(options.componentPathDefaults, options.component_path_defaults, runtimeRequirements.component_path_defaults, runtimeRequirements.componentPathDefaults, runtimeProfile.component_path_defaults, runtimeProfile.componentPathDefaults);
   return {
     ...options,
-    workspaceTools: firstObject(options.workspaceTools, options.workspace_tools, config.workspace_tools, config.workspaceTools, runtimeRequirements.workspace_tools, runtimeRequirements.workspaceTools),
+    runtimeProfile,
+    workspaceTools: firstObject(options.workspaceTools, options.workspace_tools, config.workspace_tools, config.workspaceTools, runtimeRequirements.workspace_tools, runtimeRequirements.workspaceTools, runtimeProfile.workspace_tools, runtimeProfile.workspaceTools),
     componentPathDefaults,
     componentPathAliases: firstObject(options.componentPathAliases, options.component_path_aliases, config.component_path_aliases, config.componentPathAliases, componentPathDefaults?.path_aliases, runtimeRequirements.component_path_aliases, runtimeRequirements.componentPathAliases),
     componentContractSlugMap: firstObject(options.componentContractSlugMap, options.component_contract_slug_map, config.component_contract_slug_map, config.componentContractSlugMap, componentPathDefaults?.contract_slug_map, runtimeRequirements.component_contract_slug_map, runtimeRequirements.componentContractSlugMap),
     componentDiscovery: firstObject(options.componentDiscovery, options.component_discovery, config.component_discovery, config.componentDiscovery, componentPathDefaults?.discovery, runtimeRequirements.component_discovery, runtimeRequirements.componentDiscovery),
+    abilityRequirements: uniqueStrings([
+      ...normalizeArray(options.abilityRequirements),
+      ...normalizeArray(options.ability_requirements),
+      ...normalizeArray(runtimeRequirements.ability_requirements),
+      ...normalizeArray(runtimeRequirements.abilityRequirements),
+      ...normalizeArray(runtimeProfile.ability_requirements),
+      ...normalizeArray(runtimeProfile.abilityRequirements),
+    ]),
   };
+}
+
+function runtimeProfileFromExecutorConfig(config = {}, options = {}) {
+  const runtimeProfile = firstDefined(config.runtime_profile, config.runtimeProfile, options.runtimeProfile, options.runtime_profile);
+  if (runtimeProfile && typeof runtimeProfile === 'object' && !Array.isArray(runtimeProfile)) {
+    return runtimeProfile;
+  }
+  if (typeof runtimeProfile !== 'string' || runtimeProfile.trim() === '') {
+    return {};
+  }
+  const profiles = firstObject(config.runtime_profiles, config.runtimeProfiles, options.runtimeProfiles, options.runtime_profiles) || {};
+  const namedProfile = profiles[runtimeProfile] || profiles[runtimeProfile.trim()];
+  return firstObject(namedProfile) || {};
 }
 
 function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
@@ -577,6 +600,8 @@ function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defa
     ...normalizeArray(config.abilities),
     ...normalizeArray(config.ability_requirements),
     ...normalizeArray(config.abilityRequirements),
+    ...normalizeArray(options.abilityRequirements),
+    ...normalizeArray(options.ability_requirements),
   ]);
   return uniqueStrings([...(defaults.allowedTools || []), ...declared]);
 }

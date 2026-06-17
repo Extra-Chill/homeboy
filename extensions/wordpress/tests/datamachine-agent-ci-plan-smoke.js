@@ -21,6 +21,8 @@ assert.equal(
   datamachineAgentCi.DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS.path_aliases.agent_runtime.includes('runtime_component:data_machine'),
   true
 );
+assert.equal(datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE.id, 'datamachine-agent-ci');
+assert.equal(datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE.ability_requirements.includes('datamachine/run-agent-bundle'), true);
 
 const bundleTask = datamachineAgentCiBundleTaskRequest({
   taskId: 'concept-agent',
@@ -77,7 +79,8 @@ assert.deepEqual(bundleTask.executor.config.runtime_task.input, {
     },
   },
 });
-assert.equal(bundleTask.executor.config.runtime_requirements.component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
+assert.equal(bundleTask.executor.config.runtime_profile, 'datamachine-agent-ci');
+assert.equal(bundleTask.executor.config.runtime_profiles['datamachine-agent-ci'].component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
 assert.equal(bundleTask.limits.task_timeout_seconds, 1200);
 assert.deepEqual(bundleTask.expected_artifacts, ['datamachine-transcript', 'ConceptPacket']);
 

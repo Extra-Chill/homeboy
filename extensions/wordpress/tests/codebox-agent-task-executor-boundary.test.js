@@ -10,8 +10,8 @@ const {
   providerContract,
 } = require('../../agent-runtimes/wp-codebox');
 const {
-  DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
-  DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
   datamachineAgentCiCodeboxExecutorConfig,
 } = require('../lib/datamachine-agent-ci-codebox-adapter');
 
@@ -82,11 +82,10 @@ assert.equal(provider.capabilities.includes('tool:datamachine/run-agent-bundle')
 assert.equal(provider.capabilities.includes('ability:datamachine/run-agent-bundle'), false);
 
 const datamachineAdapterConfig = datamachineAgentCiCodeboxExecutorConfig({ provider: 'openai' });
-assert.equal(datamachineAdapterConfig.component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
-assert.equal(datamachineAdapterConfig.component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
-assert.deepEqual(datamachineAdapterConfig.workspace_tools, DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS);
-assert.deepEqual(datamachineAdapterConfig.runtime_requirements.component_path_defaults, DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS);
-assert.equal(datamachineAdapterConfig.runtime_requirements.capabilities.includes('ability:datamachine/run-agent-bundle'), true);
+assert.equal(datamachineAdapterConfig.runtime_profile, DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID);
+assert.deepEqual(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID], DATAMACHINE_AGENT_CI_RUNTIME_PROFILE);
+assert.equal(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
+assert.equal(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].capabilities.includes('ability:datamachine/run-agent-bundle'), true);
 
 const customContract = providerContract({
   capabilities: ['wordpress_sandbox', 'tool:example/run-workflow'],
@@ -178,6 +177,43 @@ assert.deepEqual(customRuntimePolicyTaskInput.allowed_tools, [
 ]);
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime_tools, '/components/example-tools');
+
+const customRuntimeProfileTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'custom-runtime-profile-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      runtime_profile: 'example-runtime-profile',
+      runtime_profiles: {
+        'example-runtime-profile': {
+          schema: 'homeboy/runtime-profile/v1',
+          id: 'example-runtime-profile',
+          workspace_tools: {
+            readonly: ['profile_workspace_read'],
+            readwrite: ['profile_workspace_write'],
+          },
+          component_path_defaults: {
+            contract_slug_map: { 'example-profile-runtime': 'agent_runtime' },
+            path_aliases: { agent_runtime: ['contract:agent_runtime'] },
+          },
+          ability_requirements: ['example/run-profile-workflow'],
+        },
+      },
+      component_contracts: [{ slug: 'example-profile-runtime', path: '/components/example-profile-runtime' }],
+    },
+  },
+  instructions: 'Run against a named runtime profile.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+});
+
+assert.deepEqual(customRuntimeProfileTaskInput.allowed_tools, [
+  'profile_workspace_read',
+  'profile_workspace_write',
+  'example/run-profile-workflow',
+]);
+assert.equal(customRuntimeProfileTaskInput.runtime_component_paths.agent_runtime, '/components/example-profile-runtime');
 
 const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -273,6 +309,8 @@ assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox works
 assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
 assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
 assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
+assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('datamachine/run-agent-bundle'), true);
+assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
   repo: 'wp-site-generator@canonical-loop-main-20260616',
   cwd: repoLoopWorkspaceRoot,

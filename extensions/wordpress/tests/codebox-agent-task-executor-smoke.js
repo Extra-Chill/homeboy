@@ -11,6 +11,9 @@ const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
 } = require('../../agent-runtimes/wp-codebox');
+const {
+  datamachineAgentCiCodeboxExecutorConfig,
+} = require('../lib/datamachine-agent-ci-codebox-adapter');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
@@ -279,9 +282,9 @@ const codexSecretEnvSources = {
     field: 'tokens.refresh_token',
   },
   AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: {
-    source: 'json-file',
+    source: 'json-file-jwt-expiration',
     path: '~/.codex/auth.json',
-    field: 'tokens.expires_at',
+    field: 'tokens.access_token',
   },
   AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: {
     source: 'json-file',
@@ -292,6 +295,7 @@ const codexSecretEnvSources = {
     source: 'json-file',
     path: '~/.codex/auth.json',
     field: 'tokens.fedramp',
+    value: 'false',
   },
 };
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
@@ -375,7 +379,7 @@ assert.equal(provider.capabilities.includes('typed_bundle_outputs'), true);
 assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
 assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
 for (const capability of repoLoopCapabilities) {
-  assert.equal(provider.capabilities.includes(capability), true);
+  assert.equal(provider.capabilities.includes(capability), false);
 }
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
@@ -387,7 +391,7 @@ const manifestProvider = runtimeManifest.agent_task_executors.find((executor) =>
 assert.deepEqual(manifestProvider, providerContract());
 assert.deepEqual(secretEnvRequirementForProvider(manifestProvider, 'codex').env, codexSecretEnv);
 for (const capability of repoLoopCapabilities) {
-  assert.equal(manifestProvider.capabilities.includes(capability), true);
+  assert.equal(manifestProvider.capabilities.includes(capability), false);
 }
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
@@ -794,7 +798,7 @@ const codexAgentRequest = {
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: {
+    config: datamachineAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       provider_plugin_paths: ['/components/ai-provider-for-openai'],
       secret_env: [
@@ -811,7 +815,7 @@ const codexAgentRequest = {
       homeboy_extensions: '/components/homeboy-extensions',
       wp_codebox_bin: '/bin/wp-codebox',
       max_turns: 8,
-    },
+    }),
   },
 };
 const codexRequest = codeboxTaskRequestFromAgentTaskRequest(codexAgentRequest);
@@ -845,7 +849,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: {
+    config: datamachineAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       runtime_bin: '/bin/wp-codebox-runtime',
       runtime_wordpress_version: 'beta',
@@ -861,7 +865,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
         data_machine: '/components/data-machine',
         data_machine_code: '/components/data-machine-code',
       },
-    },
+    }),
   },
 });
 assert.equal(workflowStyleConfigRequest.wp_codebox_bin, '/bin/wp-codebox-runtime');
@@ -898,7 +902,7 @@ try {
     task_id: 'default-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: { provider: 'codex' },
+      config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1084,7 +1088,7 @@ try {
     task_id: 'alternate-default-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: { provider: 'codex' },
+      config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1169,7 +1173,7 @@ try {
       task_id: 'lab-no-target-default-runtime-stack-task-123',
       executor: {
         backend: 'codebox',
-        config: { provider: 'codex' },
+        config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
       },
       inputs: {},
     }, {
@@ -1186,7 +1190,7 @@ try {
     task_id: 'explicit-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: {
+      config: datamachineAgentCiCodeboxExecutorConfig({
         provider: 'codex',
         agents_api: staleStandaloneAgentsApiPath,
         runtime_component_paths: {
@@ -1199,7 +1203,7 @@ try {
         secret_env: ['EXPLICIT_SECRET'],
         mounts: [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }],
         workspaces: [{ target: '/explicit-workspace', mode: 'readonly' }],
-      },
+      }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1220,12 +1224,12 @@ try {
     task_id: 'legacy-runtime-alias-task-123',
     executor: {
       backend: 'codebox',
-      config: {
+      config: datamachineAgentCiCodeboxExecutorConfig({
         provider: 'codex',
         agents_api_path: staleStandaloneAgentsApiPath,
         data_machine_path: '/legacy/data-machine',
         data_machine_code_path: '/legacy/data-machine-code',
-      },
+      }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1264,7 +1268,7 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: {
+    config: datamachineAgentCiCodeboxExecutorConfig({
       execution_kind: 'agent_bundle',
       provider: 'openai',
       provider_plugin_paths: ['/components/ai-provider-for-openai'],
@@ -1287,7 +1291,7 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
       transcript_artifact_name: 'static-site-agent-transcript',
       replay_bundle_artifact_name: 'static-site-agent-replay',
       runner_workspace: { handle: 'wp-site-generator@site-loop', expose_to_agent: false },
-    },
+    }),
   },
 });
 assert.equal(agentBundleRequest.agent_bundle.bundle_path, '/bundles/static-site-agent');

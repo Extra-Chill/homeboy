@@ -4,39 +4,23 @@
  * Internal dependencies
  */
 const {
-  DATAMACHINE_AGENT_CI_CAPABILITIES,
-  DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
-  DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
 } = require('../../datamachine-agent-ci');
 
 function datamachineAgentCiCodeboxExecutorConfig(config = {}) {
   return {
     ...config,
-    runtime_requirements: {
-      ...(config.runtime_requirements || {}),
-      component_path_defaults: config.component_path_defaults || DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
-      workspace_tools: config.workspace_tools || DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
-      capabilities: uniqueStrings([
-        ...DATAMACHINE_AGENT_CI_CAPABILITIES,
-        ...normalizeArray(config.runtime_requirements?.capabilities),
-      ]),
+    runtime_profile: config.runtime_profile || config.runtimeProfile || DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
+    runtime_profiles: {
+      ...(config.runtime_profiles || config.runtimeProfiles || {}),
+      [DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID]: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
     },
-    component_path_defaults: config.component_path_defaults || DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
-    workspace_tools: config.workspace_tools || DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
   };
 }
 
-function normalizeArray(value) {
-  return Array.isArray(value) ? value.filter(Boolean) : [];
-}
-
-function uniqueStrings(values) {
-  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.trim() !== '')));
-}
-
 module.exports = {
-  DATAMACHINE_AGENT_CI_CAPABILITIES,
-  DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
-  DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
   datamachineAgentCiCodeboxExecutorConfig,
 };
