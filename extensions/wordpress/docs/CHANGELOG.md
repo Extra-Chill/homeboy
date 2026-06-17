@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.11] - 2026-06-17
+
+### Fixed
+- fix(wp-codebox): consume homeboy secret env plans
+
 ## [3.3.10] - 2026-06-17
 
 ### Changed
