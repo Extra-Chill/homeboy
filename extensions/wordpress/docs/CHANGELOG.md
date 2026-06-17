@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.0] - 2026-06-17
+
+### Added
+- expose datamachine agent ci plan helper
+
 ## [3.2.11] - 2026-06-17
 
 ### Changed
