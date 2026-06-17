@@ -156,11 +156,18 @@ assert_file_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "ful
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan-baseline.neon" "full-component PHPStan config includes component baseline via neon"
 assert_file_not_contains "$OUTPUT_FILE" "ERRORS (raw)" "zero-error PHPStan JSON should not be printed as raw errors"
 
+printf '%s\n' 'parameters:' '    scanFiles:' '        - stubs/example.php' > "${COMPONENT_DIR}/phpstan.neon.dist"
+run_phpstan
+assert_contains "--level=7" "partial component PHPStan config still uses the default level"
+assert_file_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "partial component-config run includes the extension default config"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "partial component-config run includes the component config"
+
 printf '%s\n' 'parameters:' '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
 run_phpstan
 assert_not_contains "--level=7" "component PHPStan config controls level when env override is absent"
 assert_file_not_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "component-config run does not duplicate the extension default config"
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "component-config run includes the component config"
+assert_file_contains "${COMPONENT_DIR}/phpstan.neon.dist" "level: max" "component-config fixture preserves the component ruleset"
 
 HOMEBOY_PHPSTAN_LEVEL=5 run_phpstan
 assert_contains "--level=5" "HOMEBOY_PHPSTAN_LEVEL explicitly overrides component PHPStan config level"
