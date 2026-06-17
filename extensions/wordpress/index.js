@@ -19,4 +19,5 @@ module.exports = {
 	...require('./lib/benchmark-matrix-report'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/wp-codebox-apply-adapter'),
+	...require('./lib/wp-codebox-recipe-helper'),
 };
