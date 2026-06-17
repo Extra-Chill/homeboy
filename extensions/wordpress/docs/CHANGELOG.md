@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.4] - 2026-06-17
+
+### Changed
+- share wp-codebox recipe execution helper
+
 ## [3.2.3] - 2026-06-17
 
 ### Fixed
