@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
-#[cfg(test)]
 use crate::core::redaction::RedactionPolicy;
+use serde_json::{Map, Value};
 
 pub use super::agent_task_aggregate::{
     AgentTaskAggregateReport, AgentTaskAggregateSummary, AgentTaskArtifactInventoryItem,
@@ -20,6 +20,9 @@ pub const AGENT_TASK_ARTIFACT_SCHEMA: &str = "homeboy/agent-task-artifact/v1";
 pub const AGENT_TASK_WORKFLOW_SCHEMA: &str = "homeboy/agent-task-workflow/v1";
 pub const AGENT_TASK_MATRIX_PLAN_SCHEMA: &str = "homeboy/agent-task-matrix-plan/v1";
 pub const AGENT_TASK_MATRIX_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-matrix-aggregate/v1";
+pub const AGENT_TOOL_REQUEST_SCHEMA: &str = "homeboy/agent-tool-request/v1";
+pub const AGENT_TOOL_RESULT_SCHEMA: &str = "homeboy/agent-tool-result/v1";
+pub const AGENT_TOOL_POLICY_SCHEMA: &str = "homeboy/agent-tool-policy/v1";
 
 mod matrix;
 
@@ -396,6 +399,12 @@ pub struct AgentTaskPolicy {
     pub write: String,
     #[serde(default = "default_apply_policy")]
     pub apply: String,
+    #[serde(
+        default,
+        alias = "toolPolicy",
+        skip_serializing_if = "AgentToolPolicy::is_default"
+    )]
+    pub tools: AgentToolPolicy,
 }
 
 impl Default for AgentTaskPolicy {
@@ -404,8 +413,124 @@ impl Default for AgentTaskPolicy {
             read: default_read_policy(),
             write: default_write_policy(),
             apply: default_apply_policy(),
+            tools: AgentToolPolicy::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentToolRequest {
+    #[serde(default = "agent_tool_request_schema")]
+    pub schema: String,
+    pub request_id: String,
+    pub task_id: String,
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+impl AgentToolRequest {
+    pub fn redacted(&self) -> Self {
+        let policy = RedactionPolicy::default();
+        let mut redacted = self.clone();
+        redacted.input = policy.redact_json(&redacted.input);
+        redacted.metadata = policy.redact_json(&redacted.metadata);
+        redacted
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentToolResult {
+    #[serde(default = "agent_tool_result_schema")]
+    pub schema: String,
+    pub request_id: String,
+    pub task_id: String,
+    pub tool: String,
+    pub status: AgentToolResultStatus,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub output: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskDiagnostic>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+impl AgentToolResult {
+    pub fn redacted(&self) -> Self {
+        let policy = RedactionPolicy::default();
+        let mut redacted = self.clone();
+        redacted.output = policy.redact_json(&redacted.output);
+        redacted.diagnostics = redacted
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.redacted_with(&policy))
+            .collect();
+        redacted.metadata = policy.redact_json(&redacted.metadata);
+        redacted
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolResultStatus {
+    Succeeded,
+    Failed,
+    Denied,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentToolPolicy {
+    #[serde(default = "agent_tool_policy_schema")]
+    pub schema: String,
+    #[serde(default = "default_agent_tool_execution_location")]
+    pub default_location: AgentToolExecutionLocation,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tools: BTreeMap<String, AgentToolPolicyRule>,
+}
+
+impl AgentToolPolicy {
+    pub fn execution_location_for(&self, tool: &str) -> AgentToolExecutionLocation {
+        self.tools
+            .get(tool)
+            .map(|rule| rule.execution_location)
+            .unwrap_or(self.default_location)
+    }
+
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for AgentToolPolicy {
+    fn default() -> Self {
+        Self {
+            schema: AGENT_TOOL_POLICY_SCHEMA.to_string(),
+            default_location: default_agent_tool_execution_location(),
+            tools: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentToolPolicyRule {
+    pub execution_location: AgentToolExecutionLocation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolExecutionLocation {
+    Runner,
+    ControlPlane,
+    Disabled,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -648,7 +773,6 @@ pub struct AgentTaskDiagnostic {
     pub data: Value,
 }
 
-#[cfg(test)]
 impl AgentTaskDiagnostic {
     fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
         self.message = policy.redact_string(&self.message);
@@ -787,6 +911,22 @@ fn workflow_schema() -> String {
     AGENT_TASK_WORKFLOW_SCHEMA.to_string()
 }
 
+fn agent_tool_request_schema() -> String {
+    AGENT_TOOL_REQUEST_SCHEMA.to_string()
+}
+
+fn agent_tool_result_schema() -> String {
+    AGENT_TOOL_RESULT_SCHEMA.to_string()
+}
+
+fn agent_tool_policy_schema() -> String {
+    AGENT_TOOL_POLICY_SCHEMA.to_string()
+}
+
+fn default_agent_tool_execution_location() -> AgentToolExecutionLocation {
+    AgentToolExecutionLocation::Disabled
+}
+
 fn default_read_policy() -> String {
     "workspace".to_string()
 }
@@ -844,6 +984,7 @@ mod tests {
                 read: "workspace".to_string(),
                 write: "workspace".to_string(),
                 apply: "propose_only".to_string(),
+                tools: AgentToolPolicy::default(),
             },
             limits: AgentTaskLimits {
                 timeout_ms: Some(300_000),
@@ -868,6 +1009,109 @@ mod tests {
 
         assert_eq!(decoded, request);
         assert_eq!(decoded.schema, AGENT_TASK_REQUEST_SCHEMA);
+    }
+
+    #[test]
+    fn agent_tool_contract_round_trips_policy_request_and_result() {
+        let policy: AgentToolPolicy = serde_json::from_value(json!({
+            "schema": AGENT_TOOL_POLICY_SCHEMA,
+            "default_location": "disabled",
+            "tools": {
+                "repo.status": {
+                    "execution_location": "control_plane",
+                    "timeout_ms": 30_000,
+                    "reason": "controller owns this credential boundary"
+                },
+                "format.check": {
+                    "execution_location": "runner"
+                }
+            }
+        }))
+        .expect("decode tool policy");
+        let request = AgentToolRequest {
+            schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+            request_id: "tool-request-1".to_string(),
+            task_id: "task-1".to_string(),
+            tool: "repo.status".to_string(),
+            input: json!({ "path": "/workspace/repo" }),
+            timeout_ms: Some(30_000),
+            metadata: json!({ "attempt": 1 }),
+        };
+        let result = AgentToolResult {
+            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            tool: request.tool.clone(),
+            status: AgentToolResultStatus::Succeeded,
+            output: json!({ "clean": true }),
+            diagnostics: Vec::new(),
+            metadata: json!({ "execution_location": "control_plane" }),
+        };
+
+        assert_eq!(
+            policy.execution_location_for("repo.status"),
+            AgentToolExecutionLocation::ControlPlane
+        );
+        assert_eq!(
+            policy.execution_location_for("format.check"),
+            AgentToolExecutionLocation::Runner
+        );
+        assert_eq!(
+            policy.execution_location_for("unknown.tool"),
+            AgentToolExecutionLocation::Disabled
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentToolRequest>(
+                serde_json::to_value(&request).expect("serialize request")
+            )
+            .expect("decode request"),
+            request
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentToolResult>(
+                serde_json::to_value(&result).expect("serialize result")
+            )
+            .expect("decode result"),
+            result
+        );
+    }
+
+    #[test]
+    fn agent_tool_evidence_redaction_removes_sensitive_values() {
+        let request = AgentToolRequest {
+            schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+            request_id: "tool-request-secret".to_string(),
+            task_id: "task-secret".to_string(),
+            tool: "repo.status".to_string(),
+            input: json!({ "authorization": "Bearer abc123", "safe": "value" }),
+            timeout_ms: None,
+            metadata: json!({ "refresh_token": "secret-refresh" }),
+        };
+        let result = AgentToolResult {
+            schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            tool: request.tool.clone(),
+            status: AgentToolResultStatus::Failed,
+            output: json!({ "api_key": "secret-value", "safe": "value" }),
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "tool".to_string(),
+                message: "Authorization: Bearer abc123".to_string(),
+                data: json!({ "password": "hunter2" }),
+            }],
+            metadata: json!({ "client_secret": "secret" }),
+        };
+
+        let redacted_request = serde_json::to_value(request.redacted()).expect("request json");
+        let redacted_result = serde_json::to_value(result.redacted()).expect("result json");
+
+        assert!(!redacted_request.to_string().contains("abc123"));
+        assert!(!redacted_request.to_string().contains("secret-refresh"));
+        assert_eq!(redacted_request["input"]["safe"], json!("value"));
+        assert!(!redacted_result.to_string().contains("secret-value"));
+        assert!(!redacted_result.to_string().contains("hunter2"));
+        assert!(!redacted_result.to_string().contains("abc123"));
+        assert_eq!(redacted_result["output"]["safe"], json!("value"));
     }
 
     #[test]

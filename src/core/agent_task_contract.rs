@@ -4,7 +4,8 @@ use crate::core::agent_task::{
     AgentTaskExecutionState, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
     AgentTaskWorkflowStepStatus, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
     AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TASK_WORKFLOW_SCHEMA,
+    AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
+    AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::core::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
 use crate::core::agent_task_cook_loop::AGENT_TASK_COOK_LOOP_REPORT_SCHEMA;
@@ -21,6 +22,7 @@ use crate::core::agent_task_provider::{
 use crate::core::agent_task_schedule::{
     AgentTaskAggregateStatus, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
 };
+use crate::core::agent_tool_control_plane::AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA;
 use crate::core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use crate::core::redaction::RedactionPolicy;
 use crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
@@ -54,6 +56,10 @@ pub struct AgentTaskCoreContractSchemas {
     pub matrix_aggregate: String,
     pub provider: String,
     pub provider_capability_contract: String,
+    pub tool_request: String,
+    pub tool_result: String,
+    pub tool_policy: String,
+    pub tool_dispatch_evidence: String,
     pub gate_report: String,
     pub promotion_report: String,
     pub cook_loop_report: String,
@@ -74,6 +80,9 @@ pub struct AgentTaskCoreProviderCapabilityContract {
     pub outcome_statuses: Vec<String>,
     pub failure_classifications: Vec<String>,
     pub redacted_metadata_keys: Vec<String>,
+    pub tool_request_schema: String,
+    pub tool_result_schema: String,
+    pub tool_policy_schema: String,
     pub provider_capability_fields: Vec<String>,
     pub executor_provider_fields: Vec<String>,
     pub workspace_materialization_fields: Vec<String>,
@@ -118,6 +127,10 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             provider: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
             provider_capability_contract: AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
                 .to_string(),
+            tool_request: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
+            tool_result: AGENT_TOOL_RESULT_SCHEMA.to_string(),
+            tool_policy: AGENT_TOOL_POLICY_SCHEMA.to_string(),
+            tool_dispatch_evidence: AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA.to_string(),
             gate_report: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             promotion_report: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             cook_loop_report: AGENT_TASK_COOK_LOOP_REPORT_SCHEMA.to_string(),
@@ -136,6 +149,9 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             outcome_statuses: agent_task_outcome_statuses(),
             failure_classifications: agent_task_failure_classifications(),
             redacted_metadata_keys: agent_task_redacted_metadata_keys(),
+            tool_request_schema: provider_capability.tool_request_schema,
+            tool_result_schema: provider_capability.tool_result_schema,
+            tool_policy_schema: provider_capability.tool_policy_schema,
             provider_capability_fields: string_vec(&[
                 "schema",
                 "provider_schema",
@@ -145,6 +161,9 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "outcome_statuses",
                 "failure_classifications",
                 "redacted_metadata_keys",
+                "tool_request_schema",
+                "tool_result_schema",
+                "tool_policy_schema",
             ]),
             executor_provider_fields: string_vec(&[
                 "schema",
@@ -365,6 +384,13 @@ mod tests {
             .provider_capability
             .executor_provider_fields
             .contains(&"invocation".to_string()));
+        assert_eq!(contract.schemas.tool_request, AGENT_TOOL_REQUEST_SCHEMA);
+        assert_eq!(contract.schemas.tool_result, AGENT_TOOL_RESULT_SCHEMA);
+        assert_eq!(contract.schemas.tool_policy, AGENT_TOOL_POLICY_SCHEMA);
+        assert_eq!(
+            contract.provider_capability.tool_request_schema,
+            AGENT_TOOL_REQUEST_SCHEMA
+        );
         assert!(contract
             .enums
             .outcome_status
