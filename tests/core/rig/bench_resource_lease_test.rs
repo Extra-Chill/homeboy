@@ -31,7 +31,7 @@ fn run_single_rig_bench_fails_fast_on_active_resource_lease() {
             "exclusive": ["studio-runtime"],
             "paths": ["~/Developer/studio"],
             "ports": [9724],
-            "process_patterns": ["wordpress-server-child.mjs"]
+            "process_patterns": ["app-server-child.mjs"]
         });
         set_rig_resources(home, "studio", resources.clone());
         set_rig_resources(home, "studio-bfb", resources);
