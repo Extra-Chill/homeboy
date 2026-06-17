@@ -169,23 +169,13 @@ fn upgrade_runner_with_executor(
     ) {
         Ok(path) => path,
         Err(err) => {
-            return RunnerUpgradeEntry {
-                runner_id: runner.id.clone(),
-                homeboy_path: original_homeboy_path,
-                success: false,
-                upgraded: false,
+            return runner_upgrade_failure_entry(
+                &runner.id,
+                original_homeboy_path,
                 previous_version,
-                new_version: None,
-                bare_homeboy_version: None,
-                path_drift: None,
-                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                extensions_synced: Vec::new(),
-                extensions_skipped: Vec::new(),
-                extensions_failed: Vec::new(),
-                stale_daemon: None,
-                exit_code: 1,
-                detail: err.message,
-            };
+                1,
+                err.message,
+            );
         }
     };
     let mut upgrade_homeboy_path = original_homeboy_path.clone();
@@ -203,258 +193,53 @@ fn upgrade_runner_with_executor(
         ),
     );
 
-    let (exit_code, detail) = match upgrade {
-        Ok((output, exit_code)) if exit_code == 0 => (exit_code, runner_upgrade_detail(&output)),
-        Ok((output, exit_code)) => {
-            match recover_runner_homeboy_path_after_failed_upgrade(
-                runner,
-                &original_homeboy_path,
-                previous_version.as_deref(),
-                update_homeboy_path,
-                exec,
-            ) {
-                Ok(Some(recovery)) => {
-                    upgrade_homeboy_path = recovery.homeboy_path;
-                    path_update_detail = Some(recovery.detail);
-                    match exec(
-                        &runner.id,
-                        runner_exec_options(
-                            runner,
-                            runner_upgrade_command(
-                                &upgrade_homeboy_path,
-                                force,
-                                method_override,
-                                command_source_path.as_deref(),
-                            ),
-                        ),
-                    ) {
-                        Ok((retry_output, 0)) => (0, runner_upgrade_detail(&retry_output)),
-                        Ok((retry_output, retry_exit_code)) => {
-                            return RunnerUpgradeEntry {
-                                runner_id: runner.id.clone(),
-                                homeboy_path: upgrade_homeboy_path,
-                                success: false,
-                                upgraded: false,
-                                previous_version,
-                                new_version: None,
-                                bare_homeboy_version: recovery.bare_version,
-                                path_drift: None,
-                                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                                extensions_synced: Vec::new(),
-                                extensions_skipped: Vec::new(),
-                                extensions_failed: Vec::new(),
-                                stale_daemon: None,
-                                exit_code: retry_exit_code,
-                                detail: format!(
-                                    "{}; retry after runner homeboy_path realignment failed: {}",
-                                    path_update_detail
-                                        .as_deref()
-                                        .unwrap_or("runner homeboy_path realigned"),
-                                    runner_upgrade_detail(&retry_output)
-                                ),
-                            };
-                        }
-                        Err(err) => {
-                            return RunnerUpgradeEntry {
-                                runner_id: runner.id.clone(),
-                                homeboy_path: upgrade_homeboy_path,
-                                success: false,
-                                upgraded: false,
-                                previous_version,
-                                new_version: None,
-                                bare_homeboy_version: recovery.bare_version,
-                                path_drift: None,
-                                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                                extensions_synced: Vec::new(),
-                                extensions_skipped: Vec::new(),
-                                extensions_failed: Vec::new(),
-                                stale_daemon: None,
-                                exit_code: 1,
-                                detail: format!(
-                                    "{}; retry after runner homeboy_path realignment failed: {}",
-                                    path_update_detail
-                                        .as_deref()
-                                        .unwrap_or("runner homeboy_path realigned"),
-                                    err.message
-                                ),
-                            };
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return RunnerUpgradeEntry {
-                        runner_id: runner.id.clone(),
-                        homeboy_path: original_homeboy_path,
-                        success: false,
-                        upgraded: false,
-                        previous_version,
-                        new_version: None,
-                        bare_homeboy_version: None,
-                        path_drift: None,
-                        recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                        extensions_synced: Vec::new(),
-                        extensions_skipped: Vec::new(),
-                        extensions_failed: Vec::new(),
-                        stale_daemon: None,
-                        exit_code,
-                        detail: runner_upgrade_detail(&output),
-                    };
-                }
-                Err(recovery_detail) => {
-                    return RunnerUpgradeEntry {
-                        runner_id: runner.id.clone(),
-                        homeboy_path: original_homeboy_path,
-                        success: false,
-                        upgraded: false,
-                        previous_version,
-                        new_version: None,
-                        bare_homeboy_version: None,
-                        path_drift: Some(recovery_detail.clone()),
-                        recovery_commands: runner_recovery_commands(
-                            &runner.id,
-                            "homeboy",
-                            Some(&recovery_detail),
-                            None,
-                            None,
-                        ),
-                        extensions_synced: Vec::new(),
-                        extensions_skipped: Vec::new(),
-                        extensions_failed: Vec::new(),
-                        stale_daemon: None,
-                        exit_code,
-                        detail: format!(
-                            "{}\nrunner homeboy_path recovery failed: {}",
-                            runner_upgrade_detail(&output),
-                            recovery_detail
-                        ),
-                    };
-                }
-            }
+    // Both the non-zero-exit and hard-error upgrade arms attempt the same
+    // recovery: realign the runner homeboy_path, then retry the upgrade.
+    let recovery_outcome = match upgrade {
+        Ok((output, exit_code)) if exit_code == 0 => {
+            Ok((exit_code, runner_upgrade_detail(&output), None))
         }
-        Err(err) => {
-            match recover_runner_homeboy_path_after_failed_upgrade(
-                runner,
-                &original_homeboy_path,
-                previous_version.as_deref(),
-                update_homeboy_path,
-                exec,
-            ) {
-                Ok(Some(recovery)) => {
-                    upgrade_homeboy_path = recovery.homeboy_path;
-                    path_update_detail = Some(recovery.detail);
-                    match exec(
-                        &runner.id,
-                        runner_exec_options(
-                            runner,
-                            runner_upgrade_command(
-                                &upgrade_homeboy_path,
-                                force,
-                                method_override,
-                                command_source_path.as_deref(),
-                            ),
-                        ),
-                    ) {
-                        Ok((retry_output, 0)) => (0, runner_upgrade_detail(&retry_output)),
-                        Ok((retry_output, retry_exit_code)) => {
-                            return RunnerUpgradeEntry {
-                                runner_id: runner.id.clone(),
-                                homeboy_path: upgrade_homeboy_path,
-                                success: false,
-                                upgraded: false,
-                                previous_version,
-                                new_version: None,
-                                bare_homeboy_version: recovery.bare_version,
-                                path_drift: None,
-                                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                                extensions_synced: Vec::new(),
-                                extensions_skipped: Vec::new(),
-                                extensions_failed: Vec::new(),
-                                stale_daemon: None,
-                                exit_code: retry_exit_code,
-                                detail: format!(
-                                    "{}; retry after runner homeboy_path realignment failed: {}",
-                                    path_update_detail
-                                        .as_deref()
-                                        .unwrap_or("runner homeboy_path realigned"),
-                                    runner_upgrade_detail(&retry_output)
-                                ),
-                            };
-                        }
-                        Err(retry_err) => {
-                            return RunnerUpgradeEntry {
-                                runner_id: runner.id.clone(),
-                                homeboy_path: upgrade_homeboy_path,
-                                success: false,
-                                upgraded: false,
-                                previous_version,
-                                new_version: None,
-                                bare_homeboy_version: recovery.bare_version,
-                                path_drift: None,
-                                recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                                extensions_synced: Vec::new(),
-                                extensions_skipped: Vec::new(),
-                                extensions_failed: Vec::new(),
-                                stale_daemon: None,
-                                exit_code: 1,
-                                detail: format!(
-                                    "{}; retry after runner homeboy_path realignment failed: {}",
-                                    path_update_detail
-                                        .as_deref()
-                                        .unwrap_or("runner homeboy_path realigned"),
-                                    retry_err.message
-                                ),
-                            };
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return RunnerUpgradeEntry {
-                        runner_id: runner.id.clone(),
-                        homeboy_path: original_homeboy_path,
-                        success: false,
-                        upgraded: false,
-                        previous_version,
-                        new_version: None,
-                        bare_homeboy_version: None,
-                        path_drift: None,
-                        recovery_commands: runner_upgrade_recovery_commands(&runner.id),
-                        extensions_synced: Vec::new(),
-                        extensions_skipped: Vec::new(),
-                        extensions_failed: Vec::new(),
-                        stale_daemon: None,
-                        exit_code: 1,
-                        detail: err.message,
-                    };
-                }
-                Err(recovery_detail) => {
-                    return RunnerUpgradeEntry {
-                        runner_id: runner.id.clone(),
-                        homeboy_path: original_homeboy_path,
-                        success: false,
-                        upgraded: false,
-                        previous_version,
-                        new_version: None,
-                        bare_homeboy_version: None,
-                        path_drift: Some(recovery_detail.clone()),
-                        recovery_commands: runner_recovery_commands(
-                            &runner.id,
-                            "homeboy",
-                            Some(&recovery_detail),
-                            None,
-                            None,
-                        ),
-                        extensions_synced: Vec::new(),
-                        extensions_skipped: Vec::new(),
-                        extensions_failed: Vec::new(),
-                        stale_daemon: None,
-                        exit_code: 1,
-                        detail: format!(
-                            "{}\nrunner homeboy_path recovery failed: {}",
-                            err.message, recovery_detail
-                        ),
-                    };
-                }
+        Ok((output, exit_code)) => recover_and_retry_failed_upgrade(
+            runner,
+            force,
+            method_override,
+            command_source_path.as_deref(),
+            &original_homeboy_path,
+            previous_version.as_deref(),
+            FailedUpgradeOutcome {
+                exit_code,
+                detail: runner_upgrade_detail(&output),
+            },
+            update_homeboy_path,
+            exec,
+        ),
+        Err(err) => recover_and_retry_failed_upgrade(
+            runner,
+            force,
+            method_override,
+            command_source_path.as_deref(),
+            &original_homeboy_path,
+            previous_version.as_deref(),
+            FailedUpgradeOutcome {
+                exit_code: 1,
+                detail: err.message,
+            },
+            update_homeboy_path,
+            exec,
+        ),
+    };
+
+    let (exit_code, detail) = match recovery_outcome {
+        Ok((exit_code, detail, recovery)) => {
+            if let Some(recovery) = recovery {
+                upgrade_homeboy_path = recovery.homeboy_path;
+                path_update_detail = Some(recovery.detail);
             }
+            (exit_code, detail)
+        }
+        Err(mut entry) => {
+            entry.previous_version = previous_version;
+            return entry;
         }
     };
 
@@ -521,32 +306,18 @@ fn upgrade_runner_with_executor(
             bare_homeboy_version = repair.bare_version;
             path_drift = repair.path_drift;
             path_update_detail = Some(repair.detail);
-        } else if let Some(new_path) = alignment.update_to.as_deref() {
-            match update_homeboy_path(&runner.id, new_path) {
-                Ok(()) => {
-                    homeboy_path = new_path.to_string();
-                    new_version = bare_homeboy_version.clone();
-                    path_drift = None;
-                    path_update_detail = Some(format!(
-                        "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
-                        original_homeboy_path,
-                        new_path,
-                        bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
-                    ));
-                }
-                Err(err) => {
-                    path_drift = Some(format!(
-                        "{}; automatic runner homeboy_path update failed: {}",
-                        alignment.drift.unwrap_or_else(|| {
-                            format!(
-                                "configured runner executable `{}` is stale",
-                                original_homeboy_path
-                            )
-                        }),
-                        err.message
-                    ));
-                }
-            }
+        } else {
+            apply_runner_homeboy_path_alignment(
+                &runner.id,
+                alignment,
+                &original_homeboy_path,
+                bare_homeboy_version.as_deref(),
+                &mut homeboy_path,
+                &mut new_version,
+                &mut path_drift,
+                &mut path_update_detail,
+                update_homeboy_path,
+            );
         }
     }
 
@@ -565,33 +336,17 @@ fn upgrade_runner_with_executor(
             ) {
                 Some(alignment) => {
                     path_drift = alignment.drift.clone();
-                    if let Some(new_path) = alignment.update_to.as_deref() {
-                        match update_homeboy_path(&runner.id, new_path) {
-                            Ok(()) => {
-                                homeboy_path = new_path.to_string();
-                                new_version = bare_homeboy_version.clone();
-                                path_drift = None;
-                                path_update_detail = Some(format!(
-                                    "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
-                                    original_homeboy_path,
-                                    new_path,
-                                    bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
-                                ));
-                            }
-                            Err(err) => {
-                                path_drift = Some(format!(
-                                    "{}; automatic runner homeboy_path update failed: {}",
-                                    alignment.drift.unwrap_or_else(|| {
-                                        format!(
-                                            "configured runner executable `{}` is stale",
-                                            original_homeboy_path
-                                        )
-                                    }),
-                                    err.message
-                                ));
-                            }
-                        }
-                    }
+                    apply_runner_homeboy_path_alignment(
+                        &runner.id,
+                        alignment,
+                        &original_homeboy_path,
+                        bare_homeboy_version.as_deref(),
+                        &mut homeboy_path,
+                        &mut new_version,
+                        &mut path_drift,
+                        &mut path_update_detail,
+                        update_homeboy_path,
+                    );
                 }
                 None => {
                     path_drift = None;
@@ -610,33 +365,17 @@ fn upgrade_runner_with_executor(
             bare_homeboy_version.as_deref(),
         ) {
             path_drift = alignment.drift.clone();
-            if let Some(new_path) = alignment.update_to.as_deref() {
-                match update_homeboy_path(&runner.id, new_path) {
-                    Ok(()) => {
-                        homeboy_path = new_path.to_string();
-                        new_version = bare_homeboy_version.clone();
-                        path_drift = None;
-                        path_update_detail = Some(format!(
-                            "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
-                            original_homeboy_path,
-                            new_path,
-                            bare_homeboy_version.as_deref().unwrap_or("an upgraded version")
-                        ));
-                    }
-                    Err(err) => {
-                        path_drift = Some(format!(
-                            "{}; automatic runner homeboy_path update failed: {}",
-                            alignment.drift.unwrap_or_else(|| {
-                                format!(
-                                    "configured runner executable `{}` is stale",
-                                    original_homeboy_path
-                                )
-                            }),
-                            err.message
-                        ));
-                    }
-                }
-            }
+            apply_runner_homeboy_path_alignment(
+                &runner.id,
+                alignment,
+                &original_homeboy_path,
+                bare_homeboy_version.as_deref(),
+                &mut homeboy_path,
+                &mut new_version,
+                &mut path_drift,
+                &mut path_update_detail,
+                update_homeboy_path,
+            );
         }
     }
     defer_extension_failures_for_path_drift(
@@ -686,6 +425,199 @@ fn upgrade_runner_with_executor(
         stale_daemon,
         exit_code,
         detail,
+    }
+}
+
+/// Captures the exit code and detail produced by a failed runner upgrade attempt.
+struct FailedUpgradeOutcome {
+    exit_code: i32,
+    detail: String,
+}
+
+/// Builds a non-recoverable runner upgrade failure entry, preserving every
+/// `RunnerUpgradeEntry` field at its canonical "failed before completion" value.
+///
+/// The caller is responsible for assigning `previous_version`, which is left as
+/// `None` here so the surrounding flow can move it in once.
+fn runner_upgrade_failure_entry(
+    runner_id: &str,
+    homeboy_path: String,
+    previous_version: Option<String>,
+    exit_code: i32,
+    detail: String,
+) -> RunnerUpgradeEntry {
+    RunnerUpgradeEntry {
+        runner_id: runner_id.to_string(),
+        homeboy_path,
+        success: false,
+        upgraded: false,
+        previous_version,
+        new_version: None,
+        bare_homeboy_version: None,
+        path_drift: None,
+        recovery_commands: runner_upgrade_recovery_commands(runner_id),
+        extensions_synced: Vec::new(),
+        extensions_skipped: Vec::new(),
+        extensions_failed: Vec::new(),
+        stale_daemon: None,
+        exit_code,
+        detail,
+    }
+}
+
+/// Recovers a stale runner `homeboy_path` after a failed upgrade and retries the
+/// upgrade through the realigned path.
+///
+/// Returns `Ok((exit_code, detail, recovery))` when the main upgrade flow should
+/// continue (either no realignment was needed, or the retry succeeded). Returns
+/// `Err(entry)` with a fully-populated failure entry (minus `previous_version`,
+/// which the caller assigns) when recovery or the retry definitively fails.
+#[allow(clippy::too_many_arguments)]
+fn recover_and_retry_failed_upgrade(
+    runner: &Runner,
+    force: bool,
+    method_override: Option<InstallMethod>,
+    command_source_path: Option<&str>,
+    original_homeboy_path: &str,
+    previous_version: Option<&str>,
+    failure: FailedUpgradeOutcome,
+    update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> std::result::Result<(i32, String, Option<FailedUpgradePathRecovery>), RunnerUpgradeEntry> {
+    match recover_runner_homeboy_path_after_failed_upgrade(
+        runner,
+        original_homeboy_path,
+        previous_version,
+        update_homeboy_path,
+        exec,
+    ) {
+        Ok(Some(recovery)) => {
+            let realigned_detail = recovery.detail.clone();
+            let retry = exec(
+                &runner.id,
+                runner_exec_options(
+                    runner,
+                    runner_upgrade_command(
+                        &recovery.homeboy_path,
+                        force,
+                        method_override,
+                        command_source_path,
+                    ),
+                ),
+            );
+            match retry {
+                Ok((retry_output, 0)) => {
+                    Ok((0, runner_upgrade_detail(&retry_output), Some(recovery)))
+                }
+                Ok((retry_output, retry_exit_code)) => Err(runner_upgrade_retry_failure_entry(
+                    &runner.id,
+                    recovery.homeboy_path,
+                    recovery.bare_version,
+                    retry_exit_code,
+                    &realigned_detail,
+                    runner_upgrade_detail(&retry_output),
+                )),
+                Err(err) => Err(runner_upgrade_retry_failure_entry(
+                    &runner.id,
+                    recovery.homeboy_path,
+                    recovery.bare_version,
+                    1,
+                    &realigned_detail,
+                    err.message,
+                )),
+            }
+        }
+        Ok(None) => Err(runner_upgrade_failure_entry(
+            &runner.id,
+            original_homeboy_path.to_string(),
+            None,
+            failure.exit_code,
+            failure.detail,
+        )),
+        Err(recovery_detail) => {
+            let mut entry = runner_upgrade_failure_entry(
+                &runner.id,
+                original_homeboy_path.to_string(),
+                None,
+                failure.exit_code,
+                format!(
+                    "{}\nrunner homeboy_path recovery failed: {}",
+                    failure.detail, recovery_detail
+                ),
+            );
+            entry.path_drift = Some(recovery_detail.clone());
+            entry.recovery_commands =
+                runner_recovery_commands(&runner.id, "homeboy", Some(&recovery_detail), None, None);
+            Err(entry)
+        }
+    }
+}
+
+/// Builds the failure entry emitted when the post-realignment upgrade retry
+/// itself fails, preserving the realigned `homeboy_path` and bare version.
+fn runner_upgrade_retry_failure_entry(
+    runner_id: &str,
+    homeboy_path: String,
+    bare_version: Option<String>,
+    exit_code: i32,
+    realigned_detail: &str,
+    failure_detail: String,
+) -> RunnerUpgradeEntry {
+    let mut entry =
+        runner_upgrade_failure_entry(runner_id, homeboy_path, None, exit_code, String::new());
+    entry.bare_homeboy_version = bare_version;
+    entry.detail = format!(
+        "{}; retry after runner homeboy_path realignment failed: {}",
+        realigned_detail, failure_detail
+    );
+    entry
+}
+
+/// Applies a runner `homeboy_path` alignment that may update the configured path.
+///
+/// When the alignment carries an `update_to` target, the runner config is updated
+/// and the in-flight upgrade state (`homeboy_path`, `new_version`, `path_drift`,
+/// `path_update_detail`) is mutated to reflect the realignment; a failed update is
+/// recorded as path drift instead.
+#[allow(clippy::too_many_arguments)]
+fn apply_runner_homeboy_path_alignment(
+    runner_id: &str,
+    alignment: RunnerHomeboyPathAlignment,
+    original_homeboy_path: &str,
+    bare_homeboy_version: Option<&str>,
+    homeboy_path: &mut String,
+    new_version: &mut Option<String>,
+    path_drift: &mut Option<String>,
+    path_update_detail: &mut Option<String>,
+    update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
+) {
+    let Some(new_path) = alignment.update_to.as_deref() else {
+        return;
+    };
+    match update_homeboy_path(runner_id, new_path) {
+        Ok(()) => {
+            *homeboy_path = new_path.to_string();
+            *new_version = bare_homeboy_version.map(str::to_string);
+            *path_drift = None;
+            *path_update_detail = Some(format!(
+                "runner homeboy_path updated from `{}` to `{}` because bare `homeboy` reports {}",
+                original_homeboy_path,
+                new_path,
+                bare_homeboy_version.unwrap_or("an upgraded version")
+            ));
+        }
+        Err(err) => {
+            *path_drift = Some(format!(
+                "{}; automatic runner homeboy_path update failed: {}",
+                alignment.drift.unwrap_or_else(|| {
+                    format!(
+                        "configured runner executable `{}` is stale",
+                        original_homeboy_path
+                    )
+                }),
+                err.message
+            ));
+        }
     }
 }
 
