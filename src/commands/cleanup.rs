@@ -30,6 +30,10 @@ pub struct CleanupArtifactsArgs {
     /// Resolve managed worktrees from this checkout instead of the current directory.
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
+
+    /// Also scan this temp root for detached Homeboy build artifacts. Repeatable.
+    #[arg(long, value_name = "PATH")]
+    pub temp_root: Vec<PathBuf>,
 }
 
 pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<ArtifactCleanupOutput> {
@@ -38,6 +42,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Artifact
             path: args.path,
             apply: args.apply,
             self_artifacts: args.self_artifacts,
+            temp_roots: args.temp_root,
         })
         .map(|output| (output, 0)),
     }
