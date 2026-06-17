@@ -33,8 +33,9 @@ use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
-    inline_agent_task_prompt_files_in_args, lab_offload_source_path, remap_agent_task_plan_in_args,
-    remap_path_settings_in_args, remap_provider_config_in_args, rewrite_lab_offload_args,
+    inject_agent_task_default_provider_config_in_args, inline_agent_task_prompt_files_in_args,
+    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
+    remap_provider_config_in_args, rewrite_lab_offload_args,
     rewrite_runner_resident_lab_offload_args, LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
@@ -929,22 +930,21 @@ fn run_lab_offload_inner(
             }
         );
     }
+    let offload_args =
+        inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
     let mut extra_workspaces = lab_extra_workspaces(&source_path)?;
     // Sync any controller-local directories referenced by --provider-config
     // (runtime components, provider plugins, extra mount sources) so the cook
     // config's paths resolve on the runner after remapping.
     extra_workspaces.extend(provider_config_extra_workspaces(
-        &changed_since_preflight.args,
+        &offload_args,
         &source_path,
     )?);
     extra_workspaces.extend(agent_task_plan_extra_workspaces(
-        &changed_since_preflight.args,
+        &offload_args,
         &source_path,
     )?);
-    extra_workspaces.extend(path_setting_extra_workspaces(
-        &changed_since_preflight.args,
-        &source_path,
-    )?);
+    extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, &source_path)?);
     extra_workspaces.extend(rig_component_path_env_extra_workspaces(&source_path)?);
     let synced = sync_workspace(
         runner_id,
@@ -1085,12 +1085,9 @@ fn run_lab_offload_inner(
             remote: entry.remote_path().to_string(),
         })
         .collect();
-    preflight_provider_config_source_cli_dependencies(
-        &changed_since_preflight.args,
-        &synced.excludes,
-    )?;
+    preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
     let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
-        &changed_since_preflight.args,
+        &offload_args,
         &remote_cwd,
     );
     let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
