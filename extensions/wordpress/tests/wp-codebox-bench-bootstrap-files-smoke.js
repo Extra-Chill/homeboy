@@ -51,6 +51,17 @@ homeboy_write_empty_bench_results() {
   printf '{"component_id":"%s","iterations":%s,"scenarios":[]}\\n' "$component" "$iterations" > "$results_file"
 }
 `);
+  const preflightHelper = path.join(root, 'preflight-helper.sh');
+  fs.writeFileSync(preflightHelper, `#!/usr/bin/env bash
+homeboy_require_bash_version() { :; }
+`);
+  const resolveContextHelper = path.join(root, 'resolve-context-helper.sh');
+  fs.writeFileSync(resolveContextHelper, `#!/usr/bin/env bash
+homeboy_resolve_context() {
+  PLUGIN_PATH="$HOMEBOY_COMPONENT_PATH"
+  COMPONENT_ID="$HOMEBOY_COMPONENT_ID"
+}
+`);
 
   const settings = {
     wp_codebox_bootstrap_files: [
@@ -70,7 +81,9 @@ homeboy_write_empty_bench_results() {
       HOMEBOY_COMPONENT_ID: 'bootstrap-fixture',
       HOMEBOY_COMPONENT_PATH: componentPath,
       HOMEBOY_EXTENSION_PATH: extensionPath,
+      HOMEBOY_RUNTIME_BASH_PREFLIGHT: preflightHelper,
       HOMEBOY_RUNTIME_BENCH_HELPER_SH: benchHelper,
+      HOMEBOY_RUNTIME_RESOLVE_CONTEXT: resolveContextHelper,
       HOMEBOY_SETTINGS_JSON: JSON.stringify(settings),
       HOMEBOY_WP_CODEBOX_BIN: fakeWpCodebox,
     },

@@ -85,7 +85,9 @@ homeboy_wp_codebox_validate_bench_settings() {
             ["wp_codebox_prepare_steps", "array"],
             ["wp_codebox_bootstrap_steps", "array"],
             ["wp_codebox_scenario_manifests", "array"],
-            ["scenario_manifests", "array"]
+            ["scenario_manifests", "array"],
+            ["wp_codebox_source_root", "string"],
+            ["wp_codebox_source_subpath", "string"]
         ]
         | map(select(($settings[.[0]] // null) != null and (($settings[.[0]] | type) != .[1])))
         | first
@@ -108,6 +110,41 @@ if [ -n "$WP_CODEBOX_CORE_MODULE" ]; then
     export HOMEBOY_WP_CODEBOX_CORE_MODULE="$WP_CODEBOX_CORE_MODULE"
 fi
 
+WP_CODEBOX_PLUGIN_SOURCE_PATH="$PLUGIN_PATH"
+WP_CODEBOX_SOURCE_ROOT=""
+WP_CODEBOX_SOURCE_SUBPATH=""
+if [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_SOURCE_ROOT=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_source_root // empty' 2>/dev/null || true)
+    WP_CODEBOX_SOURCE_SUBPATH=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_source_subpath // empty' 2>/dev/null || true)
+fi
+if [ -n "$WP_CODEBOX_SOURCE_ROOT" ]; then
+    if [[ "$WP_CODEBOX_SOURCE_ROOT" != /* ]] || [ ! -d "$WP_CODEBOX_SOURCE_ROOT" ]; then
+        echo "Error: wp_codebox_source_root must be an absolute existing directory." >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+    if [ -z "$WP_CODEBOX_SOURCE_SUBPATH" ]; then
+        if [[ "$PLUGIN_PATH" = "$WP_CODEBOX_SOURCE_ROOT"/* ]]; then
+            WP_CODEBOX_SOURCE_SUBPATH="${PLUGIN_PATH#"$WP_CODEBOX_SOURCE_ROOT/"}"
+        else
+            echo "Error: wp_codebox_source_subpath is required when wp_codebox_source_root is not an ancestor of HOMEBOY_COMPONENT_PATH." >&2
+            FAILED_STEP="WP Codebox source root setup"
+            exit 1
+        fi
+    fi
+    if [[ "$WP_CODEBOX_SOURCE_SUBPATH" = /* ]] || [[ "$WP_CODEBOX_SOURCE_SUBPATH" == *..* ]]; then
+        echo "Error: wp_codebox_source_subpath must be a relative path under wp_codebox_source_root." >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+    WP_CODEBOX_PLUGIN_SOURCE_PATH="${WP_CODEBOX_SOURCE_ROOT%/}/${WP_CODEBOX_SOURCE_SUBPATH}"
+    if [ ! -d "$WP_CODEBOX_PLUGIN_SOURCE_PATH" ]; then
+        echo "Error: wp_codebox_source_root/wp_codebox_source_subpath does not exist: $WP_CODEBOX_PLUGIN_SOURCE_PATH" >&2
+        FAILED_STEP="WP Codebox source root setup"
+        exit 1
+    fi
+fi
+
 homeboy_wp_codebox_resolve_host_path() {
     local base_dir="$1"
     local path_value="$2"
@@ -120,8 +157,8 @@ homeboy_wp_codebox_resolve_host_path() {
 
 homeboy_wp_codebox_component_relative_path() {
     local host_path="$1"
-    if [[ "$host_path" = "$PLUGIN_PATH"/* ]]; then
-        printf '%s\n' "${host_path#"$PLUGIN_PATH/"}"
+    if [[ "$host_path" = "$WP_CODEBOX_PLUGIN_SOURCE_PATH"/* ]]; then
+        printf '%s\n' "${host_path#"$WP_CODEBOX_PLUGIN_SOURCE_PATH/"}"
     else
         echo "Error: scenario manifest file references must stay under component root: $host_path" >&2
         FAILED_STEP="Scenario manifest setup"
@@ -151,8 +188,8 @@ homeboy_wp_codebox_compile_bootstrap_files() {
         fi
 
         local bootstrap_host
-        bootstrap_host=$(homeboy_wp_codebox_resolve_host_path "$PLUGIN_PATH" "$bootstrap_ref")
-        if [[ "$bootstrap_host" = /* && "$bootstrap_host" != "$PLUGIN_PATH"/* ]]; then
+        bootstrap_host=$(homeboy_wp_codebox_resolve_host_path "$WP_CODEBOX_PLUGIN_SOURCE_PATH" "$bootstrap_ref")
+        if [[ "$bootstrap_host" = /* && "$bootstrap_host" != "$WP_CODEBOX_PLUGIN_SOURCE_PATH"/* ]]; then
             echo "Error: wp_codebox_bootstrap_files[$index] must stay under component root: $bootstrap_ref" >&2
             FAILED_STEP="WP Codebox bootstrap file setup"
             exit 1
@@ -233,16 +270,16 @@ homeboy_wp_codebox_prepare_step_cwd() {
     local cwd_host
 
     if [ -z "$cwd_ref" ]; then
-        printf '%s\n' "$PLUGIN_PATH"
+        printf '%s\n' "$WP_CODEBOX_PLUGIN_SOURCE_PATH"
         return 0
     fi
     if [[ "$cwd_ref" = /* ]] || [[ "$cwd_ref" == *..* ]]; then
         return 1
     fi
 
-    cwd_host="${PLUGIN_PATH}/${cwd_ref}"
+    cwd_host="${WP_CODEBOX_PLUGIN_SOURCE_PATH}/${cwd_ref}"
     case "$cwd_host" in
-        "$PLUGIN_PATH"|"$PLUGIN_PATH"/*)
+        "$WP_CODEBOX_PLUGIN_SOURCE_PATH"|"$WP_CODEBOX_PLUGIN_SOURCE_PATH"/*)
             [ -d "$cwd_host" ] || return 1
             printf '%s\n' "$cwd_host"
             return 0
@@ -554,7 +591,7 @@ homeboy_wp_codebox_extra_workload_scenarios_json() {
 }
 
 homeboy_wp_codebox_component_workload_scenarios_json() {
-    local bench_dir="${PLUGIN_PATH}/tests/bench"
+    local bench_dir="${WP_CODEBOX_PLUGIN_SOURCE_PATH}/tests/bench"
     local scenarios="[]"
     [ -d "$bench_dir" ] || {
         printf '%s\n' "$scenarios"
@@ -633,12 +670,12 @@ homeboy_wp_codebox_compile_scenario_manifests() {
         [ -n "$manifest_entry" ] || continue
         local entry_type manifest_json manifest_host manifest_dir manifest_rel
         entry_type=$(printf '%s' "$manifest_entry" | jq -r 'type')
-        manifest_dir="$PLUGIN_PATH"
+        manifest_dir="$WP_CODEBOX_PLUGIN_SOURCE_PATH"
         manifest_rel=""
         if [ "$entry_type" = "string" ]; then
             local manifest_ref
             manifest_ref=$(printf '%s' "$manifest_entry" | jq -r '.')
-            manifest_host=$(homeboy_wp_codebox_resolve_host_path "$PLUGIN_PATH" "$manifest_ref")
+            manifest_host=$(homeboy_wp_codebox_resolve_host_path "$WP_CODEBOX_PLUGIN_SOURCE_PATH" "$manifest_ref")
             if [ ! -f "$manifest_host" ]; then
                 echo "Error: scenario manifest not found: $manifest_host" >&2
                 FAILED_STEP="Scenario manifest setup"
@@ -840,7 +877,7 @@ wp_codebox_command=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
 WP_CODEBOX_RESOLVED_BIN="$(homeboy_wp_codebox_resolved_bin_path "$WP_CODEBOX_BIN")"
 
 if type homeboy_export_validation_dependency_paths &>/dev/null; then
-    homeboy_export_validation_dependency_paths "$PLUGIN_PATH"
+    homeboy_export_validation_dependency_paths "$WP_CODEBOX_PLUGIN_SOURCE_PATH"
 fi
 DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 if [ -n "$DEPENDENCY_PATHS" ] && type homeboy_prepare_validation_dependency_paths_for_wp_codebox_bench &>/dev/null; then
@@ -865,12 +902,12 @@ WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSO
 homeboy_wp_codebox_append_extra_bench_workloads_configured_json
 
 MOUNTS_JSON="[]"
-COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$PLUGIN_PATH" || true)"
+COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$WP_CODEBOX_PLUGIN_SOURCE_PATH" || true)"
 if [ -n "$COMPONENT_PLUGIN_FILE" ]; then
-    EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg slug "$PLUGIN_SLUG" --arg pluginFile "${PLUGIN_SLUG}/${COMPONENT_PLUGIN_FILE}" '[{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]')
+    EXTRA_PLUGINS_JSON=$(jq -nc --arg source "$WP_CODEBOX_PLUGIN_SOURCE_PATH" --arg slug "$PLUGIN_SLUG" --arg pluginFile "${PLUGIN_SLUG}/${COMPONENT_PLUGIN_FILE}" '[{source: $source, slug: $slug, pluginFile: $pluginFile, activate: false}]')
 else
     EXTRA_PLUGINS_JSON="[]"
-    MOUNTS_JSON=$(jq -nc --arg source "$PLUGIN_PATH" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '[{source: $source, target: $target, mode: "readonly"}]')
+    MOUNTS_JSON=$(jq -nc --arg source "$WP_CODEBOX_PLUGIN_SOURCE_PATH" --arg target "/wordpress/wp-content/plugins/${PLUGIN_SLUG}" '[{source: $source, target: $target, mode: "readonly"}]')
 fi
 MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$EXTENSION_DIR" '$mounts + [{source: $source, target: "/homeboy-extension", mode: "readonly"}]')
 DEPENDENCY_SLUGS=()
@@ -918,7 +955,7 @@ else
     exit 1
 fi
 
-PLUGIN_DB_PHP="${PLUGIN_PATH}/db.php"
+PLUGIN_DB_PHP="${WP_CODEBOX_PLUGIN_SOURCE_PATH}/db.php"
 if [ -f "$PLUGIN_DB_PHP" ]; then
     MOUNTS_JSON=$(jq -nc --argjson mounts "$MOUNTS_JSON" --arg source "$PLUGIN_DB_PHP" '$mounts + [{source: $source, target: "/wordpress/wp-content/db.php", mode: "readonly"}]')
 fi
@@ -938,7 +975,7 @@ if printf '%s' "$WP_CODEBOX_FILE_MOUNTS_JSON" | jq -e 'type == "array" and lengt
             FAILED_STEP="WP Codebox file mount setup"
             exit 1
         fi
-        mount_root="$PLUGIN_PATH"
+        mount_root="$WP_CODEBOX_PLUGIN_SOURCE_PATH"
         if [ -n "$mount_dependency" ]; then
             mount_root=""
             if [ -n "$DEPENDENCY_PATHS" ]; then
@@ -982,7 +1019,7 @@ if ! homeboy_wordpress_emit_browser_target "$settings_json" "$SHARED_STATE_HOST"
     exit 1
 fi
 
-BENCH_DIR="${PLUGIN_PATH}/tests/bench"
+BENCH_DIR="${WP_CODEBOX_PLUGIN_SOURCE_PATH}/tests/bench"
 HAS_EXTRA_BENCH_WORKLOADS=0
 [ -n "${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}" ] && HAS_EXTRA_BENCH_WORKLOADS=1
 
@@ -1014,6 +1051,9 @@ fi
 
 echo "Running bench workloads via WP Codebox..."
 echo "  Plugin: ${PLUGIN_SLUG} (${PLUGIN_PATH})"
+if [ "$WP_CODEBOX_PLUGIN_SOURCE_PATH" != "$PLUGIN_PATH" ]; then
+    echo "  Plugin source: ${WP_CODEBOX_PLUGIN_SOURCE_PATH}"
+fi
 echo "  Backend: wp-codebox"
 
 DEPENDENCY_SLUGS_CSV=""
@@ -1123,6 +1163,9 @@ homeboy_wp_codebox_emit_dependency_provenance() {
         --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
         --argjson extraPlugins "$EXTRA_PLUGINS_JSON" \
         --argjson mounts "$MOUNTS_JSON" \
+        --arg pluginSourcePath "$WP_CODEBOX_PLUGIN_SOURCE_PATH" \
+        --arg sourceRoot "$WP_CODEBOX_SOURCE_ROOT" \
+        --arg sourceSubpath "$WP_CODEBOX_SOURCE_SUBPATH" \
         --argjson settings "$settings_json" \
         '{
             schema: $schema,
@@ -1132,6 +1175,9 @@ homeboy_wp_codebox_emit_dependency_provenance() {
             artifacts_dir: $artifactsDir,
             dependency_slugs: $dependencySlugs,
             declared_dependency_paths: $declaredDependencyPaths,
+            plugin_source_path: $pluginSourcePath,
+            source_root: (if $sourceRoot == "" then null else $sourceRoot end),
+            source_subpath: (if $sourceSubpath == "" then null else $sourceSubpath end),
             plugin_inputs: ($extraPlugins | map({slug, pluginFile, source, activate})),
             mounts: ($mounts | map({target, mode, source})),
             settings: {
