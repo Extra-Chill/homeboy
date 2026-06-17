@@ -1960,6 +1960,46 @@ mod tests {
     }
 
     #[test]
+    fn provider_default_secret_sources_accept_keychain_bundle_sources() {
+        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        request.executor.config = json!({ "provider": "claude-code" });
+        provider.provider_defaults.insert(
+            "claude-code".to_string(),
+            json!({
+                "secret_env": [
+                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+                    "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+                ],
+                "secret_env_sources": {
+                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN": {
+                        "source": "keychain-bundle",
+                        "scope": "agent-task",
+                        "name": "claude-code-oauth",
+                        "field": "access_token"
+                    },
+                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                        "source": "keychain-bundle",
+                        "scope": "agent-task",
+                        "name": "claude-code-oauth",
+                        "field": "refresh_token"
+                    }
+                }
+            }),
+        );
+
+        let sources = provider_secret_sources(&provider, Some(&request));
+
+        let refresh = sources
+            .get("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+            .expect("refresh token source is declared");
+        assert_eq!(refresh.source, "keychain-bundle");
+        assert_eq!(refresh.scope.as_deref(), Some("agent-task"));
+        assert_eq!(refresh.name.as_deref(), Some("claude-code-oauth"));
+        assert_eq!(refresh.field.as_deref(), Some("refresh_token"));
+    }
+
+    #[test]
     fn provider_workspace_materialization_declares_requires_git_requirement() {
         let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
         provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
