@@ -12,6 +12,8 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+const EXTENDS_FIELD: &str = "extends";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveredRig {
     pub id: String,
@@ -74,6 +76,8 @@ pub struct RigSourceMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_path: Option<String>,
     pub linked: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub materialized: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
 }
@@ -116,12 +120,14 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
     let mut installed = Vec::new();
     for rig in selected {
         let target = paths::rig_config(&rig.id)?;
+        materialize_rig_spec(&rig.rig_path, &prepared.source_root)?;
         if target.exists() || fs::symlink_metadata(&target).is_ok() {
             ensure_rig_refreshable(&rig, &target)?;
             remove_existing_config(&target, "replace rig config link")?;
         }
 
-        link_or_copy_file(&rig.rig_path, &target)?;
+        let materialized =
+            write_rig_config_from_source(&rig.rig_path, &target, &prepared.source_root)?;
 
         let metadata = RigSourceMetadata {
             source: prepared.source.clone(),
@@ -130,6 +136,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             rig_path: rig.rig_path.to_string_lossy().to_string(),
             discovery_path: Some(prepared.discovery_path.to_string_lossy().to_string()),
             linked: prepared.linked,
+            materialized,
             source_revision: prepared.source_revision.clone(),
         };
         write_source_metadata(&rig.id, &metadata)?;
@@ -179,6 +186,192 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
         installed,
         installed_stacks,
     })
+}
+
+pub(crate) fn write_rig_config_from_source(
+    source: &Path,
+    target: &Path,
+    source_root: &Path,
+) -> Result<bool> {
+    match materialize_rig_spec(source, source_root)? {
+        Some(value) => {
+            let content = serde_json::to_string_pretty(&value).map_err(|e| {
+                Error::internal_json(
+                    e.to_string(),
+                    Some("serialize materialized rig spec".into()),
+                )
+            })?;
+            fs::write(target, format!("{}\n", content)).map_err(|e| {
+                Error::internal_io(e.to_string(), Some("write materialized rig spec".into()))
+            })?;
+            Ok(true)
+        }
+        None => {
+            link_or_copy_file(source, target)?;
+            Ok(false)
+        }
+    }
+}
+
+pub(crate) fn materialize_rig_spec(
+    path: &Path,
+    source_root: &Path,
+) -> Result<Option<serde_json::Value>> {
+    let value = read_json_value(path)?;
+    if !value.get(EXTENDS_FIELD).is_some() {
+        return Ok(None);
+    }
+    materialize_rig_spec_value(path, source_root, value, &mut Vec::new()).map(Some)
+}
+
+fn materialize_rig_spec_value(
+    path: &Path,
+    source_root: &Path,
+    mut value: serde_json::Value,
+    stack: &mut Vec<PathBuf>,
+) -> Result<serde_json::Value> {
+    let canonical = path.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("resolve rig spec {}", path.display())),
+        )
+    })?;
+    if stack.contains(&canonical) {
+        return Err(Error::validation_invalid_argument(
+            EXTENDS_FIELD,
+            format!("Rig template extends cycle includes {}", path.display()),
+            Some(path.to_string_lossy().to_string()),
+            None,
+        ));
+    }
+    stack.push(canonical);
+
+    let parents = extends_paths(&value, path, source_root)?;
+    remove_extends(&mut value);
+
+    let mut merged = serde_json::Value::Object(serde_json::Map::new());
+    for parent in parents {
+        let parent_value = read_json_value(&parent)?;
+        let parent_materialized =
+            materialize_rig_spec_value(&parent, source_root, parent_value, stack)?;
+        merge_json(&mut merged, parent_materialized);
+    }
+    merge_json(&mut merged, value);
+
+    stack.pop();
+    Ok(merged)
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value> {
+    let content = fs::read_to_string(path).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read rig spec {}", path.display())),
+        )
+    })?;
+    serde_json::from_str(&content).map_err(|e| {
+        Error::validation_invalid_json(
+            e,
+            Some(format!("parse rig spec {}", path.display())),
+            Some(content.chars().take(200).collect()),
+        )
+    })
+}
+
+fn extends_paths(
+    value: &serde_json::Value,
+    path: &Path,
+    source_root: &Path,
+) -> Result<Vec<PathBuf>> {
+    let Some(extends) = value.get(EXTENDS_FIELD) else {
+        return Ok(Vec::new());
+    };
+
+    let raw_paths = match extends {
+        serde_json::Value::String(path) => vec![path.as_str()],
+        serde_json::Value::Array(paths) => paths
+            .iter()
+            .map(|entry| {
+                entry.as_str().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        EXTENDS_FIELD,
+                        "Rig template extends entries must be strings",
+                        Some(entry.to_string()),
+                        None,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                EXTENDS_FIELD,
+                "Rig template extends must be a string or array of strings",
+                Some(extends.to_string()),
+                None,
+            ));
+        }
+    };
+
+    let source_root = source_root.canonicalize().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!(
+                "resolve rig package root {}",
+                source_root.display()
+            )),
+        )
+    })?;
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut paths = Vec::new();
+    for raw_path in raw_paths {
+        if raw_path.trim().is_empty() || Path::new(raw_path).is_absolute() {
+            return Err(Error::validation_invalid_argument(
+                EXTENDS_FIELD,
+                "Rig template extends paths must be non-empty relative paths",
+                Some(raw_path.to_string()),
+                None,
+            ));
+        }
+        let candidate = base.join(raw_path);
+        let canonical = candidate.canonicalize().map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("resolve rig template {}", candidate.display())),
+            )
+        })?;
+        if !canonical.starts_with(&source_root) {
+            return Err(Error::validation_invalid_argument(
+                EXTENDS_FIELD,
+                "Rig template extends paths must stay inside the rig package source root",
+                Some(raw_path.to_string()),
+                None,
+            ));
+        }
+        paths.push(canonical);
+    }
+    Ok(paths)
+}
+
+fn remove_extends(value: &mut serde_json::Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.remove(EXTENDS_FIELD);
+    }
+}
+
+fn merge_json(target: &mut serde_json::Value, overlay: serde_json::Value) {
+    match (target, overlay) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                match target.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, overlay) => *target = overlay,
+    }
 }
 
 fn ensure_rig_refreshable(rig: &DiscoveredRig, target: &Path) -> Result<()> {

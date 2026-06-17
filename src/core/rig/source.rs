@@ -8,8 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::install::{
-    discover_stacks, link_or_copy_file, write_source_metadata, write_stack_source_metadata,
-    RigSourceMetadata, StackSourceMetadata,
+    discover_stacks, link_or_copy_file, write_rig_config_from_source, write_source_metadata,
+    write_stack_source_metadata, RigSourceMetadata, StackSourceMetadata,
 };
 
 mod types;
@@ -319,12 +319,14 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
         }
 
         let config_path = PathBuf::from(&rig.config_path);
+        super::install::materialize_rig_spec(&rig_path, Path::new(&source.source_root))?;
         if config_path.exists() || fs::symlink_metadata(&config_path).is_ok() {
             fs::remove_file(&config_path).map_err(|e| {
                 Error::internal_io(e.to_string(), Some("replace rig config link".into()))
             })?;
         }
-        link_or_copy_file(&rig_path, &config_path)?;
+        let materialized =
+            write_rig_config_from_source(&rig_path, &config_path, Path::new(&source.source_root))?;
 
         let metadata = RigSourceMetadata {
             source: source.source.clone(),
@@ -333,6 +335,7 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
             rig_path: rig.rig_path.clone(),
             discovery_path: Some(source.discovery_path.clone()),
             linked: false,
+            materialized,
             source_revision: source_revision.clone(),
         };
         write_source_metadata(&rig.id, &metadata)?;
@@ -493,9 +496,9 @@ fn group_source_entries(entries: SourceEntries) -> RigSourceListResult {
         let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
         let config_path = paths::rig_config(&entry.id).ok();
         let config_present = config_path.as_ref().is_some_and(|path| path.exists());
-        let config_owned = config_path
-            .as_ref()
-            .is_some_and(|path| rig_config_matches_source(path, &entry.metadata.rig_path));
+        let config_owned = config_path.as_ref().is_some_and(|path| {
+            entry.metadata.materialized || rig_config_matches_source(path, &entry.metadata.rig_path)
+        });
 
         groups
             .entry(key)

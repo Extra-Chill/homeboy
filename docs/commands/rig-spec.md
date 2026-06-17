@@ -30,6 +30,7 @@ For git sources, `repo.git//subpath` clones the repository root but discovers sp
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `id` | string | No | Rig ID. If absent, the filename stem is used. |
+| `extends` | string or array | No | Install-time template parents, resolved relative to the declaring `rig.json` and deep-merged before installation. |
 | `description` | string | No | Human-readable description shown in `rig list` / `rig show`. |
 | `components` | object | No | Map of component ID to `ComponentSpec`. |
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
@@ -42,6 +43,46 @@ For git sources, `repo.git//subpath` clones the repository root but discovers sp
 | `trace_workloads` | object | No | Rig-owned out-of-tree trace workloads keyed by extension ID. |
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
+
+## Templates And Variants
+
+Rig package specs may declare `extends` to derive a concrete installed rig from one or more JSON templates in the same package source root. Homeboy resolves each parent relative to the declaring file, materializes the merged JSON during `homeboy rig install` / `rig sources update`, and writes the installed rig without the `extends` field. Runtime commands continue to load ordinary rig JSON.
+
+Merge rules are intentionally generic:
+
+- Parent files are applied in order; the declaring rig is applied last.
+- Objects merge recursively.
+- Arrays and scalar values replace the inherited value.
+- `extends` paths must be non-empty relative paths that stay inside the rig package source root.
+
+Example:
+
+```jsonc
+// templates/base.json
+{
+  "components": {
+    "app": { "path": "${env.DEV_ROOT}/app", "branch": "main" }
+  },
+  "pipeline": {
+    "check": [
+      { "kind": "check", "label": "app exists", "file": "${components.app.path}" }
+    ]
+  }
+}
+```
+
+```jsonc
+// rigs/app-branch/rig.json
+{
+  "extends": "../../templates/base.json",
+  "id": "app-branch",
+  "components": {
+    "app": { "path": "${env.DEV_ROOT}/app-branch" }
+  }
+}
+```
+
+The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
 
 ## `ComponentSpec`
 

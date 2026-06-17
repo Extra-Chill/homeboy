@@ -1028,6 +1028,7 @@ mod tests {
                     discovery_path: Some(checkout.display().to_string()),
                     source_revision: None,
                     linked: true,
+                    materialized: false,
                 },
             )
             .expect("source metadata");

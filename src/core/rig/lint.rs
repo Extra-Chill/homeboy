@@ -28,6 +28,7 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
 
     let conflict_failures = conflict_marker_failures(&root, &files)?;
     let json_failures = json_parse_failures(&root, &files)?;
+    let template_failures = template_materialization_failures(&root, &files)?;
     let steps = vec![
         aggregate_step(
             "rig-package-lint",
@@ -38,6 +39,11 @@ pub fn run_package_lint(rig: &RigSpec) -> Result<PipelineOutcome> {
             "rig-package-lint",
             "rig package JSON specs parse",
             json_failures,
+        ),
+        aggregate_step(
+            "rig-package-lint",
+            "rig package template specs materialize",
+            template_failures,
         ),
     ];
 
@@ -139,6 +145,29 @@ fn json_parse_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
                 "{} invalid JSON: {}",
                 display_relative(root, file),
                 error
+            ));
+        }
+    }
+    Ok(failures)
+}
+
+fn template_materialization_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
+    let mut failures = Vec::new();
+    for file in files
+        .iter()
+        .filter(|path| path.file_name() == Some(OsStr::new("rig.json")))
+    {
+        let content = fs::read_to_string(file).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", file.display())))
+        })?;
+        if !content.contains("\"extends\"") {
+            continue;
+        }
+        if let Err(error) = super::install::materialize_rig_spec(file, root) {
+            failures.push(format!(
+                "{} template materialization failed: {}",
+                display_relative(root, file),
+                error.message
             ));
         }
     }

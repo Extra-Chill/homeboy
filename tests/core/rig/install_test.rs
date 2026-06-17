@@ -206,6 +206,80 @@ fn installed_rig_check_reports_package_lint_failures() {
 }
 
 #[test]
+fn install_materializes_rig_template_extends() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    fs::create_dir_all(package.path().join("templates")).expect("templates dir");
+    fs::write(
+        package.path().join("templates/base.json"),
+        r#"{
+            "description": "base rig",
+            "components": {
+                "app": { "path": "${env.DEV_ROOT}/base", "branch": "main" }
+            },
+            "pipeline": {
+                "check": [
+                    { "kind": "check", "label": "app exists", "file": "${components.app.path}" }
+                ]
+            }
+        }"#,
+    )
+    .expect("base template");
+    write_rig(
+        package.path(),
+        "alpha",
+        r#"{
+            "extends": "../../templates/base.json",
+            "id": "alpha",
+            "description": "alpha rig",
+            "components": {
+                "app": { "path": "${env.DEV_ROOT}/alpha" }
+            }
+        }"#,
+    );
+
+    let result = install(package.path().to_str().unwrap(), None, false).expect("install");
+
+    assert_eq!(result.installed.len(), 1);
+    let installed_path = crate::core::paths::rig_config("alpha").expect("rig config");
+    #[cfg(unix)]
+    assert!(fs::read_link(&installed_path).is_err());
+    let installed = fs::read_to_string(&installed_path).expect("installed rig");
+    assert!(!installed.contains("extends"));
+    let rig = load("alpha").expect("load rig");
+    assert_eq!(rig.description, "alpha rig");
+    assert_eq!(rig.components["app"].path, "${env.DEV_ROOT}/alpha");
+    assert_eq!(rig.components["app"].branch.as_deref(), Some("main"));
+    assert_eq!(rig.pipeline["check"].len(), 1);
+    assert!(
+        read_source_metadata("alpha")
+            .expect("metadata")
+            .materialized
+    );
+}
+
+#[test]
+fn install_rejects_rig_template_extends_outside_source_root() {
+    let _home = HomeGuard::new();
+    let root = tempfile::tempdir().expect("root");
+    let package = root.path().join("package");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(&package).expect("package dir");
+    fs::create_dir_all(&outside).expect("outside dir");
+    fs::write(outside.join("base.json"), minimal_rig("base")).expect("outside base");
+    fs::write(
+        package.join("rig.json"),
+        r#"{"id":"alpha","extends":"../outside/base.json"}"#,
+    )
+    .expect("rig json");
+
+    let err = install(package.to_str().unwrap(), None, false).expect_err("outside extends");
+
+    assert_eq!(err.details["field"], "extends");
+    assert!(err.message.contains("inside the rig package source root"));
+}
+
+#[test]
 fn installed_rig_load_applies_trace_workload_defaults() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
