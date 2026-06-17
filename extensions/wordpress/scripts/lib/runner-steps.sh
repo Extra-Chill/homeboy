@@ -5,7 +5,6 @@ if [ -n "$HELPER" ] && [ "$HELPER" != "${BASH_SOURCE[0]}" ]; then
     # shellcheck source=/dev/null
     source "$HELPER"
 else
-    COMMON_RUNNER_STEPS_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/runner-steps.sh"
-    # shellcheck source=/dev/null
-    source "$COMMON_RUNNER_STEPS_HELPER"
+    echo "runner-steps wrapper requires HOMEBOY_RUNTIME_RUNNER_STEPS" >&2
+    return 2 2>/dev/null || exit 2
 fi

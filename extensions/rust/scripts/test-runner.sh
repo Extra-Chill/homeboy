@@ -17,8 +17,8 @@ set -euo pipefail
 # Passthrough args after -- are forwarded to cargo test.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-${SCRIPT_DIR}/lib/command-capture.sh}"
-RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/lib/runner-prelude.sh}"
+COMMAND_CAPTURE_HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:?HOMEBOY_RUNTIME_COMMAND_CAPTURE is required}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:?HOMEBOY_RUNTIME_RUNNER_PRELUDE is required}"
 SETTINGS_HELPER="${SCRIPT_DIR}/lib/settings.sh"
 # shellcheck source=/dev/null
 source "$RUNNER_PRELUDE"

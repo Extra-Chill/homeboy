@@ -24,7 +24,7 @@ BASH_PREFLIGHT_HELPER="${HOMEBOY_RUNTIME_BASH_PREFLIGHT:?Homeboy core must provi
 source "$BASH_PREFLIGHT_HELPER"
 homeboy_require_bash_version 4
 
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${TRACE_SCRIPT_DIR}/../lib/resolve-context.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
 homeboy_resolve_context

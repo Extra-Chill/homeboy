@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 
-# Direct-invocation fallback wrapper. Prefer the core runtime helper when the
-# caller provided it; direct runs without Homeboy still share one local copy.
-
 HELPER="${HOMEBOY_RUNTIME_COMMAND_CAPTURE:-}"
 if [ -n "$HELPER" ] && [ "$HELPER" != "${BASH_SOURCE[0]}" ]; then
     # shellcheck source=/dev/null
     source "$HELPER"
 else
-    # shellcheck source=../../../scripts/lib/command-capture.sh
-    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib" && pwd)/command-capture.sh"
+    echo "command-capture wrapper requires HOMEBOY_RUNTIME_COMMAND_CAPTURE" >&2
+    return 2 2>/dev/null || exit 2
 fi

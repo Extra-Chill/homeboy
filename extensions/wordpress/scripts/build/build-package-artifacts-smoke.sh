@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${EXTENSION_DIR}/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
+RESOLVE_CONTEXT_CORE_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wordpress-package-artifacts.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -45,6 +48,7 @@ printf '%s\n' 'intentional package zip' > "${component_dir}/runtime/packages/sta
     cd "$component_dir"
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_ID="package-artifact-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
     HOMEBOY_SKIP_TESTS=1 \
         bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/default-build.out"
 )
@@ -58,6 +62,7 @@ assert_zip_not_contains "$default_zip" "package-artifact-plugin/runtime/packages
     cd "$component_dir"
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_ID="package-artifact-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
     HOMEBOY_SKIP_TESTS=1 \
     HOMEBOY_SETTINGS_JSON='{"package_artifacts":["runtime/packages/*.zip"]}' \
         bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/included-build.out"
@@ -89,6 +94,7 @@ if (
     cd "$component_dir"
     HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
     HOMEBOY_COMPONENT_ID="package-artifact-plugin" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
     HOMEBOY_SKIP_TESTS=1 \
     HOMEBOY_SETTINGS_JSON='{"package_artifacts":["runtime/missing/*.zip"]}' \
         bash "${EXTENSION_DIR}/scripts/build/build.sh" > "${TMP_DIR}/missing-build.out" 2>&1

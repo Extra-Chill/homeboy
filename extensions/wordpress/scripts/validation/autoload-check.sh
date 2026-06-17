@@ -10,7 +10,7 @@ source "${DEPENDENCY_HELPER}"
 # Catches class loading errors before tests run
 
 # Resolve execution context (shared helper)
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
