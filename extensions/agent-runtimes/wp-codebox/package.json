@@ -5,7 +5,8 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js"
+    "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
+    "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js"
   },
   "bin": {
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
