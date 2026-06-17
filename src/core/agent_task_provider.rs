@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -167,6 +167,8 @@ pub struct AgentTaskProviderRunnerReadiness {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<AgentTaskProviderExecutableReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
@@ -189,6 +191,61 @@ pub struct AgentTaskProviderEnvPathReadiness {
     pub canonical_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderExecutableReadiness {
+    /// Environment variable names that should receive the resolved executable path.
+    /// Existing non-empty env values win before binary candidate discovery.
+    pub env: Vec<String>,
+    /// Ordered executable names or paths to try when env does not already point
+    /// at an executable. Bare names are resolved on PATH; paths are checked as-is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    /// Optional arguments a caller can use to probe the resolved executable version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentTaskProviderResolvedExecutable {
+    env: Vec<String>,
+    path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentTaskProviderExecutableResolutionError {
+    readiness_id: String,
+    label: String,
+    env: Vec<String>,
+    candidates: Vec<String>,
+    install_hint: Option<String>,
+}
+
+impl AgentTaskProviderExecutableResolutionError {
+    fn message(&self) -> String {
+        let mut message = format!(
+            "provider runner executable '{}' is not configured",
+            self.label
+        );
+        if !self.env.is_empty() {
+            message.push_str(&format!("; set one of: {}", self.env.join(", ")));
+        }
+        if !self.candidates.is_empty() {
+            message.push_str(&format!(
+                "; searched candidates: {}",
+                self.candidates.join(", ")
+            ));
+        }
+        if let Some(hint) = self.install_hint.as_deref().filter(|hint| !hint.is_empty()) {
+            message.push_str(&format!("; install hint: {hint}"));
+        }
+        message
+    }
 }
 
 /// A named, extension-declared source checkout that homeboy keeps synced on the
@@ -646,6 +703,104 @@ pub fn provider_secret_sources_for_providers(
         }
     }
     sources
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderCommandEnvError {
+    Secret(AgentTaskSecretResolutionError),
+    Executable(AgentTaskProviderExecutableResolutionError),
+}
+
+fn provider_executable_env(
+    provider: &AgentTaskExecutorProvider,
+) -> Result<Vec<(String, String)>, AgentTaskProviderExecutableResolutionError> {
+    let mut env = Vec::new();
+    for readiness in &provider.runner_readiness {
+        let Some(executable) = readiness.executable.as_ref() else {
+            continue;
+        };
+        let resolved = resolve_provider_executable(readiness, executable)?;
+        for name in resolved.env {
+            env.push((name, resolved.path.clone()));
+        }
+    }
+    Ok(env)
+}
+
+fn resolve_provider_executable(
+    readiness: &AgentTaskProviderRunnerReadiness,
+    executable: &AgentTaskProviderExecutableReadiness,
+) -> Result<AgentTaskProviderResolvedExecutable, AgentTaskProviderExecutableResolutionError> {
+    let env_names: Vec<String> = executable
+        .env
+        .iter()
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .collect();
+    for name in &env_names {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(AgentTaskProviderResolvedExecutable {
+                    env: env_names,
+                    path: value.to_string(),
+                });
+            }
+        }
+    }
+
+    for candidate in &executable.candidates {
+        if let Some(path) = resolve_executable_candidate(candidate) {
+            return Ok(AgentTaskProviderResolvedExecutable {
+                env: env_names,
+                path,
+            });
+        }
+    }
+
+    Err(AgentTaskProviderExecutableResolutionError {
+        readiness_id: readiness.id.clone(),
+        label: readiness.label.clone(),
+        env: executable.env.clone(),
+        candidates: executable.candidates.clone(),
+        install_hint: executable
+            .install_hint
+            .clone()
+            .or_else(|| readiness.remediation.clone()),
+    })
+}
+
+fn resolve_executable_candidate(candidate: &str) -> Option<String> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    let candidate_path = Path::new(candidate);
+    if candidate_path.components().count() > 1 || candidate_path.is_absolute() {
+        return executable_file(candidate_path).then(|| candidate.to_string());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for path in std::env::split_paths(&path_var) {
+        let resolved = path.join(candidate);
+        if executable_file(&resolved) {
+            return Some(resolved.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 pub(crate) fn role_aliases_for_executor(
@@ -1342,7 +1497,7 @@ fn run_provider_command(
     };
     let env = match provider_command_env(request, provider) {
         Ok(env) => env,
-        Err(error) => {
+        Err(ProviderCommandEnvError::Secret(error)) => {
             return failure_outcome(
                 request,
                 AgentTaskOutcomeStatus::ProviderError,
@@ -1350,6 +1505,22 @@ fn run_provider_command(
                 "agent_task.secret_env_missing",
                 error.message,
                 json!({ "provider": provider.id, "missing_secret_env": error.missing_secret_env }),
+            )
+        }
+        Err(ProviderCommandEnvError::Executable(error)) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::Provider,
+                "agent_task.provider_executable_missing",
+                error.message(),
+                json!({
+                    "provider": provider.id,
+                    "readiness_id": error.readiness_id,
+                    "env": error.env,
+                    "candidates": error.candidates,
+                    "install_hint": error.install_hint,
+                }),
             )
         }
     };
@@ -1588,7 +1759,7 @@ fn provider_command_parts(provider: &AgentTaskExecutorProvider) -> Option<(Strin
 fn provider_command_env(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
-) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
     let mut env = vec![
         (
             "HOMEBOY_AGENT_TASK_PROVIDER_ID".to_string(),
@@ -1632,10 +1803,14 @@ fn provider_command_env(
                 .unwrap_or_default(),
         ),
     ];
-    env.extend(resolve_secret_env_with_fallbacks(
-        &request.executor.secret_env,
-        &provider_secret_sources(provider, Some(request)),
-    )?);
+    env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
+    env.extend(
+        resolve_secret_env_with_fallbacks(
+            &request.executor.secret_env,
+            &provider_secret_sources(provider, Some(request)),
+        )
+        .map_err(ProviderCommandEnvError::Secret)?,
+    );
     Ok(env)
 }
 
@@ -1748,6 +1923,13 @@ mod tests {
                 "env_path": {
                     "env": ["PROVIDER_HOME"],
                     "path_kind": "provider-cache"
+                },
+                "executable": {
+                    "env": ["PROVIDER_BIN"],
+                    "candidates": ["provider-bin"],
+                    "version_command": ["--version"],
+                    "install_hint": "Install provider-bin.",
+                    "provider_executable_hint": "preserve-me"
                 }
             }],
             "timeout_artifact_discovery": {
@@ -1786,6 +1968,18 @@ mod tests {
                 .extra["path_kind"],
             "provider-cache"
         );
+        let executable = provider.runner_readiness[0]
+            .executable
+            .as_ref()
+            .expect("executable readiness");
+        assert_eq!(executable.env, vec!["PROVIDER_BIN".to_string()]);
+        assert_eq!(executable.candidates, vec!["provider-bin".to_string()]);
+        assert_eq!(executable.version_command, vec!["--version".to_string()]);
+        assert_eq!(
+            executable.install_hint.as_deref(),
+            Some("Install provider-bin.")
+        );
+        assert_eq!(executable.extra["provider_executable_hint"], "preserve-me");
         assert_eq!(
             provider.timeout_artifact_discovery.extra["provider_discovery"],
             true
@@ -1816,6 +2010,10 @@ mod tests {
         assert_eq!(
             exported["runner_readiness"][0]["env_path"]["path_kind"],
             "provider-cache"
+        );
+        assert_eq!(
+            exported["runner_readiness"][0]["executable"]["version_command"][0],
+            "--version"
         );
         assert_eq!(
             exported["timeout_artifact_discovery"]["provider_discovery"],
@@ -2327,6 +2525,7 @@ process.stdout.write(JSON.stringify({
             label: "Provider A auth".to_string(),
             secret_env: vec!["PROVIDER_A_TOKEN".to_string()],
             env_path: None,
+            executable: None,
             remediation: Some("Configure provider A auth.".to_string()),
             extra: BTreeMap::new(),
         }];
@@ -2342,6 +2541,7 @@ process.stdout.write(JSON.stringify({
                 "EXPLICIT_SECRET".to_string(),
             ],
             env_path: None,
+            executable: None,
             remediation: None,
             extra: BTreeMap::new(),
         }];
@@ -2429,6 +2629,73 @@ process.stdout.write(JSON.stringify({
             render_provider_command_display(&provider),
             "node /tmp/custom-runtime/provider.js"
         );
+    }
+
+    #[test]
+    fn provider_command_env_injects_declared_executable_candidate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = temp.path().join("provider-tool");
+        fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("write tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&tool, permissions).expect("chmod tool");
+        }
+        let (request, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "provider.tool".to_string(),
+            label: "Provider tool".to_string(),
+            secret_env: Vec::new(),
+            env_path: None,
+            executable: Some(AgentTaskProviderExecutableReadiness {
+                env: vec!["HOMEBOY_TEST_PROVIDER_TOOL".to_string()],
+                candidates: vec![tool.to_string_lossy().to_string()],
+                version_command: vec!["--version".to_string()],
+                install_hint: Some("Install provider-tool.".to_string()),
+                extra: BTreeMap::new(),
+            }),
+            remediation: None,
+            extra: BTreeMap::new(),
+        }];
+        std::env::remove_var("HOMEBOY_TEST_PROVIDER_TOOL");
+
+        let env = provider_command_env(&request, &provider).expect("provider env");
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_PROVIDER_TOOL".to_string(),
+            tool.to_string_lossy().to_string()
+        )));
+    }
+
+    #[test]
+    fn provider_command_env_prefers_declared_executable_env_value() {
+        let (request, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "provider.tool".to_string(),
+            label: "Provider tool".to_string(),
+            secret_env: Vec::new(),
+            env_path: None,
+            executable: Some(AgentTaskProviderExecutableReadiness {
+                env: vec!["HOMEBOY_TEST_PROVIDER_TOOL_ENV".to_string()],
+                candidates: vec!["definitely-missing-provider-tool".to_string()],
+                version_command: Vec::new(),
+                install_hint: None,
+                extra: BTreeMap::new(),
+            }),
+            remediation: None,
+            extra: BTreeMap::new(),
+        }];
+        std::env::set_var("HOMEBOY_TEST_PROVIDER_TOOL_ENV", "/custom/provider-tool");
+
+        let env = provider_command_env(&request, &provider).expect("provider env");
+
+        std::env::remove_var("HOMEBOY_TEST_PROVIDER_TOOL_ENV");
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_PROVIDER_TOOL_ENV".to_string(),
+            "/custom/provider-tool".to_string()
+        )));
     }
 
     #[test]

@@ -196,6 +196,7 @@ fn provider_readiness_renderer_uses_fake_provider_contract() {
             canonical_path: None,
             extra: BTreeMap::new(),
         }),
+        executable: None,
         remediation: Some("Refresh the fake runtime cache".to_string()),
         extra: BTreeMap::new(),
     };
@@ -233,6 +234,7 @@ fn provider_readiness_warns_on_non_canonical_checkout() {
             canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
             extra: BTreeMap::new(),
         }),
+        executable: None,
         remediation: Some("Refresh the managed source checkout".to_string()),
         extra: BTreeMap::new(),
     };
@@ -269,6 +271,7 @@ fn provider_readiness_ok_when_path_within_canonical_root() {
             canonical_path: Some("/home/runner/.cache/homeboy/source".to_string()),
             extra: BTreeMap::new(),
         }),
+        executable: None,
         remediation: None,
         extra: BTreeMap::new(),
     };
