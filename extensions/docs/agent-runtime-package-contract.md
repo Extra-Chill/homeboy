@@ -144,6 +144,11 @@ Common fields:
 The provider must not infer workspace shape from WP Codebox, WordPress, or any
 other current runtime unless that shape is declared here.
 
+Caller-owned wrappers should pass domain-specific runtime requirements explicitly.
+For example, Data Machine Agent CI supplies its Agents API, Data Machine, Data
+Machine Code, workspace-tool, and ability-policy defaults before invoking the
+generic WP Codebox provider.
+
 ## Outcome And Diagnostic Contracts
 
 Provider outcomes should include:

@@ -10,6 +10,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+/**
+ * Internal dependencies
+ */
+const {
+  datamachineAgentCiCodeboxExecutorConfig,
+} = require('../../lib/datamachine-agent-ci-codebox-adapter');
+
 const SCRIPT_DIR = __dirname;
 const EXTENSION_PATH = path.resolve(SCRIPT_DIR, '..', '..');
 const EXECUTOR = path.resolve(SCRIPT_DIR, '..', '..', '..', 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
@@ -71,7 +78,7 @@ function buildAgentTaskRequest(config, configPath) {
     agent_runtime_tools: config.agent_runtime_tools || config.agent_runtime_tools_path || runtimeComponents.data_machine_code,
     runtime: runtimeComponents.runtime,
   }).filter(([, value]) => nonEmpty(value)));
-  const executorConfig = Object.fromEntries(Object.entries({
+  const executorConfig = datamachineAgentCiCodeboxExecutorConfig(Object.fromEntries(Object.entries({
     ...config,
     execution_kind: config.execution_kind || 'agent_bundle',
     agents_api: config.agents_api || config.agents_api_path || runtimeComponents.agents_api,
@@ -79,7 +86,7 @@ function buildAgentTaskRequest(config, configPath) {
     homeboy_extensions: config.homeboy_extensions || config.homeboy_extensions_path || EXTENSION_PATH,
     artifacts: config.artifacts_path || config.artifacts,
     replay_bundle_dir: config.replay_bundle_dir || process.env.HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR,
-  }).filter(([, value]) => nonEmpty(value)));
+  }).filter(([, value]) => nonEmpty(value))));
 
   return {
     schema: 'homeboy/agent-task-request/v1',

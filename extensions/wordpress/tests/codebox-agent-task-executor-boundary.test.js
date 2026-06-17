@@ -9,6 +9,11 @@ const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
 } = require('../../agent-runtimes/wp-codebox');
+const {
+  DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
+  DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
+  datamachineAgentCiCodeboxExecutorConfig,
+} = require('../lib/datamachine-agent-ci-codebox-adapter');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 const codexSecretEnv = [
@@ -72,8 +77,16 @@ assert.deepEqual(provider.workspace_tools.readonly, [
   'workspace_read',
   'workspace_git_status',
 ]);
-assert.equal(provider.component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
-assert.equal(provider.component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
+assert.deepEqual(provider.component_path_defaults, {});
+assert.equal(provider.capabilities.includes('tool:datamachine/run-agent-bundle'), false);
+assert.equal(provider.capabilities.includes('ability:datamachine/run-agent-bundle'), false);
+
+const datamachineAdapterConfig = datamachineAgentCiCodeboxExecutorConfig({ provider: 'openai' });
+assert.equal(datamachineAdapterConfig.component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
+assert.equal(datamachineAdapterConfig.component_path_defaults.path_aliases.agent_runtime.includes('runtime_component:data_machine'), true);
+assert.deepEqual(datamachineAdapterConfig.workspace_tools, DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS);
+assert.deepEqual(datamachineAdapterConfig.runtime_requirements.component_path_defaults, DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS);
+assert.equal(datamachineAdapterConfig.runtime_requirements.capabilities.includes('ability:datamachine/run-agent-bundle'), true);
 
 const customContract = providerContract({
   capabilities: ['wordpress_sandbox', 'tool:example/run-workflow'],
@@ -242,10 +255,10 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   repo: 'wp-site-generator@canonical-loop-main-20260616',
   executor: {
     backend: 'codebox',
-    config: {
+    config: datamachineAgentCiCodeboxExecutorConfig({
       provider: 'openai',
       task_kind: 'repo-cooking',
-    },
+    }),
   },
   instructions: 'Run a repo-loop workflow against the current checkout.',
   inputs: {

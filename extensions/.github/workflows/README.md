@@ -146,7 +146,8 @@ jobs:
 
 - Agent CI runs through the selected `agent_runtime`. Today the only supported value is `wp-codebox`, and the workflow checks out/builds `Automattic/wp-codebox` for that runtime.
 - `agent_runtime_ref` controls the selected runtime ref.
-- `include_agent_runtime_dependencies` defaults to `true` and checks out the standard WordPress agent runtime stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin.
+- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Data Machine Agent CI policy lives in this reusable workflow and runner adapter, not in the generic WP Codebox provider manifest.
+- `include_agent_runtime_dependencies` defaults to `true` and checks out the Data Machine Agent CI stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin. The runner adapter forwards those paths to WP Codebox as explicit runtime component requirements.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
