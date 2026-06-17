@@ -1000,9 +1000,9 @@ mod tests {
         );
     }
 
-    fn plugin_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
+    fn nested_tree_archive_policy(staging_path: String) -> DeployArchiveInstallPolicy {
         DeployArchiveInstallPolicy {
-            path_pattern: "/wp-content/plugins/".to_string(),
+            path_pattern: "/components/".to_string(),
             staging_path,
             root_must_match_target_basename: false,
             required_header: None,
@@ -1030,33 +1030,34 @@ mod tests {
         leaked
     }
 
-    // Issue #3027: replacing an existing plugin directory that contains a deep
-    // nested Node package tree (node_modules-style) must succeed without
-    // relying on cross-device `mv` that preserves permissions per file.
+    // Issue #3027: replacing an existing target directory that contains a deep
+    // nested package tree (node_modules-style) must succeed without relying on
+    // a cross-device `mv` that preserves permissions per file. This is a
+    // generic, runtime-agnostic directory-tree replace — no domain semantics.
     #[test]
     fn test_archive_install_replaces_target_with_deep_nested_tree() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let artifact = temp.path().join("wp-codebox.zip");
+        let artifact = temp.path().join("component.zip");
         let staging = temp.path().join("staging");
-        let plugins = temp.path().join("wp-content/plugins");
-        let target = plugins.join("wp-codebox");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
 
         // Existing install with a deep nested package tree, mirroring the
         // vendor/<pkg>/packages/<sub>/node_modules layout from the bug report.
-        let deep = target.join("vendor/wp-codebox-cli/packages/runtime-core/node_modules/dep/lib");
+        let deep = target.join("vendor/inner-cli/packages/runtime-core/node_modules/dep/lib");
         fs::create_dir_all(&deep).expect("deep nested tree");
         fs::write(deep.join("index.js"), "module.exports = {};").expect("nested file");
-        fs::write(target.join("stale.php"), "stale").expect("stale file");
+        fs::write(target.join("stale.txt"), "stale").expect("stale file");
 
         write_zip(
             &artifact,
             &[
-                ("wp-codebox/wp-codebox.php", "Plugin Name: WP Codebox\n"),
-                ("wp-codebox/vendor/pkg/node_modules/x/y.js", "ok"),
+                ("component/manifest.txt", "fresh\n"),
+                ("component/vendor/pkg/node_modules/x/y.js", "ok"),
             ],
         );
 
-        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let policy = nested_tree_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
 
         let result = deploy_with_override(
@@ -1074,16 +1075,16 @@ mod tests {
         .expect("deploy result");
 
         assert!(result.success, "deploy failed: {:?}", result.error);
-        assert!(target.join("wp-codebox.php").exists());
+        assert!(target.join("manifest.txt").exists());
         assert!(target.join("vendor/pkg/node_modules/x/y.js").exists());
         // The old nested tree and stale files must be gone after replace.
-        assert!(!target.join("stale.php").exists());
+        assert!(!target.join("stale.txt").exists());
         assert!(!deep.join("index.js").exists());
         // No adjacent extraction temp dir or backup dir may leak.
         assert!(
-            list_adjacent_install_temp_dirs(&plugins, "wp-codebox").is_empty(),
+            list_adjacent_install_temp_dirs(&parent, "component").is_empty(),
             "adjacent install/backup dirs leaked: {:?}",
-            list_adjacent_install_temp_dirs(&plugins, "wp-codebox")
+            list_adjacent_install_temp_dirs(&parent, "component")
         );
     }
 
@@ -1093,19 +1094,19 @@ mod tests {
     #[test]
     fn test_archive_install_replaces_target_containing_symlink() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let artifact = temp.path().join("plugin.zip");
+        let artifact = temp.path().join("component.zip");
         let staging = temp.path().join("staging");
-        let plugins = temp.path().join("wp-content/plugins");
-        let target = plugins.join("plugin");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
 
         let nested = target.join("node_modules/.bin");
         fs::create_dir_all(&nested).expect("nested dir");
         fs::write(target.join("node_modules/real.js"), "real").expect("real file");
         std::os::unix::fs::symlink("../real.js", nested.join("link.js")).expect("symlink");
 
-        write_zip(&artifact, &[("plugin/plugin.php", "Plugin Name: Plugin\n")]);
+        write_zip(&artifact, &[("component/manifest.txt", "fresh\n")]);
 
-        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let policy = nested_tree_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
 
         let result = deploy_with_override(
@@ -1123,26 +1124,26 @@ mod tests {
         .expect("deploy result");
 
         assert!(result.success, "deploy failed: {:?}", result.error);
-        assert!(target.join("plugin.php").exists());
+        assert!(target.join("manifest.txt").exists());
         assert!(!target.join("node_modules").exists());
-        assert!(list_adjacent_install_temp_dirs(&plugins, "plugin").is_empty());
+        assert!(list_adjacent_install_temp_dirs(&parent, "component").is_empty());
     }
 
-    // If the install step fails after the existing target was moved aside, the
-    // original directory (including its nested tree) must be restored so a
-    // failed deploy never leaves the site without its plugin.
+    // If the install step aborts before the new tree is in place, the original
+    // directory (including its nested tree) must remain intact so a failed
+    // deploy never leaves the target without its contents.
     #[test]
     fn test_archive_install_restores_backup_on_failure() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let artifact = temp.path().join("plugin.zip");
+        let artifact = temp.path().join("component.zip");
         let staging = temp.path().join("staging");
-        let plugins = temp.path().join("wp-content/plugins");
-        let target = plugins.join("plugin");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
 
         let nested = target.join("vendor/pkg/node_modules/dep");
         fs::create_dir_all(&nested).expect("nested dir");
         fs::write(nested.join("keep.js"), "keep").expect("keep file");
-        fs::write(target.join("plugin.php"), "Plugin Name: Plugin v1\n").expect("existing header");
+        fs::write(target.join("manifest.txt"), "v1\n").expect("existing marker");
 
         // Ship a malformed archive whose only top-level entry is a *file*, not
         // a directory. `zip_root` resolves to that file name, so the extracted
@@ -1151,9 +1152,9 @@ mod tests {
         // intentionally fires *before* the existing target is touched, so the
         // original install (including its deep nested tree) must remain fully
         // intact and no staging/backup dirs may leak.
-        write_zip(&artifact, &[("plugin.php", "Plugin Name: Plugin v2\n")]);
+        write_zip(&artifact, &[("manifest.txt", "v2\n")]);
 
-        let policy = plugin_archive_policy(staging.to_string_lossy().to_string());
+        let policy = nested_tree_archive_policy(staging.to_string_lossy().to_string());
         let override_config = archive_install_override(&policy);
 
         let result = deploy_with_override(
@@ -1171,17 +1172,17 @@ mod tests {
         .expect("deploy result");
 
         assert!(!result.success, "expected install to fail and roll back");
-        // Original install fully restored, nested tree intact.
+        // Original install fully preserved, nested tree intact.
         assert_eq!(
-            fs::read_to_string(target.join("plugin.php")).expect("restored header"),
-            "Plugin Name: Plugin v1\n"
+            fs::read_to_string(target.join("manifest.txt")).expect("preserved marker"),
+            "v1\n"
         );
-        assert!(nested.join("keep.js").exists(), "nested tree not restored");
-        // No backup or extraction temp dir may survive the rollback.
+        assert!(nested.join("keep.js").exists(), "nested tree not preserved");
+        // No backup or extraction temp dir may survive the failed install.
         assert!(
-            list_adjacent_install_temp_dirs(&plugins, "plugin").is_empty(),
-            "backup/temp dirs leaked after rollback: {:?}",
-            list_adjacent_install_temp_dirs(&plugins, "plugin")
+            list_adjacent_install_temp_dirs(&parent, "component").is_empty(),
+            "backup/temp dirs leaked after failure: {:?}",
+            list_adjacent_install_temp_dirs(&parent, "component")
         );
     }
 
