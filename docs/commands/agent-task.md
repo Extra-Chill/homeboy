@@ -243,6 +243,71 @@ without `origin` fail on the controller before offload with a supported-path
 diagnostic; use a Homeboy worktree or another clean checkout
 for write-capable agent tasks.
 
+## Provider Runtime Contracts
+
+Agent runtime manifests may declare portable provider contracts that Homeboy uses
+before and after execution without learning provider-specific APIs. These fields
+belong on each `agent_task_executors[]` entry:
+
+```json
+{
+  "schema": "homeboy/agent-task-executor-provider/v1",
+  "id": "example.default",
+  "backend": "example",
+  "command": "example-provider",
+  "request_schema": "homeboy/agent-task-request/v1",
+  "outcome_schema": "homeboy/agent-task-outcome/v1",
+  "secret_env_requirements": [
+    {
+      "env": ["EXAMPLE_API_TOKEN"],
+      "secret_env_sources": {
+        "EXAMPLE_API_TOKEN": { "kind": "env", "name": "EXAMPLE_API_TOKEN" }
+      }
+    }
+  ],
+  "runner_readiness": [
+    {
+      "id": "example-auth",
+      "label": "Example provider auth",
+      "secret_env": ["EXAMPLE_API_TOKEN"],
+      "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
+    }
+  ],
+  "workspace_materialization": {
+    "cwd": "git_checkout",
+    "requires_git": true,
+    "write_scope": "workspace",
+    "artifact_paths": ["artifacts"]
+  },
+  "timeout_artifact_discovery": {
+    "config_path_keys": ["provider_artifact_root"],
+    "paths": ["/var/tmp/example-provider/latest"],
+    "artifact_patterns": [
+      {
+        "kind": "metrics",
+        "filename_patterns": ["*-metrics.ndjson"],
+        "mime": "application/x-ndjson",
+        "metadata": { "role": "telemetry" }
+      }
+    ]
+  }
+}
+```
+
+Homeboy treats these declarations as generic contracts:
+
+- `secret_env_requirements` and `runner_readiness` describe required secret env
+  names and redacted readiness probes without exposing values.
+- `workspace_materialization` describes the checkout shape a provider needs; it
+  does not name any workspace manager or product runtime.
+- `timeout_artifact_discovery` extends timeout evidence recovery with declared
+  paths, request metadata/config path keys, and typed filename/extension patterns.
+  Discovered files are normalized into `AgentTaskArtifact` entries with generic
+  `kind`, `mime`, and opaque metadata.
+- Provider-specific sessions, APIs, artifact namespaces, and backend payloads stay
+  outside Homeboy core and are represented only as artifacts, evidence refs,
+  diagnostics, workflow steps, or opaque metadata.
+
 ## Durable Loop Controllers
 
 `agent-task controller` stores domain-agnostic controller state for multi-day

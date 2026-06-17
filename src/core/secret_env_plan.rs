@@ -20,6 +20,103 @@ pub struct SecretEnvPlan {
     pub redaction: SecretEnvRedactionPolicy,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvStatus {
+    pub name: String,
+    pub configured: bool,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvResolution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<SecretEnvStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvResolutionError {
+    pub missing_secret_env: Vec<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<SecretEnvStatus>,
+}
+
+pub struct SecretEnvValueProvider<'a> {
+    source: String,
+    resolve: Box<dyn FnMut(&str) -> Option<String> + 'a>,
+}
+
+impl<'a> SecretEnvValueProvider<'a> {
+    pub fn new(
+        source: impl Into<String>,
+        resolve: impl FnMut(&str) -> Option<String> + 'a,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            resolve: Box::new(resolve),
+        }
+    }
+}
+
+pub fn resolve_secret_env_names(
+    names: impl IntoIterator<Item = String>,
+    providers: Vec<SecretEnvValueProvider<'_>>,
+    missing_message_prefix: &str,
+) -> Result<SecretEnvResolution, SecretEnvResolutionError> {
+    SecretEnvResolver::new(providers).resolve_required(names, missing_message_prefix)
+}
+
+pub struct SecretEnvResolver<'a> {
+    providers: Vec<SecretEnvValueProvider<'a>>,
+}
+
+impl<'a> SecretEnvResolver<'a> {
+    pub fn new(providers: Vec<SecretEnvValueProvider<'a>>) -> Self {
+        Self { providers }
+    }
+
+    pub fn resolve_required(
+        mut self,
+        names: impl IntoIterator<Item = String>,
+        missing_message_prefix: &str,
+    ) -> Result<SecretEnvResolution, SecretEnvResolutionError> {
+        let names = normalize_names(names);
+        let mut env = Vec::new();
+        let mut status = Vec::new();
+        let mut missing = Vec::new();
+
+        for name in names {
+            let mut resolved = None;
+            for provider in self.providers.iter_mut() {
+                if let Some(value) = (provider.resolve)(&name) {
+                    resolved = Some((provider.source.clone(), value));
+                    break;
+                }
+            }
+
+            if let Some((source, value)) = resolved {
+                env.push((name.clone(), value));
+                status.push(secret_env_status(name, true, source));
+            } else {
+                status.push(secret_env_status(name.clone(), false, "missing"));
+                missing.push(name);
+            }
+        }
+
+        if missing.is_empty() {
+            Ok(SecretEnvResolution { env, status })
+        } else {
+            Err(SecretEnvResolutionError {
+                message: format!("{missing_message_prefix}: {}", missing.join(", ")),
+                missing_secret_env: missing,
+                status,
+            })
+        }
+    }
+}
+
 impl Default for SecretEnvPlan {
     fn default() -> Self {
         Self {
@@ -135,13 +232,22 @@ impl SecretEnvRedactionPolicy {
     }
 }
 
-fn normalize_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+pub fn normalize_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
     names
         .into_iter()
+        .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn secret_env_status(name: String, configured: bool, source: impl Into<String>) -> SecretEnvStatus {
+    SecretEnvStatus {
+        name,
+        configured,
+        source: source.into(),
+    }
 }
 
 fn redact_env_value(policy: &RedactionPolicy, value: &str) -> String {
@@ -246,5 +352,73 @@ mod tests {
                 "C_SECRET".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn normalizes_secret_env_names_by_trimming_sorting_and_deduplicating() {
+        assert_eq!(
+            normalize_names([
+                " B_SECRET ".to_string(),
+                "".to_string(),
+                "A_SECRET".to_string(),
+                "B_SECRET".to_string(),
+            ]),
+            vec!["A_SECRET".to_string(), "B_SECRET".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolver_returns_values_and_redacted_status_contract() {
+        let resolver = SecretEnvResolver::new(vec![
+            SecretEnvValueProvider::new("missing-source", |_| None),
+            SecretEnvValueProvider::new("test-source", |name| {
+                (name == "API_TOKEN").then(|| "secret-value".to_string())
+            }),
+        ]);
+
+        let resolved = resolver
+            .resolve_required(vec!["API_TOKEN".to_string()], "missing required secret env")
+            .expect("secret resolves");
+
+        assert_eq!(
+            resolved.env,
+            vec![("API_TOKEN".to_string(), "secret-value".to_string())]
+        );
+        assert_eq!(
+            resolved.status,
+            vec![SecretEnvStatus {
+                name: "API_TOKEN".to_string(),
+                configured: true,
+                source: "test-source".to_string(),
+            }]
+        );
+        assert!(!serde_json::to_string(&resolved.status)
+            .expect("status json")
+            .contains("secret-value"));
+    }
+
+    #[test]
+    fn resolver_reports_missing_names_without_values() {
+        let resolver =
+            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-source", |_| None)]);
+
+        let error = resolver
+            .resolve_required(
+                vec!["B_SECRET".to_string(), "A_SECRET".to_string()],
+                "missing required secret env",
+            )
+            .expect_err("secrets are missing");
+
+        assert_eq!(
+            error.missing_secret_env,
+            vec!["A_SECRET".to_string(), "B_SECRET".to_string()]
+        );
+        assert_eq!(
+            error.message,
+            "missing required secret env: A_SECRET, B_SECRET"
+        );
+        assert!(!serde_json::to_string(&error)
+            .expect("error json")
+            .contains("secret-value"));
     }
 }

@@ -170,7 +170,7 @@ pub mod gate {
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentVariable, AgentTaskGateFailureEvidence,
         AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
-        AgentTaskGateVisibility, AGENT_TASK_GATE_REPORT_SCHEMA,
+        AgentTaskGateVisibility, VerifyGateOptions, AGENT_TASK_GATE_REPORT_SCHEMA,
     };
 }
 
@@ -226,11 +226,12 @@ pub mod provider {
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_requires_cwd_git_checkout, provider_runner_readiness_contracts,
         provider_runner_secret_env_for_plan, provider_runner_source_contracts,
-        provider_secret_sources_for_plan, required_extension_ids_for_plan,
-        AgentTaskExecutorProvider, AgentTaskProviderDependencyFailurePattern,
-        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
-        AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
-        AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
+        provider_secret_sources_for_plan, provider_secret_sources_for_providers,
+        required_extension_ids_for_plan, AgentTaskExecutorProvider,
+        AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
+        AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
+        AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
+        ExtensionProviderAgentTaskExecutor,
     };
 }
 

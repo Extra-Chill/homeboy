@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use crate::core::defaults::{self, AgentTaskSecretSource};
 use crate::core::keychain;
 use crate::core::paths;
-use crate::core::secret_env_plan::SecretEnvPlan;
+use crate::core::secret_env_plan::{
+    resolve_secret_env_names, SecretEnvPlan, SecretEnvValueProvider,
+};
 use crate::core::Error;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -38,7 +40,11 @@ pub fn resolve_secret_env_plan(
 }
 
 pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
-    secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        &HashMap::new(),
+    )
 }
 
 pub fn secret_env_status_with_fallbacks(
@@ -277,45 +283,30 @@ fn resolve_secret_env_with_config_and_fallbacks(
     config: &AgentTaskSecretConfig,
     fallback_sources: &HashMap<String, AgentTaskSecretSource>,
 ) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
-    if names.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut resolved = Vec::new();
-    let mut missing = Vec::new();
     let mut bundle_cache = HashMap::new();
-
-    for name in names {
-        if let Ok(value) = env::var(name) {
-            resolved.push((name.clone(), value));
-            continue;
-        }
-
-        match config
-            .secrets
-            .get(name)
-            .and_then(|source| source.resolve(name, &mut bundle_cache))
-            .or_else(|| {
-                fallback_sources
+    resolve_secret_env_names(
+        names.iter().cloned(),
+        vec![
+            SecretEnvValueProvider::new("env", |name| env::var(name).ok()),
+            SecretEnvValueProvider::new("agent-task", move |name| {
+                config
+                    .secrets
                     .get(name)
                     .and_then(|source| source.resolve(name, &mut bundle_cache))
-            }) {
-            Some(value) => resolved.push((name.clone(), value)),
-            None => missing.push(name.clone()),
-        }
-    }
-
-    if missing.is_empty() {
-        Ok(resolved)
-    } else {
-        Err(AgentTaskSecretResolutionError {
-            message: format!(
-                "missing required agent-task secret env: {}",
-                missing.join(", ")
-            ),
-            missing_secret_env: missing,
-        })
-    }
+                    .or_else(|| {
+                        fallback_sources
+                            .get(name)
+                            .and_then(|source| source.resolve(name, &mut bundle_cache))
+                    })
+            }),
+        ],
+        "missing required agent-task secret env",
+    )
+    .map(|resolution| resolution.env)
+    .map_err(|error| AgentTaskSecretResolutionError {
+        missing_secret_env: error.missing_secret_env,
+        message: error.message,
+    })
 }
 
 fn resolve_secret_source<'a>(

@@ -50,6 +50,11 @@ pub struct AgentTaskExecutorProvider {
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     #[serde(
         default,
+        skip_serializing_if = "AgentTaskProviderTimeoutArtifactDiscovery::is_empty"
+    )]
+    pub timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery,
+    #[serde(
+        default,
         skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
     )]
     pub role_aliases: AgentTaskProviderRoleAliases,
@@ -172,6 +177,55 @@ pub struct AgentTaskProviderDependencyFailurePattern {
     pub error_contains_any: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderTimeoutArtifactDiscovery {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_path_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_path_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_patterns: Vec<AgentTaskProviderArtifactPattern>,
+}
+
+impl AgentTaskProviderTimeoutArtifactDiscovery {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+            && self.metadata_path_keys.is_empty()
+            && self.config_path_keys.is_empty()
+            && self.artifact_patterns.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderArtifactPattern {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filename_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filename_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(
+        default = "default_metadata",
+        skip_serializing_if = "is_empty_metadata"
+    )]
+    pub metadata: Value,
+}
+
+fn default_metadata() -> Value {
+    Value::Object(Default::default())
+}
+
+fn is_empty_metadata(value: &Value) -> bool {
+    value.as_object().is_none_or(|object| object.is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -362,6 +416,19 @@ pub fn provider_secret_sources_for_discovered_providers(
     provider_secret_sources_for_providers(&providers)
 }
 
+pub fn provider_secret_sources_for_providers(
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for provider in providers {
+        sources.extend(provider_secret_sources(provider, None));
+        for defaults in provider.provider_defaults.values() {
+            sources.extend(provider_config_secret_sources(defaults));
+        }
+    }
+    sources
+}
+
 pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
@@ -369,6 +436,16 @@ pub(crate) fn role_aliases_for_executor(
     let providers = discover_agent_task_executor_providers();
     select_provider_by_backend(&providers, backend, selector)
         .map(|provider| provider.role_aliases.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn timeout_artifact_discovery_for_executor(
+    backend: &str,
+    selector: Option<&str>,
+) -> AgentTaskProviderTimeoutArtifactDiscovery {
+    let providers = discover_agent_task_executor_providers();
+    select_provider_by_backend(&providers, backend, selector)
+        .map(|provider| provider.timeout_artifact_discovery.clone())
         .unwrap_or_default()
 }
 
@@ -441,19 +518,6 @@ fn provider_secret_sources_for_plan_with_providers(
             continue;
         };
         sources.extend(provider_secret_sources(provider, Some(request)));
-    }
-    sources
-}
-
-fn provider_secret_sources_for_providers(
-    providers: &[AgentTaskExecutorProvider],
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let mut sources = HashMap::new();
-    for provider in providers {
-        sources.extend(provider_secret_sources(provider, None));
-        for defaults in provider.provider_defaults.values() {
-            sources.extend(provider_config_secret_sources(defaults));
-        }
     }
     sources
 }
@@ -1365,6 +1429,7 @@ mod tests {
             runner_readiness: Vec::new(),
             runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
+            timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
@@ -2105,6 +2170,47 @@ process.stdout.write(JSON.stringify({
                 "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
                 "12345".to_string()
             )));
+        });
+    }
+
+    #[test]
+    fn provider_default_secret_sources_feed_secret_readiness_status() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("codex-auth.json");
+            fs::write(
+                &auth_path,
+                json!({
+                    "tokens": {
+                        "access_token": "provider-owned-access-token"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write auth");
+            let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+            provider.provider_defaults.insert(
+                "codex".to_string(),
+                json!({
+                    "secret_env_sources": {
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "tokens.access_token"
+                        }
+                    }
+                }),
+            );
+            let fallback_sources = provider_secret_sources_for_providers(&[provider]);
+
+            let status = crate::core::agent_task_secrets::secret_env_status_with_fallbacks(
+                &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+                &fallback_sources,
+            );
+
+            assert_eq!(status.len(), 1);
+            assert!(status[0].configured);
+            assert_eq!(status[0].source, "json-file");
         });
     }
 

@@ -12,7 +12,7 @@ use crate::core::agent_task::{
 };
 use crate::core::agent_task_gate::{
     run_gate_command, run_gate_command_with_policy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-    AgentTaskGateStatus, AgentTaskGateVisibility,
+    AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
@@ -31,12 +31,11 @@ pub struct AgentTaskPromotionOptions {
     pub artifact_id: Option<String>,
     #[serde(default)]
     pub dry_run: bool,
-    #[serde(default)]
-    pub verify: Vec<String>,
-    #[serde(default)]
-    pub private_verify: Vec<String>,
-    #[serde(default = "default_private_gate_reveal")]
-    pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    /// Deterministic verification gates. Flattened so the serialized shape keeps
+    /// the historical flat `verify` / `private_verify` / `private_gate_reveal`
+    /// keys while the field group is defined once in `VerifyGateOptions`.
+    #[serde(flatten)]
+    pub gates: VerifyGateOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_command: Option<String>,
 }
@@ -160,7 +159,9 @@ fn promote_with_provider(
     }
 
     let mut deterministic_gates = Vec::new();
-    if !options.dry_run && (!options.verify.is_empty() || !options.private_verify.is_empty()) {
+    if !options.dry_run
+        && (!options.gates.verify.is_empty() || !options.gates.private_verify.is_empty())
+    {
         let worktree_path = applied_worktree_path.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "to_worktree",
@@ -169,7 +170,7 @@ fn promote_with_provider(
                 None,
             )
         })?;
-        for (index, command) in options.verify.iter().enumerate() {
+        for (index, command) in options.gates.verify.iter().enumerate() {
             deterministic_gates.push(provider.verify(
                 worktree_path,
                 index + 1,
@@ -179,13 +180,13 @@ fn promote_with_provider(
             )?);
         }
         let private_offset = deterministic_gates.len();
-        for (index, command) in options.private_verify.iter().enumerate() {
+        for (index, command) in options.gates.private_verify.iter().enumerate() {
             deterministic_gates.push(provider.verify(
                 worktree_path,
                 private_offset + index + 1,
                 command,
                 AgentTaskGateVisibility::Private,
-                options.private_gate_reveal,
+                options.gates.private_gate_reveal,
             )?);
         }
     }
@@ -330,10 +331,6 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
 
 fn promotion_report_schema() -> String {
     AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
-}
-
-fn default_private_gate_reveal() -> AgentTaskGateRevealPolicy {
-    AgentTaskGateRevealPolicy::SummaryOnly
 }
 
 fn select_outcome(source: Value, task_id: Option<&str>) -> Result<(String, AgentTaskOutcome)> {
@@ -1091,9 +1088,11 @@ mod tests {
             task_id: None,
             artifact_id: None,
             dry_run: true,
-            verify: Vec::new(),
-            private_verify: Vec::new(),
-            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            gates: VerifyGateOptions {
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
             provider_command: None,
         })
         .expect("dry-run promotion report");
@@ -1124,9 +1123,11 @@ mod tests {
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
-                verify: vec!["cargo test --lib agent_task_promotion".to_string()],
-                private_verify: vec!["cargo test --lib hidden".to_string()],
-                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                gates: VerifyGateOptions {
+                    verify: vec!["cargo test --lib agent_task_promotion".to_string()],
+                    private_verify: vec!["cargo test --lib hidden".to_string()],
+                    private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                },
                 provider_command: None,
             },
             &mut provider,
@@ -1213,9 +1214,11 @@ mod tests {
                 task_id: None,
                 artifact_id: None,
                 dry_run: false,
-                verify: Vec::new(),
-                private_verify: Vec::new(),
-                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                gates: VerifyGateOptions {
+                    verify: Vec::new(),
+                    private_verify: Vec::new(),
+                    private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                },
                 provider_command: None,
             },
             &mut provider,
@@ -1245,14 +1248,78 @@ mod tests {
             task_id: None,
             artifact_id: None,
             dry_run: false,
-            verify: Vec::new(),
-            private_verify: Vec::new(),
-            private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            gates: VerifyGateOptions {
+                verify: Vec::new(),
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+            },
             provider_command: None,
         })
         .expect_err("missing provider rejected");
 
         assert!(err.message.contains("workspace provider command"));
+    }
+
+    #[test]
+    fn promotion_options_keep_flat_verify_gate_serialized_shape() {
+        // #4910: the shared VerifyGateOptions is `#[serde(flatten)]`-embedded so
+        // the historical flat `verify` / `private_verify` / `private_gate_reveal`
+        // keys must stay at the top level of the serialized options.
+        let options = AgentTaskPromotionOptions {
+            source: "source.json".to_string(),
+            source_path: None,
+            to_worktree: "repo@flatten".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["cargo test".to_string()],
+                private_verify: vec!["cargo test --lib hidden".to_string()],
+                private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+            },
+            provider_command: None,
+        };
+
+        let value = serde_json::to_value(&options).expect("serialize options");
+        assert_eq!(value["verify"], serde_json::json!(["cargo test"]));
+        assert_eq!(
+            value["private_verify"],
+            serde_json::json!(["cargo test --lib hidden"])
+        );
+        assert_eq!(
+            value["private_gate_reveal"],
+            serde_json::json!("summary_only")
+        );
+        assert!(
+            value.get("gates").is_none(),
+            "flattened gate fields must not nest under a `gates` key: {value}"
+        );
+
+        let round_trip: AgentTaskPromotionOptions =
+            serde_json::from_value(value).expect("deserialize flat options");
+        assert_eq!(round_trip, options);
+    }
+
+    #[test]
+    fn promotion_options_deserialize_legacy_flat_gate_payload() {
+        // Payloads authored before the refactor used flat keys; they must still
+        // deserialize into the flattened `gates` field unchanged.
+        let payload = serde_json::json!({
+            "source": "source.json",
+            "to_worktree": "repo@legacy",
+            "verify": ["cargo build"],
+            "private_verify": [],
+            "private_gate_reveal": "full_evidence"
+        });
+
+        let options: AgentTaskPromotionOptions =
+            serde_json::from_value(payload).expect("deserialize legacy flat payload");
+        assert_eq!(options.gates.verify, vec!["cargo build".to_string()]);
+        assert!(options.gates.private_verify.is_empty());
+        assert_eq!(
+            options.gates.private_gate_reveal,
+            AgentTaskGateRevealPolicy::FullEvidence
+        );
     }
 
     #[test]

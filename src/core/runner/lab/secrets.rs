@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use crate::core::agent_tasks::provider::{
     provider_runner_secret_env_for_plan, provider_secret_sources_for_plan,
+    provider_secret_sources_for_providers, ExtensionProviderAgentTaskExecutor,
 };
-use crate::core::agent_tasks::provider_secret_sources_for_discovered_providers;
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::{config, Error, Result};
@@ -39,13 +39,9 @@ pub(super) fn hydrate_agent_task_secret_env(
         }));
     }
 
-    let fallback_sources = provider_secret_sources_for_discovered_providers();
+    let fallback_sources = declared_agent_task_controller_secret_sources(args);
     if !names.is_empty() {
-        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(
-            &names,
-            &fallback_sources,
-        )
-        .map_err(|error| {
+        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(&names, &fallback_sources).map_err(|error| {
             Error::validation_invalid_argument(
                 "secret-env",
                 error.message,
@@ -215,6 +211,20 @@ fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+fn declared_agent_task_controller_secret_sources(
+    args: &[String],
+) -> HashMap<String, crate::core::defaults::AgentTaskSecretSource> {
+    let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
+        return HashMap::new();
+    };
+    if args.get(agent_task_index + 1).map(String::as_str) != Some("providers") {
+        return HashMap::new();
+    }
+
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    provider_secret_sources_for_providers(executor.providers())
 }
 
 pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {

@@ -194,9 +194,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
         task_id: args.task_id,
         artifact_id: args.artifact_id,
         dry_run: args.dry_run,
-        verify: args.verify,
-        private_verify: args.private_verify,
-        private_gate_reveal: args.private_gate_reveal,
+        gates: args.gates.into(),
         provider_command: args.provider_command,
     })?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
@@ -283,13 +281,14 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
 
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let providers = executor.providers();
     let fallback_sources =
-        homeboy::core::agent_tasks::provider_secret_sources_for_discovered_providers();
+        homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
-            "providers": executor.providers(),
-            "secret_env": homeboy::core::agent_tasks::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
+            "providers": providers,
+            "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,
     ))

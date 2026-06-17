@@ -45,6 +45,24 @@ pub struct ArtifactFetchOutcome {
     pub sha256: Option<String>,
 }
 
+/// Pure artifact lookup input for callers that need records without refresh,
+/// indexing, or runner mirroring side effects.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunArtifactQuery {
+    pub run_id: String,
+    pub kind: Option<String>,
+    pub artifact_type: Option<String>,
+}
+
+impl RunArtifactQuery {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// Look up a run and surface a stable validation error when it doesn't
 /// exist. Used by every observation command that takes a `run_id`.
 pub fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
@@ -197,6 +215,33 @@ pub fn list_artifacts_for_run(
     let mut artifacts = store.list_artifacts(run_id)?;
     artifacts.extend(related_lab_artifacts_for_runner_job(store, &run)?);
     Ok(enrich_artifact_links(artifacts))
+}
+
+/// List artifact records from the local store only, preserving the stored
+/// records exactly except for optional in-memory kind/type filtering.
+pub fn query_run_artifacts(
+    store: &ObservationStore,
+    query: &RunArtifactQuery,
+) -> Result<Vec<ArtifactRecord>> {
+    if store.get_run(&query.run_id)?.is_none() {
+        return Err(missing_run_error(&query.run_id));
+    }
+    let artifacts = store
+        .list_artifacts(&query.run_id)?
+        .into_iter()
+        .filter(|artifact| {
+            query
+                .kind
+                .as_ref()
+                .map_or(true, |kind| artifact.kind == *kind)
+        })
+        .filter(|artifact| {
+            query.artifact_type.as_ref().map_or(true, |artifact_type| {
+                artifact.artifact_type == *artifact_type
+            })
+        })
+        .collect();
+    Ok(artifacts)
 }
 
 /// Outcome of `get_artifact_bytes` describing where the bytes were written.
@@ -956,6 +1001,32 @@ mod tests {
             assert_eq!(outcome.artifact_id, artifact.id);
             assert_eq!(outcome.output_path, dest);
             assert_eq!(std::fs::read(&dest).expect("downloaded"), br#"{"ok":true}"#);
+        });
+    }
+
+    #[test]
+    fn query_run_artifacts_filters_without_enrichment_side_effects() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store.start_run(sample_run("bench")).expect("run");
+            let source = home.path().join("bench-results.json");
+            std::fs::write(&source, br#"{"ok":true}"#).expect("source");
+            store
+                .record_artifact(&run.id, "bench_results", &source)
+                .expect("record");
+            store
+                .record_url_artifact(&run.id, "review", "https://example.test/evidence")
+                .expect("url");
+
+            let mut query = RunArtifactQuery::new(&run.id);
+            query.kind = Some("bench_results".to_string());
+            query.artifact_type = Some("file".to_string());
+
+            let artifacts = query_run_artifacts(&store, &query).expect("artifacts");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].kind, "bench_results");
+            assert_eq!(artifacts[0].public_url, None);
         });
     }
 
