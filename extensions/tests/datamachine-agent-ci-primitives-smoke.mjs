@@ -118,6 +118,82 @@ assert.equal(config.runner_workspace.checkout_path, '/workspace/homeboy-extensio
 assert.deepEqual(config.writable_paths, ['src', 'tests']);
 assert.equal(config.provider_credentials.connectors_ai_openai_api_key, 'OPENAI_API_KEY');
 
+fs.writeFileSync(githubOutput, '');
+run('build-runner-config.cjs', [], {
+  GITHUB_OUTPUT: githubOutput,
+  GITHUB_WORKSPACE: workspace,
+  RUNNER_TEMP: runnerTemp,
+  GITHUB_SHA: 'abc123',
+  AGENT_SLUG: 'artifact-processor',
+  PIPELINE_SLUG: 'artifact-pipeline',
+  FLOW_SLUG: 'artifact-flow',
+  BUNDLE_PATH: '',
+  TARGET_REPO: 'Extra-Chill/homeboy-extensions',
+  CONTEXT_REPOSITORIES: '[]',
+  VERIFICATION_COMMANDS: '[]',
+  DRIFT_CHECKS: '[]',
+  WRITABLE_PATHS: '',
+  WORKSPACE_CONTRACT_CHECKS: '{}',
+  PROVIDER: 'openai',
+  MODEL: 'gpt-5.5',
+  AGENT_RUNTIME: 'wp-codebox',
+  AGENT_RUNTIME_REF: 'main',
+  RUNTIME_WORDPRESS_VERSION: '7.0',
+  EXECUTION_KIND: 'runtime_task',
+  ABILITY_REQUEST: '{"ability":"example/process-artifact","input":{"source_artifact":"/workspace/input/example-packet.json"}}',
+  ABILITY_INPUT: '{"mode":"typed-artifact"}',
+  RUNTIME_TASK: '{}',
+  OUTPUT_MAPPINGS: '{"processed_packet":"result.processed_packet"}',
+  COMPONENT_CONTRACTS: '[{"slug":"example-fixture-plugin","path":"/workspace/plugins/example-fixture-plugin","activate":true}]',
+  SUCCESS_REQUIRES_PR: 'false',
+  SUCCESS_COMPLETION_OUTCOMES: '[]',
+  MAX_TURNS: '1',
+  STEP_BUDGET: '1',
+  TIME_BUDGET_MS: '60000',
+  EXPECTED_ARTIFACTS: '["processed_packet"]',
+  ARTIFACT_DECLARATIONS: '[{"name":"processed_packet","type":"example-packet","schema":"example/processed-packet/v1","required":true}]',
+  ARTIFACT_EXPORT_CONFIG: '{}',
+  RULES: '{}',
+  GENERAL_RULES: '[]',
+  TASK_RULES: '[]',
+  PROBES: '{}',
+  WP_GYM_BENCHMARK_MODE: 'false',
+  DRY_RUN: 'true',
+  EXTRA_WP_CONFIG_DEFINES: '{}',
+  RUNTIME_MOUNTS: '[{"source":".ci/actions-artifacts/source-packet","target":"/workspace/input","mode":"readonly"}]',
+  RUNTIME_OVERLAYS: '[]',
+  WORKLOAD_RUN_BEFORE: '[]',
+  WORKLOAD_RUN_AFTER: '[]',
+  DAILY_MEMORY_ENABLED: 'false',
+  DISABLE_DATAMACHINE_DIRECTIVES: 'false',
+  EXTRA_REQUIRED_ABILITIES: '["example/process-artifact"]',
+  APP_TOKEN_REPOS: '',
+  ALLOWED_REPOS: '[]',
+  TOOL_RESULTS_KEY: 'github_tool_results',
+  ABILITY_TOOLS: '[]',
+  TOOL_RECORDERS: '[]',
+  ENABLE_TERMINAL_ACTIONS: 'false',
+  WP_CLI_TOOL_NAME: 'run_wp_cli',
+  PIPELINE_STEP_PATCHES: '[]',
+  FLOW_STEP_PATCHES: '[]',
+  RUNNER_WORKSPACE_CONFIG: '{}',
+  PROVIDER_PLUGIN: '{}',
+});
+const runtimeTaskConfig = JSON.parse(fs.readFileSync(path.join(runnerTemp, 'datamachine-agent-config.json'), 'utf8'));
+assert.equal(runtimeTaskConfig.execution_kind, 'runtime_task');
+assert.deepEqual(runtimeTaskConfig.runtime_task, {
+  ability: 'example/process-artifact',
+  input: {
+    source_artifact: '/workspace/input/example-packet.json',
+    mode: 'typed-artifact',
+  },
+});
+assert.deepEqual(runtimeTaskConfig.output_mappings, { processed_packet: 'result.processed_packet' });
+assert.deepEqual(runtimeTaskConfig.component_contracts, [{ slug: 'example-fixture-plugin', path: '/workspace/plugins/example-fixture-plugin', activate: true }]);
+assert.equal(runtimeTaskConfig.runtime_mounts.some((mount) => mount.target === '/workspace/input' && mount.mode === 'readonly'), true);
+assert.deepEqual(runtimeTaskConfig.artifact_declarations, [{ name: 'processed_packet', type: 'example-packet', schema: 'example/processed-packet/v1', required: true }]);
+assert.deepEqual(runtimeTaskConfig.required_abilities, ['example/process-artifact']);
+
 const resultsFile = path.join(tempRoot, 'results.json');
 fs.writeFileSync(resultsFile, JSON.stringify({ scenarios: [{ id: 'flow', metadata: { job_status: 'completed', engine_data: { value: 7 } } }] }));
 fs.writeFileSync(githubOutput, '');

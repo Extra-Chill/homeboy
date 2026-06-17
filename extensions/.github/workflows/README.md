@@ -44,10 +44,12 @@ mark with `if: always()` after the validation job starts producing reviewer
 evidence.
 
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
-Data Machine agent bundle in a disposable WordPress execution substrate.
-Consumers provide bundle and flow identifiers, a prompt, and optional output
-projections. Agent runs use the WP Codebox substrate; the legacy direct
-Playground runner is no longer selectable by callers.
+Data Machine agent bundle or a direct runtime task in a disposable WordPress
+execution substrate. Bundle consumers provide bundle and flow identifiers, a
+prompt, and optional output projections. Runtime-task consumers provide
+`execution_kind: runtime_task` plus `runtime_task` or the `ability_request` /
+`ability_input` shorthand. Agent runs use the WP Codebox substrate; the legacy
+direct Playground runner is no longer selectable by callers.
 See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the WP Codebox contract, runtime surface, and evaluation notes.
 
@@ -153,12 +155,17 @@ jobs:
 
 - Agent CI runs through the selected `agent_runtime`. Today the only supported value is `wp-codebox`, and the workflow checks out/builds `Automattic/wp-codebox` for that runtime.
 - `agent_runtime_ref` controls the selected runtime ref.
+- `execution_kind` defaults to `agent_bundle`; when `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
+- `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
+- `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
+- `output_mappings` maps named outputs to dotted paths in the runtime task result, and those outputs are validated when they are also listed in `engine_data_outputs`.
+- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox. Use it for caller-owned fixture ability providers or runtime components that are not part of the default Data Machine stack.
 - Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Data Machine Agent CI policy lives in this reusable workflow and runner adapter, not in the generic WP Codebox provider manifest.
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the Data Machine Agent CI stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin. The runner adapter forwards those paths to WP Codebox as explicit runtime component requirements.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
-- `bundle_path` is resolved relative to the consumer checkout.
+- `bundle_path` is resolved relative to the consumer checkout for bundle runs. It is optional for `execution_kind: runtime_task`.
 - `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into the WordPress substrate.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
 - `require_homeboy_app_token` fails before agent setup when Homeboy App credentials are missing. Enable it for central, cross-repo, and private-target runs; leave it false for same-repo consumers that intentionally use `github.token` fallback.

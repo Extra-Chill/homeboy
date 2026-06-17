@@ -11,8 +11,9 @@ name: Data Machine Agent CI (reusable)
   workflow_call:
     inputs:
       bundle_path:
+        description: Bundle path for datamachine/run-agent-bundle runs. Leave empty when execution_kind=runtime_task and runtime_task or ability_request is supplied.
         type: string
-        required: true
+        default: ""
       homeboy_extensions_ref:
         description: Ref of Extra-Chill/homeboy-extensions to check out for runner scripts.
         type: string
@@ -118,6 +119,30 @@ name: Data Machine Agent CI (reusable)
         description: WordPress version used by the selected WordPress-capable runtime.
         type: string
         default: "7.0"
+      execution_kind:
+        description: Executor mode. Defaults to agent_bundle unless runtime_task or ability_request is supplied; use runtime_task for direct ability execution.
+        type: string
+        default: ""
+      runtime_task:
+        description: JSON object forwarded to the runtime task executor, typically {"ability":"example/process-artifact","input":{...}}.
+        type: string
+        default: "{}"
+      ability_request:
+        description: JSON object shorthand for runtime_task. Supports {"ability":"example/process-artifact","input":{...}}.
+        type: string
+        default: "{}"
+      ability_input:
+        description: JSON object merged into ability_request.input when building a runtime_task shorthand.
+        type: string
+        default: "{}"
+      output_mappings:
+        description: JSON object mapping workflow output names to dotted paths in the runtime task result.
+        type: string
+        default: "{}"
+      component_contracts:
+        description: JSON array of runtime component contracts forwarded to WP Codebox.
+        type: string
+        default: "[]"
       success_requires_pr:
         type: boolean
         default: true
@@ -517,6 +542,12 @@ jobs:
           AGENT_RUNTIME: ${{ inputs.agent_runtime }}
           AGENT_RUNTIME_REF: ${{ inputs.agent_runtime_ref }}
           RUNTIME_WORDPRESS_VERSION: ${{ inputs.runtime_wordpress_version }}
+          EXECUTION_KIND: ${{ inputs.execution_kind }}
+          RUNTIME_TASK: ${{ inputs.runtime_task }}
+          ABILITY_REQUEST: ${{ inputs.ability_request }}
+          ABILITY_INPUT: ${{ inputs.ability_input }}
+          OUTPUT_MAPPINGS: ${{ inputs.output_mappings }}
+          COMPONENT_CONTRACTS: ${{ inputs.component_contracts }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
           SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
           MAX_TURNS: ${{ inputs.max_turns }}

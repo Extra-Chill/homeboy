@@ -129,6 +129,44 @@ stdin and writes `homeboy/agent-task-promotion-apply-response/v1` JSON on
 stdout. It keeps the DMC-specific `studio wp datamachine-code ...` shellouts in
 Homeboy Extensions instead of Homeboy core.
 
+### Data Machine Agent CI runtime tasks
+
+The reusable `.github/workflows/datamachine-agent-ci.yml` workflow can run a
+generic WordPress ability directly through WP Codebox, without importing an
+agent bundle. Use `execution_kind: runtime_task` with either `runtime_task` or
+the `ability_request`/`ability_input` shorthand. Downloaded GitHub Actions
+artifacts can be mounted into the sandbox with `runtime_mounts`, and typed
+outputs can be enforced with `artifact_declarations` plus `output_mappings`:
+
+```yaml
+jobs:
+  process-artifact:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@main
+    with:
+      homeboy_extensions_ref: main
+      target_repo: Example/project
+      agent_slug: artifact-processor
+      pipeline_slug: artifact-pipeline
+      flow_slug: artifact-flow
+      execution_kind: runtime_task
+      actions_artifact_downloads: >-
+        [{"repo":"Example/project","run_id":"123456789","name":"source-packet","dir":".ci/actions-artifacts/source-packet"}]
+      runtime_mounts: >-
+        [{"source":".ci/actions-artifacts/source-packet","target":"/workspace/input","mode":"readonly"}]
+      ability_request: >-
+        {"ability":"example/process-artifact","input":{"source_artifact":"/workspace/input/source.json"}}
+      output_mappings: >-
+        {"processed_packet":"result.processed_packet"}
+      artifact_declarations: >-
+        [{"name":"processed_packet","type":"example-packet","schema":"example/processed-packet/v1","required":true}]
+      expected_artifacts: '["processed_packet"]'
+```
+
+Use `component_contracts` only when the ability provider plugin or runtime
+component must be mounted explicitly. Keep ability names, schemas, and artifact
+types owned by the caller; Homeboy Extensions only forwards the generic runtime
+task contract.
+
 Each extension also exposes a CLI binding for direct use against a project or component:
 
 ```bash

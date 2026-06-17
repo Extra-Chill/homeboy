@@ -27,7 +27,7 @@ function buildConfig(env) {
   const agentSlug = required(env.AGENT_SLUG, 'AGENT_SLUG');
   const flowSlug = required(env.FLOW_SLUG, 'FLOW_SLUG');
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
-  const bundlePath = required(env.BUNDLE_PATH, 'BUNDLE_PATH');
+  const bundlePath = env.BUNDLE_PATH || '';
   const componentSlug = path.basename(workspace);
   const transcriptHostDir = path.join(workspace, 'datamachine-agent-artifacts', agentSlug);
   const transcriptGuestDir = `/wordpress/wp-content/plugins/${componentSlug}/datamachine-agent-artifacts/${agentSlug}`;
@@ -76,9 +76,16 @@ function buildConfig(env) {
   const workloadRunBefore = parseJsonInput('workload_run_before', env.WORKLOAD_RUN_BEFORE || '[]', 'array', []);
   const workloadRunAfter = parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []);
   const extraRequiredAbilities = parseJsonInput('extra_required_abilities', env.EXTRA_REQUIRED_ABILITIES || '[]', 'array', []);
-  const executeRequiredAbilities = executeWorkflow.path
-    ? ['datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job']
-    : ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job'];
+  const runtimeTask = runtimeTaskFromEnv(env);
+  const executionKind = env.EXECUTION_KIND || (runtimeTask ? 'runtime_task' : 'agent_bundle');
+  if (executionKind === 'agent_bundle' && !bundlePath) {
+    throw new Error('BUNDLE_PATH is required for agent_bundle execution. Set execution_kind=runtime_task with runtime_task or ability_request for direct ability execution.');
+  }
+  const executeRequiredAbilities = runtimeTask
+    ? [runtimeTask.ability]
+    : executeWorkflow.path
+      ? ['datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job']
+      : ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job'];
 
   return {
     _configPath: path.join(runnerTemp, 'datamachine-agent-config.json'),
@@ -88,6 +95,7 @@ function buildConfig(env) {
     workload_label: `Run ${agentSlug} Data Machine agent`,
     validation_dependencies: validationDependencies.paths,
     runtime_id: runtimeId,
+    execution_kind: executionKind,
     runtime_ref: env.AGENT_RUNTIME_REF || 'main',
     runtime_wordpress_version: env.RUNTIME_WORDPRESS_VERSION || '7.0',
     runtime_mounts: [
@@ -106,7 +114,7 @@ function buildConfig(env) {
     workload_run_before: workloadRunBefore,
     workload_run_after: workloadRunAfter,
     required_abilities: Array.from(new Set([...executeRequiredAbilities, ...extraRequiredAbilities])),
-    bundle_path: path.join(workspace, bundlePath),
+    ...(bundlePath ? { bundle_path: path.join(workspace, bundlePath) } : {}),
     bundle_repo: env.BUNDLE_REPO || `https://github.com/${targetRepo}.git`,
     bundle_ref: env.BUNDLE_REF || env.GITHUB_SHA,
     bundle_path_in_repo: env.BUNDLE_PATH_IN_REPO || bundlePath,
@@ -156,6 +164,9 @@ function buildConfig(env) {
     time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []),
+    output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
+    component_contracts: parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []),
+    ...(runtimeTask ? { runtime_task: runtimeTask } : {}),
     ability_tools: parseJsonInput('ability_tools', env.ABILITY_TOOLS || '[]', 'array', []),
     tool_recorders: parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', []),
     pipeline_step_patches: parseJsonInput('pipeline_step_patches', env.PIPELINE_STEP_PATCHES || '[]', 'array', []),
@@ -228,6 +239,33 @@ function resolveExecuteWorkflowMounts(executeWorkflowPath, workspace, componentS
   const type = fs.existsSync(hostPath) && fs.statSync(hostPath).isFile() ? 'file' : 'directory';
   const guestPath = `/wordpress/wp-content/plugins/${componentSlug}/${executeWorkflowPath}`;
   return { path: guestPath, mounts: [{ type, source: hostPath, target: guestPath, mode: 'readonly' }] };
+}
+
+function runtimeTaskFromEnv(env) {
+  const runtimeTask = parseJsonInput('runtime_task', env.RUNTIME_TASK || '{}', 'object', {});
+  if (Object.keys(runtimeTask).length > 0) {
+    if (!runtimeTask.ability || typeof runtimeTask.ability !== 'string') {
+      throw new Error('runtime_task.ability is required when runtime_task is supplied.');
+    }
+    return runtimeTask;
+  }
+
+  const abilityRequest = parseJsonInput('ability_request', env.ABILITY_REQUEST || '{}', 'object', {});
+  const abilityInput = parseJsonInput('ability_input', env.ABILITY_INPUT || '{}', 'object', {});
+  if (Object.keys(abilityRequest).length === 0 && Object.keys(abilityInput).length === 0) {
+    return null;
+  }
+  if (!abilityRequest.ability || typeof abilityRequest.ability !== 'string') {
+    throw new Error('ability_request.ability is required when ability_request or ability_input is supplied.');
+  }
+
+  return {
+    ...abilityRequest,
+    input: {
+      ...(abilityRequest.input && typeof abilityRequest.input === 'object' && !Array.isArray(abilityRequest.input) ? abilityRequest.input : {}),
+      ...abilityInput,
+    },
+  };
 }
 
 function withoutInternalKeys(config) {
