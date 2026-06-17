@@ -438,7 +438,7 @@ fn test_trace_variants() {
             "dependencies": [
                 {
                     "id": "woocommerce",
-                    "kind": "wordpress-plugin",
+                    "kind": "component-plugin",
                     "source": "release-package-or-build-artifact",
                     "path": "/tmp/packages/woocommerce",
                     "plugin_file": "woocommerce/woocommerce.php",
@@ -461,7 +461,7 @@ fn test_trace_variants() {
     assert_eq!(workload.trace_dependencies().len(), 1);
     let dependency = &workload.trace_dependencies()[0];
     assert_eq!(dependency.id, "woocommerce");
-    assert_eq!(dependency.kind, "wordpress-plugin");
+    assert_eq!(dependency.kind, "component-plugin");
     assert_eq!(
         dependency.plugin_file.as_deref(),
         Some("woocommerce/woocommerce.php")
