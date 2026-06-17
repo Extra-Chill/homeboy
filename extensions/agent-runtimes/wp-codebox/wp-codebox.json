@@ -145,9 +145,9 @@
               "field": "tokens.refresh_token"
             },
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT": {
-              "source": "json-file",
+              "source": "json-file-jwt-expiration",
               "path": "~/.codex/auth.json",
-              "field": "tokens.expires_at"
+              "field": "tokens.access_token"
             },
             "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID": {
               "source": "json-file",
@@ -157,7 +157,8 @@
             "AI_PROVIDER_OPENAI_CODEX_FEDRAMP": {
               "source": "json-file",
               "path": "~/.codex/auth.json",
-              "field": "tokens.fedramp"
+              "field": "tokens.fedramp",
+              "value": "false"
             }
           }
         },
