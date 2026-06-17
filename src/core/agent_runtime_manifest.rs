@@ -192,9 +192,9 @@ mod tests {
         let mut extension = extension("runtime-extension");
         extension.agent_runtimes.push(
             serde_json::from_value(json!({
-                "id": "codex-runtime",
-                "label": "Codex Runtime",
-                "agent_task_executors": [provider_json("codex.default", "codex")]
+                "id": "example-runtime",
+                "label": "Example Runtime",
+                "agent_task_executors": [provider_json("example.default", "example")]
             }))
             .expect("runtime manifest"),
         );
@@ -203,12 +203,12 @@ mod tests {
 
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].schema, AGENT_RUNTIME_MANIFEST_SCHEMA);
-        assert_eq!(manifests[0].id, "codex-runtime");
+        assert_eq!(manifests[0].id, "example-runtime");
         assert_eq!(
             manifests[0].extension_id.as_deref(),
             Some("runtime-extension")
         );
-        assert_eq!(manifests[0].agent_task_executors[0].backend, "codex");
+        assert_eq!(manifests[0].agent_task_executors[0].backend, "example");
         assert_eq!(
             manifests[0].runtime_path.as_deref(),
             Some("/extensions/runtime-extension")
@@ -221,21 +221,21 @@ mod tests {
             let runtime_dir = home
                 .path()
                 .join(".config/homeboy/agent-runtimes")
-                .join("standalone-codex");
+                .join("standalone-example");
             std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
             std::fs::write(
-                runtime_dir.join("standalone-codex.json"),
+                runtime_dir.join("standalone-example.json"),
                 json!({
                     "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
                     "id": "ignored-on-disk",
-                    "name": "Standalone Codex Package",
+                    "name": "Standalone Example Package",
                     "version": "1.0.0",
                     "description": "Standalone runtime package fixture.",
-                    "label": "Standalone Codex",
+                    "label": "Standalone Example",
                     "agent_task_executors": [{
                         "schema": "homeboy/agent-task-executor-provider/v1",
-                        "id": "standalone-codex.default",
-                        "backend": "codex",
+                        "id": "standalone-example.default",
+                        "backend": "example",
                         "command": "agent-task-provider",
                         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
                         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
@@ -243,20 +243,20 @@ mod tests {
                             "cwd": "git_checkout",
                             "requires_git": true,
                             "write_scope": "artifacts",
-                            "artifact_paths": [".homeboy/codex"]
+                            "artifact_paths": [".homeboy/example"]
                         },
                         "secret_requirements": [{
-                            "name": "CODEX_TOKEN",
+                            "name": "EXAMPLE_RUNTIME_TOKEN",
                             "required": true,
                             "purpose": "fixture"
                         }],
                         "secret_env_requirements": [{
                             "schema": "homeboy/secret-env-requirement/v1",
-                            "env": ["CODEX_REFRESH_TOKEN"],
-                            "when": { "path": "executor.config.provider", "equals": "codex" }
+                            "env": ["EXAMPLE_RUNTIME_REFRESH_TOKEN"],
+                            "when": { "path": "executor.config.provider", "equals": "example-provider" }
                         }],
                         "provider_defaults": {
-                            "codex": { "secret_env": ["CODEX_REFRESH_TOKEN"] }
+                            "example-provider": { "secret_env": ["EXAMPLE_RUNTIME_REFRESH_TOKEN"] }
                         }
                     }]
                 })
@@ -267,14 +267,14 @@ mod tests {
             let manifests = discover_standalone_agent_runtime_manifests();
 
             assert_eq!(manifests.len(), 1);
-            assert_eq!(manifests[0].id, "standalone-codex");
+            assert_eq!(manifests[0].id, "standalone-example");
             assert_eq!(manifests[0].extension_id, None);
             assert_eq!(manifests[0].extension_path, None);
             assert_eq!(
                 manifests[0].runtime_path.as_deref(),
                 Some(runtime_dir.to_str().expect("runtime dir utf-8"))
             );
-            assert_eq!(manifests[0].agent_task_executors[0].backend, "codex");
+            assert_eq!(manifests[0].agent_task_executors[0].backend, "example");
             let provider = &manifests[0].agent_task_executors[0];
             let materialization = provider
                 .workspace_materialization
@@ -282,18 +282,18 @@ mod tests {
                 .expect("workspace materialization");
             assert_eq!(materialization.requires_git, Some(true));
             assert_eq!(materialization.write_scope.as_deref(), Some("artifacts"));
-            assert_eq!(materialization.artifact_paths, vec![".homeboy/codex"]);
+            assert_eq!(materialization.artifact_paths, vec![".homeboy/example"]);
             assert_eq!(
                 provider.secret_requirements[0].name.as_deref(),
-                Some("CODEX_TOKEN")
+                Some("EXAMPLE_RUNTIME_TOKEN")
             );
             assert_eq!(
                 provider.secret_env_requirements[0].env,
-                vec!["CODEX_REFRESH_TOKEN"]
+                vec!["EXAMPLE_RUNTIME_REFRESH_TOKEN"]
             );
             assert_eq!(
-                provider.provider_defaults["codex"]["secret_env"][0],
-                "CODEX_REFRESH_TOKEN"
+                provider.provider_defaults["example-provider"]["secret_env"][0],
+                "EXAMPLE_RUNTIME_REFRESH_TOKEN"
             );
         });
     }

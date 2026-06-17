@@ -131,7 +131,7 @@ pub struct AgentTaskProviderEnvPathReadiness {
     /// stale / non-canonical checkout drift before it corrupts results.
     ///
     /// Core is runtime-agnostic: it does not know what the canonical path
-    /// represents (wp-codebox, a toolchain, etc.) — the value is supplied
+    /// represents (a runtime checkout, a toolchain, etc.) — the value is supplied
     /// entirely by the declaring extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_path: Option<String>,
@@ -140,7 +140,7 @@ pub struct AgentTaskProviderEnvPathReadiness {
 /// A named, extension-declared source checkout that homeboy keeps synced on the
 /// runner. Core treats this generically: it materializes/refreshes a git
 /// checkout to the intended ref/remote. It has no knowledge of what the source
-/// is (wp-codebox, a CLI, a toolchain) — extensions declare the path/remote/ref.
+/// is (a runtime checkout, a CLI, a toolchain) — extensions declare the path/remote/ref.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderRunnerSource {
     pub id: String,
@@ -1586,11 +1586,11 @@ mod tests {
             "{{runtime_path}}/bin/provider --extension {{extension_path}}".to_string(),
         );
         provider.extension_path = Some("/extensions/project-type".to_string());
-        provider.runtime_path = Some("/agent-runtimes/codex".to_string());
+        provider.runtime_path = Some("/agent-runtimes/example".to_string());
 
         assert_eq!(
             render_provider_command(&provider),
-            "/agent-runtimes/codex/bin/provider --extension /extensions/project-type"
+            "/agent-runtimes/example/bin/provider --extension /extensions/project-type"
         );
     }
 
@@ -1815,7 +1815,7 @@ mod tests {
     #[test]
     fn provider_secret_contracts_are_applied_generically() {
         let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
-        request.executor.config = json!({ "provider": "codex" });
+        request.executor.config = json!({ "provider": "example-provider" });
         provider.secret_requirements = vec![
             AgentTaskProviderSecretRequirement {
                 name: Some("REQUIRED_TOKEN".to_string()),
@@ -1829,18 +1829,18 @@ mod tests {
             },
         ];
         provider.secret_env_requirements = vec![AgentTaskProviderSecretEnvRequirement {
-            env: vec!["CODEX_TOKEN".to_string()],
+            env: vec!["EXAMPLE_PROVIDER_TOKEN".to_string()],
             when: Some(json!({
                 "any": [
-                    { "path": "executor.config.provider", "equals": "codex" },
-                    { "path": "provider", "equals": "codex" }
+                    { "path": "executor.config.provider", "equals": "example-provider" },
+                    { "path": "provider", "equals": "example-provider" }
                 ]
             })),
             ..AgentTaskProviderSecretEnvRequirement::default()
         }];
         provider.provider_defaults.insert(
-            "codex".to_string(),
-            json!({ "secret_env": ["CODEX_REFRESH_TOKEN"] }),
+            "example-provider".to_string(),
+            json!({ "secret_env": ["EXAMPLE_PROVIDER_REFRESH_TOKEN"] }),
         );
         let mut plan = AgentTaskPlan::new("plan-a", vec![request]);
 
@@ -1849,8 +1849,8 @@ mod tests {
         assert_eq!(
             plan.tasks[0].executor.secret_env,
             vec![
-                "CODEX_REFRESH_TOKEN".to_string(),
-                "CODEX_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_TOKEN".to_string(),
                 "REQUIRED_TOKEN".to_string(),
             ]
         );
@@ -1971,7 +1971,7 @@ mod tests {
     fn provider_can_return_timeout_payload_during_wrapper_grace() {
         let command = format!(
             "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'codebox-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 3050);")
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'provider-task-runner-preflight',path:'/tmp/timeout-evidence.json'}]})), 3050);")
         );
         let (mut request, provider) = request("task-timeout-payload", command);
         request.limits.timeout_ms = Some(3000);

@@ -495,7 +495,7 @@ mod tests {
         let config: HomeboyConfig = serde_json::from_str(
             r#"{
                 "agent_task": {
-                    "default_backend": "codex",
+                    "default_backend": "example",
                     "secrets": {
                         "TOKEN": {
                             "source": "config",
@@ -507,7 +507,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.agent_task.default_backend.as_deref(), Some("codex"));
+        assert_eq!(
+            config.agent_task.default_backend.as_deref(),
+            Some("example")
+        );
         let secret = config.agent_task.secrets.get("TOKEN").unwrap();
         assert_eq!(secret.source, "config");
         assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));
