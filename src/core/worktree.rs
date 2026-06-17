@@ -163,6 +163,7 @@ fn create_with_store(
         capability: None,
         allow_synthetic: false,
         accept_bare_directory: false,
+        ..TargetSpec::default()
     })?;
     let source_checkout = target
         .git_root

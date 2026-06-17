@@ -34,6 +34,10 @@ pub struct TargetSpec<'a> {
     /// Whether a positional component value that is a directory is accepted as
     /// an ad-hoc target.
     pub accept_bare_directory: bool,
+
+    /// Controls whether an ID-only target may fall back to the persisted
+    /// component registry after CWD/portable discovery fails.
+    pub registry_lookup: RegistryLookupPolicy,
 }
 
 impl<'a> TargetSpec<'a> {
@@ -45,8 +49,22 @@ impl<'a> TargetSpec<'a> {
             capability: None,
             allow_synthetic: true,
             accept_bare_directory: true,
+            registry_lookup: RegistryLookupPolicy::Allow,
         }
     }
+}
+
+/// Registry lookup policy for component target resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RegistryLookupPolicy {
+    /// Allow ID-only targets to resolve through the standalone/project registry.
+    #[default]
+    Allow,
+
+    /// Resolve only from explicit paths, bare directories, or the current
+    /// checkout's portable config. Useful for commands that must not silently
+    /// operate on a globally registered checkout.
+    CwdOrPortableOnly,
 }
 
 /// Resolved target shared by git, audit, refactor, and execution context setup.
@@ -355,6 +373,7 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
         spec.path_override,
         spec.project,
         spec.accept_bare_directory,
+        spec.registry_lookup,
     )?;
 
     let explicit_path = spec
@@ -477,7 +496,13 @@ pub fn resolve_effective(
     path_override: Option<&str>,
     project: Option<&crate::core::project::Project>,
 ) -> Result<Component> {
-    resolve_effective_inner(id, path_override, project, true)
+    resolve_effective_inner(
+        id,
+        path_override,
+        project,
+        true,
+        RegistryLookupPolicy::Allow,
+    )
 }
 
 fn resolve_effective_inner(
@@ -485,6 +510,7 @@ fn resolve_effective_inner(
     path_override: Option<&str>,
     project: Option<&crate::core::project::Project>,
     accept_bare_directory: bool,
+    registry_lookup: RegistryLookupPolicy,
 ) -> Result<Component> {
     if let (Some(project), Some(id)) = (project, id) {
         let mut component = crate::core::project::resolve_project_component(project, id)?;
@@ -538,6 +564,21 @@ fn resolve_effective_inner(
             // operates on the current checkout, not the registered local_path (#694).
             if let Some(cwd_component) = prefer_cwd_for_component(id) {
                 return Ok(cwd_component);
+            }
+
+            if registry_lookup == RegistryLookupPolicy::CwdOrPortableOnly {
+                return Err(Error::validation_invalid_argument(
+                    "component_id",
+                    format!(
+                        "Component '{}' was not found in the current checkout and registry lookup is disabled",
+                        id
+                    ),
+                    Some(id.to_string()),
+                    Some(vec![
+                        "Run from the component checkout or pass --path <checkout>".to_string(),
+                        "Allow registry lookup for commands that should use the registered local_path".to_string(),
+                    ]),
+                ));
             }
             load(id)
         }
@@ -772,6 +813,24 @@ mod tests {
             assert_eq!(target.component_id, "registered");
             assert_eq!(target.source_path, repo);
             assert!(!target.synthetic);
+        });
+    }
+
+    #[test]
+    fn target_spec_can_disable_registry_lookup_for_id_only_targets() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = home.path().join("registered-repo");
+            std::fs::create_dir_all(&repo).expect("repo dir");
+            write_standalone_registration(home.path(), "registered", &repo);
+
+            let err = resolve_target(TargetSpec {
+                component_id: Some("registered"),
+                registry_lookup: RegistryLookupPolicy::CwdOrPortableOnly,
+                ..TargetSpec::default()
+            })
+            .expect_err("registry lookup should be disabled");
+
+            assert!(err.to_string().contains("registry lookup is disabled"));
         });
     }
 
