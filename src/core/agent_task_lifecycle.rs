@@ -1003,6 +1003,25 @@ pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
     Ok((raw, path))
 }
 
+pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    record.updated_at = Some(now_timestamp());
+    let metadata = record.ensure_metadata_object();
+    let promotions = metadata
+        .entry("promotions".to_string())
+        .or_insert_with(|| json!([]));
+    if !promotions.is_array() {
+        *promotions = json!([]);
+    }
+    promotions
+        .as_array_mut()
+        .expect("promotions array")
+        .push(promotion.clone());
+    metadata.insert("latest_promotion".to_string(), promotion);
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 fn aggregate_artifacts(aggregate: Option<&AgentTaskAggregate>) -> Vec<AgentTaskArtifact> {
     aggregate
         .map(|aggregate| {
@@ -1541,6 +1560,48 @@ mod tests {
             assert_eq!(
                 loaded.tasks[0].provider_ref.as_deref(),
                 Some("test:fixture")
+            );
+        });
+    }
+
+    #[test]
+    fn record_promotion_persists_latest_event_on_run_metadata() {
+        with_isolated_home(|_| {
+            let plan = test_plan();
+            submit_plan(&plan, Some("run-promotion-status")).expect("submitted");
+
+            let promotion = json!({
+                "schema": "homeboy/agent-task-promotion-status/v1",
+                "status": "applied",
+                "source_run_id": "run-promotion-status",
+                "patch_artifact_id": "patch.diff",
+                "to_worktree": "homeboy@fix-5055",
+                "target": {
+                    "worktree": "homeboy@fix-5055",
+                    "branch": "fix/5055",
+                    "head": "abc123"
+                },
+                "operator_notification": {
+                    "status": "completed",
+                    "message": "patch promoted into homeboy@fix-5055"
+                }
+            });
+
+            let updated = record_promotion("run-promotion-status", promotion.clone())
+                .expect("promotion recorded");
+            let loaded = status("run-promotion-status").expect("status loaded");
+
+            assert_eq!(updated.metadata["latest_promotion"], promotion);
+            assert_eq!(
+                loaded.metadata["latest_promotion"]["patch_artifact_id"],
+                "patch.diff"
+            );
+            assert_eq!(
+                loaded.metadata["promotions"]
+                    .as_array()
+                    .expect("events")
+                    .len(),
+                1
             );
         });
     }

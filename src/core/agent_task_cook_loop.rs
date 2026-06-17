@@ -446,7 +446,8 @@ mod tests {
     };
     use crate::core::agent_task_gate::{AgentTaskGateEnvironment, AgentTaskGateFailureEvidence};
     use crate::core::agent_task_promotion::{
-        AgentTaskPromotionArtifactRef, AgentTaskPromotionSource, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+        AgentTaskPromotionArtifactRef, AgentTaskPromotionNotification, AgentTaskPromotionSource,
+        AgentTaskPromotionTarget, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 
     #[test]
@@ -713,9 +714,17 @@ mod tests {
             source: AgentTaskPromotionSource {
                 kind: "aggregate".to_string(),
                 task_id: "cook-homeboy".to_string(),
+                run_id: Some("agent-task-run-1".to_string()),
                 path: Some("aggregate.json".to_string()),
             },
             to_worktree: "homeboy@fix-3676".to_string(),
+            target: AgentTaskPromotionTarget {
+                worktree: "homeboy@fix-3676".to_string(),
+                path: Some("/tmp/homeboy@fix-3676".to_string()),
+                branch: Some("fix/3676".to_string()),
+                head: Some("abc123".to_string()),
+                dirty: Some(true),
+            },
             patch_artifact: AgentTaskPromotionArtifactRef {
                 id: "patch".to_string(),
                 kind: "patch".to_string(),
@@ -727,6 +736,16 @@ mod tests {
             deterministic_gates,
             gate_results: Vec::new(),
             provenance: json!({ "worktree_path": "/tmp/homeboy@fix-3676" }),
+            operator_notification: AgentTaskPromotionNotification {
+                status: if status == AgentTaskPromotionStatus::Applied {
+                    "completed".to_string()
+                } else {
+                    "blocked".to_string()
+                },
+                message: "test promotion notification".to_string(),
+                resumable_blocker: None,
+                next_command: None,
+            },
         }
     }
 

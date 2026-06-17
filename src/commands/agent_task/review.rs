@@ -186,9 +186,13 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
 
 pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let to_worktree = args.to_worktree.clone();
+    let source_run_id = agent_task_lifecycle::status(&args.source)
+        .ok()
+        .map(|record| record.run_id);
     let (raw, source_path) = read_promotion_source(&args.source)?;
     let report = promote(AgentTaskPromotionOptions {
         source: raw,
+        source_run_id: source_run_id.clone(),
         source_path,
         to_worktree: args.to_worktree,
         task_id: args.task_id,
@@ -204,6 +208,15 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     };
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
     value["handoff"] = promotion_handoff(&report, &to_worktree);
+    if let Some(run_id) = source_run_id.filter(|_| !args.dry_run) {
+        let record =
+            agent_task_lifecycle::record_promotion(&run_id, promotion_status_event(&report))?;
+        value["recorded_on_run"] = serde_json::json!({
+            "run_id": record.run_id,
+            "metadata_key": "latest_promotion",
+            "status_command": format!("homeboy agent-task status {} --full", run_id)
+        });
+    }
 
     Ok((value, exit_code))
 }
@@ -462,6 +475,21 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
     })
 }
 
+fn promotion_status_event(report: &AgentTaskPromotionReport) -> Value {
+    serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-status/v1",
+        "status": report.status,
+        "source_run_id": report.source.run_id,
+        "source_task_id": report.source.task_id,
+        "patch_artifact_id": report.patch_artifact.id,
+        "patch_artifact_path": report.patch_artifact.path,
+        "to_worktree": report.to_worktree,
+        "target": report.target,
+        "changed_files": report.changed_files,
+        "operator_notification": report.operator_notification,
+    })
+}
+
 fn finalization_handoff(status: &str, pr_url: Option<&str>) -> Value {
     let pr_opened = status == "review_ready" && pr_url.is_some();
     serde_json::json!({
@@ -524,7 +552,8 @@ pub(crate) fn read_promotion_source(
 mod tests {
     use super::*;
     use homeboy::core::agent_tasks::promotion::{
-        AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionSource,
+        AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
+        AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
     use homeboy::core::agent_tasks::AgentTaskAggregateSummary;
 
@@ -569,9 +598,17 @@ mod tests {
             source: AgentTaskPromotionSource {
                 kind: "aggregate".to_string(),
                 task_id: "cook-homeboy".to_string(),
+                run_id: Some("agent-task-run-1".to_string()),
                 path: Some("/tmp/aggregate.json".to_string()),
             },
             to_worktree: "homeboy@fix-runtime".to_string(),
+            target: AgentTaskPromotionTarget {
+                worktree: "homeboy@fix-runtime".to_string(),
+                path: Some("/Users/chubes/Developer/homeboy@fix-runtime".to_string()),
+                branch: Some("fix/runtime".to_string()),
+                head: Some("abc123".to_string()),
+                dirty: Some(true),
+            },
             patch_artifact: AgentTaskPromotionArtifactRef {
                 id: "patch-1".to_string(),
                 kind: "patch".to_string(),
@@ -583,6 +620,12 @@ mod tests {
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
             provenance: serde_json::json!({ "worktree_path": "/Users/chubes/Developer/homeboy@fix-runtime" }),
+            operator_notification: AgentTaskPromotionNotification {
+                status: "completed".to_string(),
+                message: "patch promoted".to_string(),
+                resumable_blocker: None,
+                next_command: None,
+            },
         };
 
         let handoff = promotion_handoff(&report, "homeboy@fix-runtime");

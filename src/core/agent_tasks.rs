@@ -193,10 +193,11 @@ pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run, list_records,
         load_plan, logs, mark_resuming, mark_running, record_completed_run,
-        record_pre_dispatch_failure, record_remote_dispatch_failure, record_run_aggregate, retry,
-        run_record_exists, status, submit_plan, AgentTaskArtifactRef, AgentTaskPreDispatchFailure,
-        AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts, AgentTaskRunLog,
-        AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
+        record_pre_dispatch_failure, record_promotion, record_remote_dispatch_failure,
+        record_run_aggregate, retry, run_record_exists, status, submit_plan, AgentTaskArtifactRef,
+        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunArtifacts,
+        AgentTaskRunLog, AgentTaskRunProviderHandle, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunTask,
     };
 }
 
@@ -229,8 +230,9 @@ pub mod loop_controller {
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
         promote, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
-        AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
-        AgentTaskPromotionStatus, AGENT_TASK_PROMOTION_REPORT_SCHEMA,
+        AgentTaskPromotionNotification, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+        AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
+        AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
 }
 
