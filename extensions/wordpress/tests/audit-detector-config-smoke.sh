@@ -56,39 +56,6 @@ for call in ["wp_get_ability", "is_wp_error", "get_error_message"]:
     require(call in set(duplication_detector.get("plumbing_calls", [])),
             f"WordPress ability CLI boilerplate must be plumbing in parallel-implementation signal: {call}")
 
-# v0.157.0 best-effort — off-role file suffixes must be exempt from sibling-method conventions.
-for pattern in [
-    "**/class-*-store.php",
-    "**/class-*-registry.php",
-    "**/class-*-adopter.php",
-    "**/class-*-resolver.php",
-    "**/class-*-sanitizer.php",
-    "**/class-*-authenticator.php",
-    "**/class-*-service.php",
-    "**/class-*-scheduler.php",
-    "**/class-*-policy.php",
-    "**/class-*-config.php",
-    "**/class-*-constants.php",
-    "**/class-*-token.php",
-    "**/class-*-credential.php",
-    "**/class-*-result.php",
-    "**/class-*-diff.php",
-    "**/class-*-factory.php",
-    "**/class-*-adapter.php",
-    "**/class-*-lock.php",
-    "**/class-*-artifact.php",
-    "**/class-*-artifacts.php",
-    "**/*Constants.php",
-    "**/*Policy.php",
-    "**/Policy/*AccessPolicy.php",
-    "**/*Resolver.php",
-    "**/*Result.php",
-    "**/*Sanitizer.php",
-    "**/*Scheduler.php",
-    "**/*Verifier.php",
-]:
-    require(pattern in exception_globs, f"missing PHP role exception glob: {pattern}")
-
 lifecycle_globs = set(rules.get("lifecycle_path_globs", []))
 for pattern in ["**/*-smoke.php", "**/*-fallback.php", "**/*-shim.php", "**/*-stub.php"]:
     require(pattern in lifecycle_globs, f"missing contextual dead-guard path glob: {pattern}")
@@ -122,7 +89,7 @@ require(any("use WP_CLI;" in group for group in any_groups),
 require(any("WP_CLI::success" in group and "WP_CLI::error" in group for group in any_groups),
         "indirect subclass recognizer must require a WP_CLI output-method marker")
 
-# Forward-compat (core main): convention_tag_globs splits unrelated PHP roles.
+# convention_tag_globs splits unrelated PHP roles.
 tag_globs = rules.get("convention_tag_globs", [])
 require(tag_globs, "convention_tag_globs must be configured to split PHP roles in mixed directories")
 
@@ -231,7 +198,7 @@ require(not matches_any("src/Context/class-demo-context-injection-policy.php", g
 
 # PSR-4 API fixture: helper/value/resolver classes can live beside real REST
 # route/controller classes under broad Api namespaces. Only the helper roles are
-# exempt/tagged; route-like classes remain in the normal convention group so
+# tagged; route-like classes remain in the normal convention group so
 # missing register()/register_routes()/rest_api_init signals still report there.
 api_helper_roles = {
     "src/Api/WebhookAuthResolver.php": "wordpress:php-role:contract",
@@ -240,8 +207,6 @@ api_helper_roles = {
     "src/Api/WebhookVerifier.php": "wordpress:php-role:service",
 }
 for path, tag in api_helper_roles.items():
-    require(matches_any(path, exception_globs),
-            f"PSR-4 API helper {path} must be exempt from registrar/controller conventions")
     require(matches_any(path, globs_for(tag)),
             f"PSR-4 API helper {path} must be tagged as {tag}")
 
@@ -274,30 +239,6 @@ require(matches_any("src/Abilities/BlockSanitizer.php", globs_for("wordpress:php
         "ability sanitizer fixture must be tagged as service role")
 require(matches_any("src/Abilities/PipelineBatchScheduler.php", globs_for("wordpress:php-role:service")),
         "ability scheduler fixture must be tagged as service role")
-
-# v0.157.0 best-effort fallback: every off-role file must also be in convention_exception_globs.
-for path in [
-    "src/Identity/class-demo-identity-store.php",
-    "src/Packages/class-demo-package-adopter.php",
-    "src/Packages/class-demo-package-artifact.php",
-    "src/Packages/class-demo-package-adoption-result.php",
-    "src/Packages/class-demo-package-adoption-diff.php",
-    "src/Packages/class-demo-package-artifacts-registry.php",
-    "src/Packages/register-demo-package-artifacts.php",
-    "src/Auth/class-demo-token.php",
-    "src/Auth/class-demo-token-authenticator.php",
-    "src/Context/class-demo-context-conflict-resolver.php",
-    "src/Context/class-demo-context-injection-policy.php",
-    "src/Api/WebhookAuthResolver.php",
-    "src/Api/ToolAccessPolicy.php",
-    "src/Api/WebhookVerificationResult.php",
-    "src/Api/WebhookVerifier.php",
-    "src/Abilities/FileConstants.php",
-    "src/Abilities/BlockSanitizer.php",
-    "src/Abilities/PipelineBatchScheduler.php",
-]:
-    require(matches_any(path, exception_globs),
-            f"off-role file {path} must also be exempt for v0.157.0 fallback")
 
 # Option scope drift detector — must require explicit drift vocabulary in a
 # comment block (claims of network/site-option storage), recognize file-level
