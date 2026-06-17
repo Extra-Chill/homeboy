@@ -17,7 +17,17 @@ use crate::core::process::{pid_is_running, process_group_is_running};
 use crate::core::server;
 use crate::core::{CreateOutput, MergeOutput, RemoveResult};
 
-const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
+/// Sentinel server id used for runner-local service tunnels. A service tunnel
+/// carrying this server id is materialized/validated without requiring a
+/// separate `server` declaration: in a runner-local context the runner itself
+/// is the server, so demanding a duplicate server declaration is redundant
+/// (see #4606).
+pub const RUNNER_LOCAL_SERVICE_SERVER_ID: &str = "__runner_local__";
+
+/// Returns true when the given server id refers to the runner-local sentinel.
+pub fn is_runner_local_server_id(server_id: &str) -> bool {
+    server_id == RUNNER_LOCAL_SERVICE_SERVER_ID
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTunnel {
@@ -423,6 +433,10 @@ pub struct ExposeServiceTunnelSpec {
     pub auth: ServiceTunnelAuth,
     pub policy: ServiceTunnelPolicy,
     pub description: Option<String>,
+    /// When true, the declaration is materialized against the runner-local
+    /// sentinel server instead of requiring a separate `server` declaration for
+    /// the selected runner (see #4606). The supplied `server_id` is ignored.
+    pub runner_local: bool,
 }
 
 fn default_scheme() -> String {
@@ -522,11 +536,16 @@ impl ConfigEntity for ServiceTunnel {
 entity_crud!(ServiceTunnel; list_ids, merge);
 
 pub fn expose(spec: ExposeServiceTunnelSpec) -> Result<ServiceTunnel> {
+    let server_id = if spec.runner_local || is_runner_local_server_id(&spec.server_id) {
+        RUNNER_LOCAL_SERVICE_SERVER_ID.to_string()
+    } else {
+        spec.server_id
+    };
     let tunnel = ServiceTunnel {
         id: spec.id,
         aliases: Vec::new(),
         description: spec.description,
-        server_id: spec.server_id,
+        server_id,
         target: spec.target,
         scheme: spec.scheme,
         local_host: default_local_host(),
