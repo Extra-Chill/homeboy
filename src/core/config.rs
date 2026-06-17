@@ -171,6 +171,30 @@ fn resolve_alias<T: ConfigEntity>(alias: &str) -> Option<String> {
     None
 }
 
+/// Resolve a directory entry to its config JSON path and entity ID.
+///
+/// Supports directory-backed entities (`{dir}/{id}/{id}.json`) and flat
+/// entries (`{dir}/{id}.json`). Returns `None` for entries that are not
+/// valid config entities (e.g. a directory missing its nested JSON, or a
+/// non-JSON file). Shared by the `list` and `list_ids` discovery paths.
+fn entry_path_and_id<T: ConfigEntity>(entry: &local_files::Entry) -> Option<(PathBuf, String)> {
+    if entry.is_dir {
+        // For directories (extension structure): look for {dir}/{dir}.json
+        let dir_name = entry.path.file_name()?.to_string_lossy().to_string();
+        let nested_json = entry.path.join(format!("{}.json", dir_name));
+        if nested_json.exists() {
+            Some((nested_json, dir_name))
+        } else {
+            None
+        }
+    } else if T::supports_flat_config_entries() && entry.is_json() {
+        let id = entry.path.file_stem()?.to_string_lossy().to_string();
+        Some((entry.path.clone(), id))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
     let dir = T::config_dir()?;
     let entries = local_files::local().list(&dir)?;
@@ -179,21 +203,7 @@ pub(crate) fn list<T: ConfigEntity>() -> Result<Vec<T>> {
         .into_iter()
         .filter_map(|e| {
             // Determine the path to the JSON file and the ID
-            let (json_path, id) = if e.is_dir {
-                // For directories (extension structure): look for {dir}/{dir}.json
-                let dir_name = e.path.file_name()?.to_string_lossy().to_string();
-                let nested_json = e.path.join(format!("{}.json", dir_name));
-                if nested_json.exists() {
-                    (nested_json, dir_name)
-                } else {
-                    return None;
-                }
-            } else if T::supports_flat_config_entries() && e.is_json() {
-                let id = e.path.file_stem()?.to_string_lossy().to_string();
-                (e.path.clone(), id)
-            } else {
-                return None;
-            };
+            let (json_path, id) = entry_path_and_id::<T>(&e)?;
 
             let content = match local_files::local().read(&json_path) {
                 Ok(c) => c,
@@ -270,20 +280,29 @@ fn check_alias_collision_all(id: &str, saving_type: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
-    identifier::validate_component_id(entity.id())?;
-    check_id_collision(entity.id(), T::entity_type())?;
-
+/// Serialize an entity and write it to its config path.
+///
+/// Ensures the app config dirs exist, creates the entity's parent directory
+/// (supporting directory-based entities like projects and extensions where
+/// `config_path` is `{dir}/{id}/{id}.json`), serializes the entity as pretty
+/// JSON, and writes the file. Callers are responsible for validation and
+/// collision checks before invoking this helper.
+fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
     let path = T::config_path(entity.id())?;
     local_files::ensure_app_dirs()?;
-    // Ensure parent directory exists (supports directory-based entities like
-    // projects and extensions where config_path is {dir}/{id}/{id}.json)
     if let Some(parent) = path.parent() {
         local_files::local().ensure_dir(parent)?;
     }
     let content = to_string_pretty(entity)?;
     local_files::local().write(&path, &content)?;
     Ok(())
+}
+
+pub(crate) fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
+    identifier::validate_component_id(entity.id())?;
+    check_id_collision(entity.id(), T::entity_type())?;
+
+    write_entity(entity)
 }
 
 /// Internal: create a single entity from a constructed struct.
@@ -303,13 +322,7 @@ fn create_single<T: ConfigEntity>(entity: T) -> Result<CreateResult<T>> {
 
     check_id_collision(entity.id(), T::entity_type())?;
 
-    let path = T::config_path(entity.id())?;
-    local_files::ensure_app_dirs()?;
-    if let Some(parent) = path.parent() {
-        local_files::local().ensure_dir(parent)?;
-    }
-    let content = to_string_pretty(&entity)?;
-    local_files::local().write(&path, &content)?;
+    write_entity(&entity)?;
 
     Ok(CreateResult {
         id: entity.id().to_string(),
@@ -390,22 +403,7 @@ pub(crate) fn list_ids<T: ConfigEntity>() -> Result<Vec<String>> {
     let entries = local_files::local().list(&dir)?;
     let mut ids: Vec<String> = entries
         .into_iter()
-        .filter_map(|e| {
-            if e.is_dir {
-                // For directories: check for {dir}/{dir}.json (same logic as list())
-                let dir_name = e.path.file_name()?.to_string_lossy().to_string();
-                let nested_json = e.path.join(format!("{}.json", dir_name));
-                if nested_json.exists() {
-                    Some(dir_name)
-                } else {
-                    None
-                }
-            } else if T::supports_flat_config_entries() && e.is_json() {
-                e.path.file_stem().map(|s| s.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
+        .filter_map(|e| entry_path_and_id::<T>(&e).map(|(_, id)| id))
         .collect();
     ids.sort();
     Ok(ids)
