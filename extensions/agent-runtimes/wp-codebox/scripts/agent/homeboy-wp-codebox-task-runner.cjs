@@ -7,9 +7,15 @@
  * External dependencies
  */
 const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { URLSearchParams } = require('node:url');
+
+const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
+const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -104,8 +110,149 @@ function claudeCodeRequiredSecretEnv() {
   return ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'];
 }
 
+function codexRequiredAuthEnv() {
+  return [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  ];
+}
+
 function isClaudeCodeRequest(request) {
   return request.provider === 'claude-code';
+}
+
+function isCodexRequest(request) {
+  return request.provider === 'codex';
+}
+
+function parseUnixTimestamp(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return NaN;
+  }
+  if (/^\d+$/.test(raw)) {
+    const parsed = Number.parseInt(raw, 10);
+    return parsed > 100000000000 ? Math.floor(parsed / 1000) : parsed;
+  }
+  const parsedDate = Date.parse(raw);
+  return Number.isFinite(parsedDate) ? Math.floor(parsedDate / 1000) : NaN;
+}
+
+function codexAuthGuidance() {
+  return 'Refresh Codex OAuth credentials before launching WP Codebox, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the codebox executor.';
+}
+
+function codexOAuthTokenUrl() {
+  return process.env.HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL || CODEX_OAUTH_TOKEN_URL;
+}
+
+function postForm(url, body, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      reject(new Error('Codex provider auth preflight failed: OAuth token URL is invalid.'));
+      return;
+    }
+
+    const transport = parsedUrl.protocol === 'http:' ? http : https;
+    const encoded = new URLSearchParams(body).toString();
+    const request = transport.request(parsedUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(encoded),
+      },
+      timeout: timeoutMs,
+    }, (response) => {
+      let responseBody = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        responseBody += chunk;
+      });
+      response.on('end', () => {
+        resolve({ statusCode: response.statusCode || 0, body: responseBody });
+      });
+    });
+
+    request.on('timeout', () => {
+      request.destroy(new Error('Codex provider auth preflight failed: OAuth refresh timed out.'));
+    });
+    request.on('error', reject);
+    request.end(encoded);
+  });
+}
+
+async function refreshCodexAuthEnv() {
+  let response;
+  try {
+    response = await postForm(codexOAuthTokenUrl(), {
+      grant_type: 'refresh_token',
+      client_id: CODEX_OAUTH_CLIENT_ID,
+      refresh_token: process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
+    });
+  } catch (error) {
+    throw new Error(`Codex provider auth preflight failed: OAuth refresh request failed. ${codexAuthGuidance()}`);
+  }
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned HTTP ${response.statusCode}. ${codexAuthGuidance()}`);
+  }
+
+  let data;
+  try {
+    data = JSON.parse(response.body);
+  } catch {
+    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned invalid JSON. ${codexAuthGuidance()}`);
+  }
+
+  if (!data || typeof data !== 'object' || typeof data.access_token !== 'string' || data.access_token === '') {
+    throw new Error(`Codex provider auth preflight failed: OAuth refresh returned an invalid response. ${codexAuthGuidance()}`);
+  }
+
+  const expiresIn = Number.isFinite(Number(data.expires_in)) ? Number(data.expires_in) : 3600;
+  return Object.fromEntries(Object.entries({
+    AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: data.access_token,
+    AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: typeof data.refresh_token === 'string' && data.refresh_token !== ''
+      ? data.refresh_token
+      : process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN,
+    AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: String(Math.floor(Date.now() / 1000) + Math.trunc(expiresIn)),
+    AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: process.env.AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID,
+    AI_PROVIDER_OPENAI_CODEX_FEDRAMP: process.env.AI_PROVIDER_OPENAI_CODEX_FEDRAMP,
+  }).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+}
+
+async function codexAuthPreflightEnv(request) {
+  if (!isCodexRequest(request)) {
+    return {};
+  }
+
+  const names = secretEnvNames(request);
+  const missingMapping = codexRequiredAuthEnv().filter((name) => !names.includes(name));
+  if (missingMapping.length > 0) {
+    throw new Error(`Codex provider auth preflight failed: missing required secret environment mapping: ${missingMapping.join(', ')}. ${codexAuthGuidance()}`);
+  }
+
+  const missing = codexRequiredAuthEnv().filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    throw new Error(`Codex provider auth preflight failed: missing required secret environment value: ${missing.join(', ')}. ${codexAuthGuidance()}`);
+  }
+
+  const expiresAt = parseUnixTimestamp(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT);
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
+    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is malformed. ${codexAuthGuidance()}`);
+  }
+
+  const safetyWindowSeconds = 300;
+  const now = Math.floor(Date.now() / 1000);
+  if (expiresAt <= now + safetyWindowSeconds) {
+    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is expired or expires within ${safetyWindowSeconds} seconds. ${codexAuthGuidance()}`);
+  }
+
+  return refreshCodexAuthEnv();
 }
 
 function assertClaudeCodeAuthPreflight(request) {
@@ -1592,7 +1739,7 @@ function emptyStdoutPayloadFailure(result, artifacts) {
   );
 }
 
-function runWpCodeboxParentTask(request) {
+function runWpCodeboxParentTask(request, envOverrides = {}) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts_path || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
   if (explicitArtifacts) {
@@ -1644,6 +1791,7 @@ function runWpCodeboxParentTask(request) {
     encoding: 'utf8',
     env: {
       ...process.env,
+      ...envOverrides,
     },
     maxBuffer: 1024 * 1024 * 20,
     timeout: timeoutMs,
@@ -1713,12 +1861,15 @@ function runWpCodeboxParentTask(request) {
   return result.status ?? 1;
 }
 
+(async () => {
 try {
   const request = readTaskRequest();
+  const codexEnv = await codexAuthPreflightEnv(request);
   assertClaudeCodeAuthPreflight(request);
   assertRequiredSecretEnvAvailable(request);
-  process.exitCode = runWpCodeboxParentTask(request);
+  process.exitCode = runWpCodeboxParentTask(request, codexEnv);
 } catch (error) {
   console.error(error && error.message ? error.message : String(error));
   process.exitCode = 1;
 }
+})();

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const wpCodeboxTaskRunner = path.join(
   __dirname,
@@ -175,7 +175,15 @@ const agentResult = isRuntimeTask
   : (isAgentBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_AGENT_BUNDLE
       ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
       : { status: 'completed' })))));
-fs.writeFileSync(out, JSON.stringify({ argv: process.argv.slice(2), input }, null, 2));
+fs.writeFileSync(out, JSON.stringify({
+  argv: process.argv.slice(2),
+  input,
+  codex_env: {
+    access_refreshed: process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN === 'fresh-access-token-value',
+    refresh_refreshed: process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN === 'fresh-refresh-token-value',
+    expires_refreshed: Number(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT || 0) > Math.floor(Date.now() / 1000),
+  },
+}, null, 2));
 const execution = { recipeCommand: 'wp-codebox.agent-sandbox-run', exitCode: 0, stdout: JSON.stringify({ status: 'completed', output: JSON.stringify(agentResult) }) };
 const executions = [execution];
 process.stdout.write(JSON.stringify({
@@ -202,14 +210,71 @@ if (process.env.FIXTURE_WP_CODEBOX_EXIT_CODE) {
   return binPath;
 }
 
+function waitForFile(filePath) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) {
+      return fs.readFileSync(filePath, 'utf8').trim();
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+function createCodexOAuthServer(root) {
+  const script = path.join(root, 'fixture-codex-oauth-server.js');
+  const portPath = path.join(root, 'fixture-codex-oauth-port');
+  const logPath = path.join(root, 'fixture-codex-oauth-requests.jsonl');
+  fs.writeFileSync(script, `#!/usr/bin/env node
+'use strict';
+const fs = require('node:fs');
+const http = require('node:http');
+const { URLSearchParams } = require('node:url');
+const portPath = process.argv[2];
+const logPath = process.argv[3];
+const server = http.createServer((request, response) => {
+  let body = '';
+  request.setEncoding('utf8');
+  request.on('data', (chunk) => { body += chunk; });
+  request.on('end', () => {
+    const params = Object.fromEntries(new URLSearchParams(body));
+    fs.appendFileSync(logPath, JSON.stringify({ method: request.method, url: request.url, params }) + '\\n');
+    if (params.refresh_token === 'stale-refresh-token-value') {
+      response.writeHead(401, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: 'invalid_grant' }));
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ access_token: 'fresh-access-token-value', refresh_token: 'fresh-refresh-token-value', expires_in: 3600 }));
+  });
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(portPath, String(server.address().port));
+});
+`);
+  const child = spawn(process.execPath, [script, portPath, logPath], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  const port = waitForFile(portPath);
+  return {
+    url: `http://127.0.0.1:${port}/oauth/token`,
+    logPath,
+    stop() {
+      child.kill();
+    },
+  };
+}
+
 function pathInside(parent, candidate) {
   const relative = path.relative(parent, candidate);
   return relative === '' || (Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-task-runner-'));
+let codexOAuthServer;
 
 try {
+  codexOAuthServer = createCodexOAuthServer(root);
   const capturePath = path.join(root, 'capture.json');
   const fixtureWpCodebox = createFixtureWpCodebox(root);
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
@@ -587,16 +652,86 @@ try {
       AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
       AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: codexOAuthServer.url,
     },
   });
   assert.equal(codexResult.status, 0, codexResult.stderr || codexResult.stdout);
-  const codexInput = readJson(codexCapturePath).input;
+  const codexCapture = readJson(codexCapturePath);
+  const codexInput = codexCapture.input;
   assert.deepEqual(codexInput.secret_env, codexSecretEnv);
   assert.equal(codexInput.provider, 'codex');
   assert.equal(codexInput.model, 'gpt-5.5');
   assert.equal(codexInput.provider_plugin_paths[0], '/components/ai-provider-for-openai');
+  assert.deepEqual(codexCapture.codex_env, {
+    access_refreshed: true,
+    refresh_refreshed: true,
+    expires_refreshed: true,
+  });
   assert(!JSON.stringify(codexInput).includes('access-token-value'));
   assert(!JSON.stringify(codexInput).includes('refresh-token-value'));
+
+  const expiredCodexCapturePath = path.join(root, 'capture-expired-codex.json');
+  const expiredCodexResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      provider: 'codex',
+      model: 'gpt-5.5',
+      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+      secret_env: codexSecretEnv,
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: expiredCodexCapturePath,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'expired-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'expired-refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'expired-account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+    },
+  });
+  assert.equal(expiredCodexResult.status, 1, expiredCodexResult.stderr || expiredCodexResult.stdout);
+  assert.match(expiredCodexResult.stderr, /Codex provider auth preflight failed/);
+  assert.match(expiredCodexResult.stderr, /AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT/);
+  assert.match(expiredCodexResult.stderr, /Refresh Codex OAuth credentials/);
+  assert(!expiredCodexResult.stderr.includes('expired-access-token-value'));
+  assert(!expiredCodexResult.stderr.includes('expired-refresh-token-value'));
+  assert(!fs.existsSync(expiredCodexCapturePath));
+
+  const staleCodexCapturePath = path.join(root, 'capture-stale-codex.json');
+  const staleCodexResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      provider: 'codex',
+      model: 'gpt-5.5',
+      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+      secret_env: codexSecretEnv,
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: staleCodexCapturePath,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'stale-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'stale-refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'stale-account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: codexOAuthServer.url,
+    },
+  });
+  assert.equal(staleCodexResult.status, 1, staleCodexResult.stderr || staleCodexResult.stdout);
+  assert.match(staleCodexResult.stderr, /Codex provider auth preflight failed/);
+  assert.match(staleCodexResult.stderr, /OAuth refresh returned HTTP 401/);
+  assert.match(staleCodexResult.stderr, /Refresh Codex OAuth credentials/);
+  assert(!staleCodexResult.stderr.includes('stale-access-token-value'));
+  assert(!staleCodexResult.stderr.includes('stale-refresh-token-value'));
+  assert(!fs.existsSync(staleCodexCapturePath));
 
   const implicitRuntimeRequest = { ...request };
   delete implicitRuntimeRequest.runtime_component_paths;
@@ -1131,5 +1266,8 @@ try {
 
   console.log('Homeboy WP Codebox task runner smoke passed');
 } finally {
+  if (codexOAuthServer) {
+    codexOAuthServer.stop();
+  }
   fs.rmSync(root, { recursive: true, force: true });
 }
