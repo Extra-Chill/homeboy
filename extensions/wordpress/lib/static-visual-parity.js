@@ -12,6 +12,7 @@ const path = require('node:path');
  * Internal dependencies
  */
 const { runWpCodeboxRecipe } = require('./wp-codebox-recipe-helper');
+const { resolveWpCodeboxArtifactPath } = require('./wp-codebox-artifacts');
 
 function buildStaticVisualParityRecipe(options = {}) {
   const sourceUrl = requiredString(options.sourceUrl, 'sourceUrl');
@@ -138,18 +139,36 @@ async function normalizeStaticVisualParityArtifacts({ codeboxResult, artifactsDi
   if (!outputDirectory) {
     throw new Error('normalizeStaticVisualParityArtifacts requires outputDirectory.');
   }
-  const artifactDirectory = codeboxResult?.artifacts?.directory || artifactsDirectory || outputDirectory;
-  const codeboxVisualDir = path.join(artifactDirectory, 'files', 'browser', 'visual-compare');
   const sourcePath = path.join(outputDirectory, 'source.png');
   const candidatePath = path.join(outputDirectory, 'candidate.png');
   const importedPath = path.join(outputDirectory, 'imported.png');
   const diffPath = path.join(outputDirectory, 'diff.png');
-  await fs.copyFile(path.join(codeboxVisualDir, 'source.png'), sourcePath);
-  await fs.copyFile(path.join(codeboxVisualDir, 'candidate.png'), candidatePath);
+  const codeboxVisualDiff = JSON.parse(await fs.readFile(resolveWpCodeboxArtifactPath({
+    codeboxResult,
+    artifactsDirectory: artifactsDirectory || outputDirectory,
+    key: 'visualDiff',
+    fallbackPath: 'files/browser/visual-compare/visual-diff.json',
+  }), 'utf8'));
+  const codeboxVisualFiles = codeboxVisualDiff.files || {};
+  await fs.copyFile(resolveWpCodeboxArtifactPath({
+    codeboxResult,
+    artifactsDirectory: artifactsDirectory || outputDirectory,
+    artifact: codeboxVisualFiles.sourceScreenshot,
+    fallbackPath: 'files/browser/visual-compare/source.png',
+  }), sourcePath);
+  await fs.copyFile(resolveWpCodeboxArtifactPath({
+    codeboxResult,
+    artifactsDirectory: artifactsDirectory || outputDirectory,
+    artifact: codeboxVisualFiles.candidateScreenshot,
+    fallbackPath: 'files/browser/visual-compare/candidate.png',
+  }), candidatePath);
   await fs.copyFile(candidatePath, importedPath);
-  await fs.copyFile(path.join(codeboxVisualDir, 'diff.png'), diffPath);
-
-  const codeboxVisualDiff = JSON.parse(await fs.readFile(path.join(codeboxVisualDir, 'visual-diff.json'), 'utf8'));
+  await fs.copyFile(resolveWpCodeboxArtifactPath({
+    codeboxResult,
+    artifactsDirectory: artifactsDirectory || outputDirectory,
+    artifact: codeboxVisualFiles.diffScreenshot,
+    fallbackPath: 'files/browser/visual-compare/diff.png',
+  }), diffPath);
   const comparison = codeboxVisualDiff.comparison || {};
   const source = comparison.source || {};
   const candidate = comparison.candidate || {};
@@ -194,7 +213,7 @@ async function normalizeStaticVisualParityArtifacts({ codeboxResult, artifactsDi
       schema: codeboxVisualDiff.schema,
       status: codeboxVisualDiff.status,
       files: codeboxVisualDiff.files,
-      artifactDirectory,
+      artifactDirectory: codeboxResult?.artifacts?.directory || artifactsDirectory || outputDirectory,
     },
   };
 

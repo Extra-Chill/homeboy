@@ -27,6 +27,18 @@ Configure the Codex pair with task config, global settings, or environment varia
 
 The `php-ai-client` checkout must include bearer-token auth support (`RequestAuthenticationMethod::bearerToken`) and Composer vendor dependencies (`vendor/autoload.php`). If the stack is incomplete, the executor emits diagnostics for the missing Codex provider plugin, missing bearer-token auth, or missing Composer vendor preparation.
 
+## WP Codebox Artifact Lookup
+
+WordPress helpers that consume WP Codebox browser or recipe artifacts should use
+`wordpress/lib/wp-codebox-artifacts.js` instead of parsing bundle directory
+layouts directly. The helper resolves artifact references from returned runtime
+metadata (`artifacts`, `files`, nested `artifact.files`, or fallback paths) to
+absolute files under the artifact bundle directory.
+
+This keeps extension helpers product-neutral: workloads and probes can name the
+artifact they need, while runtime-specific bundle layouts remain behind one
+lookup boundary.
+
 ## Test failure sidecar
 
 When Homeboy sets `HOMEBOY_TEST_FAILURES_FILE`, the WordPress PHPUnit runners write a JSON sidecar with parsed failure details. Existing Homeboy analysis fields are preserved, and each failure also includes normalized sidecar fields for cross-runner consumers:
