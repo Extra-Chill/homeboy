@@ -190,6 +190,7 @@ fn matrix_template_request(
         executor: AgentTaskExecutor {
             backend: executor_backend.to_string(),
             selector: None,
+            runtime_selection: None,
             required_capabilities: vec!["bench".to_string(), "matrix".to_string()],
             secret_env: Vec::new(),
             model: None,

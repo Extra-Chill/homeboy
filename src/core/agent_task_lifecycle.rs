@@ -403,6 +403,7 @@ pub fn record_pre_dispatch_failure(
             executor: AgentTaskExecutor {
                 backend: "homeboy-lab".to_string(),
                 selector: None,
+                runtime_selection: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 model: None,
@@ -690,6 +691,7 @@ fn synthetic_remote_dispatch_plan(
                 executor: AgentTaskExecutor {
                     backend: provider.to_string(),
                     selector: None,
+                    runtime_selection: None,
                     required_capabilities: Vec::new(),
                     secret_env: Vec::new(),
                     model: None,
@@ -2458,6 +2460,7 @@ mod tests {
                 executor: AgentTaskExecutor {
                     backend: "test".to_string(),
                     selector: Some("fixture".to_string()),
+                    runtime_selection: None,
                     required_capabilities: Vec::new(),
                     secret_env: Vec::new(),
                     model: None,
