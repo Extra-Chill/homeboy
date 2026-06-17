@@ -1,4 +1,4 @@
-use crate::core::component::{discover_from_portable, Component};
+use crate::core::component::{discover_from_portable, portable::read_portable_config, Component};
 use crate::core::engine::local_files::FileSystem;
 use crate::core::error::{Error, Result};
 use crate::core::extension;
@@ -159,11 +159,15 @@ fn load_standalone_components() -> Result<Vec<Component>> {
         let local_dir = Path::new(&local_path);
 
         // If the local_path directory has a homeboy.json, prefer portable discovery
-        // (it's the source of truth for version_targets, extensions, etc.)
-        // and merge the standalone file's fields as fallback.
+        // (it's the source of truth for repo-owned fields) and use standalone
+        // data only for machine-local fields or legacy fallback values.
         if local_dir.exists() {
             if let Some(discovered) = discover_from_portable(local_dir) {
-                let component = overlay_standalone_registration(&id, discovered, json);
+                let portable = read_portable_config(local_dir)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let component = overlay_standalone_registration(&id, discovered, portable, json);
                 components.push(component);
                 continue;
             }
@@ -195,16 +199,25 @@ fn load_standalone_components() -> Result<Vec<Component>> {
 fn overlay_standalone_registration(
     id: &str,
     discovered: Component,
+    portable: serde_json::Value,
     standalone: serde_json::Value,
 ) -> Component {
     let mut merged = serde_json::to_value(&discovered).unwrap_or_else(|_| serde_json::json!({}));
 
     if let (Some(base), Some(overrides)) = (merged.as_object_mut(), standalone.as_object()) {
+        let portable = portable.as_object();
         for (key, value) in overrides {
-            if key == "id" || value.is_null() {
+            if key == "id" || value.is_null() || key == "local_path" {
+                continue;
+            }
+            if portable.is_some_and(|portable| portable.contains_key(key)) {
                 continue;
             }
             base.insert(key.clone(), value.clone());
+        }
+
+        if let Some(local_path) = overrides.get("local_path").filter(|value| !value.is_null()) {
+            base.insert("local_path".to_string(), local_path.clone());
         }
     }
 
@@ -684,9 +697,9 @@ fn suggest_project_for_attachment() -> Option<String> {
 /// Write a standalone component registration to `~/.config/homeboy/components/<id>.json`.
 ///
 /// This creates a lightweight pointer file so the component is discoverable by ID
-/// from any directory, even without project attachment. The file contains only
-/// machine-specific fields (`local_path`, `remote_path`) — the source of truth
-/// for version_targets, extensions, etc. remains in the repo's `homeboy.json`.
+/// from any directory, even without project attachment. The file's explicit
+/// machine-local field is `local_path`; other fields are legacy fallback data
+/// and do not override fields present in the repo's `homeboy.json`.
 pub fn write_standalone_registration(component: &Component) -> Result<()> {
     if component.id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -991,6 +1004,64 @@ mod tests {
             plugin.remote_path, "wp-content/plugins/my-plugin",
             "Should inherit remote_path from standalone registration"
         );
+    }
+
+    #[test]
+    fn portable_config_fields_override_standalone_registration() {
+        let dir = TempDir::new().unwrap();
+        let config_components = dir
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("components");
+        fs::create_dir_all(&config_components).unwrap();
+
+        let repo_dir = dir.path().join("repo-owned-plugin");
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        fs::write(
+            repo_dir.join("homeboy.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": "repo-owned-plugin",
+                "remote_path": "portable/remote-path",
+                "build_artifact": "portable.zip",
+                "extensions": { "portable-extension": {} }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        fs::write(
+            config_components.join("repo-owned-plugin.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "local_path": repo_dir.to_string_lossy(),
+                "remote_path": "standalone/remote-path",
+                "build_artifact": "standalone.zip",
+                "extensions": { "standalone-extension": {} }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let _home = with_home_override(dir.path());
+
+        let components = load_standalone_components().unwrap();
+        let plugin = components
+            .iter()
+            .find(|c| c.id == "repo-owned-plugin")
+            .expect("component should load");
+
+        assert_eq!(plugin.local_path, repo_dir.to_string_lossy());
+        assert_eq!(plugin.remote_path, "portable/remote-path");
+        assert_eq!(plugin.build_artifact.as_deref(), Some("portable.zip"));
+        assert!(plugin
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key("portable-extension")));
+        assert!(!plugin
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key("standalone-extension")));
     }
 
     #[test]
