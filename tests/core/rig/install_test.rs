@@ -7,12 +7,11 @@ use crate::core::rig::{
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 #[path = "support.rs"]
 mod support;
 
-use support::{minimal_rig, minimal_stack, run_git, write_rig, write_stack};
+use support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
 
 fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("single rig dir");
@@ -22,39 +21,10 @@ fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     rig_path
 }
 
-fn commit_package(package: &Path) {
-    run_git(package, &["add", "."]);
-    run_git(
-        package,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            "update rigs",
-        ],
-    );
-}
-
 fn bare_package(package: &Path) -> tempfile::TempDir {
-    run_git(package, &["init"]);
-    commit_package(package);
-
-    let bare = tempfile::tempdir().expect("bare parent");
-    let source_path = bare.path().join("rig-package.git");
-    let output = Command::new("git")
-        .args([
-            "clone",
-            "--bare",
-            package.to_str().unwrap(),
-            source_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("git clone --bare");
-    assert!(output.status.success());
-    bare
+    let git = GitFixture::init(package);
+    git.commit("update rigs");
+    git.clone_bare()
 }
 
 #[test]
@@ -535,44 +505,10 @@ fn git_url_installs_clone_package_and_config_link() {
     let package = tempfile::tempdir().expect("package");
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
 
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(package.path())
-        .output()
-        .expect("git init");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(package.path())
-        .output()
-        .expect("git add");
-    std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            "init",
-        ])
-        .current_dir(package.path())
-        .output()
-        .expect("git commit");
-
-    let bare = tempfile::tempdir().expect("bare parent");
-    let source_path = bare.path().join("rig-package.git");
-    let clone_bare = std::process::Command::new("git")
-        .args([
-            "clone",
-            "--bare",
-            package.path().to_str().unwrap(),
-            source_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("git clone --bare");
-    assert!(clone_bare.status.success());
-
-    let source = source_path.to_string_lossy().to_string();
+    let bare = bare_package(package.path());
+    let source = support::bare_source_path(&bare)
+        .to_string_lossy()
+        .to_string();
     let result = install(&source, None, false).expect("install");
     assert!(!result.linked);
     assert_eq!(result.installed.len(), 1);
