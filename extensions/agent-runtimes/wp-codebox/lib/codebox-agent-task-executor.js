@@ -6,8 +6,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
-const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
+/**
+ * Internal dependencies
+ */
+const {
+  AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+  AGENT_TASK_FAILURE_CLASSIFICATIONS,
+  AGENT_TASK_OUTCOME_SCHEMA,
+  AGENT_TASK_OUTCOME_STATUSES,
+  AGENT_TASK_REDACTED_METADATA_KEYS,
+  AGENT_TASK_REQUEST_SCHEMA,
+  agentTaskProviderContractFields,
+  providerDefaultsContract,
+} = require('../../lib/agent-task-provider-contract');
+
 const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
@@ -91,27 +103,6 @@ const WP_CODEBOX_ROLE_ALIASES = {
   },
 };
 
-const AGENT_TASK_OUTCOME_STATUSES = [
-  'succeeded',
-  'failed',
-  'no_op',
-  'unable_to_remediate',
-  'timeout',
-  'provider_error',
-];
-
-const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
-  'provider',
-  'timeout',
-  'execution_failed',
-];
-
-const AGENT_TASK_REDACTED_METADATA_KEYS = [
-  'secret_env_values',
-  'secretEnvValues',
-  'secrets',
-];
-
 function assertAgentTaskRequest(request) {
   if (!request || request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
     throw new Error(`Agent task request must use schema ${AGENT_TASK_REQUEST_SCHEMA}.`);
@@ -127,17 +118,12 @@ function assertAgentTaskRequest(request) {
 
 function providerContract(options = {}) {
   return {
-    schema: 'homeboy/agent-task-executor-provider/v1',
+    schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     id: options.id || WP_CODEBOX_PROVIDER_ID,
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
     backend: WP_CODEBOX_BACKEND,
     command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
-    request_schema: AGENT_TASK_REQUEST_SCHEMA,
-    outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
-    request_required_fields: ['schema', 'task_id', 'executor.backend', 'instructions'],
-    outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
-    failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
-    redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
+    ...agentTaskProviderContractFields(),
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
     capabilities: normalizeArray(options.capabilities || PROVIDER_CAPABILITIES),
     workspace_materialization: {
@@ -145,34 +131,12 @@ function providerContract(options = {}) {
     },
     workspace_tools: runtimeWorkspaceTools(options),
     component_path_defaults: runtimeComponentPathDefaults(options),
-    provider_defaults: providerDefaultsContract(),
+    provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
   };
-}
-
-function providerSecretEnvRequirement(provider, env) {
-  return {
-    schema: 'homeboy/secret-env-requirement/v1',
-    source: 'provider_default',
-    env,
-    when: {
-      any: [
-        { path: 'executor.config.provider', equals: provider },
-        { path: 'executor.provider', equals: provider },
-        { path: 'provider', equals: provider },
-      ],
-    },
-  };
-}
-
-function providerDefaultsContract(providerDefaults = runtimeProviderDefaults()) {
-  return Object.fromEntries(Object.entries(providerDefaults).map(([provider, defaults]) => [provider, {
-    ...defaults,
-    secret_env: normalizeArray(defaults.secret_env),
-  }]));
 }
 
 function runtimeManifest() {

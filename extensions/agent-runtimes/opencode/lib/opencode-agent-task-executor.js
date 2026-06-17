@@ -1,7 +1,15 @@
 'use strict';
 
-const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
-const AGENT_TASK_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
+/**
+ * Internal dependencies
+ */
+const {
+	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+	AGENT_TASK_OUTCOME_SCHEMA,
+	agentTaskProviderContractFields,
+	providerSecretEnvRequirement,
+} = require('../../lib/agent-task-provider-contract');
+
 const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';
 const OPENCODE_SECRET_ENV = [
@@ -24,42 +32,17 @@ const OPENCODE_CAPABILITIES = [
 	'provider_owned_cancellation',
 ];
 
-const AGENT_TASK_OUTCOME_STATUSES = [
-	'succeeded',
-	'failed',
-	'no_op',
-	'unable_to_remediate',
-	'timeout',
-	'provider_error',
-];
-
-const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
-	'provider',
-	'timeout',
-	'execution_failed',
-];
-
-const AGENT_TASK_REDACTED_METADATA_KEYS = [
-	'secret_env_values',
-	'secretEnvValues',
-	'secrets',
-	'codex_auth',
-	'opencode_auth',
-];
-
 function providerContract(options = {}) {
+	const contractFields = agentTaskProviderContractFields();
+	contractFields.redacted_metadata_keys.push('codex_auth', 'opencode_auth');
+
 	return {
-		schema: 'homeboy/agent-task-executor-provider/v1',
+		schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 		id: options.id || OPENCODE_PROVIDER_ID,
 		label: options.label || OPENCODE_PROVIDER_LABEL,
 		backend: 'opencode',
 		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs',
-		request_schema: AGENT_TASK_REQUEST_SCHEMA,
-		outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
-		request_required_fields: ['schema', 'task_id', 'executor.backend', 'instructions'],
-		outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
-		failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
-		redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
+		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV)],
 		capabilities: OPENCODE_CAPABILITIES,
 		workspace_materialization: {
@@ -83,21 +66,6 @@ function providerContract(options = {}) {
 		status: 'experimental',
 		integration_contract: 'homeboy-opencode-agent-task/v1',
 		runtime_gap_trackers: ['https://github.com/Extra-Chill/homeboy-extensions/issues/967'],
-	};
-}
-
-function providerSecretEnvRequirement(provider, env) {
-	return {
-		schema: 'homeboy/secret-env-requirement/v1',
-		source: 'provider_default',
-		env,
-		when: {
-			any: [
-				{ path: 'executor.config.provider', equals: provider },
-				{ path: 'executor.provider', equals: provider },
-				{ path: 'provider', equals: provider },
-			],
-		},
 	};
 }
 
