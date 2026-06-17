@@ -1,6 +1,8 @@
 'use strict';
 
 const BROWSER_RESULT_SCHEMA_VERSION = 1;
+const HOMEBOY_BENCH_RESULTS_SCHEMA = 'homeboy/bench-results/v1';
+const HOMEBOY_BROWSER_EVIDENCE_SCHEMA = 'homeboy/browser-evidence/v1';
 
 const VALID_TRACE_ASSERTION_STATUSES = new Set(['pass', 'fail', 'skip', 'unknown']);
 const VALID_TRACE_ENVELOPE_STATUSES = new Set(['pass', 'fail', 'error', 'skip', 'unknown']);
@@ -230,6 +232,134 @@ function normalizeTraceEnvelope(envelope) {
 	return stableJson(normalized);
 }
 
+function buildBenchResultsEnvelope({ componentId, iterations = 1, scenarios = [] } = {}) {
+	const normalizedComponentId = stringValue(componentId);
+	if (!normalizedComponentId) throw new Error('buildBenchResultsEnvelope requires componentId.');
+	return stableJson({
+		schema: HOMEBOY_BENCH_RESULTS_SCHEMA,
+		component_id: normalizedComponentId,
+		iterations: positiveInteger(iterations, 1),
+		scenarios: Array.isArray(scenarios) ? scenarios.map(buildBenchScenarioResult) : [],
+	});
+}
+
+function buildBenchScenarioResult(input = {}) {
+	const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+	const id = stringValue(source.id ?? source.scenario_id ?? source.scenarioId);
+	if (!id) throw new Error('buildBenchScenarioResult requires id.');
+
+	const scenario = {
+		id,
+		iterations: positiveInteger(source.iterations, 1),
+		metrics: normalizeBenchMetrics(source.metrics),
+	};
+	copyOptionalString(scenario, 'file', source.file);
+	copyOptionalString(scenario, 'source', source.source);
+	copyOptionalInteger(scenario, 'default_iterations', source.default_iterations ?? source.defaultIterations);
+	copyOptionalArray(scenario, 'tags', source.tags);
+	copyOptionalObject(scenario, 'metric_groups', source.metric_groups ?? source.metricGroups);
+	copyOptionalArray(scenario, 'timeline', source.timeline);
+	copyOptionalArray(scenario, 'span_definitions', source.span_definitions ?? source.spanDefinitions);
+	copyOptionalArray(scenario, 'span_results', source.span_results ?? source.spanResults);
+	copyOptionalArray(scenario, 'gates', source.gates);
+	copyOptionalArray(scenario, 'gate_results', source.gate_results ?? source.gateResults);
+	copyOptionalObject(scenario, 'metadata', source.metadata);
+	copyOptionalObject(scenario, 'provenance', source.provenance);
+	if (source.passed !== undefined) scenario.passed = Boolean(source.passed);
+	copyOptionalObject(scenario, 'memory', source.memory);
+	const artifacts = normalizeBenchArtifacts(source.artifacts);
+	if (Object.keys(artifacts).length > 0) scenario.artifacts = artifacts;
+	copyOptionalArray(scenario, 'diagnostics', source.diagnostics);
+	copyOptionalArray(scenario, 'runs', source.runs);
+	copyOptionalObject(scenario, 'runs_summary', source.runs_summary ?? source.runsSummary);
+	return stableJson(scenario);
+}
+
+function buildBrowserBenchResult(input = {}) {
+	const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+	const browserResult = source.browserResult && typeof source.browserResult === 'object' && !Array.isArray(source.browserResult) ? source.browserResult : {};
+	const metrics = normalizeBenchMetrics({
+		...(browserResult.metrics || {}),
+		...(source.browserMetrics || {}),
+		...(source.metrics || {}),
+	});
+	const artifacts = normalizeBenchArtifacts({
+		...(browserResult.artifacts || {}),
+		...(source.browserArtifacts || {}),
+		...(source.rawResultArtifact ? { raw_result: source.rawResultArtifact } : {}),
+		...(source.artifacts || {}),
+	});
+	const metadata = stableJson({
+		browser_evidence_schema: HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
+		...(source.metadata || {}),
+	});
+
+	return stableJson({
+		metrics,
+		...(Object.keys(artifacts).length > 0 ? { artifacts } : {}),
+		...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+	});
+}
+
+function normalizeBenchMetrics(metrics = {}) {
+	if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return {};
+	const normalized = {};
+	for (const [key, value] of Object.entries(metrics).sort(([a], [b]) => a.localeCompare(b))) {
+		if (typeof value === 'number' && Number.isFinite(value)) normalized[key] = roundNumber(value);
+	}
+	return normalized;
+}
+
+function normalizeBenchArtifacts(artifacts = {}) {
+	if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) return {};
+	const normalized = {};
+	for (const [key, artifact] of Object.entries(artifacts).sort(([a], [b]) => a.localeCompare(b))) {
+		const descriptor = normalizeBenchArtifact(artifact);
+		if (Object.keys(descriptor).length > 0) normalized[key] = descriptor;
+	}
+	return normalized;
+}
+
+function normalizeBenchArtifact(artifact) {
+	if (typeof artifact === 'string' && artifact.trim()) return { path: artifact.trim() };
+	if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) return {};
+	const normalized = {};
+	for (const key of ['path', 'url', 'type', 'kind', 'label', 'observation_artifact_id', 'role', 'preview_url', 'public_url', 'viewer_url', 'local_url', 'status']) {
+		copyOptionalString(normalized, key, artifact[key]);
+	}
+	for (const key of ['viewer', 'browser_origin_evidence', 'service_lifecycle']) {
+		copyOptionalObject(normalized, key, artifact[key]);
+	}
+	copyOptionalArray(normalized, 'viewer_links', artifact.viewer_links ?? artifact.viewerLinks);
+	copyOptionalString(normalized, 'expires_at', artifact.expires_at ?? artifact.expiresAt);
+	copyOptionalString(normalized, 'cleanup_status', artifact.cleanup_status ?? artifact.cleanupStatus);
+	return stableJson(normalized);
+}
+
+function copyOptionalString(target, key, value) {
+	if (typeof value === 'string' && value.trim() !== '') target[key] = value.trim();
+}
+
+function copyOptionalInteger(target, key, value) {
+	const number = Number(value);
+	if (Number.isInteger(number) && number >= 0) target[key] = number;
+}
+
+function copyOptionalArray(target, key, value) {
+	if (Array.isArray(value) && value.length > 0) target[key] = value.map(stableJson);
+}
+
+function copyOptionalObject(target, key, value) {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+	const normalized = stableJson(value);
+	if (Object.keys(normalized).length > 0) target[key] = normalized;
+}
+
+function positiveInteger(value, fallback) {
+	const number = Number(value);
+	return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
 function normalizePhaseMap(phases, phaseMarks) {
 	if (!phases || typeof phases !== 'object' || Array.isArray(phases)) {
 		return collectBrowserPhases(phaseMarks);
@@ -358,6 +488,11 @@ function stableJson(value) {
 
 module.exports = {
 	BROWSER_RESULT_SCHEMA_VERSION,
+	HOMEBOY_BENCH_RESULTS_SCHEMA,
+	HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
+	buildBenchResultsEnvelope,
+	buildBenchScenarioResult,
+	buildBrowserBenchResult,
 	collectBrowserPhases,
 	normalizeBrowserArtifact,
 	normalizeBrowserBottleneck,

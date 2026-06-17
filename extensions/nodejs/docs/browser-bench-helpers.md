@@ -4,10 +4,10 @@ Browser benchmark workloads can import the helper path exported by
 `HOMEBOY_NODEJS_BROWSER_BENCH_HELPER`.
 
 ```js
-const { runBrowserPageScenario } = await import(process.env.HOMEBOY_NODEJS_BROWSER_BENCH_HELPER);
+const { buildBrowserBenchResult, runBrowserPageScenario } = await import(process.env.HOMEBOY_NODEJS_BROWSER_BENCH_HELPER);
 
 export default async function () {
-  return runBrowserPageScenario({
+  const browserResult = await runBrowserPageScenario({
     id: 'homepage',
     target: 'https://example.test/',
     assertions: [
@@ -20,6 +20,11 @@ export default async function () {
       await mark('heading_visible');
     },
   });
+
+  return buildBrowserBenchResult({
+    browserResult,
+    metrics: { success_rate: 1 },
+  });
 }
 ```
 
@@ -27,6 +32,10 @@ export default async function () {
 without changing that API. It opens the target page, runs workload actions,
 checks page and artifact assertions, writes a stable raw result artifact, and
 returns `{ metrics, artifacts }` for the Homeboy bench runner.
+
+`buildBrowserBenchResult()` composes those browser metrics and artifacts with
+workload-owned fields while preserving the Homeboy core `BenchScenario` result
+shape.
 
 ## Public Artifact Links
 

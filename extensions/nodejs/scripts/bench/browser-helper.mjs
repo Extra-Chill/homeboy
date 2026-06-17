@@ -5,10 +5,13 @@ import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import {
     collectBrowserPhases,
+    buildBrowserBenchResult,
     normalizeBrowserArtifact,
     normalizeBrowserBottleneck,
     normalizeBrowserPerformanceProfile,
 } from '../../../scripts/lib/browser-result-shapes.mjs';
+
+export { buildBrowserBenchResult };
 
 const DEFAULT_NETWORK_IDLE_TIMEOUT_MS = 5000;
 const BROWSER_PERFORMANCE_STATE = new WeakMap();

@@ -5,6 +5,11 @@ const shapes = require('./browser-result-shapes.cjs');
 
 export const {
     BROWSER_RESULT_SCHEMA_VERSION,
+    HOMEBOY_BENCH_RESULTS_SCHEMA,
+    HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
+    buildBenchResultsEnvelope,
+    buildBenchScenarioResult,
+    buildBrowserBenchResult,
     collectBrowserPhases,
     normalizeBrowserArtifact,
     normalizeBrowserBottleneck,

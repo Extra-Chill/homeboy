@@ -24,6 +24,11 @@ preload attribution, and route grouping remain in `wordpress`.
   `phase`, `message`, and optional `data`.
 - `normalizeTraceEvent()`, `normalizeTraceAssertion()`, and
   `normalizeTraceEnvelope()` describe generic trace timelines and assertions.
+- `buildBenchResultsEnvelope()` and `buildBenchScenarioResult()` emit the
+  parseable `homeboy/bench-results/v1` envelope and scenario shape.
+- `buildBrowserBenchResult()` emits the `{ metrics, artifacts, metadata }`
+  workload result shape used by browser evidence producers, with browser
+  artifacts normalized to Homeboy core artifact fields.
 
 ## Shape Boundary
 
