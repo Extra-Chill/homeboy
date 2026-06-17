@@ -14,9 +14,150 @@ import {
 export { buildBrowserBenchResult };
 
 const DEFAULT_NETWORK_IDLE_TIMEOUT_MS = 5000;
+const DEFAULT_DEFERRED_INIT_MARKER_PREFIX = 'deferred_init';
 const BROWSER_PERFORMANCE_STATE = new WeakMap();
 const SECRET_HEADER_PATTERN = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token)$/i;
 const SECRET_HEADER_PART_PATTERN = /(token|secret|session|cookie|credential|password|key)/i;
+
+export const DEFERRED_INIT_BROWSER_PHASES = Object.freeze({
+    FEATURE_NOT_NEEDED: 'feature-not-needed',
+    FEATURE_NEEDED: 'feature-needed',
+});
+
+export function deferredInitBrowserMarkers(featureId, options = {}) {
+    const normalizedFeatureId = normalizeDeferredInitFeatureId(featureId, 'deferredInitBrowserMarkers');
+    const prefix = normalizeDeferredInitMarkerPrefix(options.prefix);
+
+    return Object.freeze({
+        featureNotNeededStart: deferredInitMarkerName(prefix, normalizedFeatureId, 'feature_not_needed.start'),
+        featureNotNeededReady: deferredInitMarkerName(prefix, normalizedFeatureId, 'feature_not_needed.ready'),
+        featureNeededTrigger: deferredInitMarkerName(prefix, normalizedFeatureId, 'feature_needed.trigger'),
+        featureNeededReady: deferredInitMarkerName(prefix, normalizedFeatureId, 'feature_needed.ready'),
+        featureNeededSuccess: deferredInitMarkerName(prefix, normalizedFeatureId, 'feature_needed.success'),
+    });
+}
+
+export function deferredInitBrowserMarkerScript(featureId, options = {}) {
+    const normalizedFeatureId = normalizeDeferredInitFeatureId(featureId, 'deferredInitBrowserMarkerScript');
+    const markers = deferredInitBrowserMarkers(normalizedFeatureId, options);
+
+    return `(() => {
+  const startedAt = performance.now();
+  const events = [];
+  const elapsed = () => Math.round(performance.now() - startedAt);
+  const mark = (name, data = {}) => {
+    const event = { name, t_ms: elapsed(), data };
+    events.push(event);
+    try { performance.mark(name); } catch {}
+    return event;
+  };
+  window.__homeboyDeferredInit = window.__homeboyDeferredInit || {};
+  window.__homeboyDeferredInit[${JSON.stringify(normalizedFeatureId)}] = {
+    featureId: ${JSON.stringify(normalizedFeatureId)},
+    markers: ${JSON.stringify(markers)},
+    events,
+    mark,
+  };
+  mark(${JSON.stringify(markers.featureNotNeededStart)});
+})();`;
+}
+
+export function summarizeDeferredInitBrowserEvidence(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Error('summarizeDeferredInitBrowserEvidence requires an options object.');
+    }
+
+    const featureId = normalizeDeferredInitFeatureId(options.featureId, 'summarizeDeferredInitBrowserEvidence');
+    const featureMatchers = normalizeDeferredInitMatchers(options.featureRequestMatchers, 'featureRequestMatchers', true);
+    const thirdPartyMatchers = normalizeDeferredInitMatchers(options.thirdPartyRequestMatchers, 'thirdPartyRequestMatchers', false);
+    const markerEvents = Array.isArray(options.markerEvents) ? options.markerEvents : [];
+    const networkEntries = Array.isArray(options.networkEntries) ? options.networkEntries : [];
+    const maxEarlyFeatureRequests = finiteNonNegativeNumber(options.maxEarlyFeatureRequests) ?? 0;
+    const maxEarlyThirdPartyRequests = options.maxEarlyThirdPartyRequests === undefined || options.maxEarlyThirdPartyRequests === null
+        ? null
+        : finiteNonNegativeNumber(options.maxEarlyThirdPartyRequests);
+    const minPostTriggerFeatureRequests = finiteNonNegativeNumber(options.minPostTriggerFeatureRequests) ?? 1;
+    const metricsPrefix = sanitizeMetricName(options.metricsPrefix || `${featureId}_deferred_init`);
+    const markers = deferredInitBrowserMarkers(featureId, { prefix: options.markerPrefix });
+    const notNeededReadyMs = findDeferredInitMarkerTime(markerEvents, markers.featureNotNeededReady);
+    const triggerMs = findDeferredInitMarkerTime(markerEvents, markers.featureNeededTrigger);
+    const neededReadyMs = findDeferredInitMarkerTime(markerEvents, markers.featureNeededReady);
+    const successMs = findDeferredInitMarkerTime(markerEvents, markers.featureNeededSuccess);
+    const hasRequestTiming = networkEntries.some((entry) => deferredInitRequestTime(entry) !== null);
+    const beforeTrigger = (entry) => {
+        const time = deferredInitRequestTime(entry);
+        return triggerMs !== null && time !== null && time < triggerMs;
+    };
+    const afterTrigger = (entry) => {
+        const time = deferredInitRequestTime(entry);
+        return triggerMs !== null && time !== null && time >= triggerMs;
+    };
+    const earlyFeatureRequests = countDeferredInitRequests(networkEntries, featureMatchers, beforeTrigger);
+    const postTriggerFeatureRequests = countDeferredInitRequests(networkEntries, featureMatchers, afterTrigger);
+    const earlyThirdPartyRequests = thirdPartyMatchers.length > 0 ? countDeferredInitRequests(networkEntries, thirdPartyMatchers, beforeTrigger) : null;
+    const postTriggerThirdPartyRequests = thirdPartyMatchers.length > 0 ? countDeferredInitRequests(networkEntries, thirdPartyMatchers, afterTrigger) : null;
+    const featureRequestCount = countDeferredInitRequests(networkEntries, featureMatchers);
+    const thirdPartyRequestCount = thirdPartyMatchers.length > 0 ? countDeferredInitRequests(networkEntries, thirdPartyMatchers) : null;
+    const earlyFeaturePass = hasRequestTiming && triggerMs !== null && earlyFeatureRequests <= maxEarlyFeatureRequests;
+    const postTriggerFeaturePass = hasRequestTiming && triggerMs !== null && postTriggerFeatureRequests >= minPostTriggerFeatureRequests;
+    const thirdPartyEarlyPass = maxEarlyThirdPartyRequests === null || (
+        hasRequestTiming && triggerMs !== null && earlyThirdPartyRequests <= maxEarlyThirdPartyRequests
+    );
+    const successPass = options.success === true || successMs !== null;
+
+    return stableJson({
+        feature_id: featureId,
+        phases: DEFERRED_INIT_BROWSER_PHASES,
+        markers,
+        metrics: {
+            [`${metricsPrefix}_feature_not_needed_ready_ms`]: notNeededReadyMs,
+            [`${metricsPrefix}_feature_needed_trigger_ms`]: triggerMs,
+            [`${metricsPrefix}_feature_needed_ready_ms`]: neededReadyMs,
+            [`${metricsPrefix}_feature_needed_success_ms`]: successMs,
+            [`${metricsPrefix}_request_timing_available`]: hasRequestTiming,
+            [`${metricsPrefix}_feature_request_count`]: featureRequestCount,
+            [`${metricsPrefix}_feature_request_count_before_trigger`]: earlyFeatureRequests,
+            [`${metricsPrefix}_feature_request_count_after_trigger`]: postTriggerFeatureRequests,
+            [`${metricsPrefix}_third_party_request_count`]: thirdPartyRequestCount,
+            [`${metricsPrefix}_third_party_request_count_before_trigger`]: earlyThirdPartyRequests,
+            [`${metricsPrefix}_third_party_request_count_after_trigger`]: postTriggerThirdPartyRequests,
+            [`${metricsPrefix}_no_early_feature_init`]: earlyFeaturePass,
+            [`${metricsPrefix}_post_trigger_feature_requests`]: postTriggerFeaturePass,
+            [`${metricsPrefix}_post_trigger_success`]: successPass,
+        },
+        assertions: [
+            deferredInitAssertion(
+                `${featureId}-no-early-feature-init`,
+                earlyFeaturePass ? 'pass' : 'fail',
+                `Observed ${earlyFeatureRequests} feature request(s) before trigger; expected <= ${maxEarlyFeatureRequests}.`
+            ),
+            deferredInitAssertion(
+                `${featureId}-post-trigger-feature-requests`,
+                postTriggerFeaturePass ? 'pass' : 'fail',
+                `Observed ${postTriggerFeatureRequests} feature request(s) after trigger; expected >= ${minPostTriggerFeatureRequests}.`
+            ),
+            deferredInitAssertion(
+                `${featureId}-post-trigger-success`,
+                successPass ? 'pass' : 'fail',
+                successPass ? 'Feature reported post-trigger success.' : 'Feature did not report post-trigger success.'
+            ),
+            ...(maxEarlyThirdPartyRequests === null ? [] : [
+                deferredInitAssertion(
+                    `${featureId}-no-early-third-party-init`,
+                    thirdPartyEarlyPass ? 'pass' : 'fail',
+                    `Observed ${earlyThirdPartyRequests} third-party request(s) before trigger; expected <= ${maxEarlyThirdPartyRequests}.`
+                ),
+            ]),
+        ],
+        metadata: {
+            marker_events: markerEvents,
+            early_feature_urls_sample: sampleDeferredInitUrls(networkEntries, featureMatchers, beforeTrigger),
+            post_trigger_feature_urls_sample: sampleDeferredInitUrls(networkEntries, featureMatchers, afterTrigger),
+            early_third_party_urls_sample: thirdPartyMatchers.length > 0 ? sampleDeferredInitUrls(networkEntries, thirdPartyMatchers, beforeTrigger) : [],
+            post_trigger_third_party_urls_sample: thirdPartyMatchers.length > 0 ? sampleDeferredInitUrls(networkEntries, thirdPartyMatchers, afterTrigger) : [],
+        },
+    });
+}
 
 export async function runBrowserActions(page, actions, options = {}) {
     if (!Array.isArray(actions) || actions.length === 0) {
@@ -1869,6 +2010,92 @@ function pickRounded(source, keys) {
         out[normalizedKey] = typeof source[key] === 'number' ? roundNumber(source[key]) : source[key];
     }
     return stableJson(out);
+}
+
+function normalizeDeferredInitFeatureId(featureId, caller) {
+    if (typeof featureId !== 'string' || featureId.trim() === '') {
+        throw new Error(`${caller} requires a non-empty string featureId.`);
+    }
+    return featureId.trim();
+}
+
+function normalizeDeferredInitMarkerPrefix(prefix) {
+    if (prefix === undefined || prefix === null || prefix === '') return DEFAULT_DEFERRED_INIT_MARKER_PREFIX;
+    return String(prefix).trim() || DEFAULT_DEFERRED_INIT_MARKER_PREFIX;
+}
+
+function deferredInitMarkerName(prefix, featureId, name) {
+    return `${prefix}.${featureId}.${name}`;
+}
+
+function normalizeDeferredInitMatchers(matchers, label, required) {
+    const values = Array.isArray(matchers) ? matchers : [];
+    if (required && values.length === 0) {
+        throw new Error(`summarizeDeferredInitBrowserEvidence requires at least one ${label}.`);
+    }
+    return values.map((matcher) => compileDeferredInitMatcher(matcher));
+}
+
+function compileDeferredInitMatcher(matcher) {
+    if (typeof matcher === 'function') return matcher;
+    if (matcher instanceof RegExp) return (entry) => matcher.test(deferredInitRequestUrl(entry));
+    if (typeof matcher === 'string') return (entry) => deferredInitRequestUrl(entry).includes(matcher);
+    throw new Error(`Unsupported deferred-init request matcher: ${String(matcher)}`);
+}
+
+function findDeferredInitMarkerTime(markerEvents, marker) {
+    const event = markerEvents.find((candidate) => candidate?.name === marker);
+    return deferredInitEventTime(event);
+}
+
+function deferredInitEventTime(event) {
+    return finiteNumberOrNull(event?.t_ms ?? event?.time_ms ?? event?.timestamp_ms ?? event?.startTime ?? event?.start_time_ms);
+}
+
+function deferredInitRequestTime(entry) {
+    return finiteNumberOrNull(
+        entry?.t_ms ??
+        entry?.time_ms ??
+        entry?.timestamp_ms ??
+        entry?.startTime ??
+        entry?.start_time_ms ??
+        entry?.request?.startTime ??
+        entry?.request?.start_time_ms
+    );
+}
+
+function deferredInitRequestUrl(entry) {
+    return entry?.url || entry?.request?.url || entry?.response?.url || '';
+}
+
+function countDeferredInitRequests(entries, matchers, predicate = () => true) {
+    return entries.filter((entry) => predicate(entry) && matchesAnyDeferredInitMatcher(entry, matchers)).length;
+}
+
+function sampleDeferredInitUrls(entries, matchers, predicate = () => true, limit = 20) {
+    return entries
+        .filter((entry) => predicate(entry) && matchesAnyDeferredInitMatcher(entry, matchers))
+        .map(deferredInitRequestUrl)
+        .filter(Boolean)
+        .slice(0, limit);
+}
+
+function matchesAnyDeferredInitMatcher(entry, matchers) {
+    return matchers.some((matcher) => matcher(entry));
+}
+
+function deferredInitAssertion(id, status, message) {
+    return { id, message, status };
+}
+
+function finiteNonNegativeNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function finiteNumberOrNull(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? roundNumber(number) : null;
 }
 
 function stableJson(value) {
