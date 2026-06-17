@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -1061,6 +1061,12 @@ pub(crate) fn prepare_runner_process(
             &request.command,
             &runner.id,
         )?;
+        provision_provider_file_secret_sources_for_runner(
+            &runner,
+            &request.command,
+            &request.secret_env_names,
+            &request.env,
+        )?;
     }
     validate_runner_policy(
         &runner,
@@ -1201,29 +1207,263 @@ fn resolve_runner_secret_env_for_command(
     required_names: &[String],
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
+    resolve_runner_secret_env_for_command_with_fallbacks(
+        secret_env,
+        required_names,
+        env,
+        &provider_secret_sources_for_discovered_providers(),
+    )
+}
+
+fn resolve_runner_secret_env_for_command_with_fallbacks(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    required_names: &[String],
+    env: &HashMap<String, String>,
+    fallback_sources: &HashMap<String, crate::core::defaults::AgentTaskSecretSource>,
+) -> Result<HashMap<String, String>> {
     if required_names.is_empty() {
         return Ok(HashMap::new());
     }
 
     let mut refs = HashMap::new();
+    let mut resolved = HashMap::new();
     for name in required_names {
         if env.contains_key(name.as_str()) {
             continue;
         }
-        let Some(source) = secret_env.get(name.as_str()) else {
-            return Err(Error::validation_invalid_argument(
-                "secret_env",
-                format!("missing runner secret env ref for {name}"),
-                Some(name.clone()),
-                Some(vec![
-                    "Configure the selected runner secret_env reference or pass the secret in the exec request environment.".to_string(),
-                ]),
-            ));
-        };
-        refs.insert(name.clone(), source.clone());
+        if let Some(source) = secret_env.get(name.as_str()) {
+            refs.insert(name.clone(), source.clone());
+            continue;
+        }
+        if fallback_sources.contains_key(name) {
+            if let Ok(values) = agent_task_secrets::resolve_secret_env_with_fallbacks(
+                std::slice::from_ref(name),
+                &fallback_sources,
+            ) {
+                for (name, value) in values {
+                    resolved.insert(name, value);
+                }
+                continue;
+            }
+        }
+        return Err(Error::validation_invalid_argument(
+            "secret_env",
+            format!("missing runner secret env ref for {name}"),
+            Some(name.clone()),
+            Some(vec![
+                "Configure the selected runner secret_env reference, declare provider secret_env_sources that resolve on the runner, or pass the secret in the exec request environment.".to_string(),
+            ]),
+        ));
     }
 
-    resolve_runner_secret_env(&refs)
+    resolved.extend(resolve_runner_secret_env(&refs)?);
+    Ok(resolved)
+}
+
+fn provision_provider_file_secret_sources_for_runner(
+    runner: &Runner,
+    command: &[String],
+    required_names: &[String],
+    request_env: &HashMap<String, String>,
+) -> Result<()> {
+    if !is_agent_task_run_plan_command(command) || required_names.is_empty() {
+        return Ok(());
+    }
+    let fallback_sources = provider_secret_sources_for_discovered_providers();
+    let provisions = provider_file_secret_source_provisions(required_names, &fallback_sources);
+    if provisions.is_empty() {
+        return Ok(());
+    }
+
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "SSH runner requires server_id before provider secret source provisioning",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let client = SshClient::from_server(&server, server_id)?;
+    for provision in provisions {
+        if provision
+            .env_names
+            .iter()
+            .all(|name| request_env.contains_key(name.as_str()))
+        {
+            continue;
+        }
+        agent_task_secrets::resolve_secret_env_with_fallbacks(
+            &provision.env_names,
+            &fallback_sources,
+        )
+        .map_err(|err| {
+            provider_file_secret_source_error(
+                &runner.id,
+                &provision,
+                format!(
+                    "controller credential source does not satisfy provider env names: {}",
+                    err.message
+                ),
+            )
+        })?;
+        provision_provider_file_secret_source(&client, &runner.id, &provision)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderFileSecretSourceProvision {
+    path: String,
+    env_names: Vec<String>,
+}
+
+fn provider_file_secret_source_provisions(
+    required_names: &[String],
+    fallback_sources: &HashMap<String, crate::core::defaults::AgentTaskSecretSource>,
+) -> Vec<ProviderFileSecretSourceProvision> {
+    let mut by_path: HashMap<String, Vec<String>> = HashMap::new();
+    for name in required_names {
+        let Some(source) = fallback_sources.get(name) else {
+            continue;
+        };
+        if source.source != "json-file" {
+            continue;
+        }
+        let Some(path) = source
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        else {
+            continue;
+        };
+        by_path
+            .entry(path.to_string())
+            .or_default()
+            .push(name.clone());
+    }
+
+    let mut provisions = by_path
+        .into_iter()
+        .map(|(path, mut env_names)| {
+            env_names.sort();
+            env_names.dedup();
+            ProviderFileSecretSourceProvision { path, env_names }
+        })
+        .collect::<Vec<_>>();
+    provisions.sort_by(|left, right| left.path.cmp(&right.path));
+    provisions
+}
+
+fn provision_provider_file_secret_source(
+    client: &SshClient,
+    runner_id: &str,
+    provision: &ProviderFileSecretSourceProvision,
+) -> Result<()> {
+    let local_path = expanded_home_path(&provision.path);
+    let local_raw = std::fs::read_to_string(&local_path).map_err(|err| {
+        provider_file_secret_source_error(
+            runner_id,
+            provision,
+            format!("controller credential source is not readable: {err}"),
+        )
+    })?;
+    let remote_path = remote_secret_source_path(client, &provision.path)?;
+    let Some(parent) = Path::new(&remote_path).parent().and_then(Path::to_str) else {
+        return Err(provider_file_secret_source_error(
+            runner_id,
+            provision,
+            "runner credential source path has no parent directory".to_string(),
+        ));
+    };
+
+    let prepare = client.execute(&format!(
+        "mkdir -p {} && chmod 700 {}",
+        shell::quote_arg(parent),
+        shell::quote_arg(parent)
+    ));
+    if !prepare.success {
+        return Err(provider_file_secret_source_error(
+            runner_id,
+            provision,
+            "failed to prepare runner credential directory".to_string(),
+        ));
+    }
+
+    let temp = tempfile::NamedTempFile::new().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("create provider credential temp file".to_string()),
+        )
+    })?;
+    std::fs::write(temp.path(), local_raw).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("write provider credential temp file".to_string()),
+        )
+    })?;
+    let upload = client.upload_file(&temp.path().to_string_lossy(), &remote_path);
+    if !upload.success {
+        return Err(provider_file_secret_source_error(
+            runner_id,
+            provision,
+            "failed to upload credential source to runner".to_string(),
+        ));
+    }
+    let chmod = client.execute(&format!("chmod 600 {}", shell::quote_arg(&remote_path)));
+    if !chmod.success {
+        return Err(provider_file_secret_source_error(
+            runner_id,
+            provision,
+            "failed to lock down runner credential source permissions".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn provider_file_secret_source_error(
+    runner_id: &str,
+    provision: &ProviderFileSecretSourceProvision,
+    reason: String,
+) -> Error {
+    Error::validation_invalid_argument(
+        "secret_env",
+        format!(
+            "provider runner credential source for {} cannot be provisioned on runner `{}`: {}",
+            provision.env_names.join(", "),
+            runner_id,
+            reason
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Refresh the provider credentials on the controller, then rerun the Lab offload so Homeboy can provision the runner-side credential source before dispatch.".to_string(),
+            "Credential values are not printed; inspect provider auth with the provider's own auth status command if refresh continues to fail.".to_string(),
+        ]),
+    )
+}
+
+fn remote_secret_source_path(client: &SshClient, path: &str) -> Result<String> {
+    if path == "~" || path.starts_with("~/") {
+        let home = client.execute("printf %s \"$HOME\"");
+        if !home.success || home.stdout.trim().is_empty() {
+            return Err(Error::internal_unexpected(
+                "failed to resolve runner home directory for provider credential source",
+            ));
+        }
+        let suffix = path.strip_prefix('~').unwrap_or_default();
+        return Ok(format!("{}{}", home.stdout.trim_end_matches('/'), suffix));
+    }
+    Ok(path.to_string())
+}
+
+fn expanded_home_path(path: &str) -> PathBuf {
+    PathBuf::from(shellexpand::tilde(path).to_string())
+}
+
+fn is_agent_task_run_plan_command(command: &[String]) -> bool {
+    command
+        .windows(2)
+        .any(|items| items[0] == "agent-task" && items[1] == "run-plan")
 }
 
 fn resolve_controller_secret_env_for_command(
@@ -1799,6 +2039,7 @@ fn daemon_exec_stale_response_error(runner_id: &str, status_code: u16, parse_err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::defaults::AgentTaskSecretSource;
     use crate::core::error::ErrorCode;
     use crate::core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
@@ -2012,6 +2253,147 @@ mod tests {
                 None => std::env::remove_var(self.name),
             }
         }
+    }
+
+    fn json_file_source(path: &str, field: &str) -> AgentTaskSecretSource {
+        AgentTaskSecretSource {
+            source: "json-file".to_string(),
+            env_var: None,
+            path: Some(path.to_string()),
+            scope: None,
+            name: None,
+            field: Some(field.to_string()),
+            value: None,
+        }
+    }
+
+    #[test]
+    fn provider_file_secret_source_provisions_group_json_file_sources_without_values() {
+        let sources = HashMap::from([
+            (
+                "PROVIDER_ACCESS_TOKEN".to_string(),
+                json_file_source("~/.provider/auth.json", "tokens.access_token"),
+            ),
+            (
+                "PROVIDER_REFRESH_TOKEN".to_string(),
+                json_file_source("~/.provider/auth.json", "tokens.refresh_token"),
+            ),
+            (
+                "UNRELATED_SECRET".to_string(),
+                AgentTaskSecretSource {
+                    source: "env".to_string(),
+                    env_var: Some("UNRELATED_SECRET".to_string()),
+                    path: None,
+                    scope: None,
+                    name: None,
+                    field: None,
+                    value: None,
+                },
+            ),
+        ]);
+
+        let provisions = provider_file_secret_source_provisions(
+            &[
+                "PROVIDER_REFRESH_TOKEN".to_string(),
+                "PROVIDER_ACCESS_TOKEN".to_string(),
+                "UNRELATED_SECRET".to_string(),
+            ],
+            &sources,
+        );
+
+        assert_eq!(provisions.len(), 1);
+        assert_eq!(provisions[0].path, "~/.provider/auth.json");
+        assert_eq!(
+            provisions[0].env_names,
+            vec![
+                "PROVIDER_ACCESS_TOKEN".to_string(),
+                "PROVIDER_REFRESH_TOKEN".to_string(),
+            ]
+        );
+        let rendered = format!("{:?}", provisions);
+        assert!(!rendered.contains("access-secret"));
+        assert!(!rendered.contains("refresh-secret"));
+    }
+
+    #[test]
+    fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
+        crate::test_support::with_isolated_home(|home| {
+            let provider_dir = home.path().join(".provider");
+            std::fs::create_dir_all(&provider_dir).expect("provider dir");
+            std::fs::write(
+                provider_dir.join("auth.json"),
+                serde_json::json!({
+                    "tokens": {
+                        "access_token": "access-secret-value",
+                        "refresh_token": "refresh-secret-value"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("auth json");
+            let sources = HashMap::from([
+                (
+                    "PROVIDER_ACCESS_TOKEN".to_string(),
+                    json_file_source("~/.provider/auth.json", "tokens.access_token"),
+                ),
+                (
+                    "PROVIDER_REFRESH_TOKEN".to_string(),
+                    json_file_source("~/.provider/auth.json", "tokens.refresh_token"),
+                ),
+            ]);
+
+            let resolved = resolve_runner_secret_env_for_command_with_fallbacks(
+                &HashMap::new(),
+                &[
+                    "PROVIDER_ACCESS_TOKEN".to_string(),
+                    "PROVIDER_REFRESH_TOKEN".to_string(),
+                ],
+                &HashMap::new(),
+                &sources,
+            )
+            .expect("provider sources resolve on runner");
+
+            assert_eq!(
+                resolved.get("PROVIDER_ACCESS_TOKEN"),
+                Some(&"access-secret-value".to_string())
+            );
+            assert_eq!(
+                resolved.get("PROVIDER_REFRESH_TOKEN"),
+                Some(&"refresh-secret-value".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn provider_file_secret_source_error_is_early_clear_and_redacted() {
+        let provision = ProviderFileSecretSourceProvision {
+            path: "~/.provider/auth.json".to_string(),
+            env_names: vec![
+                "PROVIDER_ACCESS_TOKEN".to_string(),
+                "PROVIDER_REFRESH_TOKEN".to_string(),
+            ],
+        };
+
+        let err = provider_file_secret_source_error(
+            "homeboy-lab",
+            &provision,
+            "controller credential source is not readable".to_string(),
+        );
+
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains("homeboy-lab"));
+        assert!(err.message.contains("PROVIDER_ACCESS_TOKEN"));
+        assert!(err
+            .message
+            .contains("controller credential source is not readable"));
+        assert!(err.details["tried"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("Refresh the provider credentials")))));
+        let rendered = format!("{} {:?} {:?}", err.message, err.details, err.hints);
+        assert!(!rendered.contains("access-secret-value"));
+        assert!(!rendered.contains("refresh-secret-value"));
     }
 
     #[test]
