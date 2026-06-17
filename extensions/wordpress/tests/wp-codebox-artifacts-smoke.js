@@ -4,9 +4,12 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const {
   resolveWpCodeboxArtifactPath,
+  resolveWpCodeboxManifestArtifactPath,
   wpCodeboxArtifactByKey,
   wpCodeboxArtifactDirectory,
+  wpCodeboxArtifactManifestV1,
   wpCodeboxArtifactPath,
+  wpCodeboxBrowserArtifacts,
 } = require('../lib/wp-codebox-artifacts');
 
 const codeboxResult = {
@@ -44,5 +47,40 @@ assert.equal(resolveWpCodeboxArtifactPath({
 }), '/tmp/already-absolute.png');
 assert.throws(() => resolveWpCodeboxArtifactPath({ artifact: 'relative.json' }), /without artifact directory/);
 assert.throws(() => resolveWpCodeboxArtifactPath({ codeboxResult, key: 'missing' }), /Unable to resolve WP Codebox artifact: missing/);
+
+const browserOutput = { artifacts: { directory: '/tmp/wp-codebox-artifacts' } };
+assert.equal(
+  resolveWpCodeboxManifestArtifactPath(browserOutput, 'files/browser/summary.json'),
+  path.join('/tmp/wp-codebox-artifacts', 'files/browser/summary.json')
+);
+assert.deepEqual(wpCodeboxBrowserArtifacts(browserOutput, ['summary.json', 'network.jsonl']), {
+  directory: path.join('/tmp/wp-codebox-artifacts', 'files/browser'),
+  'summary.json': path.join('/tmp/wp-codebox-artifacts', 'files/browser/summary.json'),
+  'network.jsonl': path.join('/tmp/wp-codebox-artifacts', 'files/browser/network.jsonl'),
+});
+
+const manifestOutput = {
+  artifacts: {
+    directory: '/tmp/wp-codebox-artifacts',
+    files: [
+      { path: 'browser/summary.actual.json', relativePath: 'files/browser/summary.json' },
+      { path: '/external/browser/network.actual.json', relativePath: 'files/browser/network.jsonl' },
+    ],
+  },
+};
+assert.deepEqual(wpCodeboxArtifactManifestV1(manifestOutput), {
+  version: 1,
+  directory: '/tmp/wp-codebox-artifacts',
+  files: manifestOutput.artifacts.files,
+});
+assert.equal(
+  resolveWpCodeboxManifestArtifactPath(manifestOutput, 'files/browser/summary.json'),
+  path.join('/tmp/wp-codebox-artifacts', 'browser/summary.actual.json')
+);
+assert.equal(
+  resolveWpCodeboxManifestArtifactPath(manifestOutput, 'files/browser/network.jsonl'),
+  '/external/browser/network.actual.json'
+);
+assert.equal(resolveWpCodeboxManifestArtifactPath({}, 'files/browser/summary.json'), '');
 
 console.log('✓ WP Codebox artifact helper smoke test PASSED');
