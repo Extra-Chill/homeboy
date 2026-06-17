@@ -68,11 +68,11 @@ homeboy_project_init_node() {
     HOMEBOY_PROJECT_ROOT="$_root"
     HOMEBOY_PROJECT_SCRIPT_FILE="${_root}/package.json"
 
-    if [ -f "$_root/pnpm-lock.yaml" ] && command -v pnpm >/dev/null 2>&1; then
+    if [ -f "$_root/pnpm-lock.yaml" ]; then
         HOMEBOY_PROJECT_PACKAGE_MANAGER="pnpm"
         HOMEBOY_PROJECT_RUN_CMD="pnpm run"
         HOMEBOY_PROJECT_EXEC_CMD="pnpm exec"
-    elif [ -f "$_root/yarn.lock" ] && command -v yarn >/dev/null 2>&1; then
+    elif [ -f "$_root/yarn.lock" ]; then
         HOMEBOY_PROJECT_PACKAGE_MANAGER="yarn"
         HOMEBOY_PROJECT_RUN_CMD="yarn"
         HOMEBOY_PROJECT_EXEC_CMD="yarn"
