@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.238.0] - 2026-06-17
+
+### Added
+- bundle compare evidence across scenarios
+- execute scripts through runner exec
+- add declarative requirement steps
+- add --run-id and warn on unknown setting keys (#4477, #4478)
+- feat(agent-task): add typed artifact primitives
+- add portable evidence manifest schema
+- feat(agent-task): add secret env plan primitive
+- add generic run lifecycle record
+- feat(agent-task): add runtime selection envelope
+
+### Changed
+- extract core review service
+- test(agent-task): cover nested provider secret sources
+- reuse core git primitives
+- centralize temp-dir and git fixture scaffolding (#4866)
+- Preserve runner agent-task observability
+
+### Fixed
+- fix(agent-task): normalize artifact declarations
+- fix(agent-task): resolve provider credential sources
+- retry transient SQLite lock on runner exec persistence (#4863)
+
 ## [0.237.0] - 2026-06-17
 
 ### Added
