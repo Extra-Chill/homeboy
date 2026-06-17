@@ -746,6 +746,33 @@ Evidence expectations:
   include the rerun commands above. Do not cite machine-local paths as PR
   evidence.
 
+### Nested Plugin Source Roots
+
+WP Codebox bench runs normally treat the selected Homeboy component path as the
+plugin source. Monorepos can keep that component path scoped to the nested
+plugin while asking the runner to materialize a broader checkout for host-side
+prep and Composer path repositories:
+
+```json
+{
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "wp_codebox_source_root": "/path/to/monorepo",
+        "wp_codebox_source_subpath": "plugins/example-plugin"
+      }
+    }
+  }
+}
+```
+
+For Lab offload, pass `wp_codebox_source_root` as a path-valued `--setting` when
+the root must be synced separately from the selected component snapshot. Homeboy
+remaps that setting to the runner path before the WordPress bench runner starts.
+The bench runner keeps `HOMEBOY_COMPONENT_PATH` and the plugin slug scoped to the
+selected component, but uses the configured source root/subpath for prepare step
+cwd resolution, workload discovery, file mounts, and the WP Codebox plugin input.
+
 ## WP Codebox Scenario Manifests
 
 Repos can declare first-class scenario manifests and let the WordPress runner

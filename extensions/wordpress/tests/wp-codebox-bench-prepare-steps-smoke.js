@@ -10,11 +10,17 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-prepare-s
 
 try {
   const extensionPath = path.join(__dirname, '..');
-  const componentPath = path.join(root, 'prepare-steps-fixture');
-  const benchDir = path.join(componentPath, 'tests', 'bench');
-  const generatedPath = path.join(componentPath, 'includes', 'react-admin', 'feature-config.php');
+  const componentPath = path.join(root, 'isolated-snapshot', 'prepare-steps-fixture');
+  const sourceRoot = path.join(root, 'monorepo');
+  const sourceSubpath = path.join('plugins', 'prepare-steps-fixture');
+  const sourcePluginPath = path.join(sourceRoot, sourceSubpath);
+  const benchDir = path.join(sourcePluginPath, 'tests', 'bench');
+  const generatedPath = path.join(sourcePluginPath, 'includes', 'react-admin', 'feature-config.php');
   fs.mkdirSync(benchDir, { recursive: true });
-  fs.writeFileSync(path.join(componentPath, 'prepare-steps-fixture.php'), "<?php\n/* Plugin Name: Prepare Steps Fixture */\n");
+  fs.mkdirSync(componentPath, { recursive: true });
+  fs.mkdirSync(path.join(sourceRoot, 'packages', 'php', 'monorepo-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, 'packages', 'php', 'monorepo-plugin', 'composer.json'), '{}\n');
+  fs.writeFileSync(path.join(sourcePluginPath, 'prepare-steps-fixture.php'), "<?php\n/* Plugin Name: Prepare Steps Fixture */\n");
   fs.writeFileSync(path.join(benchDir, 'assert-prepare.php'), "<?php\nreturn static fn() => ['metrics' => ['prepared' => 1]];\n");
 
   const fakeWpCodebox = path.join(root, 'fixture-wp-codebox.js');
@@ -25,10 +31,15 @@ if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
   process.exit(2);
 }
 const recipe = JSON.parse(fs.readFileSync(process.argv[recipeIndex + 1], 'utf8'));
-const plugin = recipe.inputs.extraPlugins.find((entry) => entry.slug === 'prepare-steps-fixture');
+const extraPlugins = recipe.inputs.extraPlugins || recipe.inputs.extra_plugins || [];
+const plugin = extraPlugins.find((entry) => entry.slug === 'prepare-steps-fixture');
 if (!plugin || !fs.existsSync(plugin.source + '/includes/react-admin/feature-config.php')) {
   process.stderr.write('generated feature config missing before wp-codebox launch\\n');
   process.exit(8);
+}
+if (!fs.existsSync(plugin.source + '/../../packages/php/monorepo-plugin/composer.json')) {
+  process.stderr.write('monorepo composer path repository missing from plugin source context\\n');
+  process.exit(9);
 }
 process.stdout.write(JSON.stringify({
   success: true,
@@ -55,7 +66,14 @@ homeboy_write_empty_bench_results() {
   fs.writeFileSync(preflightHelper, `#!/usr/bin/env bash
 homeboy_require_bash_version() { :; }
 `);
-  const prepareScript = path.join(componentPath, 'bin', 'generate-feature-config.php');
+  const resolveContextHelper = path.join(root, 'resolve-context-helper.sh');
+  fs.writeFileSync(resolveContextHelper, `#!/usr/bin/env bash
+homeboy_resolve_context() {
+  PLUGIN_PATH="$HOMEBOY_COMPONENT_PATH"
+  COMPONENT_ID="$HOMEBOY_COMPONENT_ID"
+}
+`);
+  const prepareScript = path.join(sourcePluginPath, 'bin', 'generate-feature-config.php');
   fs.mkdirSync(path.dirname(prepareScript), { recursive: true });
   fs.writeFileSync(prepareScript, `#!/usr/bin/env php
 <?php
@@ -76,6 +94,7 @@ file_put_contents($target, "<?php return ['prepared' => true];\n");
     HOMEBOY_EXTENSION_PATH: extensionPath,
     HOMEBOY_RUNTIME_BASH_PREFLIGHT: preflightHelper,
     HOMEBOY_RUNTIME_BENCH_HELPER_SH: benchHelper,
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT: resolveContextHelper,
     HOMEBOY_WP_CODEBOX_BIN: fakeWpCodebox,
   };
 
@@ -86,6 +105,8 @@ file_put_contents($target, "<?php return ['prepared' => true];\n");
       ...baseEnv,
       HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'success-results.json'),
       HOMEBOY_SETTINGS_JSON: JSON.stringify({
+        wp_codebox_source_root: sourceRoot,
+        wp_codebox_source_subpath: sourceSubpath,
         wp_codebox_prepare_steps: [
           { command: 'php', args: ['bin/generate-feature-config.php'] },
         ],
@@ -106,6 +127,8 @@ file_put_contents($target, "<?php return ['prepared' => true];\n");
       HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'failure-results.json'),
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: failureArtifactsDir,
       HOMEBOY_SETTINGS_JSON: JSON.stringify({
+        wp_codebox_source_root: sourceRoot,
+        wp_codebox_source_subpath: sourceSubpath,
         wp_codebox_prepare_steps: [
           { command: 'php', args: ['missing-generate-feature-config.php'] },
         ],

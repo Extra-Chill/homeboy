@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.4.5",
+  "version": "3.4.6",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
@@ -1011,6 +1011,20 @@
       "type": "array",
       "default": [],
       "description": "Explicit host-side commands to run before WP Codebox mounts and loads the plugin for wordpress.bench or wordpress.phpunit. Each step is an object with command, optional string args, and optional component-relative cwd. Use this for bounded source-checkout generation such as WooCommerce feature config files; no package scripts run implicitly."
+    },
+    {
+      "id": "wp_codebox_source_root",
+      "label": "WP Codebox source root",
+      "type": "string",
+      "default": "",
+      "description": "Optional absolute source checkout root for WP Codebox-backed bench materialization. Use with wp_codebox_source_subpath when the selected Homeboy component path is a nested plugin but host-side prepare steps and Composer path repositories need the surrounding monorepo. Lab offload remaps path-valued --setting entries to the synced runner path before execution."
+    },
+    {
+      "id": "wp_codebox_source_subpath",
+      "label": "WP Codebox source subpath",
+      "type": "string",
+      "default": "",
+      "description": "Component-relative path under wp_codebox_source_root used as the plugin source for WP Codebox bench prep, workload discovery, file mounts, and plugin loading. Leave empty only when HOMEBOY_COMPONENT_PATH is already under wp_codebox_source_root and the runner can derive the relative path."
     },
     {
       "id": "wp_codebox_scenario_manifests",
