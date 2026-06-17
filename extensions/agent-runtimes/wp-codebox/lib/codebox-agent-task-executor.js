@@ -129,6 +129,7 @@ function providerContract(options = {}) {
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
     backend: WP_CODEBOX_BACKEND,
     command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
+    invocation: runtimeCommandInvocation(options),
     ...agentTaskProviderContractFields(),
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
     capabilities: normalizeArray(options.capabilities || PROVIDER_CAPABILITIES),
@@ -151,6 +152,10 @@ function runtimeManifest() {
 
 function runtimeExecutorManifest() {
   return runtimeManifest().agent_task_executors?.[0] || {};
+}
+
+function runtimeCommandInvocation(options = {}) {
+  return firstObject(options.invocation, runtimeExecutorManifest().invocation);
 }
 
 function runtimeProviderCapabilities() {

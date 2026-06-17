@@ -1,0 +1,187 @@
+{
+  "schema": "homeboy/agent-task-core-contract/v1",
+  "schemas": {
+    "request": "homeboy/agent-task-request/v1",
+    "outcome": "homeboy/agent-task-outcome/v1",
+    "artifact": "homeboy/agent-task-artifact/v1",
+    "artifact_declaration": "homeboy/agent-task-artifact-declaration/v1",
+    "evidence_ref": "homeboy/agent-task-evidence-ref/v1",
+    "workflow": "homeboy/agent-task-workflow/v1",
+    "plan": "homeboy/agent-task-plan/v1",
+    "aggregate": "homeboy/agent-task-aggregate/v1",
+    "matrix_plan": "homeboy/agent-task-matrix-plan/v1",
+    "matrix_aggregate": "homeboy/agent-task-matrix-aggregate/v1",
+    "provider": "homeboy/agent-task-executor-provider/v1",
+    "provider_capability_contract": "homeboy/agent-task-provider-capability-contract/v1",
+    "gate_report": "homeboy/agent-task-gate-report/v1",
+    "promotion_report": "homeboy/agent-task-promotion-report/v1",
+    "cook_loop_report": "homeboy/agent-task-cook-loop-report/v1",
+    "loop_controller": "homeboy/agent-task-loop-controller/v1",
+    "loop_controller_status": "homeboy/agent-task-loop-controller-status/v1",
+    "secret_env_plan": "homeboy/secret-env-plan/v1",
+    "secret_env_requirement": "homeboy/secret-env-requirement/v1"
+  },
+  "provider_capability": {
+    "schema": "homeboy/agent-task-provider-capability-contract/v1",
+    "provider_schema": "homeboy/agent-task-executor-provider/v1",
+    "request_schema": "homeboy/agent-task-request/v1",
+    "outcome_schema": "homeboy/agent-task-outcome/v1",
+    "request_required_fields": [
+      "schema",
+      "task_id",
+      "executor.backend",
+      "instructions"
+    ],
+    "outcome_statuses": [
+      "succeeded",
+      "no_op",
+      "unable_to_remediate",
+      "provider_error",
+      "timeout",
+      "failed",
+      "follow_up_issue",
+      "cancelled"
+    ],
+    "failure_classifications": [
+      "provider",
+      "timeout",
+      "policy_denied",
+      "capability_missing",
+      "invalid_input",
+      "execution_failed",
+      "unknown"
+    ],
+    "redacted_metadata_keys": [
+      "secret_env_values",
+      "secretEnvValues",
+      "secrets"
+    ],
+    "provider_capability_fields": [
+      "schema",
+      "provider_schema",
+      "request_schema",
+      "outcome_schema",
+      "request_required_fields",
+      "outcome_statuses",
+      "failure_classifications",
+      "redacted_metadata_keys"
+    ],
+    "executor_provider_fields": [
+      "schema",
+      "id",
+      "label",
+      "backend",
+      "default_backend",
+      "command",
+      "request_schema",
+      "outcome_schema",
+      "capabilities",
+      "secret_requirements",
+      "secret_env_requirements",
+      "workspace_materialization",
+      "provider_defaults",
+      "runner_readiness",
+      "runner_sources",
+      "dependency_failure_patterns",
+      "timeout_artifact_discovery",
+      "role_aliases",
+      "extension_id",
+      "extension_path",
+      "runtime_id",
+      "runtime_path",
+      "extra"
+    ]
+  },
+  "enums": {
+    "execution_state": [
+      "queued",
+      "running",
+      "waiting",
+      "succeeded",
+      "failed",
+      "cancelled"
+    ],
+    "task_state": [
+      "queued",
+      "blocked",
+      "skipped",
+      "running",
+      "succeeded",
+      "failed",
+      "cancelled",
+      "timed_out"
+    ],
+    "run_state": [
+      "queued",
+      "running",
+      "succeeded",
+      "partial_failure",
+      "failed",
+      "cancelled"
+    ],
+    "aggregate_status": [
+      "succeeded",
+      "partial_failure",
+      "failed",
+      "cancelled"
+    ],
+    "outcome_status": [
+      "succeeded",
+      "no_op",
+      "unable_to_remediate",
+      "provider_error",
+      "timeout",
+      "failed",
+      "follow_up_issue",
+      "cancelled"
+    ],
+    "failure_classification": [
+      "provider",
+      "timeout",
+      "policy_denied",
+      "capability_missing",
+      "invalid_input",
+      "execution_failed",
+      "unknown"
+    ],
+    "workflow_step_status": [
+      "pending",
+      "running",
+      "succeeded",
+      "failed",
+      "skipped",
+      "cancelled"
+    ]
+  },
+  "redaction_defaults": {
+    "replacement": "[REDACTED]",
+    "sensitive_keys": [
+      "api_key",
+      "apikey",
+      "auth",
+      "authorization",
+      "bearer",
+      "client_secret",
+      "cookie",
+      "key",
+      "nonce",
+      "passwd",
+      "password",
+      "refresh_token",
+      "secret",
+      "session",
+      "sid",
+      "token"
+    ],
+    "sensitive_headers": [
+      "authorization",
+      "cookie",
+      "proxy-authorization",
+      "set-cookie",
+      "x-api-key",
+      "x-auth-token",
+      "x-csrf-token",
+      "x-wp-nonce"
+    ]
+  }
+}

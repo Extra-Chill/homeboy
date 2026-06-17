@@ -14,6 +14,11 @@ const {
 const {
   datamachineAgentCiCodeboxExecutorConfig,
 } = require('../lib/datamachine-agent-ci-codebox-adapter');
+const {
+  AGENT_TASK_FAILURE_CLASSIFICATIONS,
+  AGENT_TASK_OUTCOME_STATUSES,
+  AGENT_TASK_REDACTED_METADATA_KEYS,
+} = require('../../agent-runtimes/lib/agent-task-provider-contract');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
@@ -305,9 +310,9 @@ assert.equal(provider.command, 'node {{runtime_path}}/scripts/agent/homeboy-code
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
-assert.deepEqual(provider.outcome_statuses, ['succeeded', 'failed', 'no_op', 'unable_to_remediate', 'timeout', 'provider_error']);
-assert.deepEqual(provider.failure_classifications, ['provider', 'timeout', 'execution_failed']);
-assert.deepEqual(provider.redacted_metadata_keys, ['secret_env_values', 'secretEnvValues', 'secrets']);
+assert.deepEqual(provider.outcome_statuses, AGENT_TASK_OUTCOME_STATUSES);
+assert.deepEqual(provider.failure_classifications, AGENT_TASK_FAILURE_CLASSIFICATIONS);
+assert.deepEqual(provider.redacted_metadata_keys, AGENT_TASK_REDACTED_METADATA_KEYS);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').when, {
   any: [

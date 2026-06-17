@@ -29,16 +29,22 @@
       ],
       "outcome_statuses": [
         "succeeded",
-        "failed",
         "no_op",
         "unable_to_remediate",
+        "provider_error",
         "timeout",
-        "provider_error"
+        "failed",
+        "follow_up_issue",
+        "cancelled"
       ],
       "failure_classifications": [
         "provider",
         "timeout",
-        "execution_failed"
+        "policy_denied",
+        "capability_missing",
+        "invalid_input",
+        "execution_failed",
+        "unknown"
       ],
       "redacted_metadata_keys": [
         "secret_env_values",

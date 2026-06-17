@@ -12,17 +12,23 @@ const AGENT_TASK_REQUEST_REQUIRED_FIELDS = ['schema', 'task_id', 'executor.backe
 
 const AGENT_TASK_OUTCOME_STATUSES = [
   'succeeded',
-  'failed',
   'no_op',
   'unable_to_remediate',
-  'timeout',
   'provider_error',
+  'timeout',
+  'failed',
+  'follow_up_issue',
+  'cancelled',
 ];
 
 const AGENT_TASK_FAILURE_CLASSIFICATIONS = [
   'provider',
   'timeout',
+  'policy_denied',
+  'capability_missing',
+  'invalid_input',
   'execution_failed',
+  'unknown',
 ];
 
 const AGENT_TASK_REDACTED_METADATA_KEYS = [
