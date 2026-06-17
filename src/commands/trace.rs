@@ -26,6 +26,7 @@ mod aggregate;
 #[cfg(test)]
 mod aggregate_tests;
 mod bundle;
+mod compare_bundle;
 mod compare_targets;
 mod compare_variant;
 mod experiment;
@@ -50,6 +51,7 @@ mod schedule;
 mod test_fixture;
 mod workload;
 
+use compare_bundle::run_compare_bundle;
 use compare_targets::run_compare_targets;
 use compare_variant::run_compare_variant;
 use experiment::{
@@ -90,12 +92,12 @@ use matrix::{expand_variant_matrix, TraceVariantStackItem};
 pub struct TraceArgs {
     #[command(flatten)]
     comp: PositionalComponentArgs,
-    /// Target component for command-shaped trace modes like `compare-variant`.
+    /// Target component for command-shaped trace modes like `compare-variant` and `compare-bundle`.
     #[arg(long = "component", value_name = "COMPONENT_ID")]
     pub component_arg: Option<String>,
     /// Scenario ID to run, or `list` to discover available scenarios.
     pub scenario: Option<String>,
-    /// Scenario ID for command-shaped trace modes like `compare-variant`.
+    /// Scenario ID or comma-separated scenario list for command-shaped trace modes like `compare-variant` and `compare-bundle`.
     #[arg(long = "scenario", value_name = "SCENARIO_ID")]
     pub scenario_arg: Option<String>,
     /// After aggregate JSON when running `homeboy trace compare before.json after.json`.
@@ -199,7 +201,7 @@ pub struct TraceArgs {
     #[arg(skip)]
     pub matrix_env: Vec<(String, String)>,
 
-    /// Directory where trace matrix modes write aggregate, compare, cell, and summary artifacts.
+    /// Directory where trace matrix and compare bundle modes write aggregate, compare, cell, and summary artifacts.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
 
@@ -399,6 +401,11 @@ fn run_outputs(mut args: TraceArgs) -> CmdResult<(TraceCommandOutput, Option<Tra
             return Ok(((output, None), exit_code));
         }
         let (output, exit_code) = run_compare(args)?;
+        return Ok(((output, None), exit_code));
+    }
+
+    if args.comp.component.as_deref() == Some("compare-bundle") {
+        let (output, exit_code) = run_compare_bundle(args)?;
         return Ok(((output, None), exit_code));
     }
 
