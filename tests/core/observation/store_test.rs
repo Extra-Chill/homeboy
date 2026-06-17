@@ -878,3 +878,91 @@ fn missing_artifact_file_returns_clear_error() {
         assert!(err.details.to_string().contains("missing.json"));
     });
 }
+
+mod write_retry {
+    use super::super::{execute_with_retry_inner, is_transient_lock_error};
+    use std::cell::Cell;
+
+    fn locked_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        )
+    }
+
+    fn persistent_error() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some("UNIQUE constraint failed".to_string()),
+        )
+    }
+
+    #[test]
+    fn is_transient_lock_error_detects_busy_and_locked() {
+        assert!(is_transient_lock_error(&locked_error()));
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        );
+        assert!(is_transient_lock_error(&locked));
+        assert!(!is_transient_lock_error(&persistent_error()));
+    }
+
+    #[test]
+    fn execute_with_retry_inner_recovers_after_transient_lock() {
+        let attempts = Cell::new(0u32);
+        let slept = Cell::new(0u32);
+        let result = execute_with_retry_inner(
+            "test op".to_string(),
+            6,
+            10,
+            |_, _| slept.set(slept.get() + 1),
+            &mut || {
+                let n = attempts.get() + 1;
+                attempts.set(n);
+                if n < 3 {
+                    Err(locked_error())
+                } else {
+                    Ok(42usize)
+                }
+            },
+        );
+        assert_eq!(result.expect("should self-heal"), 42);
+        assert_eq!(attempts.get(), 3);
+        // Slept before each of the two retries, not after the success.
+        assert_eq!(slept.get(), 2);
+    }
+
+    #[test]
+    fn execute_with_retry_inner_exhausts_and_surfaces_lock_error() {
+        let attempts = Cell::new(0u32);
+        let result: crate::core::Result<usize> =
+            execute_with_retry_inner("persist run".to_string(), 4, 1, |_, _| {}, &mut || {
+                attempts.set(attempts.get() + 1);
+                Err(locked_error())
+            });
+        let err = result.expect_err("exhausted retries should fail");
+        assert_eq!(attempts.get(), 4);
+        assert!(err.message.contains("after 4 attempts"));
+        assert!(err.message.contains("persist run"));
+    }
+
+    #[test]
+    fn execute_with_retry_inner_does_not_retry_persistent_error() {
+        let attempts = Cell::new(0u32);
+        let result: crate::core::Result<usize> = execute_with_retry_inner(
+            "insert run record".to_string(),
+            6,
+            1,
+            |_, _| panic!("should not sleep on a persistent error"),
+            &mut || {
+                attempts.set(attempts.get() + 1);
+                Err(persistent_error())
+            },
+        );
+        let err = result.expect_err("persistent error should fail immediately");
+        assert_eq!(attempts.get(), 1);
+        assert!(!err.message.contains("attempts"));
+        assert!(err.message.contains("insert run record"));
+    }
+}

@@ -251,6 +251,13 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(sqlite_error("configure observation store busy timeout"))?;
+    // WAL journaling lets readers and a single writer proceed concurrently,
+    // which sharply reduces transient "database is locked" contention when
+    // multiple homeboy processes touch the observation store at once.
+    // pragma_update may itself momentarily contend on the lock, so it is best
+    // effort: the busy_timeout above plus the write-retry wrapper still apply.
+    let _ = connection.pragma_update(None, "journal_mode", "WAL");
+    let _ = connection.pragma_update(None, "synchronous", "NORMAL");
     Ok(connection)
 }
 

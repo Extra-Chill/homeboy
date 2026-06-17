@@ -79,8 +79,8 @@ impl ObservationStore {
         let metadata_json =
             serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
-        self.connection
-            .execute(
+        execute_with_retry("insert run record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO runs(
                     id,
@@ -110,7 +110,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("insert run record"))?;
+        })?;
 
         self.get_run(&id)?.ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -130,8 +130,8 @@ impl ObservationStore {
         let rows = match metadata_json {
             Some(metadata_json) => {
                 let serialized = serialize_metadata(&metadata_json)?;
-                self.connection
-                    .execute(
+                execute_with_retry("finish run record with metadata", || {
+                    self.connection.execute(
                         r#"
                         UPDATE runs
                         SET finished_at = ?1, status = ?2, metadata_json = ?3
@@ -139,11 +139,10 @@ impl ObservationStore {
                         "#,
                         params![finished_at, status.as_str(), serialized, run_id],
                     )
-                    .map_err(sqlite_error("finish run record with metadata"))?
+                })?
             }
-            None => self
-                .connection
-                .execute(
+            None => execute_with_retry("finish run record", || {
+                self.connection.execute(
                     r#"
                     UPDATE runs
                     SET finished_at = ?1, status = ?2
@@ -151,7 +150,7 @@ impl ObservationStore {
                     "#,
                     params![finished_at, status.as_str(), run_id],
                 )
-                .map_err(sqlite_error("finish run record"))?,
+            })?,
         };
 
         if rows == 0 {
@@ -177,9 +176,8 @@ impl ObservationStore {
     ) -> Result<RunRecord> {
         validate_required("run_id", run_id)?;
         let serialized = serialize_metadata(&metadata_json)?;
-        let rows = self
-            .connection
-            .execute(
+        let rows = execute_with_retry("update run metadata", || {
+            self.connection.execute(
                 r#"
                 UPDATE runs
                 SET metadata_json = ?1
@@ -187,7 +185,7 @@ impl ObservationStore {
                 "#,
                 params![serialized, run_id],
             )
-            .map_err(sqlite_error("update run metadata"))?;
+        })?;
 
         if rows == 0 {
             return Err(Error::validation_invalid_argument(
@@ -285,9 +283,8 @@ impl ObservationStore {
     pub fn import_run(&self, run: &RunRecord) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let metadata_json = serialize_metadata(&run.metadata_json)?;
-        let inserted = self
-            .connection
-            .execute(
+        let inserted = execute_with_retry("import run record", || {
+            self.connection.execute(
                 r#"
                 INSERT OR IGNORE INTO runs(
                     id,
@@ -319,7 +316,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("import run record"))?;
+        })?;
         if inserted == 0 {
             let existing = self.get_run(&run.id)?.ok_or_else(|| {
                 Error::internal_unexpected(format!(
@@ -335,8 +332,8 @@ impl ObservationStore {
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let metadata_json = serialize_metadata(&run.metadata_json)?;
-        self.connection
-            .execute(
+        execute_with_retry("upsert imported run record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO runs(
                     id,
@@ -380,7 +377,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("upsert imported run record"))?;
+        })?;
         Ok(())
     }
 
@@ -397,8 +394,9 @@ impl ObservationStore {
         if let Some(existing) = self.get_artifact(&artifact.id)? {
             return ensure_identical("artifact", &artifact.id, &existing, artifact);
         }
-        self.connection
-            .execute(
+        let metadata_json = serialize_metadata(&artifact.metadata_json)?;
+        execute_with_retry("import artifact record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -412,11 +410,11 @@ impl ObservationStore {
                     artifact.sha256,
                     artifact.size_bytes,
                     artifact.mime,
-                    serialize_metadata(&artifact.metadata_json)?,
+                    metadata_json,
                     artifact.created_at,
                 ],
             )
-            .map_err(sqlite_error("import artifact record"))?;
+        })?;
         Ok(())
     }
 
@@ -497,8 +495,9 @@ impl ObservationStore {
         };
         crate::core::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
 
-        self.connection
-            .execute(
+        let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
+        execute_with_retry("insert artifact record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -512,11 +511,11 @@ impl ObservationStore {
                     sha256,
                     size_bytes,
                     mime,
-                    serialize_metadata(&artifact.metadata_json)?,
+                    metadata_json_str,
                     created_at,
                 ],
             )
-            .map_err(sqlite_error("insert artifact record"))?;
+        })?;
 
         let artifact = self
             .list_artifacts(run_id)?
@@ -595,8 +594,9 @@ impl ObservationStore {
         copy_artifact_directory(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
 
-        self.connection
-            .execute(
+        let metadata_json_str = serialize_metadata(&metadata_json)?;
+        execute_with_retry("insert directory artifact record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -610,11 +610,11 @@ impl ObservationStore {
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
-                    serialize_metadata(&metadata_json)?,
+                    metadata_json_str,
                     created_at,
                 ],
             )
-            .map_err(sqlite_error("insert directory artifact record"))?;
+        })?;
 
         self.list_artifacts(run_id)?
             .into_iter()
@@ -657,8 +657,9 @@ impl ObservationStore {
         let id = Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
 
-        self.connection
-            .execute(
+        let metadata_json_str = serialize_metadata(&metadata_json)?;
+        execute_with_retry("insert URL artifact record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -672,11 +673,11 @@ impl ObservationStore {
                     Option::<String>::None,
                     Option::<i64>::None,
                     Option::<String>::None,
-                    serialize_metadata(&metadata_json)?,
+                    metadata_json_str,
                     created_at,
                 ],
             )
-            .map_err(sqlite_error("insert URL artifact record"))?;
+        })?;
 
         self.list_artifacts(run_id)?
             .into_iter()
@@ -796,10 +797,10 @@ impl ObservationStore {
 
     pub fn delete_artifact_record(&self, artifact_id: &str) -> Result<bool> {
         validate_required("artifact_id", artifact_id)?;
-        let rows = self
-            .connection
-            .execute("DELETE FROM artifacts WHERE id = ?1", [artifact_id])
-            .map_err(sqlite_error("delete artifact record"))?;
+        let rows = execute_with_retry("delete artifact record", || {
+            self.connection
+                .execute("DELETE FROM artifacts WHERE id = ?1", [artifact_id])
+        })?;
         Ok(rows > 0)
     }
 
@@ -819,8 +820,8 @@ impl ObservationStore {
         }
         let metadata_json = serialize_metadata(&record.metadata_json)?;
 
-        self.connection
-            .execute(
+        execute_with_retry("insert trace run record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO trace_runs(
                     run_id,
@@ -849,7 +850,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("insert trace run record"))?;
+        })?;
 
         self.get_trace_run(&run_id)?.ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -892,8 +893,8 @@ impl ObservationStore {
         let id = Uuid::new_v4().to_string();
         let metadata_json = serialize_metadata(&record.metadata_json)?;
 
-        self.connection
-            .execute(
+        execute_with_retry("insert trace span record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO trace_spans(
                     id,
@@ -917,7 +918,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("insert trace span record"))?;
+        })?;
 
         self.list_trace_spans(&run_id)?
             .into_iter()
@@ -981,8 +982,8 @@ impl ObservationStore {
             return ensure_identical("trace_span", &span.id, &existing, span);
         }
         let metadata_json = serialize_metadata(&span.metadata_json)?;
-        self.connection
-            .execute(
+        execute_with_retry("import trace span record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO trace_spans(
                     id,
@@ -1006,7 +1007,7 @@ impl ObservationStore {
                     metadata_json,
                 ],
             )
-            .map_err(sqlite_error("import trace span record"))?;
+        })?;
         Ok(())
     }
 }
@@ -1269,6 +1270,81 @@ fn sqlite_error(context: impl Into<String>) -> impl FnOnce(rusqlite::Error) -> E
         Error::internal_unexpected(format!(
             "SQLite observation store error: {context}: {error}"
         ))
+    }
+}
+
+/// Number of attempts (1 initial + retries) used for transient-lock recovery.
+const SQLITE_WRITE_MAX_ATTEMPTS: u32 = 6;
+/// Base backoff between retries; doubles each attempt (25, 50, 100, 200, ...ms).
+const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
+
+/// Returns true when the SQLite error is a transient busy/locked condition that
+/// is expected to self-heal once a competing writer releases the lock.
+fn is_transient_lock_error(error: &rusqlite::Error) -> bool {
+    use rusqlite::ffi::ErrorCode;
+    match error {
+        rusqlite::Error::SqliteFailure(inner, _) => {
+            matches!(
+                inner.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Runs a SQLite write closure with bounded exponential backoff, retrying only
+/// when the failure is a transient "database is locked"/"database is busy"
+/// condition. Genuine, persistent errors surface immediately, and the lock
+/// error is surfaced with context if every attempt is exhausted.
+fn execute_with_retry<T>(
+    context: impl Into<String>,
+    mut op: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T> {
+    execute_with_retry_inner(
+        context.into(),
+        SQLITE_WRITE_MAX_ATTEMPTS,
+        SQLITE_WRITE_BASE_BACKOFF_MS,
+        |attempt, backoff_ms| {
+            if backoff_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            }
+            let _ = attempt;
+        },
+        &mut op,
+    )
+}
+
+/// Backoff-injectable core so the retry policy can be unit-tested without
+/// sleeping. `sleep` is invoked with the upcoming attempt index and the
+/// computed backoff (ms) before each retry.
+fn execute_with_retry_inner<T>(
+    context: String,
+    max_attempts: u32,
+    base_backoff_ms: u64,
+    mut sleep: impl FnMut(u32, u64),
+    op: &mut impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let transient = is_transient_lock_error(&error);
+                if transient && attempt < max_attempts {
+                    let backoff_ms = base_backoff_ms.saturating_mul(1u64 << (attempt - 1));
+                    sleep(attempt, backoff_ms);
+                    continue;
+                }
+                let detail = if transient {
+                    format!("{context} (after {attempt} attempts, lock did not clear)")
+                } else {
+                    context.clone()
+                };
+                return Err(sqlite_error(detail)(error));
+            }
+        }
     }
 }
 

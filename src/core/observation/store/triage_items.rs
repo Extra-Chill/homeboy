@@ -45,8 +45,8 @@ impl ObservationStore {
             )
         })?;
 
-        self.connection
-            .execute(
+        execute_with_retry("insert triage item record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO triage_items(
                     id, run_id, provider, repo_owner, repo_name, item_type, number, state,
@@ -80,7 +80,7 @@ impl ObservationStore {
                     observed_at,
                 ],
             )
-            .map_err(sqlite_error("insert triage item record"))?;
+        })?;
 
         self.get_triage_item(&id)?.ok_or_else(|| {
             Error::internal_unexpected(format!(
