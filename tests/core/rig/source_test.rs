@@ -7,46 +7,20 @@ use crate::core::rig::{
 use crate::test_support::HomeGuard;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 #[path = "support.rs"]
 mod support;
 
-use support::{minimal_rig, minimal_stack, run_git, write_rig, write_stack};
+use support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
 
 fn commit_package(package: &Path, message: &str) {
-    run_git(package, &["add", "."]);
-    run_git(
-        package,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "-m",
-            message,
-        ],
-    );
+    GitFixture::attach(package).commit(message);
 }
 
 fn create_bare_source(package: &Path) -> tempfile::TempDir {
-    run_git(package, &["init", "-b", "main"]);
-    commit_package(package, "initial rigs");
-
-    let bare = tempfile::tempdir().expect("bare parent");
-    let source_path = bare.path().join("rig-package.git");
-    let output = Command::new("git")
-        .args([
-            "clone",
-            "--bare",
-            package.to_str().unwrap(),
-            source_path.to_str().unwrap(),
-        ])
-        .output()
-        .expect("git clone --bare");
-    assert!(output.status.success());
-    bare
+    let git = GitFixture::init(package);
+    git.commit("initial rigs");
+    git.clone_bare()
 }
 
 #[test]
@@ -299,9 +273,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = bare
-        .path()
-        .join("rig-package.git")
+    let source = support::bare_source_path(&bare)
         .to_string_lossy()
         .to_string();
 
@@ -316,7 +288,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     )
     .expect("update rig");
     commit_package(package.path(), "update alpha");
-    run_git(package.path(), &["push", &source, "HEAD:main"]);
+    GitFixture::attach(package.path()).push_main(&source);
 
     let result = update_source_for_rig("alpha").expect("update rig source");
 
@@ -343,9 +315,7 @@ fn update_git_source_refreshes_owned_stack_specs() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
     let bare = create_bare_source(package.path());
-    let source = bare
-        .path()
-        .join("rig-package.git")
+    let source = support::bare_source_path(&bare)
         .to_string_lossy()
         .to_string();
 
@@ -360,7 +330,7 @@ fn update_git_source_refreshes_owned_stack_specs() {
     )
     .expect("update stack");
     commit_package(package.path(), "update alpha stack");
-    run_git(package.path(), &["push", &source, "HEAD:main"]);
+    GitFixture::attach(package.path()).push_main(&source);
 
     let result = update_source_for_rig("alpha").expect("update rig source");
 
@@ -379,9 +349,7 @@ fn update_all_reports_broken_sources_and_continues() {
     let broken_package = tempfile::tempdir().expect("broken package");
     write_rig(broken_package.path(), "broken", &minimal_rig("broken"));
     let broken_bare = create_bare_source(broken_package.path());
-    let broken_source = broken_bare
-        .path()
-        .join("rig-package.git")
+    let broken_source = support::bare_source_path(&broken_bare)
         .to_string_lossy()
         .to_string();
     install(&broken_source, None, false).expect("install broken source");
@@ -392,9 +360,7 @@ fn update_all_reports_broken_sources_and_continues() {
     let good_package = tempfile::tempdir().expect("good package");
     let good_rig = write_rig(good_package.path(), "good", &minimal_rig("good"));
     let good_bare = create_bare_source(good_package.path());
-    let good_source = good_bare
-        .path()
-        .join("rig-package.git")
+    let good_source = support::bare_source_path(&good_bare)
         .to_string_lossy()
         .to_string();
     install(&good_source, None, false).expect("install good source");
@@ -404,7 +370,7 @@ fn update_all_reports_broken_sources_and_continues() {
     )
     .expect("update good rig");
     commit_package(good_package.path(), "update good rig");
-    run_git(good_package.path(), &["push", &good_source, "HEAD:main"]);
+    GitFixture::attach(good_package.path()).push_main(&good_source);
 
     let result = update_all_sources().expect("update all continues after broken source");
 
@@ -424,9 +390,7 @@ fn refresh_source_selector_updates_recorded_package() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = bare
-        .path()
-        .join("rig-package.git")
+    let source = support::bare_source_path(&bare)
         .to_string_lossy()
         .to_string();
 
@@ -441,7 +405,7 @@ fn refresh_source_selector_updates_recorded_package() {
     )
     .expect("update rig");
     commit_package(package.path(), "refresh alpha");
-    run_git(package.path(), &["push", &source, "HEAD:main"]);
+    GitFixture::attach(package.path()).push_main(&source);
 
     let package_id = list_sources().expect("sources").sources[0]
         .package_id
@@ -472,9 +436,7 @@ fn refresh_without_selector_updates_all_sources() {
     let package = tempfile::tempdir().expect("package");
     let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let bare = create_bare_source(package.path());
-    let source = bare
-        .path()
-        .join("rig-package.git")
+    let source = support::bare_source_path(&bare)
         .to_string_lossy()
         .to_string();
 
@@ -485,7 +447,7 @@ fn refresh_without_selector_updates_all_sources() {
     )
     .expect("update rig");
     commit_package(package.path(), "refresh alpha");
-    run_git(package.path(), &["push", &source, "HEAD:main"]);
+    GitFixture::attach(package.path()).push_main(&source);
 
     let result = update_source(None).expect("refresh all sources");
 
@@ -502,9 +464,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     write_rig(package.path(), "alpha", &minimal_rig("alpha"));
     let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
     let bare = create_bare_source(package.path());
-    let source = bare
-        .path()
-        .join("rig-package.git")
+    let source = support::bare_source_path(&bare)
         .to_string_lossy()
         .to_string();
 
@@ -518,7 +478,7 @@ fn update_git_source_skips_user_replaced_stack_specs() {
     )
     .expect("update source stack");
     commit_package(package.path(), "update alpha stack");
-    run_git(package.path(), &["push", &source, "HEAD:main"]);
+    GitFixture::attach(package.path()).push_main(&source);
 
     let result = update_source_for_rig("alpha").expect("update rig source");
 

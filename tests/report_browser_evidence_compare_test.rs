@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use homeboy::commands::report::{
     browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
@@ -11,24 +11,13 @@ use homeboy::core::extension::{
     TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig,
 };
 
-fn tmp_dir(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("homeboy-browser-evidence-compare-{name}-{nanos}"))
-}
+#[path = "support/mod.rs"]
+mod support;
 
-fn write_fixture_file(dir: &Path, name: &str, body: &str) {
-    fs::create_dir_all(dir).expect("fixture dir should exist");
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap_or_else(|err| {
-        panic!(
-            "failed to write browser evidence fixture {}: {}",
-            path.display(),
-            err
-        )
-    });
+use support::write_file as write_fixture_file;
+
+fn tmp_dir(name: &str) -> tempfile::TempDir {
+    support::temp_dir(&format!("browser-evidence-compare-{name}"))
 }
 
 fn browser_evidence_adapter() -> TraceBrowserEvidenceAdapterConfig {
@@ -76,7 +65,8 @@ fn args(root: &Path, include_local_paths: bool) -> BrowserEvidenceCompareArgs {
 
 #[test]
 fn compares_repeats_matrix_variants_and_browser_deltas() {
-    let root = tmp_dir("full");
+    let guard = tmp_dir("full");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline"),
         "browser-evidence.json",
@@ -166,7 +156,7 @@ fn compares_repeats_matrix_variants_and_browser_deltas() {
         }"#,
     );
 
-    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
 
     assert_eq!(report.totals.baseline_samples, 3);
     assert_eq!(report.totals.candidate_samples, 2);
@@ -206,13 +196,12 @@ fn compares_repeats_matrix_variants_and_browser_deltas() {
     assert!(report.markdown.contains("DOM Lifecycle Metrics"));
     assert!(report.markdown.contains("browser-evidence.json"));
     assert!(!report.markdown.contains(root.to_string_lossy().as_ref()));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn can_include_local_paths_when_requested() {
-    let root = tmp_dir("local-paths");
+    let guard = tmp_dir("local-paths");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline"),
         "evidence.json",
@@ -224,16 +213,15 @@ fn can_include_local_paths_when_requested() {
         r#"{"scenario_id":"home","assertions":[],"request_count":2}"#,
     );
 
-    let report = browser_evidence_compare_from_args(&args(&root, true)).expect("report renders");
+    let report = browser_evidence_compare_from_args(&args(root, true)).expect("report renders");
 
     assert!(report.markdown.contains(root.to_string_lossy().as_ref()));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn compares_browser_evidence_across_multiple_run_dirs() {
-    let root = tmp_dir("multi-dirs");
+    let guard = tmp_dir("multi-dirs");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline-run-1"),
         "browser.json",
@@ -274,13 +262,12 @@ fn compares_browser_evidence_across_multiple_run_dirs() {
     assert!(report.markdown.contains("throttled-mobile"));
     assert!(report.markdown.contains("baseline-ref"));
     assert!(report.markdown.contains("candidate-ref"));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
-    let root = tmp_dir("advisory-assertions");
+    let guard = tmp_dir("advisory-assertions");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline"),
         "browser-evidence.json",
@@ -311,7 +298,7 @@ fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
         }"##,
     );
 
-    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
     let variant = report.variants.first().expect("variant should exist");
 
     assert_eq!(variant.assertions.baseline.advisory_failed, 0);
@@ -337,13 +324,12 @@ fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
         report_json["variants"][0]["assertions"]["candidate"]["advisory_failed"],
         serde_json::json!(1)
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn promotes_declared_browser_summary_metrics() {
-    let root = tmp_dir("provider-summary");
+    let guard = tmp_dir("provider-summary");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline"),
         "summary.json",
@@ -439,13 +425,12 @@ fn promotes_declared_browser_summary_metrics() {
         .candidate
         .iter()
         .any(|artifact| artifact.target == "files/browser/screenshot.png"));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn can_run_visual_compare_through_declared_provider() {
-    let root = tmp_dir("visual-compare");
+    let guard = tmp_dir("visual-compare");
+    let root = guard.path();
     let baseline_browser = root.join("baseline/files/browser");
     let candidate_browser = root.join("candidate/files/browser");
     fs::create_dir_all(&baseline_browser).expect("baseline browser dir");
@@ -558,12 +543,12 @@ process.stdout.write(JSON.stringify({
             std::env::remove_var("HOMEBOY_FAKE_VISUAL_INPUT");
         }
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
-    let root = tmp_dir("artifact-manifests");
+    let guard = tmp_dir("artifact-manifests");
+    let root = guard.path();
     write_fixture_file(
         &root.join("baseline"),
         "browser-evidence.json",
@@ -611,7 +596,7 @@ fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
         );
     }
 
-    let report = browser_evidence_compare_from_args(&args(&root, false)).expect("report renders");
+    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
 
     assert_eq!(report.totals.baseline_samples, 1);
     assert_eq!(report.totals.candidate_samples, 1);
@@ -637,6 +622,4 @@ fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
     assert!(!report
         .markdown
         .contains("`runtime-reference-manifest-sha256-cafebabe`"));
-
-    let _ = fs::remove_dir_all(&root);
 }

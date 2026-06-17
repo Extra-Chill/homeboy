@@ -1,25 +1,14 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use homeboy::commands::report::{performance_digest_from_args, PerformanceDigestArgs};
 
-fn tmp_dir(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should be after epoch")
-        .as_nanos();
-    std::env::temp_dir().join(format!("homeboy-performance-digest-{name}-{nanos}"))
-}
+#[path = "support/mod.rs"]
+mod support;
 
-fn write_fixture_file(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap_or_else(|err| {
-        panic!(
-            "failed to write performance digest fixture {}: {}",
-            path.display(),
-            err
-        )
-    });
+use support::write_file as write_fixture_file;
+
+fn tmp_dir(name: &str) -> tempfile::TempDir {
+    support::temp_dir(&format!("performance-digest-{name}"))
 }
 
 fn args(dir: &Path) -> PerformanceDigestArgs {
@@ -35,10 +24,10 @@ fn args(dir: &Path) -> PerformanceDigestArgs {
 
 #[test]
 fn renders_resource_summary_budget_findings_and_baseline_health() {
-    let dir = tmp_dir("full");
-    fs::create_dir_all(&dir).expect("temp dir should exist");
+    let guard = tmp_dir("full");
+    let dir = guard.path();
     write_fixture_file(
-        &dir,
+        dir,
         "resource-summary.json",
         r#"{
             "label": "bench fixture",
@@ -60,7 +49,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         }"#,
     );
     write_fixture_file(
-        &dir,
+        dir,
         "bench.json",
         r#"{
             "success": true,
@@ -108,7 +97,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         }"#,
     );
     write_fixture_file(
-        &dir,
+        dir,
         "metadata.json",
         r#"{
             "warmup_iterations": 0,
@@ -170,7 +159,7 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         }"#,
     );
 
-    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
 
     assert!(report.resource_summary.is_some());
     assert_eq!(report.budget_findings.len(), 1);
@@ -258,18 +247,16 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
         .markdown
         .contains("`https://preview.example.test/?view=site`"));
     assert!(report.markdown.contains("| true | 1 |"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn renders_managed_service_preview_url_artifact_metadata() {
-    let dir = tmp_dir("managed-preview");
-    fs::create_dir_all(&dir).expect("temp dir should exist");
-    write_fixture_file(&dir, "resource-summary.json", r#"{}"#);
-    write_fixture_file(&dir, "bench.json", r#"{}"#);
+    let guard = tmp_dir("managed-preview");
+    let dir = guard.path();
+    write_fixture_file(dir, "resource-summary.json", r#"{}"#);
+    write_fixture_file(dir, "bench.json", r#"{}"#);
     write_fixture_file(
-        &dir,
+        dir,
         "metadata.json",
         &format!(
             r#"{{"preview":{}}}"#,
@@ -277,7 +264,7 @@ fn renders_managed_service_preview_url_artifact_metadata() {
         ),
     );
 
-    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
 
     assert_eq!(
         report.preview.get("schema"),
@@ -306,16 +293,14 @@ fn renders_managed_service_preview_url_artifact_metadata() {
         .markdown
         .contains("- cleanup.expires_at: `2026-06-07T13:00:00Z`"));
     assert!(report.markdown.contains("- source.run_id: `run-1`"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn reads_persisted_uuid_prefixed_artifacts() {
-    let dir = tmp_dir("persisted");
-    fs::create_dir_all(&dir).expect("temp dir should exist");
+    let guard = tmp_dir("persisted");
+    let dir = guard.path();
     write_fixture_file(
-        &dir,
+        dir,
         "123-resource-summary.json",
         r#"{
             "label": "persisted bench",
@@ -326,7 +311,7 @@ fn reads_persisted_uuid_prefixed_artifacts() {
         }"#,
     );
     write_fixture_file(
-        &dir,
+        dir,
         "456-bench-results.json",
         r#"{
             "component_id": "homeboy",
@@ -354,7 +339,7 @@ fn reads_persisted_uuid_prefixed_artifacts() {
         }"#,
     );
 
-    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
 
     assert!(report.gaps.is_empty());
     assert_eq!(
@@ -378,16 +363,14 @@ fn reads_persisted_uuid_prefixed_artifacts() {
         .any(|diagnostic| diagnostic.code == "baseline.missing_warmup"));
     assert!(report.markdown.contains("- Duration: **54321 ms**"));
     assert!(report.markdown.contains("persisted-subject"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn missing_optional_artifacts_degrade_gracefully() {
-    let dir = tmp_dir("missing");
-    fs::create_dir_all(&dir).expect("temp dir should exist");
+    let guard = tmp_dir("missing");
+    let dir = guard.path();
 
-    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
 
     assert!(report.resource_summary.is_none());
     assert!(report.budget_findings.is_empty());
@@ -410,16 +393,14 @@ fn missing_optional_artifacts_degrade_gracefully() {
     assert!(report
         .markdown
         .contains("- No resource policy metadata available."));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn renders_max_peak_rss_from_multi_run_memory() {
-    let dir = tmp_dir("multi-run-memory");
-    fs::create_dir_all(&dir).expect("temp dir should exist");
+    let guard = tmp_dir("multi-run-memory");
+    let dir = guard.path();
     write_fixture_file(
-        &dir,
+        dir,
         "bench-results.json",
         r#"{
             "component_id": "homeboy",
@@ -434,12 +415,10 @@ fn renders_max_peak_rss_from_multi_run_memory() {
         }"#,
     );
 
-    let report = performance_digest_from_args(&args(&dir)).expect("digest should render");
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
 
     assert_eq!(report.benchmark_memory.len(), 1);
     assert_eq!(report.benchmark_memory[0].scenario, "audit-self");
     assert_eq!(report.benchmark_memory[0].peak_bytes, 33554432);
     assert!(report.markdown.contains("| `audit-self` | 32.0 MiB |"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
