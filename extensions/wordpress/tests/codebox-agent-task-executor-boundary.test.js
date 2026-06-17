@@ -63,10 +63,9 @@ assert.deepEqual(provider.provider_defaults.codex.secret_env_sources.AI_PROVIDER
 });
 assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, claudeCodeSecretEnv);
 assert.deepEqual(provider.provider_defaults['claude-code'].secret_env_sources.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN, {
-  source: 'keychain-bundle',
-  scope: 'agent-task',
-  name: 'claude-code-oauth',
-  field: 'refresh_token',
+  source: 'json-file',
+  path: '~/.local/share/opencode/auth.json',
+  field: 'anthropic.refresh',
 });
 assert.deepEqual(provider.workspace_tools.readonly, [
   'workspace_ls',
