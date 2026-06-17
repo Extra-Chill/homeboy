@@ -188,17 +188,14 @@ impl Commands {
             Commands::Lint(args) => args.output_descriptor(output_file_mode),
             Commands::Audit(args) => args.output_descriptor(output_file_mode),
             Commands::Observe(_) => {
-                quality_json_descriptor(output_file_mode, CommandOutputContractKind::JsonEnvelope)
+                json_envelope_descriptor(CommandJsonFamily::Quality, output_file_mode)
             }
             Commands::AuditBaseline(_) => {
-                quality_json_descriptor(output_file_mode, CommandOutputContractKind::JsonEnvelope)
+                json_envelope_descriptor(CommandJsonFamily::Quality, output_file_mode)
             }
-            Commands::Refactor(_) => CommandOutputDescriptor {
-                response_mode: CommandResponseMode::Json,
-                output_file_mode,
-                json_family: CommandJsonFamily::Workspace,
-                output_contract: CommandOutputContractKind::JsonEnvelope,
-            },
+            Commands::Refactor(_) => {
+                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
+            }
             Commands::Refs(_) => workspace_descriptor(
                 CommandResponseMode::Json,
                 output_file_mode,
@@ -224,18 +221,12 @@ impl Commands {
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
             | Commands::Stack(_)
-            | Commands::Undo(_) => CommandOutputDescriptor {
-                response_mode: CommandResponseMode::Json,
-                output_file_mode,
-                json_family: CommandJsonFamily::Workspace,
-                output_contract: CommandOutputContractKind::JsonEnvelope,
-            },
-            Commands::Rig(_) => CommandOutputDescriptor {
-                response_mode: CommandResponseMode::Json,
-                output_file_mode,
-                json_family: CommandJsonFamily::Workspace,
-                output_contract: CommandOutputContractKind::JsonEnvelope,
-            },
+            | Commands::Undo(_) => {
+                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
+            }
+            Commands::Rig(_) => {
+                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
+            }
             Commands::Status(_)
             | Commands::Ci(_)
             | Commands::Server(_)
@@ -253,9 +244,9 @@ impl Commands {
             | Commands::Api(_)
             | Commands::Http(_)
             | Commands::Upgrade(_)
-            | Commands::Ssh(_) => ops_json_descriptor(output_file_mode, None),
+            | Commands::Ssh(_) => ops_json_descriptor(output_file_mode),
             Commands::Fleet(args) => args.output_descriptor(output_file_mode),
-            Commands::Triage(_) => ops_json_descriptor(output_file_mode, None),
+            Commands::Triage(_) => ops_json_descriptor(output_file_mode),
         }
     }
 
@@ -317,28 +308,23 @@ fn markdown_or_json_response(markdown: bool) -> CommandResponseMode {
     }
 }
 
-fn quality_json_descriptor(
+/// Builds the common JSON-envelope descriptor: a JSON response mode paired with
+/// the [`CommandOutputContractKind::JsonEnvelope`] contract, varying only by
+/// [`CommandJsonFamily`] and output-file mode.
+fn json_envelope_descriptor(
+    json_family: CommandJsonFamily,
     output_file_mode: CommandOutputFileMode,
-    output_contract: CommandOutputContractKind,
 ) -> CommandOutputDescriptor {
     CommandOutputDescriptor {
         response_mode: CommandResponseMode::Json,
         output_file_mode,
-        json_family: CommandJsonFamily::Quality,
-        output_contract,
+        json_family,
+        output_contract: CommandOutputContractKind::JsonEnvelope,
     }
 }
 
-fn ops_json_descriptor(
-    output_file_mode: CommandOutputFileMode,
-    _lab_runner_unsupported_reason: Option<&'static str>,
-) -> CommandOutputDescriptor {
-    CommandOutputDescriptor {
-        response_mode: CommandResponseMode::Json,
-        output_file_mode,
-        json_family: CommandJsonFamily::Ops,
-        output_contract: CommandOutputContractKind::JsonEnvelope,
-    }
+fn ops_json_descriptor(output_file_mode: CommandOutputFileMode) -> CommandOutputDescriptor {
+    json_envelope_descriptor(CommandJsonFamily::Ops, output_file_mode)
 }
 
 #[cfg(test)]
