@@ -129,6 +129,7 @@ mod tests {
             settings_json: Vec::new(),
             iterations: 1,
             warmup_iterations: Some(1),
+            run_id: None,
             execution: BenchRunExecution {
                 runs: 1,
                 concurrency: 1,

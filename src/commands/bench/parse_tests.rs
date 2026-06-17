@@ -74,6 +74,32 @@ fn scenario_and_profile_conflict() {
 }
 
 #[test]
+fn parses_run_id_proof_label() {
+    let cli = TestCli::try_parse_from(["bench", "homeboy", "--run-id", "proof-2026-06"])
+        .expect("bench --run-id should parse");
+
+    assert_eq!(cli.bench.run.run_id.as_deref(), Some("proof-2026-06"));
+}
+
+#[test]
+fn non_integer_runs_hints_at_run_id() {
+    let err = match TestCli::try_parse_from(["bench", "homeboy", "--runs", "proof-label"]) {
+        Ok(_) => panic!("--runs with a non-integer should fail to parse"),
+        Err(err) => err,
+    };
+
+    let message = err.to_string();
+    assert!(
+        message.contains("--runs is a numeric repetition count"),
+        "expected repetition-count guidance, got: {message}"
+    );
+    assert!(
+        message.contains("--run-id"),
+        "expected pointer to --run-id for proof labels, got: {message}"
+    );
+}
+
+#[test]
 fn parses_dotted_setting_override_for_nested_bench_env() {
     let cli = TestCli::try_parse_from([
         "bench",

@@ -43,6 +43,7 @@ fn make_args(
             iterations: 1,
             warmup: None,
             runs: 1,
+            run_id: None,
             shared_state: None,
             concurrency: 1,
             matrix: Vec::new(),

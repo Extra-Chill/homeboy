@@ -48,6 +48,11 @@ pub struct BenchRunWorkflowArgs {
     pub settings_json: Vec<(String, serde_json::Value)>,
     pub iterations: u64,
     pub warmup_iterations: Option<u64>,
+    /// Caller-supplied stable proof label from `--run-id`. Forwarded to
+    /// component bench scripts via `$HOMEBOY_BENCH_RUN_ID` so a run can be
+    /// correlated across CI logs, dashboards, and proof archives. `None`
+    /// leaves the env var unset, preserving prior behaviour exactly.
+    pub run_id: Option<String>,
     pub execution: BenchRunExecution,
     pub baseline_flags: BaselineFlags,
     pub regression_threshold_percent: f64,
@@ -182,6 +187,7 @@ pub fn run_bench_list_workflow(
             settings_json: args.settings_json,
             iterations: 0,
             warmup_iterations: None,
+            run_id: None,
             execution: BenchRunExecution {
                 runs: 1,
                 concurrency: 1,
@@ -980,6 +986,14 @@ fn bench_component_script_env(
             )?,
         ),
     ];
+    if let Some(run_id) = args
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        env.push(("HOMEBOY_BENCH_RUN_ID".to_string(), run_id.to_string()));
+    }
     env.extend(args.ci_env.iter().cloned());
     Ok(env)
 }
@@ -1932,6 +1946,7 @@ mod tests {
                 )],
                 iterations: 10,
                 warmup_iterations: None,
+                run_id: None,
                 execution: BenchRunExecution {
                     runs: 1,
                     concurrency: 1,
@@ -1976,6 +1991,76 @@ mod tests {
         );
         assert!(parsed["workflow_bench_env"]["FOO"].is_null());
         run_dir.cleanup();
+    }
+
+    #[test]
+    fn component_script_bench_env_forwards_run_id_proof_label() {
+        let run_dir = RunDir::create().expect("run dir");
+        let mut args = bench_run_workflow_args_fixture();
+        args.run_id = Some("proof-2026-06".to_string());
+
+        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+
+        assert_eq!(
+            env.iter()
+                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_RUN_ID").then_some(value)),
+            Some(&"proof-2026-06".to_string()),
+            "run-id proof label should forward to HOMEBOY_BENCH_RUN_ID"
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn component_script_bench_env_omits_run_id_when_absent_or_blank() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        let mut absent = bench_run_workflow_args_fixture();
+        absent.run_id = None;
+        let env = bench_component_script_env(&absent, &run_dir).expect("component-script env");
+        assert!(
+            !env.iter().any(|(key, _)| key == "HOMEBOY_BENCH_RUN_ID"),
+            "no --run-id should leave HOMEBOY_BENCH_RUN_ID unset"
+        );
+
+        let mut blank = bench_run_workflow_args_fixture();
+        blank.run_id = Some("   ".to_string());
+        let env = bench_component_script_env(&blank, &run_dir).expect("component-script env");
+        assert!(
+            !env.iter().any(|(key, _)| key == "HOMEBOY_BENCH_RUN_ID"),
+            "whitespace-only --run-id should be ignored, not forwarded blank"
+        );
+        run_dir.cleanup();
+    }
+
+    fn bench_run_workflow_args_fixture() -> BenchRunWorkflowArgs {
+        BenchRunWorkflowArgs {
+            component_label: "studio-web".to_string(),
+            component_id: "studio-web".to_string(),
+            path_override: None,
+            settings: Vec::new(),
+            settings_json: Vec::new(),
+            iterations: 10,
+            warmup_iterations: None,
+            run_id: None,
+            execution: BenchRunExecution {
+                runs: 1,
+                concurrency: 1,
+            },
+            baseline_flags: BaselineFlags {
+                baseline: false,
+                ignore_baseline: true,
+                ratchet: false,
+            },
+            regression_threshold_percent: 5.0,
+            json_summary: false,
+            ci_env: Vec::new(),
+            passthrough_args: Vec::new(),
+            scenario_ids: Vec::new(),
+            rig_id: None,
+            shared_state: None,
+            extra_workloads: Vec::new(),
+            invocation_requirements: InvocationRequirements::default(),
+        }
     }
 
     #[test]
@@ -2227,6 +2312,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
                     settings_json: Vec::new(),
                     iterations: 1,
                     warmup_iterations: None,
+                    run_id: None,
                     execution: BenchRunExecution {
                         runs: 1,
                         concurrency: 1,
@@ -2468,6 +2554,7 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
                 settings_json: Vec::new(),
                 iterations: 1,
                 warmup_iterations: None,
+                run_id: None,
                 execution: BenchRunExecution {
                     runs: 1,
                     concurrency: 0,
