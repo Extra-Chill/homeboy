@@ -45,9 +45,9 @@ pub use super::runner::{
     RunnerConnectReport, RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions,
     RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool, RunnerResourceMetrics,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
+    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
