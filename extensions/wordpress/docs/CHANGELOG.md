@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.5] - 2026-06-17
+
+### Fixed
+- remove shared core helper fallbacks
+
 ## [3.2.4] - 2026-06-17
 
 ### Changed
