@@ -64,6 +64,7 @@
     "test:webperf-evidence-summary": "node tests/webperf-evidence-summary-smoke.js",
     "test:benchmark-matrix-report": "node tests/benchmark-matrix-report-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",
+    "test:wordpress-bench-artifacts": "php tests/wordpress-bench-artifact-helper-smoke.php",
     "test:wordpress-bench-woocommerce-fixtures": "php tests/wordpress-bench-woocommerce-fixtures-smoke.php",
     "test:wordpress-db-query-profiler": "php scripts/bench/wordpress-db-query-profiler-smoke.php",
     "test:audit-wp-codebox-fanout": "node tests/audit-wp-codebox-fanout-smoke.js",
