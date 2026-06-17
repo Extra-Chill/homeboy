@@ -15,7 +15,7 @@ HOMEBOY_SETTINGS_ENV_LIST='one, two,,three' \
 HOMEBOY_SETTINGS_ENV_JSON='{"source":"env"}' \
 WORKLOAD_UTILS_UNDER_TEST="$SCRIPT_DIR/lib/workload-utils.mjs" \
 node --input-type=module - <<'EOF'
-import { readFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const utils = await import(process.env.WORKLOAD_UTILS_UNDER_TEST);
@@ -115,6 +115,76 @@ if (utils.percentile([1, Number.NaN, 3], 50) !== 2) throw new Error('percentile 
 const context = utils.createArtifactContext({ id: 'Utility Smoke', runId: 'utility-run', artifactsDir: join(process.env.HOMEBOY_COMPONENT_PATH, 'context-artifacts') });
 const descriptor = await context.writeJson('raw result', { token: 'abc', keep: 'visible' });
 if (descriptor.kind !== 'json') throw new Error('artifact context wrapper did not write JSON artifact');
+
+const sourceDir = join(process.env.HOMEBOY_COMPONENT_PATH, 'source-site');
+await mkdir(sourceDir, { recursive: true });
+await writeFile(join(sourceDir, 'index.html'), '<main>Source</main>');
+const fakeCli = join(process.env.HOMEBOY_COMPONENT_PATH, 'fake-wp-codebox-cli.mjs');
+await writeFile(fakeCli, `#!/usr/bin/env node
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const recipePath = process.argv[process.argv.indexOf('--recipe') + 1];
+const recipe = JSON.parse(await readFile(recipePath, 'utf8'));
+const compareStep = recipe.workflow.steps.find((step) => step.command === 'wordpress.visual-compare');
+const args = compareStep.args;
+const arg = (name) => args.find((item) => item.startsWith(name + '='))?.slice(name.length + 1);
+const sourceResponse = await fetch(arg('source-url'));
+if (!sourceResponse.ok) throw new Error('source URL was not served');
+const dir = join(recipe.artifacts.directory, 'files/browser/visual-compare');
+await mkdir(dir, { recursive: true });
+await writeFile(join(dir, 'source.png'), 'source');
+await writeFile(join(dir, 'candidate.png'), 'candidate');
+await writeFile(join(dir, 'diff.png'), 'diff');
+const visual = {
+  schema: 'wp-codebox/visual-compare/v1',
+  status: 'different',
+  files: {
+    sourceScreenshot: 'files/browser/visual-compare/source.png',
+    candidateScreenshot: 'files/browser/visual-compare/candidate.png',
+    diffScreenshot: 'files/browser/visual-compare/diff.png',
+    visualDiff: 'files/browser/visual-compare/visual-diff.json',
+    summary: 'files/browser/visual-compare/summary.json'
+  },
+  viewport: { width: 640, height: 480 },
+  comparison: { mismatchPixels: 10, totalPixels: 1000, mismatchRatio: 0.01, dimensionMismatch: false, regions: [{ x: 1, y: 2, width: 3, height: 4 }] }
+};
+await writeFile(join(dir, 'visual-diff.json'), JSON.stringify(visual, null, 2));
+await writeFile(join(dir, 'summary.json'), JSON.stringify(visual, null, 2));
+process.stdout.write(JSON.stringify({
+  success: true,
+  commands: [{ artifact: { files: { visualDiff: 'files/browser/visual-compare/visual-diff.json' } } }]
+}));
+`);
+await chmod(fakeCli, 0o755);
+
+const visualResult = await utils.runVisualParityWorkload({
+  id: 'Visual Contract',
+  artifactsDir: join(process.env.HOMEBOY_COMPONENT_PATH, 'visual-artifacts'),
+  runId: 'visual-run',
+  wpCodeboxCli: fakeCli,
+  source: { path: sourceDir, ref: 'source-ref', label: 'static-source', port: 48531 },
+  candidate: {
+    url: '/',
+    ref: 'candidate-ref',
+    label: 'candidate-wordpress',
+    context: { runtime: 'playground' },
+    recipe: { runtime: { wp: 'latest' }, inputs: { mounts: [] }, workflow: { steps: [{ command: 'wordpress.setup', args: [] }] } },
+  },
+  viewport: { width: 640, height: 480 },
+  threshold: 0.02,
+});
+if (visualResult.metrics.visual_parity_pass !== 1) throw new Error('visual parity pass metric was not set');
+if (visualResult.metrics.visual_parity_mismatch_ratio !== 0.01) throw new Error('visual parity mismatch ratio metric was not normalized');
+const visualArtifact = JSON.parse(await readFile(visualResult.artifacts.visualParity.path, 'utf8'));
+if (visualArtifact.schema !== 'homeboy/VisualParityArtifact/v1') throw new Error('visual artifact schema mismatch');
+if (visualArtifact.source.ref !== 'source-ref' || visualArtifact.candidate.ref !== 'candidate-ref') throw new Error('visual artifact refs were not preserved');
+if (visualArtifact.summary.status !== 'passed' || visualArtifact.summary.region_count !== 1) throw new Error('visual artifact summary was not normalized');
+if (visualArtifact.artifacts.visual_diff !== 'files/browser/visual-compare/visual-diff.json') throw new Error('visual diff artifact ref was not preserved');
+const recipeArtifact = JSON.parse(await readFile(visualResult.metadata.codebox_recipe, 'utf8'));
+if (recipeArtifact.runtime.wp !== 'latest') throw new Error('candidate recipe runtime was not merged');
+if (recipeArtifact.workflow.steps[0].command !== 'wordpress.setup') throw new Error('candidate setup step was not preserved before visual compare');
+if (!recipeArtifact.workflow.steps[1].args.includes('viewport=640x480')) throw new Error('visual compare viewport was not forwarded');
 EOF
 
 echo "Node.js workload utils smoke passed."
