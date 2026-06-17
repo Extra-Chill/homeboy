@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.9] - 2026-06-17
+
+### Fixed
+- fix(wp-codebox): consume canonical artifact declarations
+
 ## [3.2.8] - 2026-06-17
 
 ### Changed
