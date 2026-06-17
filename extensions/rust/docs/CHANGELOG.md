@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.21.2] - 2026-06-17
+
+### Fixed
+- consume core test scope in runners
+
 ## [1.21.1] - 2026-06-15
 
 ### Fixed
