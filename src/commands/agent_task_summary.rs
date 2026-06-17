@@ -6,6 +6,7 @@ use super::agent_task::{AgentTaskArgs, AgentTaskCommand};
 pub(crate) enum AgentTaskSummaryKind {
     Cook,
     Status,
+    Logs,
     Review,
 }
 
@@ -13,6 +14,7 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
     match args.command {
         AgentTaskCommand::Cook(_) => Some(AgentTaskSummaryKind::Cook),
         AgentTaskCommand::Status(_) => Some(AgentTaskSummaryKind::Status),
+        AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         _ => None,
     }
@@ -25,6 +27,7 @@ pub(crate) fn render_agent_task_summary(
     match kind {
         AgentTaskSummaryKind::Cook => render_cook_summary(payload),
         AgentTaskSummaryKind::Status => render_status_summary(payload),
+        AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
     }
 }
@@ -95,6 +98,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         format!("Tasks attempted: {tasks_attempted}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(diagnostic) = first_actionable_diagnostic(payload) {
+        lines.push(format!("Diagnostic: {diagnostic}"));
+    }
     lines.push(format!("Artifacts: {artifact_count}"));
     if let Some(path) = aggregate_path.filter(|_| metrics.non_empty_patches > 0) {
         lines.push(format!("Aggregate: {path}"));
@@ -103,6 +109,20 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: homeboy agent-task run {run_id}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
+    }
+    Some(finish(lines))
+}
+
+fn render_logs_summary(payload: &Value) -> Option<String> {
+    let run_id = string_value(payload, &["run_id"])?;
+    let event_count = array_len(payload, &["events"]).unwrap_or(0);
+    let mut lines = vec![
+        "Agent task logs".to_string(),
+        format!("Run: {run_id}"),
+        format!("Events: {event_count}"),
+    ];
+    if let Some(diagnostic) = first_actionable_diagnostic(payload) {
+        lines.push(format!("Diagnostic: {diagnostic}"));
     }
     Some(finish(lines))
 }
@@ -150,6 +170,9 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         format!("Outcome: {outcome}"),
     ];
     lines.extend(code_production_lines(&metrics));
+    if let Some(diagnostic) = first_actionable_diagnostic(payload) {
+        lines.push(format!("Diagnostic: {diagnostic}"));
+    }
     if let Some(patch_path) = patch_path {
         lines.push(format!("Patch: {patch_path}"));
     } else if let Some(patch) = patch {
@@ -161,6 +184,24 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+fn first_actionable_diagnostic(payload: &Value) -> Option<&str> {
+    string_value(payload, &["diagnostic_summary", "message"])
+        .or_else(|| first_diagnostic_message(payload, &["aggregate", "outcomes"]))
+        .or_else(|| first_diagnostic_message(payload, &["aggregate_review", "tasks"]))
+}
+
+fn first_diagnostic_message<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
+    value_at(payload, path)?
+        .as_array()?
+        .iter()
+        .find_map(|item| {
+            value_at(item, &["diagnostics"])?
+                .as_array()?
+                .iter()
+                .find_map(|diagnostic| string_value(diagnostic, &["message"]))
+        })
 }
 
 fn value_at<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -741,6 +782,31 @@ mod tests {
     }
 
     #[test]
+    fn review_summary_surfaces_first_outcome_diagnostic() {
+        let payload = json!({
+            "run_id": "agent-task-d1622a44",
+            "state": "failed",
+            "aggregate_review": {
+                "summary": { "apply_candidates": 0, "failed": 1 },
+                "tasks": [{
+                    "task_id": "agent-task-d1622a44",
+                    "status": "provider_error",
+                    "diagnostics": [{
+                        "class": "provider_discovery",
+                        "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                    }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
+
+        assert!(summary.contains(
+            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+        ));
+    }
+
+    #[test]
     fn status_summary_points_queued_runs_at_run_command() {
         let payload = json!({
             "run_id": "homeboy-4345",
@@ -833,6 +899,52 @@ mod tests {
         assert!(summary.contains("Diff bytes: 0\n"));
         assert!(summary.contains("Next: homeboy agent-task logs agent-task-deadbeef\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
+    }
+
+    #[test]
+    fn status_summary_surfaces_diagnostic_summary() {
+        let payload = json!({
+            "run_id": "agent-task-d1622a44",
+            "state": "failed",
+            "tasks": [{ "task_id": "agent-task-d1622a44", "state": "failed" }],
+            "artifact_refs": [],
+            "diagnostic_summary": {
+                "task_id": "agent-task-d1622a44",
+                "class": "provider_discovery",
+                "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains(
+            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+        ));
+    }
+
+    #[test]
+    fn logs_summary_surfaces_diagnostic_summary() {
+        let payload = json!({
+            "run_id": "agent-task-d1622a44",
+            "events": [{
+                "task_id": "agent-task-d1622a44",
+                "state": "failed",
+                "attempt": 1,
+                "message": "Embedded agent runtime failed."
+            }],
+            "diagnostic_summary": {
+                "task_id": "agent-task-d1622a44",
+                "class": "provider_discovery",
+                "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Logs, &payload).unwrap();
+
+        assert!(summary.starts_with("Agent task logs\nRun: agent-task-d1622a44\nEvents: 1\n"));
+        assert!(summary.contains(
+            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+        ));
     }
 
     #[test]

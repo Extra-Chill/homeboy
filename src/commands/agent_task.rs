@@ -11,8 +11,11 @@ use homeboy::core::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerApplyEventRequest, ControllerDispatchHook,
     ControllerFromSpecRequest, ControllerInitRequest, ControllerMarkHumanReadyRequest,
 };
+use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
+use homeboy::core::agent_tasks::scheduler::{
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
+};
 use homeboy::core::agent_tasks::secrets as agent_task_secrets;
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::config;
@@ -1193,7 +1196,9 @@ fn submit(args: SubmitArgs) -> CmdResult<Value> {
 
 fn status(args: StatusArgs) -> CmdResult<Value> {
     let record = agent_task_service::status(&args.run_id)?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let mut value = serde_json::to_value(record).unwrap_or(Value::Null);
+    enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
+    Ok((value, 0))
 }
 
 fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) -> CmdResult<Value> {
@@ -1203,7 +1208,46 @@ fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) -> CmdResult<
 
 fn logs(args: StatusArgs) -> CmdResult<Value> {
     let log = agent_task_service::logs(&args.run_id)?;
-    Ok((serde_json::to_value(log).unwrap_or(Value::Null), 0))
+    let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
+    enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
+    Ok((value, 0))
+}
+
+fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::core::Result<()> {
+    let Some(aggregate) = completed_run_aggregate(run_id).transpose()? else {
+        return Ok(());
+    };
+    if let Some(summary) = diagnostic_summary_from_aggregate(&aggregate) {
+        value["diagnostic_summary"] = summary;
+    }
+    Ok(())
+}
+
+pub(crate) fn completed_run_aggregate(
+    run_id: &str,
+) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
+    match agent_task_lifecycle::aggregate_source(run_id) {
+        Ok((raw, _path)) => Some(serde_json::from_str(&raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("agent-task aggregate".to_string()),
+                Some(raw),
+            )
+        })),
+        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) -> Option<Value> {
+    aggregate.outcomes.iter().find_map(|outcome| {
+        let diagnostic = outcome.diagnostics.first()?;
+        Some(serde_json::json!({
+            "task_id": outcome.task_id,
+            "class": diagnostic.class,
+            "message": diagnostic.message,
+        }))
+    })
 }
 
 fn artifacts(args: StatusArgs) -> CmdResult<Value> {
@@ -1258,10 +1302,10 @@ mod tests {
     };
     use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use homeboy::core::agent_tasks::{
-        AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
-        AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
-        AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-        AGENT_TASK_REQUEST_SCHEMA,
+        AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor,
+        AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
+        AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
+        AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
@@ -1526,6 +1570,39 @@ mod tests {
             assert_eq!(record.state, AgentTaskRunState::Failed);
             assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
             assert_eq!(record.totals.expect("totals").failed, 1);
+        });
+    }
+
+    #[test]
+    fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
+        with_temp_home(|| {
+            let run_id = "run-cli-diagnostic-summary";
+            run_loaded_plan(test_plan(), Some(run_id), DiagnosticFailureExecutor)
+                .expect("run completed with failed outcome");
+
+            let (status_value, _) = status(StatusArgs {
+                run_id: run_id.to_string(),
+            })
+            .expect("status loaded");
+            let (logs_value, _) = logs(StatusArgs {
+                run_id: run_id.to_string(),
+            })
+            .expect("logs loaded");
+            let (review_value, _) = review::review(ReviewArgs {
+                run_id: run_id.to_string(),
+                to_worktree: None,
+                provider_command: None,
+            })
+            .expect("review loaded");
+
+            for value in [&status_value, &logs_value, &review_value] {
+                assert_eq!(
+                    value["diagnostic_summary"]["message"],
+                    "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                );
+                assert_eq!(value["diagnostic_summary"]["class"], "provider_discovery");
+                assert_eq!(value["diagnostic_summary"]["task_id"], "task-a");
+            }
         });
     }
 
@@ -2129,6 +2206,36 @@ mod tests {
                 artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    struct DiagnosticFailureExecutor;
+
+    impl AgentTaskExecutorAdapter for DiagnosticFailureExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::ProviderError,
+                summary: Some("Embedded agent runtime failed.".to_string()),
+                failure_classification: Some(AgentTaskFailureClassification::Provider),
+                artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "provider_discovery".to_string(),
+                    message: "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                        .to_string(),
+                    data: json!({ "registered_provider_plugins": [] }),
+                }],
                 outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
