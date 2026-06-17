@@ -306,6 +306,10 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     warning,
                     cli.force_hot || runner_hosted,
                     is_interactive_shell(),
+                    resource_policy::local_hot_rerun_command(
+                        hot_command,
+                        &std::env::args().collect::<Vec<_>>(),
+                    ),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);

@@ -236,12 +236,13 @@ pub fn non_interactive_preflight_error(
     warning: &ResourcePolicyWarning,
     force_hot: bool,
     interactive: bool,
+    local_hot_rerun_command: Option<String>,
 ) -> Option<crate::core::Error> {
     if force_hot || interactive || is_runner_hosted_exec() {
         return None;
     }
 
-    Some(crate::core::Error::validation_invalid_argument(
+    let mut error = crate::core::Error::validation_invalid_argument(
         "resource-policy",
         format!(
             "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy doctor resources` reports ok.",
@@ -251,7 +252,29 @@ pub fn non_interactive_preflight_error(
         ),
         None,
         None,
-    ))
+    );
+    if let Some(command) = local_hot_rerun_command {
+        error.details["rerun_command"] = serde_json::Value::String(command);
+    }
+    Some(error)
+}
+
+pub fn local_hot_rerun_command(command: HotCommand, args: &[String]) -> Option<String> {
+    if command.lab_offload_supported || args.is_empty() {
+        return None;
+    }
+
+    let mut rerun = Vec::with_capacity(args.len() + 2);
+    rerun.push(args[0].clone());
+    if !args.iter().any(|arg| arg == "--force-hot") {
+        rerun.push("--force-hot".to_string());
+    }
+    if !args.iter().any(|arg| arg == "--allow-local-hot") {
+        rerun.push("--allow-local-hot".to_string());
+    }
+    rerun.extend(args.iter().skip(1).cloned());
+
+    Some(crate::core::engine::shell::quote_args(&rerun))
 }
 
 pub fn is_runner_hosted_exec() -> bool {
@@ -463,13 +486,15 @@ mod tests {
 
     #[test]
     fn non_interactive_hot_warning_fails_before_starting_command() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Hot),
         )
         .expect("hot machines warn");
 
-        let error = non_interactive_preflight_error(&warning, false, false)
+        let error = non_interactive_preflight_error(&warning, false, false, None)
             .expect("non-interactive hot runs should fail fast");
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
@@ -477,10 +502,42 @@ mod tests {
         assert!(error.message.contains("non-interactive shell"));
         assert!(error.message.contains("--runner <id>"));
         assert!(!error.message.contains("Use --force-hot"));
+        assert!(error.details.get("rerun_command").is_none());
+    }
+
+    #[test]
+    fn non_interactive_local_only_refusal_includes_local_hot_rerun_command() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let command = local_only_hot(
+            "lint",
+            "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.",
+        );
+        let warning = evaluate(command, &resources(ResourceRecommendation::Warm))
+            .expect("warm machines warn");
+        let rerun = local_hot_rerun_command(
+            command,
+            &[
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "--changed-since".to_string(),
+                "origin/main".to_string(),
+            ],
+        );
+
+        let error = non_interactive_preflight_error(&warning, false, false, rerun)
+            .expect("non-interactive local-only hot runs should fail fast");
+
+        assert_eq!(
+            error.details["rerun_command"].as_str(),
+            Some("homeboy --force-hot --allow-local-hot lint --changed-since origin/main")
+        );
+        assert!(!error.message.contains("--force-hot --allow-local-hot"));
     }
 
     #[test]
     fn runner_hosted_exec_does_not_fail_non_interactive_preflight() {
+        let _lock = env_lock();
         let _guard = EnvVarGuard::set(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
         let warning = evaluate(
             lab_supported_hot("agent-task dispatch/cook/loop/run-plan"),
@@ -488,19 +545,21 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, false).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, false, None).is_none());
     }
 
     #[test]
     fn interactive_or_forced_hot_warning_does_not_fail_preflight() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
             lab_supported_hot("audit"),
             &resources(ResourceRecommendation::Hot),
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, true).is_none());
-        assert!(non_interactive_preflight_error(&warning, true, false).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, true, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, true, false, None).is_none());
     }
 
     #[test]
@@ -620,6 +679,19 @@ mod tests {
             std::env::set_var(name, value);
             Self { name, prior }
         }
+
+        fn remove(name: &'static str) -> Self {
+            let prior = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, prior }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("resource policy env test lock poisoned")
     }
 
     impl Drop for EnvVarGuard {
