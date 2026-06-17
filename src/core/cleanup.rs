@@ -17,6 +17,7 @@ pub struct ArtifactCleanupOptions {
     pub path: Option<PathBuf>,
     pub apply: bool,
     pub self_artifacts: bool,
+    pub temp_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -147,6 +148,22 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
         }
     }
 
+    for candidate in self_temp_artifact_candidates(&options)? {
+        if options.apply {
+            remove_artifact_path(Path::new(&candidate.path))?;
+            applied.push(ArtifactCleanupApplied {
+                worktree: candidate.worktree.clone(),
+                path: candidate.path.clone(),
+                relative_path: candidate.relative_path.clone(),
+                kind: candidate.kind.clone(),
+                size_bytes: candidate.size_bytes,
+                removed: true,
+            });
+        }
+
+        candidates.push(candidate);
+    }
+
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
     let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
 
@@ -225,6 +242,86 @@ fn validate_homeboy_manifest_dir(manifest_dir: &Path) -> Result<PathBuf> {
     }
 
     Ok(manifest_dir.to_path_buf())
+}
+
+fn self_temp_artifact_candidates(
+    options: &ArtifactCleanupOptions,
+) -> Result<Vec<ArtifactCleanupCandidate>> {
+    if !options.self_artifacts && options.temp_roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let roots = if options.temp_roots.is_empty() {
+        default_self_temp_roots()
+    } else {
+        options.temp_roots.clone()
+    };
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        if !root.is_dir() || !seen.insert(root.clone()) {
+            continue;
+        }
+        for entry in fs::read_dir(&root).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("read temp root {}", root.display())),
+            )
+        })? {
+            let entry = entry.map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("read temp root entry {}", root.display())),
+                )
+            })?;
+            let path = entry.path();
+            if !is_detached_homeboy_temp_artifact(&path) {
+                continue;
+            }
+            let size_bytes = path_size(&path)?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            candidates.push(ArtifactCleanupCandidate {
+                worktree: root.to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                relative_path: name,
+                kind: "detached_homeboy_temp_artifact".to_string(),
+                declared_by: "self_temp_root".to_string(),
+                size_bytes,
+                source_dirty: false,
+                unpushed_commits: false,
+            });
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn default_self_temp_roots() -> Vec<PathBuf> {
+    let temp_dir = std::env::temp_dir();
+    vec![temp_dir.clone(), temp_dir.join("opencode")]
+}
+
+fn is_detached_homeboy_temp_artifact(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    if path.join(".git").exists() || path.join("Cargo.toml").exists() {
+        return false;
+    }
+
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with("homeboy-")
+        && (name.ends_with("-target") || name.contains("-target-") || name.ends_with("-build"))
 }
 
 fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
@@ -499,10 +596,93 @@ mod tests {
             path: Some(tmp.path().to_path_buf()),
             apply: false,
             self_artifacts: true,
+            temp_roots: Vec::new(),
         })
         .expect_err("reject ambiguous cleanup root");
 
         assert_eq!(err.code, crate::core::ErrorCode::ValidationInvalidArgument);
+    }
+
+    #[test]
+    fn detached_homeboy_temp_artifacts_are_detected_conservatively() {
+        let temp_root = TempDir::new().expect("temp root");
+        fs::create_dir_all(temp_root.path().join("homeboy-4483-target/debug"))
+            .expect("mkdir target artifact");
+        fs::create_dir_all(temp_root.path().join("homeboy-target-4318/debug"))
+            .expect("mkdir target artifact");
+        fs::create_dir_all(temp_root.path().join("homeboy-d6b2bc65-build"))
+            .expect("mkdir build artifact");
+        fs::create_dir_all(temp_root.path().join("homeboy-runtime-helper-path"))
+            .expect("mkdir non-artifact temp");
+        fs::create_dir_all(temp_root.path().join("homeboy-main-source-28703209"))
+            .expect("mkdir source temp");
+        fs::write(
+            temp_root
+                .path()
+                .join("homeboy-main-source-28703209/Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        )
+        .expect("write source manifest");
+
+        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            path: None,
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("temp artifact candidates");
+
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates
+            .iter()
+            .any(|row| row.relative_path == "homeboy-4483-target"));
+        assert!(candidates
+            .iter()
+            .any(|row| row.relative_path == "homeboy-target-4318"));
+        assert!(candidates
+            .iter()
+            .any(|row| row.relative_path == "homeboy-d6b2bc65-build"));
+        assert!(!candidates
+            .iter()
+            .any(|row| row.relative_path == "homeboy-runtime-helper-path"));
+        assert!(!candidates
+            .iter()
+            .any(|row| row.relative_path == "homeboy-main-source-28703209"));
+    }
+
+    #[test]
+    fn apply_removes_detached_temp_artifacts_from_explicit_temp_root() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        write_file(
+            &temp_root.path().join("homeboy-4477-target/debug/homeboy"),
+            "binary",
+        );
+        write_file(
+            &temp_root
+                .path()
+                .join("homeboy-main-source-28703209/src/lib.rs"),
+            "source",
+        );
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("apply cleanup");
+
+        assert!(output
+            .candidates
+            .iter()
+            .any(|row| row.kind == "detached_homeboy_temp_artifact"
+                && row.relative_path == "homeboy-4477-target"));
+        assert!(!temp_root.path().join("homeboy-4477-target").exists());
+        assert!(temp_root
+            .path()
+            .join("homeboy-main-source-28703209")
+            .exists());
     }
 
     #[test]
@@ -521,6 +701,7 @@ mod tests {
             path: Some(repo.path().to_path_buf()),
             apply: false,
             self_artifacts: false,
+            temp_roots: Vec::new(),
         })
         .expect("dry-run cleanup");
 
@@ -549,6 +730,7 @@ mod tests {
             path: Some(repo.path().to_path_buf()),
             apply: true,
             self_artifacts: false,
+            temp_roots: Vec::new(),
         })
         .expect("apply cleanup");
 
@@ -591,6 +773,7 @@ mod tests {
             path: Some(repo.path().to_path_buf()),
             apply: true,
             self_artifacts: false,
+            temp_roots: Vec::new(),
         })
         .expect("apply cleanup");
 
