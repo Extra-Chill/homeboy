@@ -1,14 +1,14 @@
 //! Reachability-aware dead-guard detector.
 //!
-//! Scans PHP file content for `function_exists('name')`, `class_exists('Name')`,
-//! and `defined('CONST')` guards (and their negations) and emits a finding
-//! when the checked symbol is guaranteed to exist given:
+//! Scans guarded symbol-existence checks (`function_exists('name')`,
+//! `class_exists('Name')`, `defined('CONST')` and their negations) and emits a
+//! finding when the checked symbol is guaranteed to exist given the
+//! component's known-symbol table.
 //!
-//! 1. Extension-provided runtime requirement metadata.
-//! 2. Unconditional `require` calls from the plugin main file.
-//! 3. Known vendor packages declared in `composer.json`.
-//!
-//! The symbol-availability table is built by [`super::requirements`].
+//! The languages the detector applies to and the lifecycle path/basename
+//! policy are declared via [`DetectorProfileConfig`]; the symbol-availability
+//! table is built by [`super::requirements`]. Core keeps no hardcoded
+//! ecosystem manifest, file-suffix, or language literals here.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::conventions::{AuditFinding, Language};
+use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::requirements::{known_available_symbols, KnownSymbols};
@@ -81,6 +81,15 @@ fn detect_with_config(
     root: &Path,
     audit_config: &AuditConfig,
 ) -> Vec<Finding> {
+    // Languages the guard syntax applies to are component-declared; core ships
+    // no built-in ecosystem default here. Without a declared language set the
+    // detector stays inert so its guard syntax never leaks an ecosystem
+    // assumption into core.
+    let guard_languages = &audit_config.detector_profile.dead_guard_languages;
+    if guard_languages.is_empty() {
+        return Vec::new();
+    }
+
     let known = known_available_symbols(root, audit_config);
     if known.functions.is_empty() && known.classes.is_empty() && known.constants.is_empty() {
         return Vec::new();
@@ -88,7 +97,7 @@ fn detect_with_config(
 
     let mut findings = Vec::new();
     for fp in fingerprints {
-        if fp.language != Language::Php {
+        if !fp.language.matches_any_token(guard_languages) {
             continue;
         }
         for guard in extract_guards(&fp.content) {
@@ -107,7 +116,7 @@ fn detect_with_config(
                         guard.symbol
                     ),
                     suggestion: format!(
-                        "Remove the {}('{}') guard; the symbol is guaranteed by plugin requirements, composer.json, or the plugin bootstrap",
+                        "Remove the {}('{}') guard; the symbol is guaranteed by the component's known-symbol table (runtime requirements, declared packages, or bootstrap)",
                         guard.kind.label(),
                         guard.symbol
                     ),
@@ -250,7 +259,13 @@ fn extract_comments(content: &str) -> String {
 
 fn is_lifecycle_or_test_path(path: &str, audit_config: &AuditConfig) -> bool {
     let normalized = path.replace('\\', "/");
-    if is_default_contextual_path(&normalized) {
+    let profile = &audit_config.detector_profile;
+    if is_declared_contextual_path(
+        &normalized,
+        &profile.lifecycle_path_segments,
+        &profile.lifecycle_basenames,
+        &profile.lifecycle_basename_suffixes,
+    ) {
         return true;
     }
     audit_config
@@ -259,27 +274,36 @@ fn is_lifecycle_or_test_path(path: &str, audit_config: &AuditConfig) -> bool {
         .any(|pattern| glob_match::glob_match(pattern, &normalized))
 }
 
-fn is_default_contextual_path(path: &str) -> bool {
+/// Whether the path is contextual (lifecycle/migration/test) per the
+/// component-declared catalogues. Core owns only the generic matching: a path
+/// segment match, an exact basename match, or a basename-suffix match. The
+/// concrete directory names, filenames, and suffixes (which carry ecosystem
+/// file-extension assumptions) are declared via `DetectorProfileConfig`.
+fn is_declared_contextual_path(
+    path: &str,
+    segments: &[String],
+    basenames: &[String],
+    basename_suffixes: &[String],
+) -> bool {
     let lower = path.to_ascii_lowercase();
     let basename = lower.rsplit('/').next().unwrap_or(lower.as_str());
-    basename == "uninstall.php"
-        || basename == "activation.php"
-        || basename == "deactivation.php"
-        || lower.starts_with("migrations/")
-        || lower.contains("/migrations/")
-        || lower.starts_with("migration/")
-        || lower.contains("/migration/")
-        || lower.starts_with("tests/")
-        || lower.contains("/tests/")
-        || lower.starts_with("test/")
-        || lower.contains("/test/")
-        || lower.starts_with("fixtures/")
-        || lower.contains("/fixtures/")
-        || lower.starts_with("smoke/")
-        || lower.contains("/smoke/")
-        || basename == "smoke.php"
-        || basename.ends_with("-smoke.php")
-        || basename.ends_with("_smoke.php")
+
+    let segment_match = segments.iter().any(|segment| {
+        let seg = segment.to_ascii_lowercase();
+        lower.starts_with(&format!("{seg}/")) || lower.contains(&format!("/{seg}/"))
+    });
+    if segment_match {
+        return true;
+    }
+    if basenames
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(basename))
+    {
+        return true;
+    }
+    basename_suffixes
+        .iter()
+        .any(|suffix| basename.ends_with(&suffix.to_ascii_lowercase()))
 }
 
 fn guard_is_inside_registered_lifecycle_callback(content: &str, guard: &Guard) -> bool {
@@ -490,8 +514,25 @@ mod tests {
         }
     }
 
+    /// Representative dead-guard profile mirroring what a PHP/WordPress
+    /// extension would declare: the guard syntax applies to PHP, and the
+    /// lifecycle catalogue covers the usual non-runtime entrypoints.
+    fn test_profile_json() -> serde_json::Value {
+        serde_json::json!({
+            "dead_guard_languages": ["php"],
+            "lifecycle_path_segments": [
+                "migrations", "migration", "tests", "test", "fixtures", "smoke"
+            ],
+            "lifecycle_basenames": [
+                "uninstall.php", "activation.php", "deactivation.php", "smoke.php"
+            ],
+            "lifecycle_basename_suffixes": ["-smoke.php", "_smoke.php"]
+        })
+    }
+
     fn test_config() -> AuditConfig {
         serde_json::from_value(serde_json::json!({
+            "detector_profile": test_profile_json(),
             "known_symbols": {
                 "header_versions": [
                     {
@@ -679,6 +720,7 @@ if ( function_exists('runtime_unschedule_all') ) {
         let config = AuditConfig {
             lifecycle_path_globs: vec!["lifecycle/*.php".to_string()],
             known_symbols: test_config().known_symbols,
+            detector_profile: test_config().detector_profile,
             ..Default::default()
         };
         let guard = extract_guards(&fp.content).remove(0);
@@ -801,6 +843,7 @@ if ( function_exists('runtime_unschedule_all') ) {
                 "(?i)runtime is not loaded by the smoke harness".to_string(),
             ],
             known_symbols: test_config().known_symbols,
+            detector_profile: test_config().detector_profile,
             ..Default::default()
         };
 
@@ -824,6 +867,7 @@ if ( function_exists('runtime_unschedule_all') ) {
         let config = AuditConfig {
             dead_guard_context_comment_patterns: vec!["standalone runner".to_string()],
             known_symbols: test_config().known_symbols,
+            detector_profile: test_config().detector_profile,
             ..Default::default()
         };
 
@@ -865,6 +909,7 @@ if ( function_exists('runtime_unschedule_all') ) {
         let config = AuditConfig {
             dead_guard_context_comment_patterns: vec!["standalone runner".to_string()],
             known_symbols: test_config().known_symbols,
+            detector_profile: test_config().detector_profile,
             ..Default::default()
         };
 

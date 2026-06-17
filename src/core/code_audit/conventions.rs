@@ -45,6 +45,51 @@ impl Language {
             .map(Self::from_extension)
             .unwrap_or(Self::Unknown)
     }
+
+    /// Resolve a configured language/ecosystem token to a [`Language`].
+    ///
+    /// Accepts both file-extension tokens (`rs`, `js`) and ecosystem names
+    /// (`rust`, `javascript`). This is the single, language-aware home for the
+    /// token→language mapping so detector implementations under
+    /// `code_audit::detectors` can stay free of hardcoded ecosystem literals:
+    /// they declare which tokens a component opted into (via config) and ask
+    /// this helper whether a fingerprint's language is one of them.
+    pub fn from_token(token: &str) -> Self {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "php" => Language::Php,
+            "rust" | "rs" => Language::Rust,
+            "javascript" | "js" | "jsx" | "mjs" => Language::JavaScript,
+            "typescript" | "ts" | "tsx" => Language::TypeScript,
+            _ => Language::Unknown,
+        }
+    }
+
+    /// Whether this language is the one named by `token` (extension or
+    /// ecosystem name). `Unknown` never matches.
+    pub fn matches_token(&self, token: &str) -> bool {
+        let resolved = Self::from_token(token);
+        resolved != Language::Unknown && resolved == *self
+    }
+
+    /// Whether any token in `tokens` names this language.
+    pub fn matches_any_token<I, S>(&self, tokens: I) -> bool
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        tokens
+            .into_iter()
+            .any(|token| self.matches_token(token.as_ref()))
+    }
+
+    /// The canonical file-extension tokens for every language Homeboy can
+    /// classify. This is the agnostic home for the default scan/apply token set
+    /// used by detectors when a component opts into builtin profile defaults —
+    /// it keeps the concrete extension literals out of the detector
+    /// implementations under `code_audit::detectors`.
+    pub fn builtin_extension_tokens() -> &'static [&'static str] {
+        &["rs", "php", "ts", "js", "go"]
+    }
 }
 
 /// A discovered convention: a pattern that most files in a group follow.

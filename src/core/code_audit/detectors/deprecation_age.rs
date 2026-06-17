@@ -8,6 +8,11 @@
 //! threshold. Each finding is annotated with a count of remaining call
 //! sites (scanned from `internal_calls` and `call_sites` across all
 //! fingerprints) so reviewers can judge removal safety at a glance.
+//!
+//! The set of languages the detector applies to and the version sources used
+//! to resolve the component's current version are declared via
+//! [`DetectorProfileConfig`]; core keeps no hardcoded ecosystem manifest or
+//! header conventions.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,6 +24,7 @@ use semver::Version;
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use crate::core::component::{DetectorProfileConfig, VersionSource};
 
 /// Default age threshold: flag when the current minor is more than
 /// this many minors ahead of the deprecated version on the same major,
@@ -60,8 +66,32 @@ static SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
 pub(in crate::core::code_audit) fn run(
     fingerprints: &[&FileFingerprint],
     root: &Path,
+    config: &DetectorProfileConfig,
 ) -> Vec<Finding> {
-    let Some(current) = detect_current_version(root) else {
+    // Languages the detector applies to are declared via config; when a
+    // component opts into builtin defaults but declares no explicit set, fall
+    // back to the agnostic catalogue of classifiable languages.
+    let language_tokens: Vec<String> = if !config.deprecation_languages.is_empty() {
+        config.deprecation_languages.clone()
+    } else if config.use_builtin_defaults {
+        Language::builtin_extension_tokens()
+            .iter()
+            .map(|token| (*token).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if language_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    // Version sources are component-declared; core ships none. Without a
+    // declared source the detector cannot anchor "current version" and stays
+    // inert.
+    if config.version_sources.is_empty() {
+        return Vec::new();
+    }
+    let Some(current) = detect_current_version(root, &config.version_sources) else {
         return Vec::new();
     };
 
@@ -72,7 +102,7 @@ pub(in crate::core::code_audit) fn run(
 
     let mut findings = Vec::new();
     for fp in fingerprints {
-        if !is_supported_language(&fp.language) {
+        if !fp.language.matches_any_token(&language_tokens) {
             continue;
         }
         collect_findings(fp, &current, &reference_counts, &mut findings);
@@ -80,13 +110,6 @@ pub(in crate::core::code_audit) fn run(
 
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
-}
-
-fn is_supported_language(lang: &Language) -> bool {
-    matches!(
-        lang,
-        Language::Php | Language::Rust | Language::JavaScript | Language::TypeScript
-    )
 }
 
 fn collect_findings(
@@ -234,49 +257,57 @@ fn build_reference_counts<'a>(fingerprints: &'a [&FileFingerprint]) -> HashMap<&
 
 /// Read the current version of the component under `root`.
 ///
-/// Tries the supported version sources in order and returns `None` when none
-/// yield a parseable semver. The concrete manifest/header conventions are
-/// ecosystem defaults; richer projects can declare their own version targets
-/// elsewhere in component config.
-fn detect_current_version(root: &Path) -> Option<Version> {
-    if let Some(v) = plugin_header_version(root) {
-        return Some(v);
-    }
-    composer_json_version(root)
+/// Tries the component-declared version sources in order and returns `None`
+/// when none yield a parseable semver. Core owns only the generic resolution
+/// mechanics (scan files of an extension for a regex match; read a JSON
+/// manifest key); the concrete manifest/header conventions are declared by the
+/// component/extension profile.
+fn detect_current_version(root: &Path, sources: &[VersionSource]) -> Option<Version> {
+    sources
+        .iter()
+        .find_map(|source| resolve_version_source(root, source))
 }
 
-fn plugin_header_version(root: &Path) -> Option<Version> {
+fn resolve_version_source(root: &Path, source: &VersionSource) -> Option<Version> {
+    match source {
+        VersionSource::HeaderRegex {
+            file_extension,
+            pattern,
+        } => header_regex_version(root, file_extension, pattern),
+        VersionSource::JsonManifest { file, key } => json_manifest_version(root, file, key),
+    }
+}
+
+/// Scan files of the given extension directly under `root` for the first match
+/// of `pattern` (single capture group → semver).
+fn header_regex_version(root: &Path, file_extension: &str, pattern: &str) -> Option<Version> {
+    let regex = Regex::new(pattern).ok()?;
     let entries = std::fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("php") {
+        if path.extension().and_then(|e| e.to_str()) != Some(file_extension) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if let Some(v) = parse_plugin_header_version(&content) {
+        if let Some(v) = regex
+            .captures(&content)
+            .and_then(|c| c.get(1))
+            .and_then(|m| Version::parse(m.as_str()).ok())
+        {
             return Some(v);
         }
     }
     None
 }
 
-fn parse_plugin_header_version(content: &str) -> Option<Version> {
-    static HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?mi)^\s*\*?\s*Version\s*:\s*(\d+\.\d+\.\d+)").expect("valid regex")
-    });
-    HEADER_RE
-        .captures(content)
-        .and_then(|c| c.get(1))
-        .and_then(|m| Version::parse(m.as_str()).ok())
-}
-
-fn composer_json_version(root: &Path) -> Option<Version> {
-    let path = root.join("composer.json");
+/// Read a top-level string `key` from a JSON manifest at `root/file`.
+fn json_manifest_version(root: &Path, file: &str, key: &str) -> Option<Version> {
+    let path = root.join(file);
     let content = std::fs::read_to_string(&path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let raw = value.get("version")?.as_str()?;
+    let raw = value.get(key)?.as_str()?;
     Version::parse(raw).ok()
 }
 
@@ -294,6 +325,30 @@ mod tests {
             relative_path: path.to_string(),
             language: Language::Php,
             content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Representative version sources mirroring what a PHP/WordPress extension
+    /// profile would declare.
+    fn test_version_sources() -> Vec<VersionSource> {
+        vec![
+            VersionSource::HeaderRegex {
+                file_extension: "php".to_string(),
+                pattern: r"(?mi)^\s*\*?\s*Version\s*:\s*(\d+\.\d+\.\d+)".to_string(),
+            },
+            VersionSource::JsonManifest {
+                file: "composer.json".to_string(),
+                key: "version".to_string(),
+            },
+        ]
+    }
+
+    /// A profile with builtin defaults plus representative version sources, for
+    /// exercising the full `run` path.
+    fn test_profile() -> DetectorProfileConfig {
+        DetectorProfileConfig {
+            version_sources: test_version_sources(),
             ..Default::default()
         }
     }
@@ -453,7 +508,7 @@ function legacy_api() {}
         )
         .unwrap();
 
-        let v = detect_current_version(tmp.path()).unwrap();
+        let v = detect_current_version(tmp.path(), &test_version_sources()).unwrap();
         assert_eq!(v, Version::parse("0.78.0").unwrap());
     }
 
@@ -466,14 +521,14 @@ function legacy_api() {}
         )
         .unwrap();
 
-        let v = detect_current_version(tmp.path()).unwrap();
+        let v = detect_current_version(tmp.path(), &test_version_sources()).unwrap();
         assert_eq!(v, Version::parse("2.3.4").unwrap());
     }
 
     #[test]
     fn no_version_source_returns_none() {
         let tmp = tempfile::TempDir::new().unwrap();
-        assert!(detect_current_version(tmp.path()).is_none());
+        assert!(detect_current_version(tmp.path(), &test_version_sources()).is_none());
     }
 
     #[test]
@@ -532,7 +587,53 @@ class SiteContext {}
     fn run_returns_empty_when_no_version_source() {
         let tmp = tempfile::TempDir::new().unwrap();
         let fp = make_fp("x.php", "/** @deprecated 0.31.1 */\nfunction a() {}");
-        let findings = run(&[&fp], tmp.path());
+        // Profile declares no version sources → detector stays inert.
+        let findings = run(&[&fp], tmp.path(), &DetectorProfileConfig::default());
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn run_flags_stale_deprecation_with_declared_version_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("plugin.php"),
+            "<?php\n/**\n * Version: 0.78.0\n */\n",
+        )
+        .unwrap();
+        let fp = make_fp(
+            "inc/Legacy.php",
+            "<?php\n/**\n * @deprecated 0.31.1 Use modern() instead.\n */\nfunction legacy() {}\n",
+        );
+        let findings = run(&[&fp], tmp.path(), &test_profile());
+        assert_eq!(
+            findings.len(),
+            1,
+            "stale deprecation should fire: {findings:?}"
+        );
+        assert!(findings[0].description.contains("legacy"));
+    }
+
+    #[test]
+    fn run_is_inert_when_builtin_defaults_disabled_and_no_languages_declared() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("plugin.php"),
+            "<?php\n/**\n * Version: 0.78.0\n */\n",
+        )
+        .unwrap();
+        let fp = make_fp(
+            "inc/Legacy.php",
+            "<?php\n/**\n * @deprecated 0.31.1\n */\nfunction legacy() {}\n",
+        );
+        let config = DetectorProfileConfig {
+            use_builtin_defaults: false,
+            version_sources: test_version_sources(),
+            ..Default::default()
+        };
+        let findings = run(&[&fp], tmp.path(), &config);
+        assert!(
+            findings.is_empty(),
+            "no language tokens declared and builtin defaults off → inert"
+        );
     }
 }
