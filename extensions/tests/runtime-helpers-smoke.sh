@@ -313,6 +313,19 @@ bash -c '
     ! homeboy_project_has_script build
 ' _ "$PROJECT_SCRIPTS_HELPER" "$PROJECT_HELPER_NODE_PROJECT"
 
+PROJECT_HELPER_PNPM_PROJECT="$TMP_DIR/project-helper-pnpm"
+mkdir -p "$PROJECT_HELPER_PNPM_PROJECT"
+cat > "$PROJECT_HELPER_PNPM_PROJECT/package.json" <<'EOF'
+{"name":"project-helper-pnpm","scripts":{"test":"node --test"}}
+EOF
+touch "$PROJECT_HELPER_PNPM_PROJECT/pnpm-lock.yaml"
+bash -c '
+    source "$1"
+    homeboy_project_init --ecosystem node --path "$2"
+    [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = "pnpm" ]
+    [ "$(homeboy_project_run_script_command test)" = "pnpm run test" ]
+' _ "$PROJECT_SCRIPTS_HELPER" "$PROJECT_HELPER_PNPM_PROJECT"
+
 set +e
 HOMEBOY_RUNTIME_FAILURE_TRAP="$FAILURE_TRAP_HELPER" \
 HOMEBOY_EXTENSION_PATH="$ROOT_DIR/nodejs" \

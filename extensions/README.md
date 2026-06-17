@@ -13,6 +13,12 @@ Generic runtime package requirements are documented in
 Use the `agent-runtimes/fake-runtime` fixture as the minimal contract example;
 WP Codebox is a concrete backend, not the generic template.
 
+Generic project-root, package-manager, and named-script execution helpers live in
+[`scripts/lib/project-scripts.sh`](scripts/lib/project-scripts.sh) and are
+documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md).
+They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
+helper contract.
+
 ## Available Extensions
 
 | Extension | Description |
