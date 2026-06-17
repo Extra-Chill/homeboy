@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
-use std::path::{Component as PathComponent, Path};
+use std::path::{Component as PathComponent, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use zip::write::FileOptions;
@@ -18,42 +18,62 @@ pub struct ResolvedArtifactInput {
     pub sha256: String,
 }
 
+pub(crate) trait ArtifactInputWriter {
+    fn validate_consumer_artifact(&self, consumer_artifact: &Path) -> Result<()>;
+    fn write_input(
+        &self,
+        consumer_artifact: &Path,
+        source_artifact: &Path,
+        resolved: &ResolvedArtifactInput,
+    ) -> Result<()>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ZipArtifactInputWriter;
+
+impl ArtifactInputWriter for ZipArtifactInputWriter {
+    fn validate_consumer_artifact(&self, consumer_artifact: &Path) -> Result<()> {
+        validate_zip_artifact(consumer_artifact)
+    }
+
+    fn write_input(
+        &self,
+        consumer_artifact: &Path,
+        source_artifact: &Path,
+        resolved: &ResolvedArtifactInput,
+    ) -> Result<()> {
+        append_file_to_zip(consumer_artifact, source_artifact, &resolved.target)
+    }
+}
+
+struct ResolvedArtifactInputSource {
+    metadata: ResolvedArtifactInput,
+    source_artifact: PathBuf,
+}
+
 pub(crate) fn apply_to_component_artifact(
     consumer: &Component,
     consumer_artifact: &Path,
+) -> Result<Vec<ResolvedArtifactInput>> {
+    apply_to_component_artifact_with_writer(consumer, consumer_artifact, &ZipArtifactInputWriter)
+}
+
+fn apply_to_component_artifact_with_writer(
+    consumer: &Component,
+    consumer_artifact: &Path,
+    writer: &dyn ArtifactInputWriter,
 ) -> Result<Vec<ResolvedArtifactInput>> {
     if consumer.artifact_inputs.is_empty() {
         return Ok(Vec::new());
     }
 
-    validate_zip_artifact(consumer_artifact)?;
+    writer.validate_consumer_artifact(consumer_artifact)?;
 
     let mut resolved = Vec::with_capacity(consumer.artifact_inputs.len());
     for input in &consumer.artifact_inputs {
-        let producer_artifact = build_and_resolve_producer_artifact(input, &consumer.id)?;
-        let sha256 = sha256_file(&producer_artifact)?;
-
-        if let Some(expected) = input.sha256.as_deref() {
-            if !expected.eq_ignore_ascii_case(&sha256) {
-                return Err(Error::validation_invalid_argument(
-                    "artifact_inputs.sha256",
-                    format!(
-                        "Artifact input '{}' for component '{}' has SHA-256 {}, expected {}",
-                        input.artifact, input.component, sha256, expected
-                    ),
-                    Some(input.target.clone()),
-                    None,
-                ));
-            }
-        }
-
-        append_file_to_zip(consumer_artifact, &producer_artifact, &input.target)?;
-        resolved.push(ResolvedArtifactInput {
-            component: input.component.clone(),
-            artifact: producer_artifact.display().to_string(),
-            target: input.target.clone(),
-            sha256,
-        });
+        let input = resolve_input_source(input, &consumer.id, true)?;
+        writer.write_input(consumer_artifact, &input.source_artifact, &input.metadata)?;
+        resolved.push(input.metadata);
     }
 
     Ok(resolved)
@@ -64,26 +84,77 @@ pub(crate) fn resolve_metadata(component: &Component) -> Result<Vec<ResolvedArti
         .artifact_inputs
         .iter()
         .map(|input| {
-            let producer = component::resolve_effective(Some(&input.component), None, None)?;
-            let path = resolve_artifact_path_from_root(
-                &input.artifact,
-                Some(Path::new(&producer.local_path)),
-            )?;
-            let sha256 = sha256_file(&path)?;
-            Ok(ResolvedArtifactInput {
-                component: input.component.clone(),
-                artifact: path.display().to_string(),
-                target: input.target.clone(),
-                sha256,
-            })
+            resolve_input_source(input, &component.id, false).map(|resolved| resolved.metadata)
         })
         .collect()
+}
+
+fn resolve_input_source(
+    input: &ArtifactInput,
+    consumer_id: &str,
+    build_producer: bool,
+) -> Result<ResolvedArtifactInputSource> {
+    let source_artifact = if build_producer {
+        build_and_resolve_producer_artifact(input, consumer_id)?
+    } else {
+        resolve_producer_artifact(input, consumer_id)?
+    };
+    let sha256 = sha256_file(&source_artifact)?;
+
+    if let Some(expected) = input.sha256.as_deref() {
+        if !expected.eq_ignore_ascii_case(&sha256) {
+            return Err(Error::validation_invalid_argument(
+                "artifact_inputs.sha256",
+                format!(
+                    "Artifact input '{}' for component '{}' has SHA-256 {}, expected {}",
+                    input.artifact, input.component, sha256, expected
+                ),
+                Some(input.target.clone()),
+                None,
+            ));
+        }
+    }
+
+    Ok(ResolvedArtifactInputSource {
+        metadata: ResolvedArtifactInput {
+            component: input.component.clone(),
+            artifact: source_artifact.display().to_string(),
+            target: input.target.clone(),
+            sha256,
+        },
+        source_artifact,
+    })
 }
 
 fn build_and_resolve_producer_artifact(
     input: &ArtifactInput,
     consumer_id: &str,
 ) -> Result<std::path::PathBuf> {
+    validate_input(input, consumer_id)?;
+    let producer = component::resolve_effective(Some(&input.component), None, None)?;
+    let (exit_code, build_error) = crate::core::build::build_component(&producer);
+    if let Some(error) = build_error {
+        return Err(Error::validation_invalid_argument(
+            "artifact_inputs.component",
+            format!(
+                "Failed to build artifact input component '{}' (exit {:?}): {}",
+                input.component, exit_code, error
+            ),
+            Some(input.component.clone()),
+            None,
+        ));
+    }
+
+    resolve_artifact_path_from_root(&input.artifact, Some(Path::new(&producer.local_path)))
+}
+
+fn resolve_producer_artifact(input: &ArtifactInput, consumer_id: &str) -> Result<PathBuf> {
+    validate_input(input, consumer_id)?;
+    let producer = component::resolve_effective(Some(&input.component), None, None)?;
+    resolve_artifact_path_from_root(&input.artifact, Some(Path::new(&producer.local_path)))
+}
+
+fn validate_input(input: &ArtifactInput, consumer_id: &str) -> Result<()> {
     if input.component.trim().is_empty() {
         return Err(invalid_input(
             "component",
@@ -107,21 +178,7 @@ fn build_and_resolve_producer_artifact(
         ));
     }
 
-    let producer = component::resolve_effective(Some(&input.component), None, None)?;
-    let (exit_code, build_error) = crate::core::build::build_component(&producer);
-    if let Some(error) = build_error {
-        return Err(Error::validation_invalid_argument(
-            "artifact_inputs.component",
-            format!(
-                "Failed to build artifact input component '{}' (exit {:?}): {}",
-                input.component, exit_code, error
-            ),
-            Some(input.component.clone()),
-            None,
-        ));
-    }
-
-    resolve_artifact_path_from_root(&input.artifact, Some(Path::new(&producer.local_path)))
+    Ok(())
 }
 
 fn invalid_input(field: &str, message: &str, input: &ArtifactInput) -> Error {
@@ -295,5 +352,55 @@ mod tests {
         let mut bytes = Vec::new();
         std::io::copy(&mut embedded, &mut bytes).unwrap();
         assert_eq!(bytes, b"new bytes");
+    }
+
+    #[test]
+    fn zip_writer_places_resolved_input_at_target() {
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("consumer.zip");
+        let source_path = dir.path().join("producer.artifact");
+        fs::write(&source_path, b"producer bytes").unwrap();
+
+        {
+            let file = File::create(&zip_path).unwrap();
+            zip::ZipWriter::new(file).finish().unwrap();
+        }
+
+        let resolved = ResolvedArtifactInput {
+            component: "producer".to_string(),
+            artifact: source_path.display().to_string(),
+            target: "runtime/packages/producer.artifact".to_string(),
+            sha256: "sha".to_string(),
+        };
+
+        let writer = ZipArtifactInputWriter;
+        writer.validate_consumer_artifact(&zip_path).unwrap();
+        writer
+            .write_input(&zip_path, &source_path, &resolved)
+            .unwrap();
+
+        let file = File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut embedded = archive
+            .by_name("runtime/packages/producer.artifact")
+            .unwrap();
+        let mut bytes = Vec::new();
+        std::io::copy(&mut embedded, &mut bytes).unwrap();
+        assert_eq!(bytes, b"producer bytes");
+    }
+
+    #[test]
+    fn zip_writer_rejects_non_zip_consumer_artifact() {
+        let dir = TempDir::new().unwrap();
+        let artifact_path = dir.path().join("consumer.tar");
+        fs::write(&artifact_path, b"consumer bytes").unwrap();
+
+        let writer = ZipArtifactInputWriter;
+        let err = writer
+            .validate_consumer_artifact(&artifact_path)
+            .unwrap_err();
+
+        assert_eq!(err.details["field"], "build_artifact");
+        assert!(err.details.to_string().contains("ZIP consumer artifact"));
     }
 }

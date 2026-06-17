@@ -11,6 +11,14 @@ Component configuration defines buildable and deployable units stored in `compon
   "local_path": "string",
   "remote_path": "string",
   "build_artifact": "string",
+  "artifact_inputs": [
+    {
+      "component": "string",
+      "artifact": "string",
+      "target": "string",
+      "sha256": "string"
+    }
+  ],
   "extract_command": "string",
   "version_targets": [
     {
@@ -67,6 +75,12 @@ Component configuration defines buildable and deployable units stored in `compon
   - Resolution order is `scripts.<capability>` first, then linked extension support, then not-applicable
   - Scripts receive the same runner env paths (`HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`, `HOMEBOY_RUN_DIR` and sidecar file vars when relevant) as extension runners, with `HOMEBOY_EXTENSION_ID=component-script`
   - Use `scripts.build`, not `build_command`; `build_command` is still only a diagnostic output field.
+- **`artifact_inputs`** (array): Producer artifacts to resolve and compose into this component's build artifact after this component builds
+  - **`component`** (string): Producer component ID to build before composition
+  - **`artifact`** (string): Producer artifact path or glob, resolved relative to the producer `local_path`
+  - **`target`** (string): Relative path where the producer artifact is placed inside the consumer artifact
+  - **`sha256`** (string, optional): Expected producer artifact SHA-256; comparison is case-insensitive
+  - The resolved input metadata is generic (`component`, resolved `artifact`, `target`, `sha256`). The current writer implementation supports ZIP consumer artifacts and writes each input at `target` inside the ZIP.
 - **`release`** (object): Component-scoped release configuration
   - **`enabled`** (boolean): Whether release pipeline is enabled
   - **`steps`** (array): Release step definitions
