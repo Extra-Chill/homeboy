@@ -119,6 +119,19 @@
       "workspace_materialization": {
         "cwd": "git_checkout"
       },
+      "runner_readiness": [
+        {
+          "id": "wp-codebox.executable",
+          "label": "WP Codebox executable",
+          "executable": {
+            "env": ["HOMEBOY_WP_CODEBOX_BIN"],
+            "candidates": ["wp-codebox"],
+            "version_command": ["--version"],
+            "install_hint": "Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path."
+          },
+          "remediation": "Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path."
+        }
+      ],
       "workspace_tools": {
         "readonly": [
           "workspace_ls",

@@ -367,7 +367,14 @@ function executable(filePath) {
 }
 
 function configuredBinaryDiagnostic(filePath) {
-  if (!filePath || !path.isAbsolute(filePath)) {
+  if (!filePath) {
+    return {
+      class: 'wp-codebox.config.missing_binary',
+      message: 'WP Codebox binary is not configured. Set wp_codebox_bin or let Homeboy inject HOMEBOY_WP_CODEBOX_BIN from the provider runner_readiness executable contract.',
+      data: { phase: 'codebox.config', wp_codebox_bin: '', reason: 'missing' },
+    };
+  }
+  if (!path.isAbsolute(filePath)) {
     return null;
   }
   if (!fs.existsSync(filePath)) {
@@ -1750,7 +1757,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
   }
 
   const input = runnerInput(request, artifacts);
-  const wpCodeboxBin = input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || 'wp-codebox';
+  const wpCodeboxBin = input.wp_codebox_bin || process.env.HOMEBOY_WP_CODEBOX_BIN || '';
   const binaryDiagnostic = configuredBinaryDiagnostic(wpCodeboxBin);
   if (binaryDiagnostic) {
     process.stdout.write(`${JSON.stringify(configuredBinaryFailurePayload(input, artifacts, binaryDiagnostic), null, 2)}\n`);

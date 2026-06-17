@@ -136,6 +136,7 @@ function providerContract(options = {}) {
     workspace_materialization: {
       cwd: 'git_checkout',
     },
+    runner_readiness: runtimeRunnerReadiness(options),
     workspace_tools: runtimeWorkspaceTools(options),
     component_path_defaults: runtimeComponentPathDefaults(options),
     provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
@@ -188,6 +189,10 @@ function runtimeComponentDiscovery(options = {}) {
 
 function runtimeProviderDefaults() {
   return firstObject(runtimeExecutorManifest().provider_defaults) || {};
+}
+
+function runtimeRunnerReadiness(options = {}) {
+  return normalizeArray(options.runnerReadiness || options.runner_readiness || runtimeExecutorManifest().runner_readiness);
 }
 
 function runtimeSecretEnvRequirements() {

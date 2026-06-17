@@ -50,6 +50,17 @@ assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'hom
 const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8'));
 assert.equal(runtime.agent_task_executors.length, 1);
 assert.deepEqual(runtime.agent_task_executors[0], providerContract());
+assert.deepEqual(provider.runner_readiness, [{
+  id: 'wp-codebox.executable',
+  label: 'WP Codebox executable',
+  executable: {
+    env: ['HOMEBOY_WP_CODEBOX_BIN'],
+    candidates: ['wp-codebox'],
+    version_command: ['--version'],
+    install_hint: 'Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path.',
+  },
+  remediation: 'Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path.',
+}]);
 assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
