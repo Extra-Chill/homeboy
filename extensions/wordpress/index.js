@@ -21,6 +21,7 @@ module.exports = {
 	...require('./lib/datamachine-agent-ci-plan'),
 	...require('./lib/wp-codebox-apply-adapter'),
 	...require('./lib/wp-codebox-recipe-helper'),
+	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wordpress-workload-profile'),
 	...require('./lib/static-visual-parity'),
 };

@@ -79,7 +79,7 @@ assert.deepEqual(buildStaticVisualParityRecipe({
 withTempDirectory(async (root) => {
   const artifactsDirectory = path.join(root, 'artifacts');
   const outputDirectory = path.join(root, 'output');
-  const visualDir = path.join(artifactsDirectory, 'files', 'browser', 'visual-compare');
+  const visualDir = path.join(artifactsDirectory, 'custom-browser-artifacts');
   fs.mkdirSync(visualDir, { recursive: true });
   fs.writeFileSync(path.join(visualDir, 'source.png'), 'source');
   fs.writeFileSync(path.join(visualDir, 'candidate.png'), 'candidate');
@@ -93,12 +93,21 @@ withTempDirectory(async (root) => {
       totalPixels: 1000,
       dimensionMismatch: false,
       regions: [{ x: 1, y: 2, width: 5, height: 5, mismatchPixels: 3 }]
+    },
+    files: {
+      sourceScreenshot: 'custom-browser-artifacts/source.png',
+      candidateScreenshot: 'custom-browser-artifacts/candidate.png',
+      diffScreenshot: 'custom-browser-artifacts/diff.png'
     }
   }));
   fs.mkdirSync(outputDirectory, { recursive: true });
 
   const visualDiff = await normalizeStaticVisualParityArtifacts({
-    codeboxResult: { success: true, artifacts: { directory: artifactsDirectory } },
+    codeboxResult: {
+      success: true,
+      artifacts: { directory: artifactsDirectory },
+      files: { visualDiff: 'custom-browser-artifacts/visual-diff.json' },
+    },
     outputDirectory,
     maxMismatchRatio: 0.02,
   });
