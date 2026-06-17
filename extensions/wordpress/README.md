@@ -564,7 +564,7 @@ stable `wp-codebox agent-task-run` parent contract.
 ### WP Codebox agent-task executor
 
 The WordPress extension declares the capabilities it needs from an agent-task AI
-runtime in `wordpress.json`. The `ai-runtimes/wp-codebox` package carries the
+runtime in `wordpress.json`. The `agent-runtimes/wp-codebox` package carries the
 `wordpress.codebox-agent-task-executor` provider contract and advertises a
 Codebox backend with browser runtime, WordPress sandbox, artifact materialization,
 screenshots, and structured outcome capabilities without adding Codebox imports or
@@ -576,7 +576,7 @@ WordPress assumptions to Homeboy core.
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
-`../ai-runtimes/wp-codebox` is the runtime package surface for imports
+`../agent-runtimes/wp-codebox` is the runtime package surface for imports
 and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
 and installed extension layouts use the same implementation.
 

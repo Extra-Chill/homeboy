@@ -12,8 +12,7 @@ const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
-const HOMEBOY_WORDPRESS_BACKEND = 'wordpress';
-const LEGACY_CODEBOX_BACKEND = 'codebox';
+const WP_CODEBOX_BACKEND = 'codebox';
 
 const PROVIDER_CAPABILITIES = [
   'browser_runtime',
@@ -59,39 +58,7 @@ const DEFAULT_WORKSPACE_WRITE_TOOLS = [
   'workspace_git_add',
 ];
 
-const CODEX_SECRET_ENV = [
-  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
-  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
-  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
-  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
-  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
-];
-
-const CLAUDE_CODE_SECRET_ENV = [
-  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
-];
-
-const PROVIDER_SECRET_ENV_REQUIREMENTS = [
-  providerSecretEnvRequirement('openai', ['OPENAI_API_KEY']),
-  providerSecretEnvRequirement('codex', CODEX_SECRET_ENV),
-  providerSecretEnvRequirement('claude-code', CLAUDE_CODE_SECRET_ENV),
-];
-
-const PROVIDER_DEFAULTS = {
-  openai: {
-    secret_env: ['OPENAI_API_KEY'],
-  },
-  codex: {
-    secret_env: CODEX_SECRET_ENV,
-  },
-  'claude-code': {
-    secret_env: CLAUDE_CODE_SECRET_ENV,
-  },
-};
-
-const DEFAULT_CODEX_MODEL = 'gpt-5.5';
-const CODEX_PROVIDER_PLUGIN_GUIDANCE = `Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ${['ai-provider-for', ['open', 'code'].join('')].join('-')} will not work.`;
-const CODEX_PHP_AI_CLIENT_GUIDANCE = 'Codex tasks require a php-ai-client checkout that supports RequestAuthenticationMethod::bearerToken and has Composer vendor dependencies installed before WP Codebox prepares the runtime overlay.';
+const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects with a non-empty string kind, for example { "kind": "bundled-library", "library": "php-ai-client", "source": "/path/to/php-ai-client" }. The legacy type field is not accepted.';
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -196,8 +163,8 @@ function assertAgentTaskRequest(request) {
     throw new Error('Agent task request requires task_id.');
   }
   const backend = request.executor?.backend;
-  if (![HOMEBOY_WORDPRESS_BACKEND, LEGACY_CODEBOX_BACKEND].includes(backend)) {
-    throw new Error('WordPress executor provider only accepts executor.backend "wordpress".');
+  if (backend !== WP_CODEBOX_BACKEND) {
+    throw new Error('WP Codebox executor provider only accepts executor.backend "codebox".');
   }
 }
 
@@ -206,7 +173,7 @@ function providerContract(options = {}) {
     schema: 'homeboy/agent-task-executor-provider/v1',
     id: options.id || WP_CODEBOX_PROVIDER_ID,
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
-    backend: LEGACY_CODEBOX_BACKEND,
+    backend: WP_CODEBOX_BACKEND,
     command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     request_schema: AGENT_TASK_REQUEST_SCHEMA,
     outcome_schema: AGENT_TASK_OUTCOME_SCHEMA,
@@ -214,7 +181,7 @@ function providerContract(options = {}) {
     outcome_statuses: AGENT_TASK_OUTCOME_STATUSES,
     failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
     redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
-    secret_env_requirements: PROVIDER_SECRET_ENV_REQUIREMENTS,
+    secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
     capabilities: PROVIDER_CAPABILITIES,
     workspace_materialization: {
       cwd: 'git_checkout',
@@ -242,11 +209,27 @@ function providerSecretEnvRequirement(provider, env) {
   };
 }
 
-function providerDefaultsContract() {
-  return Object.fromEntries(Object.entries(PROVIDER_DEFAULTS).map(([provider, defaults]) => [provider, {
+function providerDefaultsContract(providerDefaults = runtimeProviderDefaults()) {
+  return Object.fromEntries(Object.entries(providerDefaults).map(([provider, defaults]) => [provider, {
     ...defaults,
     secret_env: normalizeArray(defaults.secret_env),
   }]));
+}
+
+function runtimeManifest() {
+  return readJsonFile(RUNTIME_MANIFEST_PATH) || {};
+}
+
+function runtimeExecutorManifest() {
+  return runtimeManifest().agent_task_executors?.[0] || {};
+}
+
+function runtimeProviderDefaults() {
+  return firstObject(runtimeExecutorManifest().provider_defaults) || {};
+}
+
+function runtimeSecretEnvRequirements() {
+  return normalizeArray(runtimeExecutorManifest().secret_env_requirements);
 }
 
 function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
@@ -761,8 +744,10 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     settings.wp_codebox_provider_plugin_path,
     process.env.HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH,
   );
-  const provider = config.provider || options.provider || defaultProvider(settings, providerPluginPath);
-  const model = config.model || options.model || defaultModelForProvider(provider, settings);
+  const providerDefaults = runtimeProviderDefaultsFromSettings(settings);
+  const provider = config.provider || options.provider || defaultProvider(settings);
+  const providerConfig = providerConfigFor(provider, settings, providerDefaults);
+  const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
     settings.wp_codebox_agents_api_path,
@@ -776,10 +761,10 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     agentsApi: agentsApiPath,
     legacyRuntime: dataMachinePath,
     legacyRuntimeTools: dataMachineCodePath,
-    providerPluginPaths: defaultProviderPluginPaths(provider, settings, providerPluginPath),
+    providerPluginPaths: defaultProviderPluginPaths(provider, config, options, settings, providerConfig, providerPluginPath),
     provider,
     model,
-    secretEnv: defaultSecretEnv(provider, settings),
+    secretEnv: defaultSecretEnv(config, options, settings, providerConfig),
     wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
@@ -794,28 +779,16 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   };
 }
 
-function defaultProviderPluginPaths(provider, settings, fallbackProviderPluginPath) {
-  const explicitCodebox = normalizeArray(settings.wp_codebox_provider_plugin_paths);
-  if (explicitCodebox.length > 0) {
-    return provider === 'codex'
-      ? explicitCodebox.filter(codexProviderPluginPathLooksUsable)
-      : explicitCodebox;
-  }
-  const explicit = normalizeArray(settings.provider_plugin_paths);
-  if (provider === 'codex') {
-    return explicit.filter(codexProviderPluginPathLooksUsable);
-  }
-  if (explicit.length > 0) {
-    return explicit;
-  }
-  return fallbackProviderPluginPath ? [fallbackProviderPluginPath] : [];
-}
-
-function codexProviderPluginPathLooksUsable(providerPath) {
-  if (!providerPath || !fs.existsSync(providerPath)) {
-    return false;
-  }
-  return fs.existsSync(path.join(providerPath, 'src', 'Codex', 'CodexProvider.php'));
+function defaultProviderPluginPaths(provider, config, options, settings, providerConfig, fallbackProviderPluginPath) {
+  return uniquePaths(firstProviderPathArray(
+    config.provider_plugin_paths,
+    options.providerPluginPaths,
+    providerPathsFor(settings.wp_codebox_provider_plugin_paths, provider),
+    providerPathsFor(settings.provider_plugin_paths, provider),
+    providerConfig.provider_plugin_paths,
+    fallbackProviderPluginPath ? [fallbackProviderPluginPath] : undefined,
+    []
+  ));
 }
 
 function defaultRuntimeOverlayProfiles(settings) {
@@ -892,6 +865,10 @@ function firstExistingPath(...candidates) {
   return '';
 }
 
+function uniquePaths(paths) {
+  return Array.from(new Set(paths.filter(Boolean)));
+}
+
 function siblingPath(base, name) {
   return base && name ? path.join(base, name) : '';
 }
@@ -908,63 +885,65 @@ function bundledAgentsApiPath(dataMachinePath) {
   ] : [];
 }
 
-function defaultSecretEnv(provider, settings) {
-  const explicit = normalizeArray(settings.wp_codebox_secret_env || settings.secret_env);
-  if (explicit.length > 0) {
-    return explicit;
-  }
-  if (provider === 'codex') {
-    return CODEX_SECRET_ENV;
-  }
-  if (provider === 'claude-code') {
-    return CLAUDE_CODE_SECRET_ENV;
-  }
-  return normalizeArray(PROVIDER_DEFAULTS[provider]?.secret_env);
+function defaultSecretEnv(config, options, settings, providerConfig) {
+  return uniquePaths(firstProviderPathArray(
+    config.secret_env,
+    options.secretEnv,
+    settings.wp_codebox_secret_env,
+    settings.secret_env,
+    providerConfig.secret_env,
+    []
+  ));
 }
 
-function defaultProvider(settings, providerPluginPath) {
+function defaultProvider(settings) {
   const explicit = settings.wp_codebox_provider || settings.provider || process.env.HOMEBOY_WP_CODEBOX_PROVIDER;
   if (explicit) {
     return explicit;
   }
-  return hasCodexSubscriptionAuth(settings) ? 'codex' : defaultProviderForPluginPath(providerPluginPath);
+  return settings.wp_codebox_default_provider || settings.default_provider || '';
 }
 
-function defaultProviderForPluginPath(providerPluginPath) {
-  if (!providerPluginPath) {
-    return '';
-  }
-  return path.basename(providerPluginPath).startsWith('ai-provider-for-openai') ? 'openai' : '';
-}
-
-function defaultModelForProvider(provider, settings) {
+function defaultModelForProvider(provider, settings, providerConfig) {
   const explicit = settings.wp_codebox_model || settings.model || process.env.HOMEBOY_WP_CODEBOX_MODEL;
   if (explicit) {
     return explicit;
   }
-  const codexModel = settings.wp_codebox_codex_model || process.env.HOMEBOY_WP_CODEBOX_CODEX_MODEL;
-  if (provider === 'codex' && hasCodexSubscriptionAuth(settings)) {
-    return codexModel || DEFAULT_CODEX_MODEL;
-  }
-  return '';
+  return providerConfig.model || '';
 }
 
-function hasCodexSubscriptionAuth(settings = {}) {
-  if (settings.wp_codebox_codex_enabled === false || settings.wp_codebox_codex_enabled === 'false') {
-    return false;
-  }
-  const envHasTokens = CODEX_SECRET_ENV.slice(0, 4).every((name) => Boolean(process.env[name]));
-  if (envHasTokens) {
-    return true;
-  }
-  const authPath = settings.wp_codebox_codex_auth_path || process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || defaultCodexAuthPath();
-  const auth = readJsonFile(authPath);
-  return Boolean(auth?.tokens?.access_token && auth?.tokens?.refresh_token && auth?.tokens?.account_id);
+function runtimeProviderDefaultsFromSettings(settings = {}) {
+  return {
+    ...runtimeProviderDefaults(),
+    ...(firstObject(settings.wp_codebox_provider_defaults, settings.provider_defaults) || {}),
+  };
 }
 
-function defaultCodexAuthPath() {
-  const home = process.env.HOME;
-  return home ? path.join(home, '.codex', 'auth.json') : '';
+function providerConfigFor(provider, settings = {}, providerDefaults = {}) {
+  if (!provider) {
+    return {};
+  }
+  return {
+    ...(firstObject(providerDefaults[provider]) || {}),
+    ...(firstObject(settings.wp_codebox_providers?.[provider], settings.providers?.[provider]) || {}),
+  };
+}
+
+function providerPathsFor(value, provider) {
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    return normalizeArray(value);
+  }
+  return normalizeArray(value[provider]);
+}
+
+function firstProviderPathArray(...values) {
+  for (const value of values) {
+    const normalized = normalizeArray(value);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  return [];
 }
 
 function readJsonFile(filePath) {
@@ -2188,12 +2167,6 @@ function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null
   }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
-function codexProviderFromRequest(request, result = {}) {
-  const configProvider = request.executor?.config?.provider;
-  const resultProvider = result.task_input?.provider || result.metadata?.provider || result.provider;
-  return configProvider === 'codex' || resultProvider === 'codex' ? 'codex' : '';
-}
-
 function resultDiagnostics(result = {}) {
   return [
     ...(Array.isArray(result.diagnostics) ? result.diagnostics : []),
@@ -2214,8 +2187,17 @@ function codeboxProviderNotRegisteredCode(result = {}) {
   return candidates.find((candidate) => /wp_codebox_provider_not_registered|provider_not_registered/i.test(candidate)) || '';
 }
 
-function codexProviderNotRegisteredDiagnostic(request, result = {}) {
-  if (codexProviderFromRequest(request, result) !== 'codex' || !codeboxProviderNotRegisteredCode(result)) {
+function providerFromRequest(request, result = {}) {
+  return request.executor?.config?.provider
+    || result.task_input?.provider
+    || result.metadata?.provider
+    || result.provider
+    || '';
+}
+
+function providerNotRegisteredDiagnostic(request, result = {}) {
+  const provider = providerFromRequest(request, result);
+  if (!provider || !codeboxProviderNotRegisteredCode(result)) {
     return null;
   }
   const providerPluginPaths = normalizeArray(
@@ -2224,80 +2206,12 @@ function codexProviderNotRegisteredDiagnostic(request, result = {}) {
       || request.executor?.config?.provider_plugin_paths
   );
   return {
-    class: 'codebox.codex_provider_plugin_guidance',
-    message: `WP Codebox did not find a registered codex provider after loading provider plugins. ${CODEX_PROVIDER_PLUGIN_GUIDANCE}`,
+    class: 'codebox.provider_not_registered',
+    message: `WP Codebox did not find a registered ${provider} provider after loading provider plugins.`,
     data: {
-      provider: 'codex',
+      provider,
       provider_plugin_paths: providerPluginPaths,
-      expected: 'Codex-capable ai-provider-for-openai checkout from the Codex provider branch/PR.',
       missing_provider_plugin_path: providerPluginPaths.length === 0,
-      guidance: CODEX_PROVIDER_PLUGIN_GUIDANCE,
-    },
-  };
-}
-
-function codexDiagnosticText(result = {}) {
-  const diagnostics = resultDiagnostics(result).flatMap((diagnostic) => [
-    diagnostic.message,
-    diagnostic.code,
-    diagnostic.class,
-    diagnostic.kind,
-    diagnostic.data?.stderr,
-    diagnostic.data?.stdout,
-    diagnostic.data?.message,
-  ]);
-  return [
-    result.summary,
-    result.message,
-    result.error,
-    result.stderr,
-    result.stdout,
-    result.code,
-    result.error_code,
-    result.errorCode,
-    result.metadata?.summary,
-    result.metadata?.message,
-    result.metadata?.error,
-    result.metadata?.stderr,
-    result.metadata?.stdout,
-    ...diagnostics,
-  ].filter(Boolean).map(String).join('\n');
-}
-
-function codexPhpAiClientBearerTokenDiagnostic(request, result = {}) {
-  if (codexProviderFromRequest(request, result) !== 'codex') {
-    return null;
-  }
-  const text = codexDiagnosticText(result);
-  if (!/RequestAuthenticationMethod::bearerToken|bearerToken\(\).*does not exist|undefined method .*bearerToken/i.test(text)) {
-    return null;
-  }
-  return {
-    class: 'codebox.codex_php_ai_client_missing_bearer_token_auth',
-    message: `Codex provider loaded, but php-ai-client does not expose bearer-token auth. ${CODEX_PHP_AI_CLIENT_GUIDANCE}`,
-    data: {
-      provider: 'codex',
-      expected: 'php-ai-client with RequestAuthenticationMethod::bearerToken support.',
-      guidance: CODEX_PHP_AI_CLIENT_GUIDANCE,
-    },
-  };
-}
-
-function codexPhpAiClientVendorDiagnostic(request, result = {}) {
-  if (codexProviderFromRequest(request, result) !== 'codex') {
-    return null;
-  }
-  const text = codexDiagnosticText(result);
-  if (!/php-ai-client[\s\S]*(vendor\/autoload\.php|vendor(?:\/|\\\\)|composer install|Composer vendor|vendor.*missing)|vendor(?:\/|\\\\).*php-ai-client/i.test(text)) {
-    return null;
-  }
-  return {
-    class: 'codebox.codex_php_ai_client_vendor_missing',
-    message: `WP Codebox could not prepare the php-ai-client runtime overlay because Composer vendor dependencies are missing. ${CODEX_PHP_AI_CLIENT_GUIDANCE}`,
-    data: {
-      provider: 'codex',
-      expected: 'Prepared php-ai-client checkout with vendor/autoload.php present.',
-      guidance: CODEX_PHP_AI_CLIENT_GUIDANCE,
     },
   };
 }
@@ -2323,9 +2237,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
-  const codexProviderDiagnostic = codexProviderNotRegisteredDiagnostic(request, result);
-  const codexBearerTokenDiagnostic = codexPhpAiClientBearerTokenDiagnostic(request, result);
-  const codexVendorDiagnostic = codexPhpAiClientVendorDiagnostic(request, result);
+  const providerDiagnostic = providerNotRegisteredDiagnostic(request, result);
   const outcome = {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     task_id: request.task_id,
@@ -2334,7 +2246,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [codexProviderDiagnostic, codexBearerTokenDiagnostic, codexVendorDiagnostic, missingRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -2371,7 +2283,7 @@ module.exports = {
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_REDACTED_METADATA_KEYS,
-  HOMEBOY_WORDPRESS_BACKEND,
+  WP_CODEBOX_BACKEND,
   providerContract,
   codeboxTaskRequestFromAgentTaskRequest,
   agentTaskOutcomeFromCodeboxResult,

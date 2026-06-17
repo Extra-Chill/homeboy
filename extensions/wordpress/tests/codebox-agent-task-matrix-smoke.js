@@ -71,7 +71,7 @@ function matrixRequests() {
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-matrix-'));
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);
-  const script = path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
+  const script = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
   const outcomes = matrixRequests().map((request) => {
     const result = spawnSync(process.execPath, [script, '--task-runner', fixture], {
       encoding: 'utf8',

@@ -8,7 +8,7 @@ const path = require('node:path');
 const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
-} = require('../../ai-runtimes/wp-codebox');
+} = require('../../agent-runtimes/wp-codebox');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 const codexSecretEnv = [
@@ -34,9 +34,10 @@ assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSe
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);
-assert.equal(manifest.agent_runtimes?.some((candidate) => candidate.id === 'wp-codebox'), false);
+assert.equal(manifest.agent_runtimes, undefined);
+assert.equal(manifest.agent_task.default_backend, undefined);
 assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'homeboy-wordpress-agent-task/v1');
-const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'ai-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8'));
+const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8'));
 assert.equal(runtime.agent_task_executors.length, 1);
 assert.deepEqual(runtime.agent_task_executors[0], providerContract());
 assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
@@ -58,7 +59,7 @@ const taskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-wordpress-task-1',
   executor: {
-    backend: 'wordpress',
+    backend: 'codebox',
     config: { provider: 'openai' },
   },
   instructions: 'Run a generic WordPress ability with declared tools.',
@@ -79,7 +80,7 @@ const taskInput = codeboxTaskRequestFromAgentTaskRequest({
 });
 
 assert.equal(taskInput.schema, 'wp-codebox/task-input/v1');
-assert.equal(taskInput.parent_request.executor.backend, 'wordpress');
+assert.equal(taskInput.parent_request.executor.backend, 'codebox');
 assert.equal(Object.hasOwn(taskInput, 'agent'), false);
 assert.deepEqual(taskInput.runtime_task, {
   ability: 'wordpress/site-health',
@@ -100,7 +101,7 @@ assert.equal(
 const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-agent-bundle-task-1',
-  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
   instructions: 'Run a repo-loop bundle workflow.',
   artifacts: {
     outputs: {
@@ -140,7 +141,7 @@ assert.deepEqual(repoLoopBundleTaskInput.artifact_declarations, [{
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-generic-ability-task-1',
-  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
   instructions: 'Run a generic declared ability with workflow inputs.',
   client_context: {
     inputs: {
@@ -172,7 +173,7 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   cwd: repoLoopWorkspaceRoot,
   repo: 'wp-site-generator@canonical-loop-main-20260616',
   executor: {
-    backend: 'wordpress',
+    backend: 'codebox',
     config: {
       provider: 'openai',
       task_kind: 'repo-cooking',
@@ -204,7 +205,7 @@ assert.deepEqual(
 const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-typed-outputs-task-1',
-  executor: { backend: 'wordpress', config: { provider: 'openai' } },
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
   instructions: 'Run a repo-loop step that declares typed outputs generically.',
   outputs: {
     typed_artifacts: [{
@@ -258,7 +259,7 @@ try {
   codexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'codex-codebox-task-1',
-    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    executor: { backend: 'codebox', config: { provider: 'codex' } },
     instructions: 'Run a Codex-backed Codebox task.',
     inputs: {},
   });
@@ -269,14 +270,14 @@ try {
     process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
   }
 }
-assert.deepEqual(codexTaskInput.provider_plugin_paths, []);
+assert.deepEqual(codexTaskInput.provider_plugin_paths, ['/missing/stale-openai-provider']);
 assert.deepEqual(codexTaskInput.secret_env, provider.provider_defaults.codex.secret_env);
 
 const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'claude-code-codebox-task-1',
   executor: {
-    backend: 'wordpress',
+    backend: 'codebox',
     config: {
       provider: 'claude-code',
       model: 'opus-4.7',
@@ -287,22 +288,18 @@ const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 });
 assert.deepEqual(claudeCodeTaskInput.secret_env, provider.provider_defaults['claude-code'].secret_env);
 
-const codexProviderRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codex-provider-'));
-const codexProviderPath = path.join(codexProviderRoot, 'ai-provider-for-openai');
-fs.mkdirSync(path.join(codexProviderPath, 'src', 'Codex'), { recursive: true });
-fs.writeFileSync(
-  path.join(codexProviderPath, 'src', 'Codex', 'CodexProvider.php'),
-  '<?php\n// Registers the codex provider.\n'
-);
+const providerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-provider-'));
+const providerPath = path.join(providerRoot, 'provider-plugin');
+fs.mkdirSync(providerPath, { recursive: true });
 process.env.HOMEBOY_SETTINGS_JSON = JSON.stringify({
-  provider_plugin_paths: [codexProviderPath],
+  provider_plugin_paths: { codex: [providerPath] },
 });
 let configuredCodexTaskInput;
 try {
   configuredCodexTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     schema: 'homeboy/agent-task-request/v1',
     task_id: 'configured-codex-codebox-task-1',
-    executor: { backend: 'wordpress', config: { provider: 'codex' } },
+    executor: { backend: 'codebox', config: { provider: 'codex' } },
     instructions: 'Run a Codex-backed Codebox task with the configured provider checkout.',
     inputs: {},
   });
@@ -313,6 +310,6 @@ try {
     process.env.HOMEBOY_SETTINGS_JSON = previousHomeboySettingsJson;
   }
 }
-assert.deepEqual(configuredCodexTaskInput.provider_plugin_paths, [codexProviderPath]);
+assert.deepEqual(configuredCodexTaskInput.provider_plugin_paths, [providerPath]);
 
 console.log('Codebox agent-task executor boundary contract passed');
