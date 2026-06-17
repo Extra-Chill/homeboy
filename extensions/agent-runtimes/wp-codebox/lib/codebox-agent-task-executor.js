@@ -283,7 +283,12 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     mode: config.mode || options.mode || 'sandbox',
     provider,
     model,
-    provider_plugin_paths: config.provider_plugin_paths || options.providerPluginPaths || defaults.providerPluginPaths || [],
+    provider_plugin_paths: firstNonEmptyArray(
+      config.provider_plugin_paths,
+      options.providerPluginPaths,
+      defaults.providerPluginPaths,
+      []
+    ),
     agent_bundles: agentBundles,
     runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
@@ -897,6 +902,16 @@ function componentDiscoveryCandidates(componentKey, discovery, settings, workspa
     }
     return [];
   });
+}
+
+function firstNonEmptyArray(...values) {
+  for (const value of values) {
+    const normalized = normalizeArray(value);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+  return [];
 }
 
 function firstExistingPath(...candidates) {
