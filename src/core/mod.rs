@@ -149,3 +149,25 @@ pub fn artifact_root() -> Result<std::path::PathBuf> {
 pub fn join_remote_path(base_path: Option<&str>, path: &str) -> Result<String> {
     paths::join_remote_path(base_path, path)
 }
+
+/// Normalize a local path lexically without touching the filesystem.
+pub fn normalize_local_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    paths::normalize_local_path(path)
+}
+
+/// Return whether `path` is inside `root` after lexical normalization.
+pub fn local_path_is_contained(
+    root: impl AsRef<std::path::Path>,
+    path: impl AsRef<std::path::Path>,
+) -> bool {
+    paths::local_path_is_contained(root, path)
+}
+
+/// Resolve a local path against a root and reject paths that escape that root.
+pub fn resolve_contained_local_path(
+    root: impl AsRef<std::path::Path>,
+    candidate: impl AsRef<std::path::Path>,
+    field: &str,
+) -> Result<std::path::PathBuf> {
+    paths::resolve_contained_local_path(root, candidate, field)
+}
