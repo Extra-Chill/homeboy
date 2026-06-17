@@ -562,13 +562,17 @@ fn materialize_snapshot_piped(
     excludes: &[String],
     action: &str,
 ) -> Result<()> {
-    let command = format!(
-        "COPYFILE_DISABLE=1 tar -C {src} {exclude} -cf - . | {target_command}",
+    let command = snapshot_archive_command(local_path, target_command, excludes);
+    run_shell_command(&command, action)
+}
+
+fn snapshot_archive_command(local_path: &Path, target_command: &str, excludes: &[String]) -> String {
+    format!(
+        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - . | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
         exclude = tar_exclude_args(excludes),
         target_command = target_command,
-    );
-    run_shell_command(&command, action)
+    )
 }
 
 pub(super) fn effective_snapshot_excludes(
@@ -1676,6 +1680,18 @@ mod tests {
         assert!(command.contains("mkdir -p \"$parent\""));
         assert!(command.contains("mv \"$tmp\" \"$dest\" && if"));
         assert!(command.contains("chown -R \"$owner\" $dest"));
+    }
+
+    #[test]
+    fn snapshot_archive_command_disables_extended_attributes() {
+        let command = snapshot_archive_command(
+            Path::new("/Users/chubes/Developer/wp-site-generator"),
+            "ssh runner 'tar -xf -'",
+            &[],
+        );
+
+        assert!(command.contains("COPYFILE_DISABLE=1"));
+        assert!(command.contains("tar --no-xattrs"));
     }
 
     #[test]
