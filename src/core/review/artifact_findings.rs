@@ -6,7 +6,7 @@ use homeboy::core::extension::lint::LintCommandOutput;
 use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::finding::HomeboyFinding;
 
-pub(super) trait ReviewArtifactFindings {
+pub trait ReviewArtifactFindings {
     fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
         Vec::new()
     }

@@ -3,9 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use homeboy::cli_surface::current_command_surface;
 use homeboy::commands::bench::BenchOutput;
 use homeboy::commands::extension::{ExtensionDetail, ExtensionOutput};
-use homeboy::commands::review::{
-    ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
-};
 use homeboy::commands::rig::RigCommandOutput;
 use homeboy::commands::runs::RunsOutput;
 use homeboy::commands::utils::response::cli_response_for_json_result;
@@ -29,6 +26,9 @@ use homeboy::core::extension::{
 };
 use homeboy::core::finding::{FindingProducerSummary, FindingSource, HomeboyFinding};
 use homeboy::core::plan::HomeboyPlan;
+use homeboy::core::review::{
+    ReviewArtifact, ReviewArtifactCommand, ReviewCommandOutput, ReviewStage, ReviewSummary,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 

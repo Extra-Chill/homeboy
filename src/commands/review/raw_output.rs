@@ -1,7 +1,8 @@
 use crate::commands::raw_output::RawCommandRun;
 use crate::commands::GlobalArgs;
+use homeboy::core::review::render;
 
-use super::{render, run, ReviewArgs};
+use super::{run, ReviewArgs};
 
 pub fn run_markdown_with_json(args: ReviewArgs, global: &GlobalArgs) -> RawCommandRun {
     let banners = args.banner.clone();
