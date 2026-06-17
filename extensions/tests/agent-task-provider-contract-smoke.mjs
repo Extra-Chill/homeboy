@@ -20,6 +20,12 @@ const {
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
 } = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-provider-contract.js'));
+const {
+	AGENT_TASK_RUNNER_SPEC_SCHEMA,
+	agentTaskRequestFromRunnerSpec,
+	agentTaskRunnerSpec,
+	validateAgentTaskRunnerSpec,
+} = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-runner-contract.js'));
 
 assert.equal(AGENT_TASK_ARTIFACT_SCHEMA, 'homeboy/agent-task-artifact/v1');
 assert.equal(AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA, 'homeboy/agent-task-artifact-declaration/v1');
@@ -72,5 +78,28 @@ assert.deepEqual(agentTaskEvidenceRefFromRef({ type: 'preview', path: 'artifacts
 	uri: 'artifacts/preview.html',
 	label: 'Preview',
 });
+
+const runnerSpec = agentTaskRunnerSpec({
+	backend: 'codebox',
+	config: { provider: 'codex' },
+	secretEnv: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
+	taskTimeoutSeconds: 900,
+	expectedArtifacts: ['patch'],
+});
+assert.equal(runnerSpec.schema, AGENT_TASK_RUNNER_SPEC_SCHEMA);
+assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec }), {
+	executor: {
+		backend: 'codebox',
+		secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
+		config: { provider: 'codex' },
+	},
+	limits: { task_timeout_seconds: 900 },
+	expected_artifacts: ['patch'],
+});
+assert.equal(validateAgentTaskRunnerSpec(runnerSpec), runnerSpec);
+assert.throws(
+	() => validateAgentTaskRunnerSpec({ schema: AGENT_TASK_RUNNER_SPEC_SCHEMA }),
+	/runner spec executor is required/
+);
 
 console.log('agent task provider contract smoke passed');
