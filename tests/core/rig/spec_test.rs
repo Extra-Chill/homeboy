@@ -251,6 +251,7 @@ fn test_spec_requirements_parse_generic_executables_and_filesystem_assertions() 
                 {
                     "executable": "node",
                     "env": "NODE_BIN",
+                    "env_aliases": ["ASDF_NODE_BIN", "VOLTA_NODE_BIN"],
                     "remediation": "install Node.js"
                 }
             ],
@@ -273,6 +274,10 @@ fn test_spec_requirements_parse_generic_executables_and_filesystem_assertions() 
     assert_eq!(
         spec.requirements.executables[0].env.as_deref(),
         Some("NODE_BIN")
+    );
+    assert_eq!(
+        spec.requirements.executables[0].env_aliases,
+        vec!["ASDF_NODE_BIN", "VOLTA_NODE_BIN"]
     );
     assert_eq!(
         spec.requirements.filesystem_assertions[0].kind,

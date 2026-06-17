@@ -196,6 +196,10 @@ pub struct ExecutableRequirementSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
 
+    /// Additional environment variables to try, in order, before PATH lookup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_aliases: Vec<String>,
+
     /// Human-readable label shown in `rig check` output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -1496,6 +1500,9 @@ pub enum PipelineStep {
         /// Environment variable whose value overrides `executable` lookup.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         executable_env: Option<String>,
+        /// Additional environment variables to try, in order, before PATH lookup.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        executable_env_aliases: Vec<String>,
         /// Command to run when the filesystem requirement is missing and the
         /// current pipeline name appears in `prepare_phases`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

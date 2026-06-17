@@ -645,6 +645,7 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
         component_path_contains,
         executable,
         executable_env,
+        executable_env_aliases,
         prepare_command,
         prepare_phases,
         cwd,
@@ -708,6 +709,7 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
             rig,
             executable.as_deref(),
             executable_env.as_deref(),
+            executable_env_aliases,
             env,
         ))
         .collect::<Vec<_>>();
@@ -733,6 +735,7 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
             rig,
             executable.as_deref(),
             executable_env.as_deref(),
+            executable_env_aliases,
             env,
         ))
         .collect::<Vec<_>>();
@@ -778,32 +781,57 @@ fn requirement_executable_failure(
     rig: &RigSpec,
     executable: Option<&str>,
     executable_env: Option<&str>,
+    executable_env_aliases: &[String],
     env: &HashMap<String, String>,
 ) -> Option<String> {
     let executable = executable?;
     let executable = expand_vars(rig, executable);
-    let override_value = executable_env.and_then(|name| env_value(name, env));
-    let candidate = override_value
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| expand_vars(rig, value))
-        .unwrap_or_else(|| executable.clone());
+    let mut attempts = Vec::new();
 
-    if find_executable(&candidate, env).is_some() {
+    for name in executable_env_names(executable_env, executable_env_aliases) {
+        match env_value(name, env) {
+            Some(value) if !value.trim().is_empty() => {
+                let candidate = expand_vars(rig, &value);
+                if find_executable(&candidate, env).is_some() {
+                    return None;
+                }
+                attempts.push(format!("{}={} (not executable)", name, candidate));
+            }
+            _ => attempts.push(format!("{} is unset or empty", name)),
+        }
+    }
+
+    if find_executable(&executable, env).is_some() {
         return None;
     }
 
-    Some(match (executable_env, override_value) {
-        (Some(name), Some(value)) if !value.trim().is_empty() => format!(
-            "executable `{}` does not exist or is not executable from {}={}",
-            executable, name, value
-        ),
-        (Some(name), _) => format!(
-            "executable `{}` not found on PATH ({} is unset or empty)",
-            executable, name
-        ),
-        _ => format!("executable `{}` not found on PATH", executable),
-    })
+    attempts.push(declared_executable_attempt(&executable));
+
+    Some(format!(
+        "executable `{}` could not be resolved; tried {}",
+        executable,
+        attempts.join(", ")
+    ))
+}
+
+fn executable_env_names<'a>(
+    executable_env: Option<&'a str>,
+    executable_env_aliases: &'a [String],
+) -> Vec<&'a str> {
+    executable_env
+        .into_iter()
+        .chain(executable_env_aliases.iter().map(String::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .collect()
+}
+
+fn declared_executable_attempt(declared: &str) -> String {
+    let path = Path::new(declared);
+    if declared.contains(std::path::MAIN_SEPARATOR) || path.is_absolute() {
+        format!("declared executable `{}`", declared)
+    } else {
+        format!("PATH lookup for `{}`", declared)
+    }
 }
 
 fn env_value(name: &str, env: &HashMap<String, String>) -> Option<String> {
