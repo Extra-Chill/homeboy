@@ -258,8 +258,9 @@ pub mod scheduler {
 pub mod secrets {
     pub use super::super::agent_task_secrets::{
         map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
-        resolve_secret_env, secret_env_status, secret_env_status_with_fallbacks, set_config_secret,
-        set_keychain_bundle, set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
+        resolve_secret_env, resolve_secret_env_with_fallbacks, secret_env_status,
+        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
+        set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
         AgentTaskSecretResolutionError,
     };
 }

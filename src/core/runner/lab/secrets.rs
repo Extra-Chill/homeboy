@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::core::agent_tasks::provider::{
     provider_runner_secret_env_for_plan, provider_secret_sources_for_plan,
 };
+use crate::core::agent_tasks::provider_secret_sources_for_discovered_providers;
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::{config, Error, Result};
@@ -38,8 +39,13 @@ pub(super) fn hydrate_agent_task_secret_env(
         }));
     }
 
+    let fallback_sources = provider_secret_sources_for_discovered_providers();
     if !names.is_empty() {
-        let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
+        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(
+            &names,
+            &fallback_sources,
+        )
+        .map_err(|error| {
             Error::validation_invalid_argument(
                 "secret-env",
                 error.message,
@@ -56,7 +62,7 @@ pub(super) fn hydrate_agent_task_secret_env(
 
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
-        "secret_env": agent_task_secrets::secret_env_status(&names),
+        "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),
         "runner_deferred_secret_env": runner_deferred_names
             .into_iter()
             .map(|name| serde_json::json!({
