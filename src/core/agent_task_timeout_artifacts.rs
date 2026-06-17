@@ -9,7 +9,11 @@ use crate::core::agent_task::{
     AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA,
 };
-use crate::core::agent_task_provider::{role_aliases_for_executor, AgentTaskProviderRoleAliases};
+use crate::core::agent_task_provider::{
+    role_aliases_for_executor, timeout_artifact_discovery_for_executor,
+    AgentTaskProviderArtifactPattern, AgentTaskProviderRoleAliases,
+    AgentTaskProviderTimeoutArtifactDiscovery,
+};
 
 const EXPECTED_RUNTIME_EVIDENCE_FILES: &[&str] = &[
     "transcript.json",
@@ -36,18 +40,35 @@ impl TimeoutArtifactDiscovery {
             &request.executor.backend,
             request.executor.selector.as_deref(),
         );
-        Self::discover_with_role_aliases(request, &role_aliases)
+        let timeout_discovery = timeout_artifact_discovery_for_executor(
+            &request.executor.backend,
+            request.executor.selector.as_deref(),
+        );
+        Self::discover_with_contract(request, &role_aliases, &timeout_discovery)
     }
 
+    fn discover_with_contract(
+        request: &AgentTaskRequest,
+        role_aliases: &AgentTaskProviderRoleAliases,
+        timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
+    ) -> Self {
+        let mut discovery = Self::default();
+        for path in artifact_discovery_paths(request, timeout_discovery) {
+            discovery.scan_path(&path, request, role_aliases, timeout_discovery);
+        }
+        discovery
+    }
+
+    #[cfg(test)]
     fn discover_with_role_aliases(
         request: &AgentTaskRequest,
         role_aliases: &AgentTaskProviderRoleAliases,
     ) -> Self {
-        let mut discovery = Self::default();
-        for path in artifact_discovery_paths(request) {
-            discovery.scan_path(&path, request, role_aliases);
-        }
-        discovery
+        Self::discover_with_contract(
+            request,
+            role_aliases,
+            &AgentTaskProviderTimeoutArtifactDiscovery::default(),
+        )
     }
 
     pub(crate) fn has_runtime_evidence(&self) -> bool {
@@ -59,13 +80,14 @@ impl TimeoutArtifactDiscovery {
         path: &Path,
         request: &AgentTaskRequest,
         role_aliases: &AgentTaskProviderRoleAliases,
+        timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
     ) {
         let Ok(metadata) = fs::metadata(path) else {
             return;
         };
 
         if metadata.is_file() {
-            self.record_file(path, request, role_aliases);
+            self.record_file(path, request, role_aliases, timeout_discovery);
             return;
         }
 
@@ -74,7 +96,7 @@ impl TimeoutArtifactDiscovery {
         }
 
         let runtime_evidence_count_before = self.runtime_evidence_count();
-        self.scan_directory_files(path, request, role_aliases, 0, &mut 0);
+        self.scan_directory_files(path, request, role_aliases, timeout_discovery, 0, &mut 0);
         self.record_directory_if_useful(
             path,
             self.runtime_evidence_count() > runtime_evidence_count_before,
@@ -134,6 +156,7 @@ impl TimeoutArtifactDiscovery {
         path: &Path,
         request: &AgentTaskRequest,
         role_aliases: &AgentTaskProviderRoleAliases,
+        timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
     ) {
         if let Some(outcome) = read_discovered_outcome(path, request) {
             append_unique_artifacts(&mut self.artifacts, outcome.artifacts.clone());
@@ -147,7 +170,9 @@ impl TimeoutArtifactDiscovery {
             return;
         }
 
-        let Some(kind) = artifact_kind_from_path(path, role_aliases) else {
+        let Some((kind, mime, metadata)) =
+            artifact_shape_from_path(path, role_aliases, timeout_discovery)
+        else {
             return;
         };
         let Some(id) = artifact_id_from_path(path) else {
@@ -163,10 +188,10 @@ impl TimeoutArtifactDiscovery {
                 .map(|name| name.to_string_lossy().to_string()),
             path: Some(path.display().to_string()),
             url: None,
-            mime: mime_from_path(path),
+            mime,
             size_bytes,
             sha256,
-            metadata: serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+            metadata,
         });
     }
 
@@ -175,6 +200,7 @@ impl TimeoutArtifactDiscovery {
         path: &Path,
         request: &AgentTaskRequest,
         role_aliases: &AgentTaskProviderRoleAliases,
+        timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
         depth: usize,
         visited: &mut usize,
     ) {
@@ -195,10 +221,17 @@ impl TimeoutArtifactDiscovery {
                 continue;
             };
             if child_metadata.is_file() {
-                self.record_file(&child, request, role_aliases);
+                self.record_file(&child, request, role_aliases, timeout_discovery);
             } else if child_metadata.is_dir() {
                 let runtime_evidence_count_before = self.runtime_evidence_count();
-                self.scan_directory_files(&child, request, role_aliases, depth + 1, visited);
+                self.scan_directory_files(
+                    &child,
+                    request,
+                    role_aliases,
+                    timeout_discovery,
+                    depth + 1,
+                    visited,
+                );
                 self.record_directory_if_useful(
                     &child,
                     self.runtime_evidence_count() > runtime_evidence_count_before,
@@ -298,10 +331,24 @@ fn artifact_has_content(artifact: &AgentTaskArtifact) -> bool {
         .unwrap_or(true)
 }
 
-fn artifact_discovery_paths(request: &AgentTaskRequest) -> Vec<PathBuf> {
+fn artifact_discovery_paths(
+    request: &AgentTaskRequest,
+    timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    collect_artifact_paths_from_value(&request.metadata, &mut paths);
-    collect_artifact_paths_from_value(&request.executor.config, &mut paths);
+    collect_artifact_paths_from_value(&request.metadata, default_path_keys(), &mut paths);
+    collect_artifact_paths_from_value(&request.executor.config, default_path_keys(), &mut paths);
+    collect_artifact_paths_from_value(
+        &request.metadata,
+        &timeout_discovery.metadata_path_keys,
+        &mut paths,
+    );
+    collect_artifact_paths_from_value(
+        &request.executor.config,
+        &timeout_discovery.config_path_keys,
+        &mut paths,
+    );
+    paths.extend(timeout_discovery.paths.iter().map(PathBuf::from));
     for expected in &request.expected_artifacts {
         paths.push(PathBuf::from(expected));
     }
@@ -313,24 +360,29 @@ fn artifact_discovery_paths(request: &AgentTaskRequest) -> Vec<PathBuf> {
     paths
 }
 
-fn collect_artifact_paths_from_value(value: &Value, paths: &mut Vec<PathBuf>) {
-    for key in [
+fn default_path_keys() -> &'static [&'static str] {
+    &[
         "artifact_root",
         "artifact_path",
         "outcome_path",
         "agent_result_path",
-    ] {
-        if let Some(path) = value.get(key).and_then(Value::as_str) {
-            paths.push(PathBuf::from(path));
-        }
-    }
-
-    for key in [
         "artifact_roots",
         "artifact_paths",
         "outcome_paths",
         "agent_result_paths",
-    ] {
+    ]
+}
+
+fn collect_artifact_paths_from_value(
+    value: &Value,
+    keys: &[impl AsRef<str>],
+    paths: &mut Vec<PathBuf>,
+) {
+    for key in keys {
+        let key = key.as_ref();
+        if let Some(path) = value.get(key).and_then(Value::as_str) {
+            paths.push(PathBuf::from(path));
+        }
         if let Some(values) = value.get(key).and_then(Value::as_array) {
             paths.extend(values.iter().filter_map(Value::as_str).map(PathBuf::from));
         }
@@ -366,6 +418,32 @@ fn merge_outcome_metadata_actionable(metadata: Value, actionable: bool) -> Value
         }
         _ => serde_json::json!({ "actionable": actionable }),
     }
+}
+
+fn artifact_shape_from_path(
+    path: &Path,
+    role_aliases: &AgentTaskProviderRoleAliases,
+    timeout_discovery: &AgentTaskProviderTimeoutArtifactDiscovery,
+) -> Option<(String, Option<String>, Value)> {
+    if let Some(pattern) = timeout_discovery
+        .artifact_patterns
+        .iter()
+        .find(|pattern| artifact_pattern_matches(pattern, path))
+    {
+        return Some((
+            pattern.kind.clone(),
+            pattern.mime.clone().or_else(|| mime_from_path(path)),
+            merge_artifact_metadata(pattern.metadata.clone()),
+        ));
+    }
+
+    artifact_kind_from_path(path, role_aliases).map(|kind| {
+        (
+            kind,
+            mime_from_path(path),
+            serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+        )
+    })
 }
 
 fn artifact_kind_from_path(
@@ -406,6 +484,71 @@ fn artifact_kind_from_path(
     }
 
     None
+}
+
+fn artifact_pattern_matches(pattern: &AgentTaskProviderArtifactPattern, path: &Path) -> bool {
+    let Some(file_name) = path
+        .file_name()
+        .map(|file_name| file_name.to_string_lossy().to_ascii_lowercase())
+    else {
+        return false;
+    };
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    pattern
+        .filename_patterns
+        .iter()
+        .any(|candidate| wildcard_match(&candidate.to_ascii_lowercase(), &file_name))
+        || pattern
+            .filename_contains
+            .iter()
+            .any(|candidate| file_name.contains(&candidate.to_ascii_lowercase()))
+        || pattern
+            .extensions
+            .iter()
+            .map(|candidate| candidate.trim_start_matches('.').to_ascii_lowercase())
+            .any(|candidate| candidate == extension)
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let mut remainder = value;
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+    let parts: Vec<&str> = pattern.split('*').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return true;
+    }
+    if anchored_start && !value.starts_with(parts[0]) {
+        return false;
+    }
+    for part in &parts {
+        let Some(index) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[index + part.len()..];
+    }
+    !anchored_end || value.ends_with(parts[parts.len() - 1])
+}
+
+fn merge_artifact_metadata(metadata: Value) -> Value {
+    match metadata {
+        Value::Object(mut object) => {
+            object.insert(
+                "discovered_from".to_string(),
+                Value::String("timeout_artifact_scan".to_string()),
+            );
+            Value::Object(object)
+        }
+        _ => serde_json::json!({ "discovered_from": "timeout_artifact_scan" }),
+    }
 }
 
 fn artifact_id_from_path(path: &Path) -> Option<String> {
@@ -519,6 +662,59 @@ mod tests {
             artifact.kind == "preflight_evidence"
                 && artifact.path.as_deref() == Some(&evidence_path.to_string_lossy())
         }));
+    }
+
+    #[test]
+    fn provider_timeout_contract_adds_discovery_paths_and_typed_artifact_patterns() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let provider_root = temp.path().join("provider-artifacts");
+        fs::create_dir_all(&provider_root).expect("provider artifact root");
+        let metrics_path = provider_root.join("worker-metrics.ndjson");
+        fs::write(&metrics_path, r#"{"tokens":12}"#).expect("metrics artifact");
+
+        let timeout_discovery: AgentTaskProviderTimeoutArtifactDiscovery =
+            serde_json::from_value(json!({
+                "config_path_keys": ["provider_artifact_root"],
+                "artifact_patterns": [
+                    {
+                        "kind": "metrics",
+                        "filename_patterns": ["*-metrics.ndjson"],
+                        "mime": "application/x-ndjson",
+                        "metadata": { "role": "telemetry" }
+                    }
+                ]
+            }))
+            .expect("timeout discovery contract");
+
+        let mut request = test_request(json!({}));
+        request.executor.config = json!({
+            "provider_artifact_root": provider_root,
+        });
+
+        let discovery = TimeoutArtifactDiscovery::discover_with_contract(
+            &request,
+            &AgentTaskProviderRoleAliases::default(),
+            &timeout_discovery,
+        );
+
+        let artifact = discovery
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path.as_deref() == Some(&metrics_path.to_string_lossy()))
+            .expect("typed metrics artifact");
+        assert_eq!(artifact.kind, "metrics");
+        assert_eq!(artifact.mime.as_deref(), Some("application/x-ndjson"));
+        assert_eq!(
+            artifact.metadata.get("role").and_then(Value::as_str),
+            Some("telemetry")
+        );
+        assert_eq!(
+            artifact
+                .metadata
+                .get("discovered_from")
+                .and_then(Value::as_str),
+            Some("timeout_artifact_scan")
+        );
     }
 
     fn test_request(metadata: Value) -> AgentTaskRequest {

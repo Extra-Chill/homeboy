@@ -50,6 +50,11 @@ pub struct AgentTaskExecutorProvider {
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     #[serde(
         default,
+        skip_serializing_if = "AgentTaskProviderTimeoutArtifactDiscovery::is_empty"
+    )]
+    pub timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery,
+    #[serde(
+        default,
         skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
     )]
     pub role_aliases: AgentTaskProviderRoleAliases,
@@ -172,6 +177,55 @@ pub struct AgentTaskProviderDependencyFailurePattern {
     pub error_contains_any: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderTimeoutArtifactDiscovery {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_path_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_path_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_patterns: Vec<AgentTaskProviderArtifactPattern>,
+}
+
+impl AgentTaskProviderTimeoutArtifactDiscovery {
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+            && self.metadata_path_keys.is_empty()
+            && self.config_path_keys.is_empty()
+            && self.artifact_patterns.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskProviderArtifactPattern {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filename_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filename_contains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(
+        default = "default_metadata",
+        skip_serializing_if = "is_empty_metadata"
+    )]
+    pub metadata: Value,
+}
+
+fn default_metadata() -> Value {
+    Value::Object(Default::default())
+}
+
+fn is_empty_metadata(value: &Value) -> bool {
+    value.as_object().is_none_or(|object| object.is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -363,6 +417,16 @@ pub(crate) fn role_aliases_for_executor(
     let providers = discover_agent_task_executor_providers();
     select_provider_by_backend(&providers, backend, selector)
         .map(|provider| provider.role_aliases.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn timeout_artifact_discovery_for_executor(
+    backend: &str,
+    selector: Option<&str>,
+) -> AgentTaskProviderTimeoutArtifactDiscovery {
+    let providers = discover_agent_task_executor_providers();
+    select_provider_by_backend(&providers, backend, selector)
+        .map(|provider| provider.timeout_artifact_discovery.clone())
         .unwrap_or_default()
 }
 
@@ -1346,6 +1410,7 @@ mod tests {
             runner_readiness: Vec::new(),
             runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
+            timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
             extension_id: None,
             extension_path: None,
