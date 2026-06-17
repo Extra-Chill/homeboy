@@ -16,8 +16,8 @@ Usage: scripts/update-wp-codebox-cache.sh [options]
 Update the WP Codebox source cache used by Homeboy lab runners.
 
 Options:
-  --target <ssh-host>       SSH target such as homeboy-lab. Omit to run locally.
-  --runner <ssh-host>       Alias for --target.
+  --target <runner-id>      Runner ID such as homeboy-lab. Omit to run locally.
+  --runner <runner-id>      Alias for --target.
   --source <git-url>        WP Codebox repository URL.
                            Default: https://github.com/Automattic/wp-codebox.git
   --ref <git-ref>           Branch, tag, or SHA to fetch/reset to. When omitted,
@@ -33,10 +33,6 @@ Examples:
   scripts/update-wp-codebox-cache.sh --runner homeboy-lab --ref main
   scripts/update-wp-codebox-cache.sh --source git@github.com:Automattic/wp-codebox.git --ref afe6890
 USAGE
-}
-
-shell_quote() {
-    printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\''/g")"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -87,11 +83,18 @@ if [ -z "$NPM_BIN" ]; then
     exit 2
 fi
 
-REMOTE_SCRIPT="SOURCE=$(shell_quote "$SOURCE")
-REQUESTED_REF=$(shell_quote "$REF")
-CACHE_DIR=$(shell_quote "$CACHE_DIR")
-NPM_BIN=$(shell_quote "$NPM_BIN")
-$(cat <<'REMOTE'
+RUNNER_ID="${TARGET:-local}"
+RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN")
+
+if [ -n "$TARGET" ]; then
+    RUNNER_ARGS+=(--ssh)
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    RUNNER_ARGS+=(--dry-run)
+fi
+
+homeboy "${RUNNER_ARGS[@]}" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 fail() {
@@ -143,21 +146,4 @@ echo "Building WP Codebox packages..."
 
 SHA="$(git -C "$CACHE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
 echo "WP Codebox cache SHA: $SHA"
-REMOTE
-)"
-
-if [ "$DRY_RUN" -eq 1 ]; then
-    if [ -n "$TARGET" ]; then
-        echo "# Target: $TARGET"
-    else
-        echo "# Target: local"
-    fi
-    printf "%s" "$REMOTE_SCRIPT"
-    exit 0
-fi
-
-if [ -n "$TARGET" ]; then
-    printf "%s" "$REMOTE_SCRIPT" | ssh "$TARGET" 'bash -s'
-else
-    bash -s <<<"$REMOTE_SCRIPT"
-fi
+REMOTE_SCRIPT
