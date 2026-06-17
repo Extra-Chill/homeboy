@@ -81,6 +81,8 @@ pub struct AgentTaskDiscoveryCommands {
     pub logs: String,
     pub artifacts: String,
     pub review: String,
+    pub retry: String,
+    pub run_plan: String,
     pub promote: String,
 }
 
@@ -208,6 +210,11 @@ fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
             logs: format!("homeboy agent-task logs {run_id}"),
             artifacts: format!("homeboy agent-task artifacts {run_id}"),
             review: format!("homeboy agent-task review {run_id}"),
+            retry: format!("homeboy agent-task retry {run_id} --run"),
+            run_plan: format!(
+                "homeboy --runner <runner-id> agent-task run-plan --plan @{} --record-run-id <new-run-id>",
+                record.plan_path
+            ),
             promote: aggregate_path
                 .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
                 .unwrap_or_else(|| format!("homeboy agent-task review {run_id}")),
@@ -916,6 +923,18 @@ mod tests {
                 run.commands.review,
                 "homeboy agent-task review run-discovery-list"
             );
+            assert_eq!(
+                run.commands.retry,
+                "homeboy agent-task retry run-discovery-list --run"
+            );
+            assert!(run
+                .commands
+                .run_plan
+                .contains("homeboy --runner <runner-id> agent-task run-plan --plan @"));
+            assert!(run
+                .commands
+                .run_plan
+                .contains("/agent-task-runs/run-discovery-list/plan.json"));
         });
     }
 

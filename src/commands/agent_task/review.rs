@@ -148,7 +148,9 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         })
         .unwrap_or_default();
     let next_actions = review_next_actions(
+        &record.run_id,
         &record.state,
+        &record.plan_path,
         aggregate_review.as_ref(),
         args.to_worktree.as_deref(),
     );
@@ -337,7 +339,9 @@ fn promotion_candidates(
 }
 
 fn review_next_actions(
+    run_id: &str,
     state: &agent_task_lifecycle::AgentTaskRunState,
+    plan_path: &str,
     aggregate_review: Option<&AgentTaskAggregateReport>,
     to_worktree: Option<&str>,
 ) -> Vec<String> {
@@ -362,10 +366,12 @@ fn review_next_actions(
         }
     }
     if review.summary.retry_candidates > 0 {
-        actions.push(
-            "retry provider-error or timeout candidates after fixing executor/preflight issues"
-                .to_string(),
-        );
+        actions.push(format!(
+            "retry provider-error or timeout candidates after fixing executor/preflight issues with `homeboy agent-task retry {run_id} --run`"
+        ));
+        actions.push(format!(
+            "rerun the persisted plan through Lab with `homeboy --runner <runner-id> agent-task run-plan --plan @{plan_path} --record-run-id <new-run-id>`"
+        ));
     }
     if review.summary.issue_report_candidates > 0 {
         actions.push(
@@ -493,6 +499,40 @@ mod tests {
     use homeboy::core::agent_tasks::promotion::{
         AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionSource,
     };
+    use homeboy::core::agent_tasks::AgentTaskAggregateSummary;
+
+    #[test]
+    fn review_next_actions_include_retry_and_lab_run_plan_commands() {
+        let review = AgentTaskAggregateReport {
+            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
+            summary: AgentTaskAggregateSummary {
+                retry_candidates: 1,
+                ..AgentTaskAggregateSummary::default()
+            },
+            tasks: Vec::new(),
+            artifact_inventory: Vec::new(),
+            apply_candidates: Vec::new(),
+            issue_report_candidates: Vec::new(),
+            retry_plan: Vec::new(),
+            review_candidates: Vec::new(),
+            matrix: Vec::new(),
+        };
+
+        let actions = review_next_actions(
+            "agent-task-run-1",
+            &agent_task_lifecycle::AgentTaskRunState::Failed,
+            "/tmp/agent-task-run-1/plan.json",
+            Some(&review),
+            None,
+        );
+
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("homeboy agent-task retry agent-task-run-1 --run")));
+        assert!(actions.iter().any(|action| action.contains(
+            "homeboy --runner <runner-id> agent-task run-plan --plan @/tmp/agent-task-run-1/plan.json --record-run-id <new-run-id>"
+        )));
+    }
 
     #[test]
     fn promotion_handoff_marks_promoted_patch_without_pr_claim() {

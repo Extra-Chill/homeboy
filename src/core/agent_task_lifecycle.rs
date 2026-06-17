@@ -559,6 +559,7 @@ pub fn record_remote_dispatch_failure(
                 synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
             });
             record.run_id = run_id.clone();
+            record.plan_path = store::write_plan(&run_id, &plan)?.display().to_string();
             apply_aggregate_to_record(
                 &mut record,
                 &plan,
@@ -1566,6 +1567,10 @@ mod tests {
                 "lab_offload_remote_dispatch_failure"
             );
             assert_eq!(loaded.metadata["runner_id"], "lab-a");
+            assert!(std::path::Path::new(&loaded.plan_path).is_file());
+            let loaded_plan = load_plan("local-run").expect("plan loaded");
+            assert_eq!(loaded_plan.plan_id, "plan-a");
+            assert_eq!(loaded_plan.tasks[0].task_id, "task-a");
             assert_eq!(
                 loaded.metadata["remote_workspace"],
                 "/runner/workspace/repo"
