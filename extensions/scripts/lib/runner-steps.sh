@@ -1,35 +1,10 @@
 #!/usr/bin/env bash
 
-# Direct-invocation fallback for Homeboy core's shared runner-step helper.
-# Keep this file aligned with homeboy/src/core/extension/runtime/runner-steps.sh.
-#
-# Reads HOMEBOY_STEP / HOMEBOY_SKIP as comma-separated step names and exposes
-# should_run_step <name> with the same semantics as Homeboy core's
-# RunnerStepFilter:
-# - HOMEBOY_STEP present => only listed steps run
-# - HOMEBOY_SKIP present => listed steps are skipped
-# - empty step name => runs by default
+# Bootstrap Homeboy core's shared runner step helper for direct extension invocation.
 
-should_run_step() {
-    local step_name="${1:-}"
-    step_name="$(printf '%s' "$step_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+__homeboy_runtime_bootstrap_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./runtime-helper-bootstrap.sh
+source "${__homeboy_runtime_bootstrap_dir}/runtime-helper-bootstrap.sh"
+unset __homeboy_runtime_bootstrap_dir
 
-    if [ -z "$step_name" ]; then
-        return 0
-    fi
-
-    if [ -n "${HOMEBOY_STEP:-}" ]; then
-        case ",${HOMEBOY_STEP}," in
-            *",${step_name},"*) ;;
-            *) return 1 ;;
-        esac
-    fi
-
-    if [ -n "${HOMEBOY_SKIP:-}" ]; then
-        case ",${HOMEBOY_SKIP}," in
-            *",${step_name},"*) return 1 ;;
-        esac
-    fi
-
-    return 0
-}
+homeboy_source_core_runtime_helper HOMEBOY_RUNTIME_RUNNER_STEPS runner-steps.sh
