@@ -276,7 +276,18 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
         if let Ok((resources, _)) = crate::commands::doctor::resources::run(
             crate::commands::doctor::resources::ResourcesArgs {},
         ) {
-            let warning = resource_policy::evaluate(hot_command, &resources);
+            let default_lab_runner = if hot_command.lab_offload_supported {
+                crate::core::runner::resolve_default_lab_runner()
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let warning = resource_policy::evaluate_with_runner_hint(
+                hot_command,
+                &resources,
+                default_lab_runner.as_deref(),
+            );
             let runner_hosted = resource_policy::is_runner_hosted_exec();
             if runner_hosted {
                 resource_policy::clear_runner_hosted_exec();
@@ -310,6 +321,7 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                         hot_command,
                         &std::env::args().collect::<Vec<_>>(),
                     ),
+                    default_lab_runner.as_deref(),
                 ) {
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);

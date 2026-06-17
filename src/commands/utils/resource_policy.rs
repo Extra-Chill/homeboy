@@ -222,12 +222,20 @@ fn is_read_only_agent_task(command: &Commands) -> bool {
 }
 
 pub fn evaluate(command: HotCommand, resources: &DoctorOutput) -> Option<ResourcePolicyWarning> {
+    evaluate_with_runner_hint(command, resources, None)
+}
+
+pub fn evaluate_with_runner_hint(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    default_runner: Option<&str>,
+) -> Option<ResourcePolicyWarning> {
     match resources.recommendation {
         ResourceRecommendation::Ok => None,
         recommendation => Some(ResourcePolicyWarning {
             command: command.label,
             recommendation,
-            message: warning_message(command, recommendation, resources),
+            message: warning_message(command, recommendation, resources, default_runner),
         }),
     }
 }
@@ -237,8 +245,12 @@ pub fn non_interactive_preflight_error(
     force_hot: bool,
     interactive: bool,
     local_hot_rerun_command: Option<String>,
+    default_runner: Option<&str>,
 ) -> Option<crate::core::Error> {
     if force_hot || interactive || is_runner_hosted_exec() {
+        return None;
+    }
+    if default_runner.is_some() && warning.message.contains("--runner") {
         return None;
     }
 
@@ -248,7 +260,7 @@ pub fn non_interactive_preflight_error(
             "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy doctor resources` reports ok.",
             warning.command,
             severity_str(warning.recommendation),
-            primary_action(warning),
+            primary_action(warning, default_runner),
         ),
         None,
         None,
@@ -287,11 +299,21 @@ pub fn clear_runner_hosted_exec() {
     std::env::remove_var(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
 }
 
-fn primary_action(warning: &ResourcePolicyWarning) -> &'static str {
+fn primary_action(warning: &ResourcePolicyWarning, default_runner: Option<&str>) -> String {
     if warning.message.contains("--runner <id>") {
-        "Connect a default Homeboy Lab runner or pass --runner <id> when Lab offload supports this mode."
+        return "Connect a default Homeboy Lab runner or pass --runner <id> when Lab offload supports this mode.".to_string();
+    }
+    if let Some(runner_id) = default_runner {
+        if warning.message.contains("--runner") {
+            return format!(
+                "Homeboy found Lab runner `{runner_id}`; rerun with --runner {runner_id} or let automatic Lab routing handle this portable command."
+            );
+        }
+    }
+    if warning.message.contains("--runner") {
+        "Pass --runner <id> when Lab offload supports this mode.".to_string()
     } else {
-        "This command is currently local-only under resource policy."
+        "This command is currently local-only under resource policy.".to_string()
     }
 }
 
@@ -299,10 +321,17 @@ fn warning_message(
     command: HotCommand,
     recommendation: ResourceRecommendation,
     resources: &DoctorOutput,
+    default_runner: Option<&str>,
 ) -> String {
     let severity = severity_str(recommendation);
     let reason = primary_reason(resources);
     if command.lab_offload_supported {
+        if let Some(runner_id) = default_runner {
+            return format!(
+                "Resource policy warning: machine is {severity}; starting `{}` locally may skew results or add pressure. {reason} Homeboy found Lab runner `{runner_id}`; use --runner {runner_id} to route this portable command through Lab offload, or omit local-hot overrides so automatic Lab routing can use it.",
+                command.label
+            );
+        }
         return format!(
             "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Connect a default Homeboy Lab runner or use --runner <id> to route this portable command through Lab offload, or use --force-hot to run locally without this warning.",
             command.label
@@ -435,6 +464,20 @@ mod tests {
     }
 
     #[test]
+    fn warning_names_default_lab_runner_when_available() {
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task providers"),
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+
+        assert!(warning.message.contains("Lab runner `homeboy-lab`"));
+        assert!(warning.message.contains("--runner homeboy-lab"));
+        assert!(!warning.message.contains("--runner <id>"));
+    }
+
+    #[test]
     fn warning_for_local_only_hot_command_explains_runner_unavailability() {
         let warning = evaluate(
             local_only_hot("rig up", "`rig up` stays local for test reasons."),
@@ -494,7 +537,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        let error = non_interactive_preflight_error(&warning, false, false, None)
+        let error = non_interactive_preflight_error(&warning, false, false, None, None)
             .expect("non-interactive hot runs should fail fast");
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
@@ -503,6 +546,23 @@ mod tests {
         assert!(error.message.contains("--runner <id>"));
         assert!(!error.message.contains("Use --force-hot"));
         assert!(error.details.get("rerun_command").is_none());
+    }
+
+    #[test]
+    fn non_interactive_hot_warning_allows_default_lab_runner_auto_offload() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::remove(crate::core::runner::RUNNER_HOSTED_EXEC_ENV);
+        let warning = evaluate_with_runner_hint(
+            lab_supported_hot("agent-task providers"),
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+        )
+        .expect("hot machines warn");
+
+        assert!(
+            non_interactive_preflight_error(&warning, false, false, None, Some("homeboy-lab"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -525,7 +585,7 @@ mod tests {
             ],
         );
 
-        let error = non_interactive_preflight_error(&warning, false, false, rerun)
+        let error = non_interactive_preflight_error(&warning, false, false, rerun, None)
             .expect("non-interactive local-only hot runs should fail fast");
 
         assert_eq!(
@@ -545,7 +605,7 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, false, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, false, None, None).is_none());
     }
 
     #[test]
@@ -558,8 +618,8 @@ mod tests {
         )
         .expect("hot machines warn");
 
-        assert!(non_interactive_preflight_error(&warning, false, true, None).is_none());
-        assert!(non_interactive_preflight_error(&warning, true, false, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, false, true, None, None).is_none());
+        assert!(non_interactive_preflight_error(&warning, true, false, None, None).is_none());
     }
 
     #[test]
