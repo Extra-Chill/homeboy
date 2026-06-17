@@ -996,6 +996,10 @@ fn run_provider_command(
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stdout.is_empty() {
+        if let Some(mut outcome) = parse_provider_outcome_from_mixed_output(&stderr) {
+            normalize_provider_outcome_roles(&mut outcome, provider);
+            return outcome;
+        }
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -1027,6 +1031,24 @@ fn run_provider_command(
             json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr, "stdout": stdout }),
         ),
     }
+}
+
+fn parse_provider_outcome_from_mixed_output(output: &str) -> Option<AgentTaskOutcome> {
+    if output.trim().is_empty() {
+        return None;
+    }
+    if let Ok(outcome) = serde_json::from_str::<AgentTaskOutcome>(output) {
+        return Some(outcome);
+    }
+
+    for (index, _) in output.match_indices('{') {
+        let mut stream =
+            serde_json::Deserializer::from_str(&output[index..]).into_iter::<AgentTaskOutcome>();
+        if let Some(Ok(outcome)) = stream.next() {
+            return Some(outcome);
+        }
+    }
+    None
 }
 
 fn normalize_provider_outcome_roles(
@@ -1946,6 +1968,28 @@ mod tests {
             aggregate.outcomes[0].diagnostics[0].data["stdout"],
             "{not json"
         );
+    }
+
+    #[test]
+    fn provider_preserves_structured_outcome_from_stderr_when_stdout_empty() {
+        let command = format!(
+            "node {}",
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stderr.write('diagnostic prefix\\n' + JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'captured provider evidence',failure_classification:'provider',diagnostics:[{class:'codebox.empty_data_packet_returned',message:'empty data packet returned',data:{typed_artifacts:{}}}]}));")
+        );
+        let (request, provider) = request("task-stderr-outcome", command);
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            outcome.summary.as_deref(),
+            Some("captured provider evidence")
+        );
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "codebox.empty_data_packet_returned"
+        );
+        assert_eq!(outcome.diagnostics[0].data["typed_artifacts"], json!({}));
     }
 
     #[test]

@@ -789,16 +789,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_inspection_commands_are_read_only_local_recovery() {
+    fn agent_task_inspection_commands_support_runner_resident_recovery() {
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "retry", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
-            assert!(lab_offload_command(&cli.command).unwrap().is_none());
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+            assert_eq!(command.hot_label, "agent-task status/logs/artifacts/review");
+            assert_eq!(
+                command.source_path_mode,
+                runners::LabOffloadSourcePathMode::RunnerResident
+            );
+            assert_eq!(
+                command.workspace_mode_policy,
+                runners::LabOffloadWorkspaceModePolicy::RunnerResident
+            );
+            assert!(!command.default_lab_offload);
         }
     }
 

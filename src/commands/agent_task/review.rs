@@ -12,7 +12,7 @@ use homeboy::core::agent_tasks::promotion::{
 };
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::service as agent_task_service;
-use homeboy::core::agent_tasks::{AgentTaskAggregateReport, AgentTaskRequest};
+use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 
@@ -128,17 +128,21 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let record = agent_task_lifecycle::status(&args.run_id)?;
     let log = agent_task_lifecycle::logs(&args.run_id)?;
     let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
-    let aggregate = super::completed_run_aggregate(&args.run_id).transpose()?;
-    let aggregate_review = aggregate
+    let aggregate_source = completed_run_aggregate_source(&args.run_id).transpose()?;
+    let aggregate = aggregate_source
         .as_ref()
-        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
-    let diagnostic_summary = aggregate
-        .as_ref()
-        .and_then(super::diagnostic_summary_from_aggregate);
+        .map(|(aggregate, _path)| aggregate);
+    let aggregate_review =
+        aggregate.map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
+    let diagnostic_summary = aggregate.and_then(super::diagnostic_summary_from_aggregate);
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
-            let promotion_source = record.aggregate_path.as_deref().unwrap_or(&args.run_id);
+            let promotion_source = aggregate_source
+                .as_ref()
+                .map(|(_aggregate, path)| path.as_str())
+                .or(record.aggregate_path.as_deref())
+                .unwrap_or(&args.run_id);
             promotion_candidates(
                 promotion_source,
                 args.to_worktree.as_deref(),
@@ -294,6 +298,26 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
         "master".to_string(),
         "trunk".to_string(),
     ]
+}
+
+fn completed_run_aggregate_source(
+    run_id: &str,
+) -> Option<homeboy::core::Result<(AgentTaskAggregate, String)>> {
+    match agent_task_lifecycle::aggregate_source(run_id) {
+        Ok((raw, path)) => Some(
+            serde_json::from_str(&raw)
+                .map(|aggregate| (aggregate, path.display().to_string()))
+                .map_err(|error| {
+                    homeboy::core::Error::validation_invalid_json(
+                        error,
+                        Some("agent-task aggregate".to_string()),
+                        Some(raw),
+                    )
+                }),
+        ),
+        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
+        Err(error) => Some(Err(error)),
+    }
 }
 
 fn promotion_candidates(
