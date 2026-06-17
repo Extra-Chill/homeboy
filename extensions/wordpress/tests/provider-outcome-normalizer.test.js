@@ -1,0 +1,62 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+
+const {
+  normalizeProviderTaskOutcome,
+  normalizeProviderStatus,
+  providerFailureClassification,
+} = require('../../agent-runtimes/wp-codebox/lib/provider-outcome-normalizer');
+
+const request = { task_id: 'provider-task-123' };
+
+const legacyProviderError = normalizeProviderTaskOutcome(request, {
+  success: false,
+  provider_error: true,
+  summary: 'Provider failed before runtime startup.',
+  artifacts: { bundle: { id: 'bundle-1', directory: '/tmp/provider-artifacts' } },
+  diagnostics: [{ kind: 'provider.auth', message: 'OAuth refresh failed.', data: { provider: 'example' } }],
+}, {
+  provider: 'example.provider',
+  integrationContract: 'example/provider-task/v1',
+});
+
+assert.equal(legacyProviderError.schema, 'homeboy/agent-task-outcome/v1');
+assert.equal(legacyProviderError.task_id, 'provider-task-123');
+assert.equal(legacyProviderError.status, 'provider_error');
+assert.equal(legacyProviderError.failure_classification, 'provider');
+assert.equal(legacyProviderError.summary, 'Provider failed before runtime startup.');
+assert.equal(legacyProviderError.artifacts[0].id, 'bundle-1');
+assert.equal(legacyProviderError.artifacts[0].path, '/tmp/provider-artifacts');
+assert.equal(legacyProviderError.diagnostics[0].class, 'provider.auth');
+assert.equal(legacyProviderError.metadata.provider, 'example.provider');
+assert.equal(legacyProviderError.metadata.integration_contract, 'example/provider-task/v1');
+
+const completedDespiteNonZeroExit = normalizeProviderTaskOutcome(request, {
+  success: true,
+  status: 'completed',
+  outputs: { issue_url: 'https://github.com/example/repo/issues/12' },
+  evidence_refs: [{ kind: 'issue', uri: 'https://github.com/example/repo/issues/12', label: 'Issue' }],
+}, { exitStatus: 1 });
+
+assert.equal(completedDespiteNonZeroExit.status, 'succeeded');
+assert.equal(completedDespiteNonZeroExit.failure_classification, undefined);
+assert.equal(completedDespiteNonZeroExit.outputs.issue_url, 'https://github.com/example/repo/issues/12');
+assert.equal(completedDespiteNonZeroExit.evidence_refs[0].kind, 'issue');
+
+const normalizedRuntimeFailure = normalizeProviderTaskOutcome(request, {
+  success: false,
+  status: 'failed',
+  failure_classification: 'runtime',
+  diagnostics: [{ code: 'runtime.no_session', message: 'Runtime failed before creating a session.' }],
+});
+
+assert.equal(normalizedRuntimeFailure.status, 'failed');
+assert.equal(normalizedRuntimeFailure.failure_classification, 'execution_failed');
+assert.equal(normalizedRuntimeFailure.diagnostics[0].class, 'runtime.no_session');
+
+assert.equal(normalizeProviderStatus({ success: true, outcome: 'no_op' }), 'no_op');
+assert.equal(providerFailureClassification('task', 'failed'), 'execution_failed');
+assert.throws(() => normalizeProviderTaskOutcome({}, {}), /request.task_id/);
+
+console.log('✓ provider outcome normalizer boundary test PASSED');

@@ -22,6 +22,10 @@ const {
   agentTaskProviderContractFields,
   providerDefaultsContract,
 } = require('../../lib/agent-task-provider-contract');
+const {
+  normalizeProviderTaskOutcome,
+  providerFailureClassification,
+} = require('./provider-outcome-normalizer');
 
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
@@ -1637,29 +1641,7 @@ function recipeRunArtifacts(result) {
 }
 
 function homeboyFailureClassification(classification, status) {
-  if (classification === 'provider' || classification === 'timeout') {
-    return classification;
-  }
-  if (classification === 'runtime' || classification === 'task') {
-    return 'execution_failed';
-  }
-  return classification || failureClassificationForStatus(status);
-}
-
-function failureClassificationForStatus(status) {
-  if (status === 'provider_error') {
-    return 'provider';
-  }
-  if (status === 'timeout') {
-    return 'timeout';
-  }
-  if (status === 'unable_to_remediate') {
-    return 'execution_failed';
-  }
-  if (status === 'failed') {
-    return 'execution_failed';
-  }
-  return undefined;
+  return providerFailureClassification(classification, status);
 }
 
 function sanitizePublicMetadata(value) {
@@ -2301,13 +2283,15 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   const providerDiagnostic = providerNotRegisteredDiagnostic(request, result);
-  const outcome = {
+  const outcome = normalizeProviderTaskOutcome(request, result, {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
-    task_id: request.task_id,
+    provider: 'wordpress.codebox-agent-task-executor',
+    providerLabel: 'WP Codebox agent',
+    integrationContract: 'wp-codebox-cli/agent-task-run',
     status,
     summary: missingRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
-    evidence_refs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
+    evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
     diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
@@ -2315,11 +2299,9 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       data: sanitizePublicMetadata(diagnostic.data || {}),
     })),
     metadata: {
-      provider: 'wordpress.codebox-agent-task-executor',
       codebox: sanitizePublicMetadata(result.metadata || result),
       codebox_run_result: runSummary ? sanitizePublicMetadata(runSummary) : undefined,
       codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
-      integration_contract: 'wp-codebox-cli/agent-task-run',
       decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary)),
       artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
       typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
@@ -2329,7 +2311,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       }),
       recipe_failed_phase: recipeFailedPhase || undefined,
     },
-  };
+    failureClassification,
+  });
   if (failureClassification) {
     outcome.failure_classification = failureClassification;
   } else if (missingRequiredTypedArtifacts) {
