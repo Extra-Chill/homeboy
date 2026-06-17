@@ -108,6 +108,7 @@ mod tests {
         let exec_output = RunnerExecOutput {
             command: "runner.exec",
             runner_id: "lab".to_string(),
+            dry_run: false,
             mode: super::super::RunnerExecMode::Daemon,
             argv: vec!["homeboy".to_string(), "refactor".to_string()],
             remote_cwd: "/srv/homeboy/_lab_workspaces/repo-abc".to_string(),
@@ -165,6 +166,7 @@ mod tests {
         let exec_output = RunnerExecOutput {
             command: "runner.exec",
             runner_id: "lab".to_string(),
+            dry_run: false,
             mode: super::super::RunnerExecMode::Daemon,
             argv: vec![
                 "homeboy".to_string(),

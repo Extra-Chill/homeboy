@@ -73,8 +73,8 @@ pub(crate) use execution::{
     RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV,
 };
 pub use execution::{
-    daemon_api_post, exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions,
-    RunnerExecOutput,
+    daemon_api_post, exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput,
 };
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
@@ -185,7 +185,31 @@ pub fn load(id: &str) -> Result<Runner> {
         }
     }
 
+    if is_local_runner_alias(id) {
+        return Ok(local_alias_runner(id));
+    }
+
     load_server_runner(id)
+}
+
+fn is_local_runner_alias(id: &str) -> bool {
+    matches!(id, "local" | "localhost" | "self")
+}
+
+fn local_alias_runner(id: &str) -> Runner {
+    Runner {
+        id: id.to_string(),
+        kind: RunnerKind::Local,
+        server_id: None,
+        workspace_root: std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string()),
+        settings: server::RunnerSettings::default(),
+        env: HashMap::new(),
+        secret_env: HashMap::new(),
+        resources: HashMap::new(),
+        policy: server::RunnerPolicy::default(),
+    }
 }
 
 pub fn effective_env(id: &str) -> Result<HashMap<String, String>> {
@@ -617,6 +641,18 @@ mod tests {
             assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
             assert_eq!(runner.resources.get("cpu"), Some(&Value::from(8)));
+        });
+    }
+
+    #[test]
+    fn local_runner_alias_does_not_require_registry_entry() {
+        test_support::with_isolated_home(|_| {
+            let runner = load("local").expect("load local alias");
+
+            assert_eq!(runner.id, "local");
+            assert_eq!(runner.kind, RunnerKind::Local);
+            assert_eq!(runner.server_id, None);
+            assert!(runner.workspace_root.is_some());
         });
     }
 

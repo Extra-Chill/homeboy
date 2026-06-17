@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io::{self, Read};
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -41,6 +43,7 @@ pub enum RunnerConnectionOutput {
 pub type RunnerOutput = EntityCrudOutput<Runner, RunnerExtra>;
 
 const REDACTED_ENV_VALUE: &str = "[redacted]";
+const RUNNER_EXEC_SCRIPT_ENV: &str = "HOMEBOY_RUNNER_EXEC_SCRIPT";
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -322,13 +325,27 @@ enum RunnerCommand {
         #[arg(long = "require-path")]
         require_paths: Vec<String>,
 
+        /// Read a shell script from this path and execute it on the runner with bash.
+        /// Use `-` to read the script from stdin.
+        #[arg(long = "script-file")]
+        script_file: Option<String>,
+
+        /// Environment variable to inject into the runner process as KEY=VALUE.
+        /// Repeat for multiple values.
+        #[arg(long = "env")]
+        env: Vec<String>,
+
+        /// Build the runner exec plan without executing it.
+        #[arg(long)]
+        dry_run: bool,
+
         /// Print remote stdout/stderr directly instead of the structured JSON envelope.
         /// Use global --output to still write the full structured envelope to a file.
         #[arg(long)]
         raw: bool,
 
         /// Command and arguments to execute on the runner
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// Show the effective environment injected into runner jobs
@@ -566,6 +583,9 @@ pub fn run(
             ssh,
             capture_patch,
             require_paths,
+            script_file,
+            env,
+            dry_run,
             raw: _,
             command,
         } => map_execution(exec(
@@ -575,6 +595,9 @@ pub fn run(
             ssh,
             capture_patch,
             require_paths,
+            script_file,
+            env,
+            dry_run,
             command,
         )),
         RunnerCommand::Env { id } => map_env(env(&id)),
@@ -616,9 +639,23 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> Json
             ssh,
             capture_patch,
             require_paths,
+            script_file,
+            env,
+            dry_run,
             raw: true,
             command,
-        } => run_raw_exec(id, cwd, project, ssh, capture_patch, require_paths, command),
+        } => run_raw_exec(
+            id,
+            cwd,
+            project,
+            ssh,
+            capture_patch,
+            require_paths,
+            script_file,
+            env,
+            dry_run,
+            command,
+        ),
         command => {
             let (stdout_result, exit_code) =
                 crate::commands::utils::response::map_cmd_result_to_json(run(
@@ -637,6 +674,9 @@ fn run_raw_exec(
     ssh: bool,
     capture_patch: bool,
     require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    dry_run: bool,
     command: Vec<String>,
 ) -> JsonCommandRun {
     match exec(
@@ -646,6 +686,9 @@ fn run_raw_exec(
         ssh,
         capture_patch,
         require_paths,
+        script_file,
+        env,
+        dry_run,
         command,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
@@ -1016,18 +1059,43 @@ fn exec(
     allow_diagnostic_ssh: bool,
     capture_patch: bool,
     require_paths: Vec<String>,
+    script_file: Option<String>,
+    env: Vec<String>,
+    dry_run: bool,
     command: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
-    let required_commands = command.first().cloned().into_iter().collect();
+    let script = script_file
+        .as_deref()
+        .map(read_runner_exec_script)
+        .transpose()?;
+    let prepared_command = prepare_runner_exec_command(script.as_ref(), command)?;
+    let env = prepare_runner_exec_env(env, script.as_deref())?;
+    let required_commands = prepared_command.first().cloned().into_iter().collect();
+
+    if dry_run {
+        return runner_exec_dry_run(
+            runner_id,
+            cwd,
+            allow_diagnostic_ssh,
+            require_paths,
+            prepared_command,
+            script.unwrap_or_default(),
+        );
+    }
+
     runner::exec(
         runner_id,
         runner::RunnerExecOptions {
             cwd,
             project_id,
             allow_diagnostic_ssh,
-            command,
-            env: Default::default(),
-            secret_env_names: Vec::new(),
+            command: prepared_command,
+            env,
+            secret_env_names: script_file
+                .is_some()
+                .then(|| RUNNER_EXEC_SCRIPT_ENV.to_string())
+                .into_iter()
+                .collect(),
             capture_patch,
             raw_exec: true,
             source_snapshot: None,
@@ -1040,6 +1108,140 @@ fn exec(
             require_paths,
         },
     )
+}
+
+fn read_runner_exec_script(path: &str) -> homeboy::core::Result<String> {
+    if path == "-" {
+        let mut script = String::new();
+        io::stdin().read_to_string(&mut script).map_err(|err| {
+            homeboy::core::Error::internal_io(
+                err.to_string(),
+                Some("read runner exec script from stdin".to_string()),
+            )
+        })?;
+        return Ok(script);
+    }
+
+    fs::read_to_string(path).map_err(|err| {
+        homeboy::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("read runner exec script {path}")),
+        )
+    })
+}
+
+fn prepare_runner_exec_command(
+    script: Option<&String>,
+    command: Vec<String>,
+) -> homeboy::core::Result<Vec<String>> {
+    match (script.is_some(), command.is_empty()) {
+        (true, false) => Err(homeboy::core::Error::validation_invalid_argument(
+            "command",
+            "runner exec accepts either --script-file or a command argv, not both",
+            None,
+            None,
+        )),
+        (false, true) => Err(homeboy::core::Error::validation_invalid_argument(
+            "command",
+            "runner exec requires a command after -- or --script-file <path>",
+            None,
+            None,
+        )),
+        (true, true) => Ok(vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "printf '%s' \"$HOMEBOY_RUNNER_EXEC_SCRIPT\" | bash -s".to_string(),
+        ]),
+        (false, false) => Ok(command),
+    }
+}
+
+fn prepare_runner_exec_env(
+    env: Vec<String>,
+    script: Option<&str>,
+) -> homeboy::core::Result<HashMap<String, String>> {
+    let mut values = HashMap::new();
+    for assignment in env {
+        let Some((key, value)) = assignment.split_once('=') else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "env",
+                "runner exec --env expects KEY=VALUE",
+                Some(assignment),
+                None,
+            ));
+        };
+        if key.is_empty() || key.contains('=') || key.chars().any(|c| c.is_whitespace()) {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "env",
+                "runner exec --env key must be a non-empty shell environment name",
+                Some(key.to_string()),
+                None,
+            ));
+        }
+        values.insert(key.to_string(), value.to_string());
+    }
+    if let Some(script) = script {
+        values.insert(RUNNER_EXEC_SCRIPT_ENV.to_string(), script.to_string());
+    }
+    Ok(values)
+}
+
+fn runner_exec_dry_run(
+    runner_id: &str,
+    cwd: Option<String>,
+    allow_diagnostic_ssh: bool,
+    require_paths: Vec<String>,
+    command: Vec<String>,
+    script: String,
+) -> CmdResult<RunnerExecOutput> {
+    let runner = runner::load(runner_id)?;
+    let remote_cwd = cwd
+        .or_else(|| runner.workspace_root.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(display_path)
+                .unwrap_or_else(|_| ".".to_string())
+        });
+    let mode = if runner.kind == RunnerKind::Local {
+        runner::RunnerExecMode::Local
+    } else if allow_diagnostic_ssh {
+        runner::RunnerExecMode::DiagnosticSsh
+    } else {
+        runner::RunnerExecMode::Daemon
+    };
+
+    Ok((
+        RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: runner.id,
+            dry_run: true,
+            mode,
+            argv: command,
+            remote_cwd,
+            exit_code: 0,
+            stdout: script,
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            job_id: None,
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            metrics: None,
+            capture: None,
+            diagnostics: Some(runner::RunnerExecDiagnostics {
+                runner_workspace_root: runner.workspace_root,
+                source_snapshot_remote_path: None,
+                required_paths: require_paths,
+                hints: vec!["dry run only; no runner command was executed".to_string()],
+            }),
+        },
+        0,
+    ))
+}
+
+fn display_path(path: std::path::PathBuf) -> String {
+    path.display().to_string()
 }
 
 fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
@@ -1263,6 +1465,7 @@ mod tests {
             RunnerExecOutput {
                 command: "runner.exec",
                 runner_id: "lab".to_string(),
+                dry_run: false,
                 mode: runner::RunnerExecMode::Daemon,
                 argv: vec!["printf".to_string(), "hello".to_string()],
                 remote_cwd: "/workspace".to_string(),
@@ -1417,5 +1620,38 @@ mod tests {
             true
         );
         assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn script_file_prepares_bash_stdin_command() {
+        let command = prepare_runner_exec_command(Some(&"echo hi".to_string()), Vec::new())
+            .expect("script command");
+
+        assert_eq!(command[0], "bash");
+        assert_eq!(command[1], "-c");
+        assert!(command[2].contains(RUNNER_EXEC_SCRIPT_ENV));
+    }
+
+    #[test]
+    fn script_file_rejects_extra_argv() {
+        let err =
+            prepare_runner_exec_command(Some(&"echo hi".to_string()), vec!["printf".to_string()])
+                .expect_err("script plus argv should fail");
+
+        assert!(err
+            .to_string()
+            .contains("either --script-file or a command"));
+    }
+
+    #[test]
+    fn env_parser_injects_script_body_without_shell_quoting() {
+        let env = prepare_runner_exec_env(
+            vec!["GREETING=hello world".to_string()],
+            Some("echo \"$GREETING\""),
+        )
+        .expect("env");
+
+        assert_eq!(env["GREETING"], "hello world");
+        assert_eq!(env[RUNNER_EXEC_SCRIPT_ENV], "echo \"$GREETING\"");
     }
 }

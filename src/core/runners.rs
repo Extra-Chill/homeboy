@@ -42,12 +42,13 @@ pub use super::runner::{
     LabRunnerGateMode, LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan,
     PreparedLabRunnerCapability, RemoteArtifactDownload, ReverseRunnerConnectOptions,
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerExecMode, RunnerExecOptions,
-    RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool, RunnerResourceMetrics,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
-    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode,
+    RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool,
+    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
+    RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
+    RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
@@ -88,8 +89,8 @@ pub mod connection {
 /// Exec entry points and option/output contracts.
 pub mod execution {
     pub use super::super::runner::{
-        exec, runner_exec_failure_error, RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
-        RunnerResourceMetrics,
+        exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
+        RunnerExecOutput, RunnerResourceMetrics,
     };
 }
 
