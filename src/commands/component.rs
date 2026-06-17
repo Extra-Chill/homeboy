@@ -483,32 +483,15 @@ fn derive_component_id_for_create(
 }
 
 fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
-    let component = match (id, path) {
-        // --path: discover from directory's homeboy.json
-        (_, Some(dir)) => {
-            let dir_path = std::path::Path::new(dir);
-            component::resolve_effective(id, Some(dir), None).map_err(|_| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "path",
-                    format!(
-                        "No homeboy.json found at {} and no registered component matches",
-                        dir_path.display()
-                    ),
-                    None,
-                    Some(vec![
-                        format!("Create homeboy.json in {}", dir_path.display()),
-                        "Or provide a registered component ID".to_string(),
-                    ]),
-                )
-            })?
-        }
-        // ID only: load from registry
-        (Some(comp_id), None) => component::load(comp_id).map_err(|e| e.with_contextual_hint())?,
-        // Neither: try CWD discovery
-        (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
-            homeboy::core::Error::validation_missing_argument(vec!["id or --path".to_string()])
-        })?,
-    };
+    let component = component::resolve_target(component::TargetSpec::new(id, path))
+        .map_err(|e| {
+            if id.is_none() && path.is_none() {
+                homeboy::core::Error::validation_missing_argument(vec!["id or --path".to_string()])
+            } else {
+                e.with_contextual_hint()
+            }
+        })?
+        .component;
 
     component.validate_supported_build_config()?;
 
@@ -543,33 +526,20 @@ struct ComponentRuntimeRequirement {
 }
 
 fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
-    let component = match (id, path) {
-        // --path with explicit ID
-        (Some(comp_id), Some(dir)) => component::resolve_effective(Some(comp_id), Some(dir), None)
-            .map_err(|e| e.with_contextual_hint())?,
-        // --path without ID: discover from the directory's homeboy.json
-        (None, Some(dir)) => {
-            let dir_path = Path::new(dir);
-            component::portable::discover_from_portable(dir_path).ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "path",
-                    format!("No homeboy.json found at {}", dir_path.display()),
-                    None,
-                    Some(vec![format!(
-                        "Create homeboy.json in {}",
-                        dir_path.display()
-                    )]),
-                )
-            })?
-        }
-        // ID only
-        (Some(comp_id), None) => component::resolve_effective(Some(comp_id), None, None)
-            .map_err(|e| e.with_contextual_hint())?,
-        // Neither: try CWD discovery
-        (None, None) => component::resolve_effective(None, None, None).map_err(|_| {
+    let component = component::resolve_target(component::TargetSpec {
+        component_id: id,
+        path_override: path,
+        allow_synthetic: id.is_some() || path.is_none(),
+        ..component::TargetSpec::new(id, path)
+    })
+    .map_err(|e| {
+        if id.is_none() && path.is_none() {
             homeboy::core::Error::validation_missing_argument(vec!["id or --path".to_string()])
-        })?,
-    };
+        } else {
+            e.with_contextual_hint()
+        }
+    })?
+    .component;
 
     let comp_id = component.id.clone();
     let local_path = Path::new(&component.local_path);
@@ -1294,6 +1264,27 @@ mod tests {
 
         assert!(err.message.contains("unsupported legacy build_command"));
         assert!(err.message.contains("Use scripts.build instead"));
+    }
+
+    #[test]
+    fn component_env_path_uses_shared_git_root_portable_discovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let subdir = repo.join("packages").join("plugin");
+        fs::create_dir_all(&subdir).expect("subdir");
+        fs::write(repo.join("homeboy.json"), r#"{"id":"portable-env"}"#).expect("homeboy.json");
+        let git_init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        assert!(git_init.status.success());
+
+        let (output, code) = env(None, Some(&subdir.to_string_lossy())).expect("component env");
+
+        assert_eq!(code, 0);
+        assert_eq!(output.id.as_deref(), Some("portable-env"));
+        assert_eq!(output.command, "component.env");
     }
 
     #[test]

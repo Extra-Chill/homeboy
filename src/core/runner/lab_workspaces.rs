@@ -789,6 +789,7 @@ fn discovered_validation_dependency_workspaces(
         capability: None,
         allow_synthetic: true,
         accept_bare_directory: true,
+        ..TargetSpec::default()
     }) else {
         return Ok(Vec::new());
     };

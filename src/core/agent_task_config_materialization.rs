@@ -176,6 +176,7 @@ fn resolve_repo_remote(repo: &str) -> Result<String> {
         capability: None,
         allow_synthetic: false,
         accept_bare_directory: false,
+        ..TargetSpec::default()
     }) {
         if let Some(git_root) = target.git_root {
             if let Ok(remote) = git_output(&git_root, &["config", "--get", "remote.origin.url"]) {
