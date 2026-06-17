@@ -641,7 +641,9 @@ try {
         agent_runtime: '.ci/data-machine',
         agent_runtime_tools: '.ci/data-machine-code',
       },
-      component_contracts: [],
+      component_contracts: [
+        { slug: 'agents-api', path: '.ci/agents-api', loadAs: 'mu-plugin', activate: false },
+      ],
     }),
     env: {
       ...process.env,
@@ -663,6 +665,7 @@ try {
   const preparedLabDataMachine = path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine');
   assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabDataMachine);
   assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
+  assert.equal(labRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
   assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine-code'));
   assert.equal(fs.existsSync(path.join(preparedLabDataMachine, 'data-machine.php')), true);
 

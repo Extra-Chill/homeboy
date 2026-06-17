@@ -79,6 +79,23 @@ function remapLabWorkspacePath(candidate, componentSlug) {
   return entry?.remote_path || candidate;
 }
 
+function runtimeComponentSlug(contract) {
+  if (!contract || typeof contract !== 'object') {
+    return '';
+  }
+  return ['agents-api', 'data-machine', 'data-machine-code'].includes(contract.slug) ? contract.slug : '';
+}
+
+function remapRuntimeComponentContract(contract) {
+  const slug = runtimeComponentSlug(contract);
+  if (!slug) {
+    return contract;
+  }
+  const source = contract.path || contract.source || '';
+  const remapped = remapLabWorkspacePath(source, slug);
+  return remapped && remapped !== source ? { ...contract, path: remapped } : contract;
+}
+
 function secretEnvNames(request) {
   return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
@@ -673,7 +690,7 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     runtime_component_paths: runtimeComponentPaths,
-    component_contracts: uniqueComponentContracts(request.component_contracts || []),
+    component_contracts: uniqueComponentContracts((request.component_contracts || []).map(remapRuntimeComponentContract)),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
@@ -732,9 +749,9 @@ function componentContracts(input) {
     activate: Boolean(plugin.activate),
   }));
   return uniqueComponentContracts([
-    ...(input.component_contracts || []),
-    ...(input.parent_request?.component_contracts || []),
-    ...(input.parent_request?.parent_request?.component_contracts || []),
+    ...(input.component_contracts || []).map(remapRuntimeComponentContract),
+    ...(input.parent_request?.component_contracts || []).map(remapRuntimeComponentContract),
+    ...(input.parent_request?.parent_request?.component_contracts || []).map(remapRuntimeComponentContract),
     ...runtimeContracts,
   ]);
 }
