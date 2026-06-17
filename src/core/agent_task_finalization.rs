@@ -12,6 +12,7 @@ use crate::core::proof::{
     HomeboyProof, HomeboyProofArtifactRef, HomeboyProofEnvironmentDisposition,
     HomeboyProofEnvironmentVariable, HomeboyProofProvenance,
 };
+use crate::core::run_lifecycle_record::RunLifecycleRecord;
 
 pub const AGENT_TASK_PR_FINALIZATION_SCHEMA: &str = "homeboy/agent-task-pr-finalization/v1";
 
@@ -65,6 +66,8 @@ pub struct AgentTaskPrEvidence {
         skip_serializing_if = "AgentTaskPrRuntimeGuardrails::is_empty"
     )]
     pub runtime_guardrails: AgentTaskPrRuntimeGuardrails,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<RunLifecycleRecord>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -567,6 +570,11 @@ fn proof_environment_variables(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::run_lifecycle_record::{
+        ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
+        ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
+        ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
+    };
 
     #[derive(Default)]
     struct MockBackend {
@@ -750,6 +758,67 @@ mod tests {
     }
 
     #[test]
+    fn pr_body_reports_run_lifecycle_evidence() {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        };
+        let mut options = options();
+        options.evidence.lifecycle = Some(RunLifecycleRecord {
+            execution: RunExecutionLifecycle {
+                state: RunExecutionState::Succeeded,
+                started_at: None,
+                finished_at: Some("2026-06-16T00:00:05Z".to_string()),
+                updated_at: Some("2026-06-16T00:00:05Z".to_string()),
+            },
+            provider_runtime: vec![ProviderRuntimeLifecycle {
+                task_id: "task-a".to_string(),
+                backend: "codebox".to_string(),
+                state: ProviderRuntimeState::Succeeded,
+                stream_uri: None,
+                external_runtime_ids: vec![ExternalRuntimeId {
+                    kind: "provider_run_id".to_string(),
+                    value: "provider-run-123".to_string(),
+                    provider: Some("codebox".to_string()),
+                    url: None,
+                }],
+                metadata: serde_json::Value::Null,
+            }],
+            external_runtime_ids: vec![ExternalRuntimeId {
+                kind: "provider_run_id".to_string(),
+                value: "provider-run-123".to_string(),
+                provider: Some("codebox".to_string()),
+                url: None,
+            }],
+            cleanup: CleanupLifecycle {
+                state: CleanupState::Preserved,
+                policy: Some("preserve".to_string()),
+                updated_at: None,
+            },
+            finalization: FinalizationLifecycle {
+                state: FinalizationState::Pending,
+                updated_at: None,
+            },
+            artifact_retention: ArtifactRetentionLifecycle {
+                status: ArtifactRetentionStatus::Retained,
+                policy: Some("retain".to_string()),
+                updated_at: None,
+            },
+            ..RunLifecycleRecord::default()
+        });
+
+        finalize_pr_with_backend(options, &mut backend).expect("finalized");
+
+        assert!(backend.last_body.contains("## Run lifecycle"));
+        assert!(backend
+            .last_body
+            .contains("provider_run_id:provider-run-123"));
+        assert!(backend
+            .last_body
+            .contains("Artifact retention:** `Retained`"));
+    }
+
+    #[test]
     fn updates_existing_pr_for_same_branch() {
         let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
@@ -859,6 +928,7 @@ mod tests {
                 source_relationship: AgentTaskPrSourceRelationship::default(),
                 verification: AgentTaskPrVerification::default(),
                 runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
+                lifecycle: None,
             },
             ai_used_for: "Drafted implementation and tests; Chris reviews and owns the change."
                 .to_string(),

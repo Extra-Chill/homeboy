@@ -16,6 +16,11 @@ use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals, AgentTaskPlan,
     AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use crate::core::run_lifecycle_record::{
+    ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
+    ExternalRuntimeId, ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionState,
+    RunHeartbeat, RunLifecycleRecord, RUN_LIFECYCLE_RECORD_SCHEMA,
+};
 use crate::core::{paths, Error, ErrorCode, Result};
 
 #[path = "lifecycle_store.rs"]
@@ -49,6 +54,8 @@ pub struct AgentTaskRunRecord {
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_handles: Vec<AgentTaskRunProviderHandle>,
+    #[serde(default)]
+    pub lifecycle: RunLifecycleRecord,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -187,10 +194,12 @@ pub fn submit_plan(
         tasks: plan.tasks.iter().map(queued_task).collect(),
         artifact_refs: Vec::new(),
         provider_handles: Vec::new(),
+        lifecycle: lifecycle_for_submitted_plan(plan),
         metadata: json!({
             "task_count": plan.tasks.len(),
             "max_concurrency": plan.options.max_concurrency,
             "provider_run_ids": [],
+            "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
             "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
         }),
     };
@@ -247,6 +256,8 @@ pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
     let reclaimed_stale = record.state == AgentTaskRunState::Running;
     record.state = AgentTaskRunState::Running;
     record.updated_at = Some(now_timestamp());
+    update_lifecycle_execution(&mut record, AgentTaskRunState::Running);
+    update_lifecycle_heartbeat(&mut record);
     for task in &mut record.tasks {
         if task.state == AgentTaskState::Queued {
             task.state = AgentTaskState::Running;
@@ -330,6 +341,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     let was_stale_running = record.state == AgentTaskRunState::Running;
     record.state = AgentTaskRunState::Cancelled;
     record.updated_at = Some(cancelled_at.clone());
+    update_lifecycle_execution(&mut record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
             task.state = AgentTaskState::Cancelled;
@@ -788,6 +800,7 @@ fn apply_aggregate_to_record(
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);
     record.provider_handles = provider_handles_for_outcomes(&aggregate.outcomes);
+    update_lifecycle_from_record(record, plan);
     let provider_run_ids: Vec<String> = record
         .provider_handles
         .iter()
@@ -877,6 +890,7 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
 
     record.state = AgentTaskRunState::Cancelled;
     record.updated_at = Some(now_timestamp());
+    update_lifecycle_execution(&mut record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
             task.state = AgentTaskState::Cancelled;
@@ -1309,6 +1323,136 @@ fn run_state_for_aggregate(aggregate: &AgentTaskAggregate) -> AgentTaskRunState 
         crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Cancelled => {
             AgentTaskRunState::Cancelled
         }
+    }
+}
+
+fn lifecycle_for_submitted_plan(plan: &AgentTaskPlan) -> RunLifecycleRecord {
+    let timestamp = now_timestamp();
+    let mut lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
+    lifecycle.updated_at = Some(timestamp.clone());
+    lifecycle.execution.updated_at = Some(timestamp.clone());
+    lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, Some(timestamp.clone()));
+    lifecycle.artifact_retention = ArtifactRetentionLifecycle {
+        status: ArtifactRetentionStatus::Pending,
+        policy: Some("retain".to_string()),
+        updated_at: Some(timestamp),
+    };
+    lifecycle
+}
+
+fn update_lifecycle_execution(record: &mut AgentTaskRunRecord, state: AgentTaskRunState) {
+    let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
+    record.lifecycle.execution.state = execution_state_for_run_state(state);
+    record.lifecycle.execution.updated_at = Some(timestamp.clone());
+    if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
+        record.lifecycle.execution.started_at = Some(timestamp.clone());
+    }
+    if matches!(
+        state,
+        AgentTaskRunState::Succeeded
+            | AgentTaskRunState::PartialFailure
+            | AgentTaskRunState::Failed
+            | AgentTaskRunState::Cancelled
+    ) {
+        record.lifecycle.execution.finished_at = Some(timestamp.clone());
+    }
+    record.lifecycle.updated_at = Some(timestamp);
+}
+
+fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
+    let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
+    record.lifecycle.heartbeat = Some(RunHeartbeat {
+        last_seen_at: timestamp,
+        owner_pid: record.owner_pid().or_else(|| Some(std::process::id())),
+        stale_after_seconds: None,
+    });
+}
+
+fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan: &AgentTaskPlan) {
+    update_lifecycle_execution(record, record.state);
+    record.lifecycle.cleanup = cleanup_lifecycle_for_plan(plan, record.updated_at.clone());
+    record.lifecycle.provider_runtime = record
+        .provider_handles
+        .iter()
+        .map(provider_runtime_for_handle)
+        .collect();
+    record.lifecycle.external_runtime_ids = record
+        .lifecycle
+        .provider_runtime
+        .iter()
+        .flat_map(|runtime| runtime.external_runtime_ids.clone())
+        .collect();
+    record.lifecycle.artifact_retention = ArtifactRetentionLifecycle {
+        status: if record.artifact_refs.is_empty() {
+            ArtifactRetentionStatus::NotApplicable
+        } else {
+            ArtifactRetentionStatus::Retained
+        },
+        policy: Some("retain".to_string()),
+        updated_at: record.updated_at.clone(),
+    };
+}
+
+fn cleanup_lifecycle_for_plan(
+    plan: &AgentTaskPlan,
+    updated_at: Option<String>,
+) -> CleanupLifecycle {
+    let policies: Vec<String> = plan
+        .tasks
+        .iter()
+        .filter_map(|task| task.workspace.cleanup.clone())
+        .collect();
+    let preserved = policies.iter().any(|policy| policy == "preserve");
+    CleanupLifecycle {
+        state: if preserved {
+            CleanupState::Preserved
+        } else if policies.is_empty() {
+            CleanupState::Unknown
+        } else {
+            CleanupState::Pending
+        },
+        policy: (!policies.is_empty()).then(|| policies.join(",")),
+        updated_at,
+    }
+}
+
+fn provider_runtime_for_handle(handle: &AgentTaskRunProviderHandle) -> ProviderRuntimeLifecycle {
+    ProviderRuntimeLifecycle {
+        task_id: handle.task_id.clone(),
+        backend: handle.backend.clone(),
+        state: provider_runtime_state_for_task_state(handle.state),
+        stream_uri: handle.stream_uri.clone(),
+        external_runtime_ids: vec![ExternalRuntimeId {
+            kind: "provider_run_id".to_string(),
+            value: handle.provider_run_id.clone(),
+            provider: Some(handle.backend.clone()),
+            url: handle.stream_uri.clone(),
+        }],
+        metadata: handle.metadata.clone(),
+    }
+}
+
+fn execution_state_for_run_state(state: AgentTaskRunState) -> RunExecutionState {
+    match state {
+        AgentTaskRunState::Queued => RunExecutionState::Queued,
+        AgentTaskRunState::Running => RunExecutionState::Running,
+        AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
+        AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
+        AgentTaskRunState::Failed => RunExecutionState::Failed,
+        AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
+    }
+}
+
+fn provider_runtime_state_for_task_state(state: Option<AgentTaskState>) -> ProviderRuntimeState {
+    match state {
+        None | Some(AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped) => {
+            ProviderRuntimeState::NotStarted
+        }
+        Some(AgentTaskState::Running) => ProviderRuntimeState::Running,
+        Some(AgentTaskState::Succeeded) => ProviderRuntimeState::Succeeded,
+        Some(AgentTaskState::Failed) => ProviderRuntimeState::Failed,
+        Some(AgentTaskState::Cancelled) => ProviderRuntimeState::Cancelled,
+        Some(AgentTaskState::TimedOut) => ProviderRuntimeState::TimedOut,
     }
 }
 
@@ -1877,8 +2021,17 @@ mod tests {
             assert_eq!(loaded_plan.plan_id, "plan-a");
             assert_eq!(running.state, AgentTaskRunState::Running);
             assert_eq!(running.tasks[0].state, AgentTaskState::Running);
+            assert_eq!(
+                running.lifecycle.execution.state,
+                RunExecutionState::Running
+            );
+            assert!(running.lifecycle.heartbeat.is_some());
             assert_eq!(completed.state, AgentTaskRunState::Succeeded);
             assert_eq!(completed.tasks[0].state, AgentTaskState::Succeeded);
+            assert_eq!(
+                completed.lifecycle.execution.state,
+                RunExecutionState::Succeeded
+            );
             assert_eq!(completed.totals, Some(aggregate.totals.clone()));
             assert_eq!(durable_status.state, AgentTaskRunState::Succeeded);
             assert_eq!(durable_status.tasks[0].state, AgentTaskState::Succeeded);
@@ -1927,6 +2080,18 @@ mod tests {
             assert_eq!(
                 record.metadata["provider_run_ids"],
                 json!(["provider-run-123"])
+            );
+            assert_eq!(
+                record.lifecycle.provider_runtime[0].state,
+                ProviderRuntimeState::Succeeded
+            );
+            assert_eq!(
+                record.lifecycle.external_runtime_ids[0].value,
+                "provider-run-123"
+            );
+            assert_eq!(
+                record.lifecycle.artifact_retention.status,
+                ArtifactRetentionStatus::NotApplicable
             );
         });
     }
