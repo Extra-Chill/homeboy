@@ -260,7 +260,7 @@ fn test_requirement_validates_component_path_contains() {
 }
 
 #[test]
-fn test_requirement_executable_uses_env_override_before_path() {
+fn test_requirement_executable_falls_back_to_path_when_env_override_missing() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let path_bin_dir = tmp.path().join("path-bin");
     std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
@@ -288,14 +288,44 @@ fn test_requirement_executable_uses_env_override_before_path() {
     .expect("parse rig");
 
     let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
-    assert!(!out.is_success(), "outcomes: {:?}", out.steps);
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("DEMO_TOOL_BIN"), "error: {error}");
-    assert!(error.contains("missing-override-tool"), "error: {error}");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
 }
 
 #[test]
-fn test_requirement_executable_falls_back_to_path_when_env_override_is_empty() {
+fn test_requirement_executable_uses_ordered_env_aliases_before_path() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let alias_bin = tmp.path().join("alias-tool");
+    write_executable(&alias_bin);
+    let missing_override = tmp.path().join("missing-override-tool");
+
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-executable-env-aliases",
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "executable": "demo-tool",
+                    "executable_env": "DEMO_TOOL_BIN",
+                    "executable_env_aliases": ["DEMO_TOOL_ALIAS_BIN"],
+                    "env": {{
+                        "DEMO_TOOL_BIN": "{}",
+                        "DEMO_TOOL_ALIAS_BIN": "{}",
+                        "PATH": "/nonexistent"
+                    }}
+                }}]
+            }}
+        }}"#,
+        missing_override.to_string_lossy(),
+        alias_bin.to_string_lossy()
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+}
+
+#[test]
+fn test_requirement_executable_falls_back_to_path_when_env_override_is_unusable() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let path_bin_dir = tmp.path().join("path-bin");
     std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
@@ -310,7 +340,7 @@ fn test_requirement_executable_falls_back_to_path_when_env_override_is_empty() {
                     "executable": "demo-tool",
                     "executable_env": "DEMO_TOOL_BIN",
                     "env": {{
-                        "DEMO_TOOL_BIN": "",
+                        "DEMO_TOOL_BIN": "/nonexistent/demo-tool",
                         "PATH": "{}"
                     }}
                 }}]
@@ -322,6 +352,45 @@ fn test_requirement_executable_falls_back_to_path_when_env_override_is_empty() {
 
     let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
+}
+
+#[test]
+fn test_requirement_executable_reports_resolution_sources() {
+    let rig: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "requirement-executable-missing-aliases",
+            "pipeline": {
+                "check": [{
+                    "kind": "requirement",
+                    "executable": "missing-homeboy-test-tool",
+                    "executable_env": "PRIMARY_TOOL_BIN",
+                    "executable_env_aliases": ["SECONDARY_TOOL_BIN"],
+                    "env": {
+                        "PATH": "/nonexistent",
+                        "PRIMARY_TOOL_BIN": "/nonexistent/primary-tool",
+                        "SECONDARY_TOOL_BIN": ""
+                    }
+                }]
+            }
+        }"#,
+    )
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(!out.is_success());
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("PRIMARY_TOOL_BIN=/nonexistent/primary-tool"),
+        "error: {error}"
+    );
+    assert!(
+        error.contains("SECONDARY_TOOL_BIN is unset or empty"),
+        "error: {error}"
+    );
+    assert!(
+        error.contains("PATH lookup for `missing-homeboy-test-tool`"),
+        "error: {error}"
+    );
 }
 
 #[test]
