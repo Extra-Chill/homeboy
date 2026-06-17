@@ -11,6 +11,14 @@
       "label": "WP Codebox agent task executor",
       "backend": "codebox",
       "command": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+      "invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [
