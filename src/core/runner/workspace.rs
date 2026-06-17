@@ -1233,6 +1233,16 @@ mod tests {
     #[test]
     fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
         crate::test_support::with_isolated_home(|_| {
+            // Recognize `github.a8c.com` as a private/proxied source host so the
+            // sync takes the hermetic controller-bundle path
+            // (`materialize_git_from_controller_bundle`) instead of attempting a
+            // real `git clone` over SSH. This keeps the test fully hermetic: it
+            // exercises private-remote materialization without reaching the
+            // network. `with_isolated_home` serializes env-mutating tests via a
+            // global lock, so setting/clearing this env var here is race-free.
+            let prior_private_hosts = std::env::var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS").ok();
+            std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", "github.a8c.com");
+
             let source = tempfile::tempdir().expect("source tempdir");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             git(source.path(), &["init"]);
@@ -1260,7 +1270,7 @@ mod tests {
             )
             .expect("create runner");
 
-            let (output, exit_code) = sync_workspace(
+            let sync_result = sync_workspace(
                 "lab-local-git-bundle",
                 RunnerWorkspaceSyncOptions {
                     path: source.path().display().to_string(),
@@ -1271,8 +1281,16 @@ mod tests {
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
                 },
-            )
-            .expect("sync workspace");
+            );
+
+            // Restore the prior env value before asserting so a failure does not
+            // leak the override into subsequent tests.
+            match prior_private_hosts {
+                Some(value) => std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", value),
+                None => std::env::remove_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS"),
+            }
+
+            let (output, exit_code) = sync_result.expect("sync workspace");
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
@@ -1280,6 +1298,13 @@ mod tests {
             assert_eq!(
                 git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
                 "true"
+            );
+            // The controller-bundle path repoints origin at the real (private)
+            // remote URL without fetching from it, proving the checkout was
+            // materialized from the local bundle rather than a network clone.
+            assert_eq!(
+                git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
+                "git@github.a8c.com:chubes4/conductor.git"
             );
             assert_eq!(
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
