@@ -152,6 +152,113 @@ fn test_command_if_missing_skips_when_path_exists() {
     assert!(!marker.exists(), "guarded command should not run");
 }
 
+#[test]
+fn test_requirement_passes_when_declared_file_exists() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("marker.txt");
+    std::fs::write(&marker, "ok").expect("write marker");
+    let marker_arg = marker.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-file",
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "file": "{}"
+                }}]
+            }}
+        }}"#,
+        marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+}
+
+#[test]
+fn test_requirement_prepare_command_runs_only_in_declared_phase() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("prepared.txt");
+    let marker_arg = marker.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-prepare",
+            "pipeline": {{
+                "bench_prepare": [{{
+                    "kind": "requirement",
+                    "file": "{}",
+                    "prepare_command": "printf prepared > {}",
+                    "prepare_phases": ["bench_prepare"]
+                }}]
+            }}
+        }}"#,
+        marker_arg, marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert_eq!(std::fs::read_to_string(marker).expect("marker"), "prepared");
+}
+
+#[test]
+fn test_requirement_fails_with_remediation_without_prepare_phase() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("missing.txt");
+    let marker_arg = marker.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-remediation",
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "file": "{}",
+                    "prepare_command": "printf prepared > {}",
+                    "prepare_phases": ["bench_prepare"],
+                    "remediation": "run bench_prepare"
+                }}]
+            }}
+        }}"#,
+        marker_arg, marker_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(!out.is_success());
+    let error = out.steps[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("run bench_prepare"), "error: {error}");
+    assert!(!marker.exists(), "check phase should not prepare");
+}
+
+#[test]
+fn test_requirement_validates_component_path_contains() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let component_path = tmp.path().join("plugins/example-plugin");
+    std::fs::create_dir_all(&component_path).expect("mkdir component");
+    let component_arg = component_path.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "requirement-component-path",
+            "components": {{
+                "example": {{ "path": "{}" }}
+            }},
+            "pipeline": {{
+                "check": [{{
+                    "kind": "requirement",
+                    "component": "example",
+                    "component_path_contains": "plugins/example-plugin"
+                }}]
+            }}
+        }}"#,
+        component_arg
+    ))
+    .expect("parse rig");
+
+    let out = run_pipeline(&rig, "check", true).expect("pipeline runs");
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+}
+
 // ---- Dependency-aware ordering ---------------------------------------------
 
 mod dag {
