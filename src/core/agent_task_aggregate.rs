@@ -724,6 +724,7 @@ mod tests {
             summary: Some(format!("{task_id} summary")),
             failure_classification: None,
             artifacts,
+            typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
             outputs: Value::Null,

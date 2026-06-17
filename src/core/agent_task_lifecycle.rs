@@ -456,6 +456,7 @@ pub fn record_pre_dispatch_failure(
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
             metadata: metadata.clone(),
         }],
     );
@@ -475,6 +476,7 @@ pub fn record_pre_dispatch_failure(
             summary: Some(failure.failure_message.to_string()),
             failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: vec![AgentTaskEvidenceRef {
                 kind: "lab-offload-pre-dispatch-failure".to_string(),
                 uri: format!("homeboy://agent-task/run/{run_id}/logs"),
@@ -749,6 +751,7 @@ fn synthetic_remote_dispatch_plan(
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
                 metadata: outcome.metadata.clone(),
             }
         })
@@ -1503,6 +1506,7 @@ mod tests {
             summary: None,
             failure_classification: None,
             artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
             outputs: json!({
@@ -1634,6 +1638,7 @@ mod tests {
                     summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: vec![AgentTaskEvidenceRef {
                         kind: "logs".to_string(),
                         uri: "homeboy://agent-task/run/remote-run/logs".to_string(),
@@ -1754,6 +1759,7 @@ mod tests {
                     summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: vec![AgentTaskEvidenceRef {
                         kind: "provider-run".to_string(),
                         uri: "homeboy://provider/runs/provider-run-1".to_string(),
@@ -1865,6 +1871,7 @@ mod tests {
                     summary: Some("Remote provider agent task failed.".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::Provider),
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
                     outputs: serde_json::json!({}),
@@ -1971,6 +1978,7 @@ mod tests {
                         sha256: None,
                         metadata: Value::Null,
                     }],
+                    typed_artifacts: Vec::new(),
                     evidence_refs: vec![AgentTaskEvidenceRef {
                         kind: "transcript".to_string(),
                         uri: "file:///tmp/transcript.json".to_string(),
@@ -2118,6 +2126,7 @@ mod tests {
                         crate::core::agent_task::AgentTaskFailureClassification::ExecutionFailed,
                     ),
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
                     outputs: Value::Null,
@@ -2265,6 +2274,7 @@ mod tests {
                     summary: Some("ok".to_string()),
                     failure_classification: None,
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
                     outputs: Value::Null,
@@ -2416,6 +2426,7 @@ mod tests {
             summary: Some("ok".to_string()),
             failure_classification: None,
             artifacts,
+            typed_artifacts: Vec::new(),
             evidence_refs,
             diagnostics: Vec::new(),
             outputs: Value::Null,
@@ -2639,6 +2650,7 @@ mod tests {
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         )
@@ -2661,6 +2673,7 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
                 outputs: Value::Null,

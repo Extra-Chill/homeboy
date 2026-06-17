@@ -136,6 +136,12 @@ pub struct AgentTaskRequest {
     pub limits: AgentTaskLimits,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_artifacts: Vec<String>,
+    #[serde(
+        default,
+        alias = "artifactDeclarations",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -169,6 +175,11 @@ impl AgentTaskRequest {
         redacted.executor.config = policy.redact_json(&redacted.executor.config);
         redacted.workspace.materialization =
             policy.redact_json(&redacted.workspace.materialization);
+        redacted.artifact_declarations = redacted
+            .artifact_declarations
+            .into_iter()
+            .map(|declaration| declaration.redacted_with(&policy))
+            .collect();
         redacted.metadata = policy.redact_json(&redacted.metadata);
         redacted
     }
@@ -382,6 +393,8 @@ pub struct AgentTaskOutcome {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<AgentTaskArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_artifacts: Vec<AgentTaskTypedArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<AgentTaskEvidenceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AgentTaskDiagnostic>,
@@ -403,6 +416,11 @@ impl AgentTaskOutcome {
         redacted.summary = redacted.summary.map(|value| policy.redact_string(&value));
         redacted.artifacts = redacted
             .artifacts
+            .into_iter()
+            .map(|artifact| artifact.redacted_with(&policy))
+            .collect();
+        redacted.typed_artifacts = redacted
+            .typed_artifacts
             .into_iter()
             .map(|artifact| artifact.redacted_with(&policy))
             .collect();
@@ -443,6 +461,58 @@ pub enum AgentTaskFailureClassification {
     InvalidInput,
     ExecutionFailed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskArtifactDeclaration {
+    pub name: String,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskTypedArtifact {
+    pub name: String,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<AgentTaskArtifact>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[cfg(test)]
+impl AgentTaskArtifactDeclaration {
+    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
+        self.description = self.description.map(|value| policy.redact_string(&value));
+        self.path = self.path.map(|value| policy.redact_string(&value));
+        self.metadata = policy.redact_json(&self.metadata);
+        self
+    }
+}
+
+#[cfg(test)]
+impl AgentTaskTypedArtifact {
+    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
+        self.payload = policy.redact_json(&self.payload);
+        self.artifact = self.artifact.map(|artifact| artifact.redacted_with(policy));
+        self.metadata = policy.redact_json(&self.metadata);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -697,6 +767,15 @@ mod tests {
                 max_output_bytes: Some(1_000_000),
             },
             expected_artifacts: vec!["patch".to_string(), "report".to_string()],
+            artifact_declarations: vec![AgentTaskArtifactDeclaration {
+                name: "analysis_report".to_string(),
+                artifact_type: Some("AnalysisReport".to_string()),
+                artifact_schema: Some("example/analysis-report/v1".to_string()),
+                path: Some("artifacts/analysis-report.json".to_string()),
+                required: true,
+                description: Some("Structured analysis output".to_string()),
+                metadata: json!({ "audience": "reviewer" }),
+            }],
             metadata: json!({ "batch": 1 }),
         };
 
@@ -781,6 +860,34 @@ mod tests {
     }
 
     #[test]
+    fn request_deserializes_legacy_expected_artifacts_and_declaration_alias() {
+        let request: AgentTaskRequest = serde_json::from_value(json!({
+            "schema": AGENT_TASK_REQUEST_SCHEMA,
+            "task_id": "task-typed-artifacts",
+            "executor": { "backend": "codebox" },
+            "instructions": "Return the declared typed report.",
+            "expected_artifacts": ["legacy-report.json"],
+            "artifactDeclarations": [{
+                "name": "analysis_report",
+                "type": "AnalysisReport",
+                "artifact_schema": "example/analysis-report/v1",
+                "path": "artifacts/analysis-report.json",
+                "required": true
+            }]
+        }))
+        .expect("decode request with typed artifact declarations");
+
+        assert_eq!(request.expected_artifacts, vec!["legacy-report.json"]);
+        assert_eq!(request.artifact_declarations.len(), 1);
+        assert_eq!(request.artifact_declarations[0].name, "analysis_report");
+        assert_eq!(
+            request.artifact_declarations[0].artifact_type.as_deref(),
+            Some("AnalysisReport")
+        );
+        assert!(request.artifact_declarations[0].required);
+    }
+
+    #[test]
     fn outcome_round_trips_success_noop_timeout_and_follow_up_shapes() {
         let statuses = [
             AgentTaskOutcomeStatus::Succeeded,
@@ -816,6 +923,14 @@ mod tests {
                     mime: Some("text/x-patch".to_string()),
                     size_bytes: Some(128),
                     sha256: Some("sha256:abc".to_string()),
+                    metadata: json!({}),
+                }],
+                typed_artifacts: vec![AgentTaskTypedArtifact {
+                    name: "issue_summary".to_string(),
+                    artifact_type: Some("IssueSummary".to_string()),
+                    artifact_schema: Some("example/issue-summary/v1".to_string()),
+                    payload: json!({ "issue_number": 3447 }),
+                    artifact: None,
                     metadata: json!({}),
                 }],
                 evidence_refs: vec![AgentTaskEvidenceRef {
@@ -867,6 +982,14 @@ mod tests {
                 size_bytes: Some(2048),
                 sha256: Some("sha256:def".to_string()),
                 metadata: json!({ "viewport": "desktop" }),
+            }],
+            typed_artifacts: vec![AgentTaskTypedArtifact {
+                name: "screenshot_summary".to_string(),
+                artifact_type: Some("ScreenshotSummary".to_string()),
+                artifact_schema: Some("example/screenshot-summary/v1".to_string()),
+                payload: json!({ "viewport": "desktop", "has_regression": true }),
+                artifact: None,
+                metadata: json!({ "source": "diagnose" }),
             }],
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
@@ -965,6 +1088,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
             metadata: json!({ "refresh_token": "secret-refresh" }),
         };
 
@@ -996,6 +1120,7 @@ mod tests {
                 sha256: None,
                 metadata: json!({ "cookie": "session=secret" }),
             }],
+            typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: vec![AgentTaskDiagnostic {
                 class: "provider".to_string(),

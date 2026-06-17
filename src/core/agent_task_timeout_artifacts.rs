@@ -305,6 +305,11 @@ fn artifact_discovery_paths(request: &AgentTaskRequest) -> Vec<PathBuf> {
     for expected in &request.expected_artifacts {
         paths.push(PathBuf::from(expected));
     }
+    for declaration in &request.artifact_declarations {
+        if let Some(path) = declaration.path.as_deref() {
+            paths.push(PathBuf::from(path));
+        }
+    }
     paths
 }
 
@@ -539,6 +544,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
             metadata,
         }
     }

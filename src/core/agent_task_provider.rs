@@ -717,6 +717,7 @@ fn fixture_success_outcome(
                 Some("application/json"),
             ),
         ],
+        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "transcript".to_string(),
             uri: transcript_path.display().to_string(),
@@ -1187,6 +1188,7 @@ fn failure_outcome(
         summary: Some(message.clone()),
         failure_classification: Some(classification),
         artifacts: Vec::new(),
+        typed_artifacts: Vec::new(),
         evidence_refs: vec![AgentTaskEvidenceRef {
             kind: "agent-task-provider".to_string(),
             uri: format!("homeboy://agent-task/{}", diagnostic_class),
@@ -1270,6 +1272,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
             metadata: Value::Null,
         };
         (request, provider)
@@ -1755,6 +1758,7 @@ mod tests {
                 &patch_path,
                 Some("text/x-patch"),
             )],
+            typed_artifacts: Vec::new(),
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
             outputs: json!({

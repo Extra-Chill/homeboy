@@ -585,6 +585,7 @@ mod tests {
                         sha256: None,
                         metadata: json!({ "metric": "p95_ms" }),
                     }],
+                    typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
                     outputs: Value::Null,
@@ -599,6 +600,7 @@ mod tests {
                     summary: Some("runner failed".to_string()),
                     failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
                     artifacts: Vec::new(),
+                    typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: vec![AgentTaskDiagnostic {
                         class: "runner".to_string(),
@@ -651,6 +653,7 @@ mod tests {
             policy: AgentTaskPolicy::default(),
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],
+            artifact_declarations: Vec::new(),
             metadata: json!({ "report": "side-by-side" }),
         }
     }

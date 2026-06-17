@@ -510,6 +510,7 @@ fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) ->
         summary: provider_payload["summary"].as_str().map(str::to_string),
         failure_classification: None,
         artifacts,
+        typed_artifacts: Vec::new(),
         evidence_refs,
         diagnostics: Vec::new(),
         outputs: json!({ "fanout_id": fanout_id }),
