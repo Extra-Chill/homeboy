@@ -32,6 +32,7 @@ pub mod agent_task_service;
 pub(crate) mod agent_task_timeout;
 pub(crate) mod agent_task_timeout_artifacts;
 pub mod api_jobs;
+pub mod artifact_address;
 pub mod artifact_inputs;
 pub mod artifact_links;
 pub mod artifact_manifest;

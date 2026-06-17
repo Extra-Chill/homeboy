@@ -37,6 +37,8 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 
 `homeboy runs resume-plan <run-id>` reads generic `validation_progress` metadata from a run and reports the last completed command, any active command, and the next pending command. Homeboy core records this ledger for Homeboy-managed validation command sets without understanding npm, smoke groups, benchmarks, or implementation-specific command names; command manifests come from project configuration or extension-provided runners.
 
+`homeboy runs evidence <run-id>` emits reviewer-facing evidence using generic artifact addresses. Local operator files are represented as non-reviewer-visible `homeboy://run/<run-id>/artifact/<artifact-id>` handles with a fetch command instead of absolute machine paths. Remote runner artifacts use `runner-artifact://...` refs, validated public HTTP(S) URLs are emitted as public evidence links, and metadata-only evidence remains non-public. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
+
 `homeboy runs artifact cleanup-downloads` plans cleanup for local runner artifact downloads under Homeboy's artifact root (`<artifact-root>/runner`). By default it is a dry run; pass `--apply` to remove the planned cache subtree. Use `--runner` and `--run-id` to narrow cleanup to a specific runner or run cache.
 
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
