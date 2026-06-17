@@ -27,55 +27,13 @@ pub(super) fn materialize_inline_agent_task_plan_arg(
     runner_id: &str,
     args: &[String],
 ) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    if subcommand_index(args, "agent-task")
-        .and_then(|index| {
-            args.get(index + 1)
-                .filter(|arg| arg.as_str() == "run-plan")
-                .map(|_| index + 1)
-        })
-        .is_none()
-    {
-        return Ok((args.to_vec(), None));
-    }
+    let in_context = subcommand_index(args, "agent-task")
+        .and_then(|index| args.get(index + 1).filter(|arg| arg.as_str() == "run-plan"))
+        .is_some();
 
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--plan" {
-            out.push(arg.clone());
-            if let Some(spec) = iter.next() {
-                if let Some((remapped_spec, entry)) = sync_inline_agent_task_plan(runner_id, spec)?
-                {
-                    out.push(remapped_spec);
-                    out.extend(iter.cloned());
-                    return Ok((out, Some(entry)));
-                }
-                out.push(spec.clone());
-            }
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--plan=") {
-            if let Some((remapped_spec, entry)) = sync_inline_agent_task_plan(runner_id, spec)? {
-                out.push(format!("--plan={remapped_spec}"));
-                out.extend(iter.cloned());
-                return Ok((out, Some(entry)));
-            }
-        }
-        out.push(arg.clone());
-    }
-
-    Ok((out, None))
+    materialize_inline_json_option(args, in_context, "--plan", |spec| {
+        sync_inline_agent_task_plan(runner_id, spec)
+    })
 }
 
 pub(super) fn materialize_inline_agent_task_tasks_arg(
@@ -94,19 +52,34 @@ pub(super) fn materialize_inline_agent_task_tasks_arg(
 
 fn materialize_inline_agent_task_tasks_arg_with(
     args: &[String],
-    mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
+    sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
 ) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    if subcommand_index(args, "agent-task")
+    let in_context = subcommand_index(args, "agent-task")
         .and_then(|index| {
             args.get(index + 1)
                 .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-                .map(|_| index + 1)
         })
-        .is_none()
-    {
+        .is_some();
+
+    materialize_inline_json_option(args, in_context, "--tasks", sync)
+}
+
+/// Scans `args` for a single `--flag <json>` / `--flag=<json>` occurrence and,
+/// when `in_context` and the supplied `sync` closure produce a remapped spec,
+/// rewrites that argument to point at the synced workspace file. Parsing stops
+/// at the `--` passthrough boundary; this is argv materialization only and does
+/// not interpret anything past `--`.
+fn materialize_inline_json_option(
+    args: &[String],
+    in_context: bool,
+    flag: &str,
+    mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
+) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
+    if !in_context {
         return Ok((args.to_vec(), None));
     }
 
+    let flag_eq = format!("{flag}=");
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -121,7 +94,7 @@ fn materialize_inline_agent_task_tasks_arg_with(
             out.push(arg.clone());
             continue;
         }
-        if arg == "--tasks" {
+        if arg == flag {
             out.push(arg.clone());
             if let Some(spec) = iter.next() {
                 if let Some((remapped_spec, entry)) = sync(spec)? {
@@ -133,9 +106,9 @@ fn materialize_inline_agent_task_tasks_arg_with(
             }
             continue;
         }
-        if let Some(spec) = arg.strip_prefix("--tasks=") {
+        if let Some(spec) = arg.strip_prefix(&flag_eq) {
             if let Some((remapped_spec, entry)) = sync(spec)? {
-                out.push(format!("--tasks={remapped_spec}"));
+                out.push(format!("{flag}={remapped_spec}"));
                 out.extend(iter.cloned());
                 return Ok((out, Some(entry)));
             }
