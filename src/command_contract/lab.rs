@@ -104,6 +104,25 @@ impl Commands {
             Commands::AgentTask(args)
                 if matches!(
                     args.command,
+                    agent_task::AgentTaskCommand::Status(_)
+                        | agent_task::AgentTaskCommand::Logs(_)
+                        | agent_task::AgentTaskCommand::Artifacts(_)
+                        | agent_task::AgentTaskCommand::Review(_)
+                ) =>
+            {
+                let mut contract = LabCommandContract::explicit_runner(
+                    "agent-task status/logs/artifacts/review",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                );
+                contract.source_path_mode = LabSourcePathMode::RunnerResident;
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
+                contract
+            }
+            Commands::AgentTask(args)
+                if matches!(
+                    args.command,
                     agent_task::AgentTaskCommand::Auth(agent_task::AgentTaskAuthArgs {
                         command: agent_task::AgentTaskAuthCommand::Status(_),
                     })
@@ -473,19 +492,19 @@ mod tests {
                 .supports_lab_runner()
         );
         assert!(
-            !parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
+            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
                 .supports_lab_runner()
         );
         assert!(
-            !parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"])
+            parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"])
                 .supports_lab_runner()
         );
         assert!(
-            !parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
+            parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
                 .supports_lab_runner()
         );
         assert!(
-            !parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
+            parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
                 .supports_lab_runner()
         );
         assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
@@ -724,7 +743,15 @@ mod tests {
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
         ] {
-            assert!(parsed_command(args).lab_contract().is_none());
+            let contract = parsed_command(args)
+                .lab_contract()
+                .expect("runner-backed agent-task inspection contract");
+            assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+            assert_eq!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::RunnerResident
+            );
+            assert!(!contract.default_lab_offload);
         }
 
         let auth_status = parsed_command(&[

@@ -961,20 +961,25 @@ pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
 
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
     let record = store::read_record(&sanitize_run_id(run_id))?;
-    let path = record.aggregate_path.ok_or_else(|| {
+    record.aggregate_path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
             format!(
                 "agent-task run '{}' has no aggregate artifact yet",
                 record.run_id
             ),
-            Some(record.run_id),
+            Some(record.run_id.clone()),
             None,
         )
     })?;
-    let path = PathBuf::from(path);
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let aggregate = store::read_aggregate(&record.run_id)?;
+    let raw = serde_json::to_string_pretty(&aggregate).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!("serialize agent-task aggregate {}", record.run_id)),
+        )
+    })?;
+    let path = store::aggregate_path(&record.run_id)?;
     Ok((raw, path))
 }
 
@@ -2100,10 +2105,16 @@ mod tests {
                 queue: Default::default(),
             };
             record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
+            let local_path = store::aggregate_path("run-source").expect("local aggregate path");
+            let mut record = store::read_record("run-source").expect("record loaded");
+            record.aggregate_path = Some("/home/chubes/remote/aggregate.json".to_string());
+            store::write_record(&record).expect("remote aggregate path stored");
+            std::fs::remove_file(&local_path).expect("local aggregate removed");
 
             let (raw, path) = aggregate_source("run-source").expect("aggregate source");
 
             assert!(path.ends_with("aggregate.json"));
+            assert_ne!(path, PathBuf::from("/home/chubes/remote/aggregate.json"));
             assert!(raw.contains("task-a"));
         });
     }
