@@ -411,16 +411,15 @@ enum DetectorProfileField {
 }
 
 fn language_matches(configured: &str, language: &Language) -> bool {
-    matches!(
-        (configured.trim().to_ascii_lowercase().as_str(), language),
-        ("php", Language::Php)
-            | ("javascript", Language::JavaScript)
-            | ("js", Language::JavaScript)
-            | ("typescript", Language::TypeScript)
-            | ("ts", Language::TypeScript)
-            | ("rust", Language::Rust)
-            | ("rs", Language::Rust)
-    )
+    let normalized = configured.trim().to_ascii_lowercase();
+    serde_json::from_value::<Language>(serde_json::Value::String(normalized.clone()))
+        .ok()
+        .or_else(|| {
+            let configured_language = Language::from_extension(&normalized);
+            (configured_language != Language::Unknown).then_some(configured_language)
+        })
+        .as_ref()
+        .is_some_and(|configured_language| configured_language == language)
 }
 
 fn version_guard_description(

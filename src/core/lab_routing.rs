@@ -6,6 +6,9 @@ use crate::command_contract::{
     LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
     LabWorkspaceModePolicy,
 };
+use crate::core::command_execution_plan::{
+    CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
+};
 use crate::core::runners;
 use crate::core::Result;
 
@@ -49,39 +52,79 @@ pub fn lab_offload_command_from_contract(
     contract: LabCommandContract,
     required_extensions: Vec<String>,
 ) -> runners::LabOffloadCommand {
+    let plan = lab_route_plan_from_contract(contract, required_extensions);
     runners::LabOffloadCommand {
         hot_label: contract.hot_label,
-        portable: matches!(contract.portability, LabCommandPortability::Portable),
-        default_lab_offload: contract.default_lab_offload,
+        portable: matches!(plan.portability, CommandPortability::Portable),
+        default_lab_offload: plan.default_lab_offload,
         unsupported_reason: match contract.portability {
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
         },
-        source_path_mode: match contract.source_path_mode {
-            LabSourcePathMode::CwdOrPathFlag => runners::LabOffloadSourcePathMode::CwdOrPathFlag,
-            LabSourcePathMode::RunnerResident => runners::LabOffloadSourcePathMode::RunnerResident,
+        source_path_mode: match plan.source_policy {
+            CommandSourcePolicy::ControllerCwdOrExplicitPath
+            | CommandSourcePolicy::MaterializeControllerPath => {
+                runners::LabOffloadSourcePathMode::CwdOrPathFlag
+            }
+            CommandSourcePolicy::RunnerResident => {
+                runners::LabOffloadSourcePathMode::RunnerResident
+            }
         },
-        workspace_mode_policy: match contract.workspace_mode_policy {
-            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
+        workspace_mode_policy: match plan.workspace_policy {
+            CommandWorkspacePolicy::ChangedSinceGitElseSnapshot => {
                 runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
-            LabWorkspaceModePolicy::Git => runners::LabOffloadWorkspaceModePolicy::Git,
-            LabWorkspaceModePolicy::GitCheckoutRequired => {
+            CommandWorkspacePolicy::Git => runners::LabOffloadWorkspaceModePolicy::Git,
+            CommandWorkspacePolicy::GitCheckoutRequired => {
                 runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
             }
-            LabWorkspaceModePolicy::RunnerResident => {
+            CommandWorkspacePolicy::RunnerResident => {
                 runners::LabOffloadWorkspaceModePolicy::RunnerResident
             }
+            CommandWorkspacePolicy::Snapshot => {
+                runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+            }
         },
-        requires_extension_parity: contract.requires_extension_parity,
-        required_extensions,
-        requires_playwright: contract
-            .extra_required_tools
-            .iter()
-            .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright)),
-        infer_source_path_tools: contract.infer_source_path_tools,
-        release_gate: contract.release_gate,
+        requires_extension_parity: plan.requires_extension_parity,
+        required_extensions: plan.required_extensions,
+        requires_playwright: plan.requires_playwright,
+        infer_source_path_tools: plan.infer_source_path_tools,
+        release_gate: plan.release_gate,
     }
+}
+
+pub fn lab_route_plan_from_contract(
+    contract: LabCommandContract,
+    required_extensions: Vec<String>,
+) -> LabRoutePlan {
+    let mut plan = match contract.portability {
+        LabCommandPortability::Portable => LabRoutePlan::portable(contract.hot_label),
+        LabCommandPortability::LocalOnly(reason) => {
+            LabRoutePlan::local_only(contract.hot_label, reason)
+        }
+    };
+    plan.default_lab_offload = contract.default_lab_offload;
+    plan.source_policy = match contract.source_path_mode {
+        LabSourcePathMode::CwdOrPathFlag => CommandSourcePolicy::ControllerCwdOrExplicitPath,
+        LabSourcePathMode::RunnerResident => CommandSourcePolicy::RunnerResident,
+    };
+    plan.workspace_policy = match contract.workspace_mode_policy {
+        LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot => {
+            CommandWorkspacePolicy::ChangedSinceGitElseSnapshot
+        }
+        LabWorkspaceModePolicy::Git => CommandWorkspacePolicy::Git,
+        LabWorkspaceModePolicy::GitCheckoutRequired => CommandWorkspacePolicy::GitCheckoutRequired,
+        LabWorkspaceModePolicy::RunnerResident => CommandWorkspacePolicy::RunnerResident,
+    };
+    plan.requires_extension_parity = contract.requires_extension_parity;
+    plan.required_extensions = required_extensions;
+    plan.requires_playwright = contract
+        .extra_required_tools
+        .iter()
+        .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright));
+    plan.infer_source_path_tools = contract.infer_source_path_tools;
+    plan.release_gate = contract.release_gate;
+    plan
 }
 
 pub fn lab_trace_dispatch_timeout() -> Duration {
@@ -158,6 +201,9 @@ mod tests {
     use crate::command_contract::{
         LabCommandContract, LabCommandPortability, LabSourcePathMode, LAB_TRACE_EXTRA_TOOLS,
     };
+    use crate::core::command_execution_plan::{
+        CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
+    };
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     struct EnvGuard {
@@ -225,6 +271,47 @@ mod tests {
         assert_eq!(command.required_extensions, vec!["wordpress", "playwright"]);
         assert!(command.requires_playwright);
         assert!(!command.infer_source_path_tools);
+    }
+
+    #[test]
+    fn lab_route_plan_from_contract_exposes_generic_policy_shape() {
+        let plan = lab_route_plan_from_contract(
+            lab_contract(),
+            vec!["wordpress".to_string(), "playwright".to_string()],
+        );
+
+        assert_eq!(plan.label, "trace");
+        assert_eq!(plan.portability, CommandPortability::Portable);
+        assert_eq!(plan.local_only_reason(), None);
+        assert_eq!(
+            plan.source_policy,
+            CommandSourcePolicy::ControllerCwdOrExplicitPath
+        );
+        assert_eq!(
+            plan.workspace_policy,
+            CommandWorkspacePolicy::GitCheckoutRequired
+        );
+        assert!(plan.default_lab_offload);
+        assert!(plan.requires_extension_parity);
+        assert_eq!(plan.required_extensions, vec!["wordpress", "playwright"]);
+        assert!(plan.requires_playwright);
+    }
+
+    #[test]
+    fn lab_route_plan_from_contract_exposes_local_only_reason() {
+        let mut contract = lab_contract();
+        contract.portability = LabCommandPortability::LocalOnly("needs controller services");
+        contract.source_path_mode = LabSourcePathMode::RunnerResident;
+        contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
+
+        let plan = lab_route_plan_from_contract(contract, Vec::new());
+
+        assert_eq!(plan.local_only_reason(), Some("needs controller services"));
+        assert_eq!(plan.source_policy, CommandSourcePolicy::RunnerResident);
+        assert_eq!(
+            plan.workspace_policy,
+            CommandWorkspacePolicy::RunnerResident
+        );
     }
 
     #[test]
