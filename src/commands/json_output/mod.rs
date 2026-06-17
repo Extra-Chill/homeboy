@@ -106,6 +106,7 @@ mod tests {
         let args = AgentTaskArgs {
             command: AgentTaskCommand::Status(StatusArgs {
                 run_id: "run-1".to_string(),
+                full: false,
             }),
         };
 
