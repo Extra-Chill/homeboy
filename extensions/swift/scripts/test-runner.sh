@@ -2,15 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/lib/resolve-context.sh}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../scripts/lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
-source "$RESOLVE_CONTEXT_HELPER"
-homeboy_resolve_context
-# shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --component-alias COMPONENT_PATH --sidecar-writer
 
 # Debug environment variables (only shown when HOMEBOY_DEBUG=1)
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
