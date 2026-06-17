@@ -1,15 +1,30 @@
-//! Shared vocabulary for code-change artifacts and apply results.
+//! Runner apply/change wire payloads.
 //!
-//! This module intentionally stays small: producers can describe a patch or
-//! file delta with provenance, while apply surfaces can report a common result
-//! envelope without adopting a full runner/Lab/refactor rewrite at once.
+//! This module owns the serializable `homeboy/change-artifact/v1` and
+//! `homeboy/change-apply-result/v1` schemas used at runner/Lab apply
+//! boundaries. `core::execution` owns the higher-level lifecycle envelopes for
+//! execute/artifact/approve/apply/publish flows. Use [`ApplyChangeArtifact`] and
+//! [`ApplyChangeResult`] when the payload is consumed by an apply adapter; use
+//! `core::execution::ChangeArtifact` when describing a lifecycle artifact in an
+//! execution run.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
+use crate::core::execution::ChangeArtifactProvenance as ExecutionChangeArtifactProvenance;
+use crate::core::execution::{ApprovalScope, ChangeArtifact as ExecutionChangeArtifact};
+use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::source_snapshot::SourceSnapshot;
 
-pub const CHANGE_ARTIFACT_SCHEMA: &str = "homeboy/change-artifact/v1";
-pub const CHANGE_APPLY_RESULT_SCHEMA: &str = "homeboy/change-apply-result/v1";
+pub const CHANGE_ARTIFACT_SCHEMA: &str = EXECUTION_CONTRACT.apply.change_artifact_schema;
+pub const CHANGE_APPLY_RESULT_SCHEMA: &str = EXECUTION_CONTRACT.apply.change_apply_result_schema;
+pub const RUNNER_WORKSPACE_APPLY_ADAPTER: &str =
+    EXECUTION_CONTRACT.apply.runner_workspace_apply_adapter;
+pub const UNIFIED_DIFF_PATCH_FORMAT: &str = EXECUTION_CONTRACT.apply.unified_diff_patch_format;
+pub const DIGEST_ALGORITHM_SHA256: &str = EXECUTION_CONTRACT.apply.digest_algorithm_sha256;
+
+pub type ApplyChangeArtifact = ChangeArtifact;
+pub type ApplyChangeResult = ChangeApplyResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChangeArtifact {
@@ -101,6 +116,81 @@ impl ChangeArtifact {
             digest: self.digest.clone(),
         }
     }
+
+    /// Project this apply-wire artifact into the lifecycle artifact envelope.
+    ///
+    /// The projection is intentionally lossy: source snapshot, schema, and
+    /// digest remain in metadata while the lifecycle artifact carries the
+    /// review-facing id/type/files/diff/provenance fields.
+    pub fn to_execution_change_artifact(
+        &self,
+        fallback_id: impl Into<String>,
+        artifact_type: impl Into<String>,
+    ) -> ExecutionChangeArtifact {
+        let artifact_id = self
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.artifact_id.clone())
+            .unwrap_or_else(|| fallback_id.into());
+        let artifact_type = artifact_type.into();
+        let mut metadata = HashMap::new();
+        metadata.insert("schema".to_string(), serde_json::json!(self.schema.clone()));
+        metadata.insert(
+            "source_snapshot".to_string(),
+            serde_json::to_value(&self.source_snapshot).unwrap_or(serde_json::Value::Null),
+        );
+        if let Some(digest) = &self.digest {
+            metadata.insert(
+                "digest".to_string(),
+                serde_json::to_value(digest).unwrap_or(serde_json::Value::Null),
+            );
+        }
+
+        ExecutionChangeArtifact {
+            id: artifact_id.clone(),
+            artifact_type,
+            provenance: self.provenance.as_ref().map_or_else(
+                || ExecutionChangeArtifactProvenance {
+                    source: "apply_change_artifact".to_string(),
+                    run_id: None,
+                    step_id: None,
+                    command: None,
+                    captured_at: None,
+                },
+                |provenance| ExecutionChangeArtifactProvenance {
+                    source: provenance.producer.clone(),
+                    run_id: provenance.run_id.clone(),
+                    step_id: None,
+                    command: provenance.command.as_ref().map(|command| command.join(" ")),
+                    captured_at: None,
+                },
+            ),
+            title: None,
+            summary: None,
+            path: None,
+            files: self.files(),
+            diff: self.patch.as_ref().map(|patch| patch.content.clone()),
+            approval_scope: Some(ApprovalScope::Artifact { artifact_id }),
+            metadata,
+        }
+    }
+
+    pub fn files(&self) -> Vec<String> {
+        let mut files = self
+            .delta
+            .as_ref()
+            .map(|delta| {
+                delta
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files.dedup();
+        files
+    }
 }
 
 impl ChangeApplyResult {
@@ -132,11 +222,11 @@ fn default_change_apply_result_schema() -> String {
 }
 
 fn default_patch_format() -> String {
-    "unified_diff".to_string()
+    UNIFIED_DIFF_PATCH_FORMAT.to_string()
 }
 
 fn default_digest_algorithm() -> String {
-    "sha256".to_string()
+    DIGEST_ALGORITHM_SHA256.to_string()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -212,6 +302,73 @@ mod tests {
             "refactor.transform"
         );
         assert_eq!(json["artifact"]["digest"]["value"], "def456");
+    }
+
+    #[test]
+    fn constants_are_sourced_from_canonical_execution_contract() {
+        assert_eq!(
+            CHANGE_ARTIFACT_SCHEMA,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .apply
+                .change_artifact_schema
+        );
+        assert_eq!(
+            CHANGE_APPLY_RESULT_SCHEMA,
+            crate::core::execution_contract::EXECUTION_CONTRACT
+                .apply
+                .change_apply_result_schema
+        );
+        assert_eq!(UNIFIED_DIFF_PATCH_FORMAT, "unified_diff");
+        assert_eq!(DIGEST_ALGORITHM_SHA256, "sha256");
+    }
+
+    #[test]
+    fn apply_artifact_projects_to_execution_lifecycle_artifact() {
+        let artifact = ChangeArtifact {
+            schema: CHANGE_ARTIFACT_SCHEMA.to_string(),
+            source_snapshot: source_snapshot(),
+            patch: None,
+            delta: Some(ChangeDelta {
+                files: vec![ChangeDeltaFile {
+                    path: "src/lib.rs".to_string(),
+                    content_base64: Some("Zm9vCg==".to_string()),
+                    delete: false,
+                }],
+            }),
+            provenance: Some(ChangeArtifactProvenance {
+                producer: "runner.capture_patch".to_string(),
+                run_id: Some("run-1".to_string()),
+                artifact_id: Some("patch.diff".to_string()),
+                command: Some(vec!["homeboy".to_string(), "lab".to_string()]),
+            }),
+            digest: Some(ChangeArtifactDigest {
+                algorithm: DIGEST_ALGORITHM_SHA256.to_string(),
+                value: "abc123".to_string(),
+            }),
+        };
+
+        let execution_artifact =
+            artifact.to_execution_change_artifact("fallback.patch", "runner.apply.change_artifact");
+
+        assert_eq!(execution_artifact.id, "patch.diff");
+        assert_eq!(
+            execution_artifact.artifact_type,
+            "runner.apply.change_artifact"
+        );
+        assert_eq!(execution_artifact.provenance.source, "runner.capture_patch");
+        assert_eq!(
+            execution_artifact.provenance.command.as_deref(),
+            Some("homeboy lab")
+        );
+        assert_eq!(execution_artifact.files, vec!["src/lib.rs"]);
+        assert_eq!(
+            execution_artifact.metadata["schema"],
+            serde_json::json!(CHANGE_ARTIFACT_SCHEMA)
+        );
+        assert_eq!(
+            execution_artifact.metadata["digest"]["algorithm"],
+            DIGEST_ALGORITHM_SHA256
+        );
     }
 
     fn source_snapshot() -> SourceSnapshot {

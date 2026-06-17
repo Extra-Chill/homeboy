@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use crate::core::change_artifact::{ChangeArtifact, ChangePatch, CHANGE_ARTIFACT_SCHEMA};
+use crate::core::change_artifact::{
+    ChangeArtifact, ChangePatch, CHANGE_ARTIFACT_SCHEMA, UNIFIED_DIFF_PATCH_FORMAT,
+};
 use crate::core::{Error, Result};
 
 use super::{
@@ -47,7 +49,7 @@ pub(super) fn apply_lab_offload_patch(
         schema: CHANGE_ARTIFACT_SCHEMA.to_string(),
         source_snapshot,
         patch: Some(ChangePatch {
-            format: "unified_diff".to_string(),
+            format: UNIFIED_DIFF_PATCH_FORMAT.to_string(),
             content: patch_content,
         }),
         delta: None,
