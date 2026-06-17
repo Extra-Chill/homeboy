@@ -152,7 +152,7 @@ function runtimeProviderCapabilities() {
 }
 
 function runtimeWorkspaceTools(options = {}) {
-  const configured = firstObject(options.workspaceTools, runtimeExecutorManifest().workspace_tools) || {};
+  const configured = firstObject(options.workspaceTools, options.workspace_tools, runtimeExecutorManifest().workspace_tools) || {};
   return {
     readonly: normalizeArray(configured.readonly),
     readwrite: normalizeArray(configured.readwrite),
@@ -160,7 +160,7 @@ function runtimeWorkspaceTools(options = {}) {
 }
 
 function runtimeComponentPathDefaults(options = {}) {
-  return firstObject(options.componentPathDefaults, runtimeExecutorManifest().component_path_defaults) || {};
+  return firstObject(options.componentPathDefaults, options.component_path_defaults, runtimeExecutorManifest().component_path_defaults) || {};
 }
 
 function runtimeComponentPathAliases(options = {}) {
@@ -186,36 +186,37 @@ function runtimeSecretEnvRequirements() {
 function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
+  const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
-  const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, options);
-  const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, options);
+  const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
+  const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
-  const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || options.mounts || []);
-  const componentContracts = componentContractsFromAgentTaskRequest(request, config, options);
-  const components = runtimeComponentPaths(config, { ...defaults, ...options, componentContracts });
-  const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, options.agentBundles, []);
-  const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, options.structuredArtifacts, []);
-  const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, options);
-  const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults);
-  const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools);
-  const provider = config.provider || options.provider || defaults.provider || '';
-  const model = request.executor.model || config.model || options.model || defaults.model || '';
-  const agent = firstValue(config.agent, options.agent, '');
+  const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || runtimeOptions.mounts || []);
+  const componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
+  const components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
+  const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
+  const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
+  const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions);
+  const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, runtimeOptions, defaults);
+  const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools);
+  const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
+  const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
+  const agent = firstValue(config.agent, runtimeOptions.agent, '');
   const runtimeTask = runtimeTaskWithExecutionDefaults(
-    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || options.runtimeTask,
+    inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
     { provider, model, agentBundles }
   );
   const explicitSecretEnv = [
     ...normalizeArray(request.executor?.secret_env),
     ...normalizeArray(config.secret_env),
-    ...normalizeArray(options.secretEnv),
+    ...normalizeArray(runtimeOptions.secretEnv),
   ];
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
-  const runtimeOverlays = runtimeOverlaysFromConfig(config, options, defaults);
+  const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -239,43 +240,43 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
-    ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, options.abilityTools, []),
+    ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, runtimeOptions.abilityTools, []),
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
     session_id: config.session_id || config.sessionId || '',
     ...(agent ? { agent } : {}),
-    mode: config.mode || options.mode || 'sandbox',
+    mode: config.mode || runtimeOptions.mode || 'sandbox',
     provider,
     model,
     provider_plugin_paths: firstNonEmptyArray(
       config.provider_plugin_paths,
-      options.providerPluginPaths,
+      runtimeOptions.providerPluginPaths,
       defaults.providerPluginPaths,
       []
     ),
     agent_bundles: agentBundles,
-    runtime_stack_mounts: config.runtime_stack_mounts || options.runtimeStackMounts || [],
-    runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || options.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
+    runtime_stack_mounts: config.runtime_stack_mounts || runtimeOptions.runtimeStackMounts || [],
+    runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || runtimeOptions.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: runtimeOverlays,
-    runtime_env: firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, options.runtimeEnv, defaults.runtimeEnv, {}),
-    runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts, []),
-    runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
+    runtime_env: firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
+    runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
+    runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeOptions.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
     secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
     // refuses to report success until the gates are green.
-    verify_steps: inputs.verify_steps || config.verify_steps || options.verifySteps || [],
+    verify_steps: inputs.verify_steps || config.verify_steps || runtimeOptions.verifySteps || [],
     mounts,
-    workspaces: inputs.workspaces || config.workspaces || options.workspaces || defaults.workspaces || [],
+    workspaces: inputs.workspaces || config.workspaces || runtimeOptions.workspaces || defaults.workspaces || [],
     runtime_component_paths: components,
     component_contracts: componentContracts,
-    homeboy_path: config.homeboy || config.homeboy_path || options.homeboy || '',
-    homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || options.homeboyExtensions || '',
-    wp_codebox_bin: firstValue(config.runtime_bin, config.wp_codebox_bin, config.wpCodeboxBin, options.wpCodeboxBin, defaults.wpCodeboxBin, ''),
-    wp: config.runtime_wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || config.wordpress_version || options.wpCodeboxWordpressVersion || '',
-    artifacts_path: config.artifacts || config.artifacts_path || options.artifacts || '',
-    max_turns: config.max_turns || options.maxTurns,
-    task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || options.taskTimeoutSeconds,
+    homeboy_path: config.homeboy || config.homeboy_path || runtimeOptions.homeboy || '',
+    homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || runtimeOptions.homeboyExtensions || '',
+    wp_codebox_bin: firstValue(config.runtime_bin, config.wp_codebox_bin, config.wpCodeboxBin, runtimeOptions.wpCodeboxBin, defaults.wpCodeboxBin, ''),
+    wp: config.runtime_wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || config.wordpress_version || runtimeOptions.wpCodeboxWordpressVersion || '',
+    artifacts_path: config.artifacts || config.artifacts_path || runtimeOptions.artifacts || '',
+    max_turns: config.max_turns || runtimeOptions.maxTurns,
+    task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || runtimeOptions.taskTimeoutSeconds,
     orchestrator: {
       ...(inputs.orchestrator || {}),
       agent_task_id: request.task_id,
@@ -284,6 +285,20 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     },
     agent_bundle: agentBundle,
     parent_request: request,
+  };
+}
+
+function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
+  const directComponentPathDefaults = firstObject(config.component_path_defaults, config.componentPathDefaults);
+  const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
+  const componentPathDefaults = directComponentPathDefaults || firstObject(options.componentPathDefaults, options.component_path_defaults, runtimeRequirements.component_path_defaults, runtimeRequirements.componentPathDefaults);
+  return {
+    ...options,
+    workspaceTools: firstObject(options.workspaceTools, options.workspace_tools, config.workspace_tools, config.workspaceTools, runtimeRequirements.workspace_tools, runtimeRequirements.workspaceTools),
+    componentPathDefaults,
+    componentPathAliases: firstObject(options.componentPathAliases, options.component_path_aliases, config.component_path_aliases, config.componentPathAliases, componentPathDefaults?.path_aliases, runtimeRequirements.component_path_aliases, runtimeRequirements.componentPathAliases),
+    componentContractSlugMap: firstObject(options.componentContractSlugMap, options.component_contract_slug_map, config.component_contract_slug_map, config.componentContractSlugMap, componentPathDefaults?.contract_slug_map, runtimeRequirements.component_contract_slug_map, runtimeRequirements.componentContractSlugMap),
+    componentDiscovery: firstObject(options.componentDiscovery, options.component_discovery, config.component_discovery, config.componentDiscovery, componentPathDefaults?.discovery, runtimeRequirements.component_discovery, runtimeRequirements.componentDiscovery),
   };
 }
 
