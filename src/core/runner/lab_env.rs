@@ -4,7 +4,9 @@ use crate::core::{Error, Result};
 
 use super::execution::RUNNER_EXEC_WAIT_TIMEOUT_ENV;
 use super::lab_workspaces::{is_rig_component_path_env_name, LabWorkspaceMappingEntry};
-use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
+use crate::core::observation::{
+    LAB_OFFLOAD_METADATA_ENV, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV,
+};
 
 const SETTINGS_DIAGNOSTICS_SCHEMA: &str = "homeboy/lab-offload-settings-env/v1";
 
@@ -27,6 +29,25 @@ pub(super) fn build_lab_offload_env(lab_metadata: &serde_json::Value) -> HashMap
         LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::to_string(lab_metadata).unwrap_or_default(),
     )])
+}
+
+/// Forward the preview metadata/public-url passthroughs plus release CI context
+/// into a Lab offload env. Centralizes the repeated forward sequence shared by
+/// the offload dispatch paths so they stay in lock-step.
+pub(super) fn forward_preview_and_release_ci_env(env: &mut HashMap<String, String>) {
+    forward_env_if_present(env, PREVIEW_METADATA_ENV);
+    forward_env_if_present(env, PREVIEW_PUBLIC_URL_ENV);
+    forward_release_ci_env(env);
+}
+
+/// Build a fresh Lab offload env from `lab_metadata` and forward the preview and
+/// release CI passthroughs in one step.
+pub(super) fn build_lab_offload_env_with_passthroughs(
+    lab_metadata: &serde_json::Value,
+) -> HashMap<String, String> {
+    let mut env = build_lab_offload_env(lab_metadata);
+    forward_preview_and_release_ci_env(&mut env);
+    env
 }
 
 pub(super) fn forward_rig_component_path_env(

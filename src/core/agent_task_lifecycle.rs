@@ -374,12 +374,21 @@ pub fn record_run_aggregate(
     record_aggregate(&mut record, plan, aggregate)
 }
 
+/// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch
+/// failure/record builders. Embedded as a named field so each builder stops
+/// repeating the same two borrows without changing any serialized shape (these
+/// builders are internal and not serialized).
+#[derive(Debug, Clone, Copy)]
+pub struct RunDispatchIdentity<'a> {
+    pub run_id: &'a str,
+    pub runner_id: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentTaskPreDispatchFailure<'a> {
-    pub run_id: &'a str,
+    pub identity: RunDispatchIdentity<'a>,
     pub local_command: Vec<String>,
     pub remote_command: Vec<String>,
-    pub runner_id: &'a str,
     pub remote_workspace: &'a str,
     pub failure_message: &'a str,
     pub stdout: &'a str,
@@ -390,7 +399,7 @@ pub struct AgentTaskPreDispatchFailure<'a> {
 pub fn record_pre_dispatch_failure(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(failure.run_id);
+    let run_id = sanitize_run_id(failure.identity.run_id);
     if let Ok(record) = status(&run_id) {
         return Ok(record);
     }
@@ -398,7 +407,7 @@ pub fn record_pre_dispatch_failure(
     let task_id = "agent-task-predispatch".to_string();
     let metadata = json!({
         "kind": "lab_offload_pre_dispatch_failure",
-        "runner_id": failure.runner_id,
+        "runner_id": failure.identity.runner_id,
         "remote_workspace": failure.remote_workspace,
         "local_command": failure.local_command,
         "remote_command": failure.remote_command,
@@ -426,7 +435,7 @@ pub fn record_pre_dispatch_failure(
             inputs: json!({
                 "local_command": failure.local_command,
                 "remote_command": failure.remote_command,
-                "runner_id": failure.runner_id,
+                "runner_id": failure.identity.runner_id,
                 "remote_workspace": failure.remote_workspace,
                 "failure": {
                     "message": failure.failure_message,
@@ -485,7 +494,7 @@ pub fn record_pre_dispatch_failure(
             diagnostics: Vec::new(),
             outputs: json!({
                 "schema": "homeboy/agent-task-predispatch-failure/v1",
-                "runner_id": failure.runner_id,
+                "runner_id": failure.identity.runner_id,
                 "remote_workspace": failure.remote_workspace,
                 "local_command": failure.local_command,
                 "remote_command": failure.remote_command,
@@ -523,10 +532,9 @@ pub fn record_pre_dispatch_failure(
 
 #[derive(Debug, Clone)]
 pub struct AgentTaskRemoteDispatchFailure<'a> {
-    pub run_id: &'a str,
+    pub identity: RunDispatchIdentity<'a>,
     pub local_command: Vec<String>,
     pub remote_command: Vec<String>,
-    pub runner_id: &'a str,
     pub remote_workspace: &'a str,
     pub stdout: &'a str,
     pub stderr: &'a str,
@@ -545,7 +553,7 @@ pub fn record_remote_dispatch_failure(
         return Ok(None);
     };
 
-    let run_id = sanitize_run_id(failure.run_id);
+    let run_id = sanitize_run_id(failure.identity.run_id);
     let mut aggregate: AgentTaskAggregate = serde_json::from_value(aggregate_value.clone())
         .map_err(|error| {
             Error::internal_json(
@@ -593,7 +601,7 @@ pub fn record_remote_dispatch_failure(
             let remote_run_id = envelope
                 .get("run_id")
                 .and_then(Value::as_str)
-                .unwrap_or(failure.run_id)
+                .unwrap_or(failure.identity.run_id)
                 .to_string();
             let remote_plan_path = envelope
                 .get("plan_path")
@@ -631,7 +639,7 @@ pub fn record_remote_dispatch_failure(
         "kind".to_string(),
         json!("lab_offload_remote_dispatch_failure"),
     );
-    metadata.insert("runner_id".to_string(), json!(failure.runner_id));
+    metadata.insert("runner_id".to_string(), json!(failure.identity.runner_id));
     metadata.insert(
         "remote_workspace".to_string(),
         json!(failure.remote_workspace),
@@ -743,7 +751,7 @@ fn synthetic_remote_dispatch_plan(
                     task_url: None,
                     cleanup: Some("preserve".to_string()),
                     materialization: json!({
-                        "runner_id": failure.runner_id,
+                        "runner_id": failure.identity.runner_id,
                         "remote_workspace": failure.remote_workspace,
                     }),
                 },
@@ -767,7 +775,7 @@ fn synthetic_remote_dispatch_plan(
     plan.group_key = Some("lab-offload".to_string());
     plan.metadata = json!({
         "kind": "lab_offload_remote_dispatch_failure",
-        "runner_id": failure.runner_id,
+        "runner_id": failure.identity.runner_id,
         "remote_workspace": failure.remote_workspace,
         "remote_run_id": envelope.get("run_id").and_then(Value::as_str),
     });
@@ -1610,7 +1618,10 @@ mod tests {
     fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         with_isolated_home(|_| {
             let record = record_pre_dispatch_failure(AgentTaskPreDispatchFailure {
-                run_id: "cook-lab-predispatch",
+                identity: RunDispatchIdentity {
+                    run_id: "cook-lab-predispatch",
+                    runner_id: "lab-a",
+                },
                 local_command: vec![
                     "homeboy".to_string(),
                     "agent-task".to_string(),
@@ -1625,7 +1636,6 @@ mod tests {
                     "--cwd".to_string(),
                     "/runner/workspace/repo".to_string(),
                 ],
-                runner_id: "lab-a",
                 remote_workspace: "/runner/workspace/repo",
                 failure_message: "Invalid argument 'cwd': agent-task Codebox dispatch requires --cwd to be a git checkout",
                 stdout: "",
@@ -1748,7 +1758,10 @@ mod tests {
 
             let record = record_remote_dispatch_failure(
                 AgentTaskRemoteDispatchFailure {
-                    run_id: "local-run",
+                    identity: RunDispatchIdentity {
+                        run_id: "local-run",
+                        runner_id: "lab-a",
+                    },
                     local_command: vec![
                         "homeboy".to_string(),
                         "agent-task".to_string(),
@@ -1759,7 +1772,6 @@ mod tests {
                         "agent-task".to_string(),
                         "cook".to_string(),
                     ],
-                    runner_id: "lab-a",
                     remote_workspace: "/runner/workspace/repo",
                     stdout: &envelope.to_string(),
                     stderr: "",
@@ -1864,7 +1876,10 @@ mod tests {
 
             let record = record_remote_dispatch_failure(
                 AgentTaskRemoteDispatchFailure {
-                    run_id: "conductor-full-loop-proof-retry2-20260611",
+                    identity: RunDispatchIdentity {
+                        run_id: "conductor-full-loop-proof-retry2-20260611",
+                        runner_id: "lab-a",
+                    },
                     local_command: vec![
                         "homeboy".to_string(),
                         "agent-task".to_string(),
@@ -1875,7 +1890,6 @@ mod tests {
                         "agent-task".to_string(),
                         "cook".to_string(),
                     ],
-                    runner_id: "lab-a",
                     remote_workspace: "/runner/workspace/conductor",
                     stdout: &envelope.to_string(),
                     stderr: "",
@@ -1965,7 +1979,10 @@ mod tests {
 
             record_remote_dispatch_failure(
                 AgentTaskRemoteDispatchFailure {
-                    run_id: "local-sparse-run",
+                    identity: RunDispatchIdentity {
+                        run_id: "local-sparse-run",
+                        runner_id: "lab-a",
+                    },
                     local_command: vec![
                         "homeboy".to_string(),
                         "agent-task".to_string(),
@@ -1976,7 +1993,6 @@ mod tests {
                         "agent-task".to_string(),
                         "cook".to_string(),
                     ],
-                    runner_id: "lab-a",
                     remote_workspace: "/runner/workspace/conductor",
                     stdout: "",
                     stderr: &envelope.to_string(),

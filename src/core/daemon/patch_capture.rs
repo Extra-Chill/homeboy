@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::core::agent_task_lifecycle::RunDispatchIdentity;
 use crate::core::error::{Error, Result};
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
@@ -52,8 +53,7 @@ pub(super) struct PatchCaptureReport {
 }
 
 struct PatchRunInput<'a> {
-    run_id: &'a str,
-    runner_id: &'a str,
+    identity: RunDispatchIdentity<'a>,
     cwd: &'a str,
     command: &'a [String],
     source_snapshot: Option<&'a SourceSnapshot>,
@@ -121,8 +121,10 @@ pub(super) fn capture_patch_report(
         baseline_missing: false,
     };
     persist_patch_run(PatchRunInput {
-        run_id: &run_id,
-        runner_id,
+        identity: RunDispatchIdentity {
+            run_id: &run_id,
+            runner_id,
+        },
         cwd,
         command,
         source_snapshot,
@@ -172,7 +174,7 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
     let store = ObservationStore::open_initialized()?;
     let now = chrono::Utc::now().to_rfc3339();
     let run = RunRecord {
-        id: input.run_id.to_string(),
+        id: input.identity.run_id.to_string(),
         kind: "runner-exec".to_string(),
         component_id: None,
         started_at: now.clone(),
@@ -187,13 +189,13 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
         rig_id: None,
         metadata_json: json!({
             "lab": {
-                "runner_id": input.runner_id,
+                "runner_id": input.identity.runner_id,
                 "source_snapshot": input.source_snapshot,
                 "patch": input.report,
             }
         }),
     };
-    if store.get_run(input.run_id)?.is_none() {
+    if store.get_run(input.identity.run_id)?.is_none() {
         store.import_run(&run)?;
     }
     if let Some(path) = input.patch_artifact_path {
@@ -202,7 +204,7 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
         })?;
         let artifact = ArtifactRecord {
             id: input.artifact_id.to_string(),
-            run_id: input.run_id.to_string(),
+            run_id: input.identity.run_id.to_string(),
             kind: "lab_fix_patch".to_string(),
             artifact_type: "file".to_string(),
             path: path.display().to_string(),
