@@ -44,7 +44,7 @@ pub use super::runner::{
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight,
     RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode,
     RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool,
-    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec,
     RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
     RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
     RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -71,7 +71,7 @@ pub(crate) use super::runner::{daemon_api_get, daemon_api_post};
 pub mod registry {
     pub use super::super::runner::{
         create, delete_safe, effective_env, enable_server_runner, exists, list, load, merge,
-        resolve_default_lab_runner, Runner, RunnerKind,
+        resolve_default_lab_runner, Runner, RunnerKind, RunnerSpec,
     };
 }
 

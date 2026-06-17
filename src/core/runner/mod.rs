@@ -132,6 +132,73 @@ pub struct Runner {
     pub policy: RunnerPolicy,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunnerSpec {
+    pub workspace_root: Option<String>,
+    pub settings: RunnerSettings,
+    pub env: HashMap<String, String>,
+    pub secret_env: HashMap<String, RunnerSecretEnvRef>,
+    pub resources: HashMap<String, Value>,
+    pub policy: RunnerPolicy,
+}
+
+impl RunnerSpec {
+    pub fn from_runner(runner: &Runner) -> Self {
+        Self {
+            workspace_root: runner.workspace_root.clone(),
+            settings: runner.settings.clone(),
+            env: runner.env.clone(),
+            secret_env: runner.secret_env.clone(),
+            resources: runner.resources.clone(),
+            policy: runner.policy.clone(),
+        }
+    }
+
+    pub fn into_runner(self, id: String, kind: RunnerKind, server_id: Option<String>) -> Runner {
+        Runner {
+            id,
+            kind,
+            server_id,
+            workspace_root: self.workspace_root,
+            settings: self.settings,
+            env: self.env,
+            secret_env: self.secret_env,
+            resources: self.resources,
+            policy: self.policy,
+        }
+    }
+
+    pub fn into_server_runner(self) -> ServerRunner {
+        ServerRunner {
+            workspace_root: self.workspace_root,
+            settings: self.settings,
+            env: self.env,
+            secret_env: self.secret_env,
+            resources: self.resources,
+            policy: self.policy,
+        }
+    }
+
+    pub fn effective_env(&self) -> HashMap<String, String> {
+        let mut env = self.env.clone();
+        normalize_runner_command_env(&mut env);
+        env
+    }
+}
+
+impl From<ServerRunner> for RunnerSpec {
+    fn from(runner: ServerRunner) -> Self {
+        Self {
+            workspace_root: runner.workspace_root,
+            settings: runner.settings,
+            env: runner.env,
+            secret_env: runner.secret_env,
+            resources: runner.resources,
+            policy: runner.policy,
+        }
+    }
+}
+
 impl ConfigEntity for Runner {
     const ENTITY_TYPE: &'static str = "runner";
     const DIR_NAME: &'static str = "runners";
@@ -161,14 +228,7 @@ impl ConfigEntity for Runner {
             server::load(server_id)?;
         }
 
-        if self.settings.concurrency_limit == Some(0) {
-            return Err(Error::validation_invalid_argument(
-                "concurrency_limit",
-                "concurrency_limit must be greater than zero",
-                None,
-                None,
-            ));
-        }
+        server::validate_runner_settings(&self.settings, "concurrency_limit", None)?;
 
         Ok(())
     }
@@ -214,9 +274,7 @@ fn local_alias_runner(id: &str) -> Runner {
 
 pub fn effective_env(id: &str) -> Result<HashMap<String, String>> {
     let runner = load(id)?;
-    let mut env = runner.env.clone();
-    normalize_runner_command_env(&mut env);
-    Ok(env)
+    Ok(RunnerSpec::from_runner(&runner).effective_env())
 }
 
 pub fn list() -> Result<Vec<Runner>> {
@@ -390,9 +448,10 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
         config::merge_config(&mut runner, patch, &[])?;
     }
     validate_server_runner(server_id, &runner)?;
-    server.runner = Some(runner.clone());
+    let spec = RunnerSpec::from(runner);
+    server.runner = Some(spec.clone().into_server_runner());
     server::save(&server)?;
-    Ok(runner_from_server(server_id, runner))
+    Ok(runner_from_spec(server_id, spec))
 }
 
 fn create_single_value(value: Value) -> Result<CreateResult<Runner>> {
@@ -451,17 +510,15 @@ fn load_server_runner(id: &str) -> Result<Runner> {
 }
 
 fn runner_from_server(server_id: &str, runner: ServerRunner) -> Runner {
-    Runner {
-        id: server_id.to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some(server_id.to_string()),
-        workspace_root: runner.workspace_root,
-        settings: runner.settings,
-        env: runner.env,
-        secret_env: runner.secret_env,
-        resources: runner.resources,
-        policy: runner.policy,
-    }
+    runner_from_spec(server_id, RunnerSpec::from(runner))
+}
+
+fn runner_from_spec(server_id: &str, spec: RunnerSpec) -> Runner {
+    spec.into_runner(
+        server_id.to_string(),
+        RunnerKind::Ssh,
+        Some(server_id.to_string()),
+    )
 }
 
 pub(crate) fn resolve_runner_secret_env(
@@ -597,15 +654,11 @@ fn strip_runner_identity_fields(mut value: Value) -> Value {
 }
 
 fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> {
-    if runner.settings.concurrency_limit == Some(0) {
-        return Err(Error::validation_invalid_argument(
-            "concurrency_limit",
-            "concurrency_limit must be greater than zero",
-            Some(server_id.to_string()),
-            None,
-        ));
-    }
-    Ok(())
+    server::validate_runner_settings(
+        &runner.settings,
+        "concurrency_limit",
+        Some(server_id.to_string()),
+    )
 }
 
 #[cfg(test)]
@@ -741,6 +794,80 @@ mod tests {
 
             let stored_server = server::load("homeboy-lab").expect("load server");
             assert!(stored_server.runner.is_some());
+        });
+    }
+
+    #[test]
+    fn runner_spec_preserves_server_runner_fields_and_effective_env() {
+        let server_runner = ServerRunner {
+            workspace_root: Some("/srv/homeboy".to_string()),
+            settings: RunnerSettings {
+                homeboy_path: Some("/usr/local/bin/homeboy".to_string()),
+                daemon: true,
+                concurrency_limit: Some(2),
+                artifact_policy: Some("copy".to_string()),
+            },
+            env: HashMap::from([
+                ("PATH".to_string(), "/runner/bin".to_string()),
+                ("RUST_LOG".to_string(), "info".to_string()),
+            ]),
+            secret_env: HashMap::from([(
+                "TOKEN".to_string(),
+                RunnerSecretEnvRef {
+                    env: Some("TOKEN".to_string()),
+                    file: None,
+                    secret: None,
+                },
+            )]),
+            resources: HashMap::from([("cpu".to_string(), Value::from(4))]),
+            policy: RunnerPolicy {
+                allowed_commands: vec!["test".to_string()],
+                ..Default::default()
+            },
+        };
+
+        let spec = RunnerSpec::from(server_runner.clone());
+        assert_eq!(spec.clone().into_server_runner(), server_runner);
+
+        let runner = runner_from_spec("lab", spec.clone());
+        assert_eq!(runner.id, "lab");
+        assert_eq!(runner.kind, RunnerKind::Ssh);
+        assert_eq!(runner.server_id.as_deref(), Some("lab"));
+        assert_eq!(runner.workspace_root.as_deref(), Some("/srv/homeboy"));
+        assert_eq!(runner.settings.concurrency_limit, Some(2));
+        assert_eq!(runner.secret_env["TOKEN"].env.as_deref(), Some("TOKEN"));
+        assert_eq!(runner.resources.get("cpu"), Some(&Value::from(4)));
+        assert_eq!(runner.policy.allowed_commands, vec!["test"]);
+
+        let env = spec.effective_env();
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/runner/bin"));
+        assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
+    }
+
+    #[test]
+    fn runner_settings_validation_rejects_zero_for_both_config_shapes() {
+        test_support::with_isolated_home(|_| {
+            let local_err = create(
+                r#"{"id":"lab-local","kind":"local","concurrency_limit":0}"#,
+                false,
+            )
+            .expect_err("local runner rejects zero concurrency");
+            assert_eq!(local_err.code.as_str(), "validation.invalid_argument");
+            assert!(local_err.message.contains("concurrency_limit"));
+
+            server::create(
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                false,
+            )
+            .expect("create server");
+
+            let ssh_err = create(
+                r#"{"id":"homeboy-lab","kind":"ssh","concurrency_limit":0}"#,
+                false,
+            )
+            .expect_err("server runner rejects zero concurrency");
+            assert_eq!(ssh_err.code.as_str(), "validation.invalid_argument");
+            assert!(ssh_err.message.contains("concurrency_limit"));
         });
     }
 
