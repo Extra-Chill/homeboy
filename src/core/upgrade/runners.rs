@@ -1,5 +1,6 @@
 use regex::Regex;
 
+use crate::core::build_identity;
 use crate::core::runner::{
     self, Runner, RunnerCapabilityPreflight, RunnerExecOptions, RunnerKind, RunnerRequiredTool,
     RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -247,6 +248,9 @@ fn upgrade_runner_with_executor(
     let mut new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
         .ok()
         .flatten();
+    let configured_identity = runner_homeboy_identity(runner, &upgrade_homeboy_path, exec)
+        .ok()
+        .flatten();
     let mut source_path_realigned = false;
     if let Some(realignment) = source_upgrade_homeboy_path_realignment(
         runner,
@@ -254,6 +258,7 @@ fn upgrade_runner_with_executor(
         method_override,
         command_source_path.as_deref(),
         new_version.as_deref(),
+        configured_identity.as_deref(),
         exec,
     ) {
         match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
@@ -391,10 +396,11 @@ fn upgrade_runner_with_executor(
         bare_homeboy_version.as_deref(),
     );
     let stale_daemon = runner_stale_daemon(runner, status);
-    let upgraded = match (previous_version.as_deref(), new_version.as_deref()) {
-        (Some(previous), Some(new)) => new != previous,
-        _ => false,
-    };
+    let upgraded = source_path_realigned
+        || match (previous_version.as_deref(), new_version.as_deref()) {
+            (Some(previous), Some(new)) => new != previous,
+            _ => false,
+        };
     let success = new_version.is_some()
         && path_drift.is_none()
         && extensions_failed.is_empty()
@@ -633,12 +639,16 @@ fn source_upgrade_homeboy_path_realignment(
     method_override: Option<InstallMethod>,
     command_source_path: Option<&str>,
     configured_version: Option<&str>,
+    configured_identity: Option<&str>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<SourceUpgradeHomeboyPathRealignment> {
     if method_override != Some(InstallMethod::Source) {
         return None;
     }
-    if configured_version == Some(current_version()) {
+    let current_identity = build_identity::current().display;
+    if configured_version == Some(current_version())
+        && configured_identity == Some(current_identity.as_str())
+    {
         return None;
     }
     let source_path = command_source_path?.trim_end_matches('/');
@@ -653,11 +663,20 @@ fn source_upgrade_homeboy_path_realignment(
         if version != current_version() {
             continue;
         }
+        let Some(identity) = runner_homeboy_identity(runner, &candidate, exec)
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        if identity != current_identity {
+            continue;
+        }
         return Some(SourceUpgradeHomeboyPathRealignment {
             homeboy_path: candidate.clone(),
             version: version.clone(),
             detail: format!(
-                "runner homeboy_path updated from `{original_homeboy_path}` to source-built `{candidate}` because it reports {version}"
+                "runner homeboy_path updated from `{original_homeboy_path}` to source-built `{candidate}` because it reports {identity}"
             ),
         });
     }
@@ -922,6 +941,35 @@ fn runner_homeboy_version(
 
     Ok(parse_cli_version_output(&output.stdout)
         .or_else(|| parse_cli_version_output(&output.stderr)))
+}
+
+fn runner_homeboy_identity(
+    runner: &Runner,
+    homeboy_path: &str,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> Result<Option<String>> {
+    let (output, exit_code) = exec(
+        &runner.id,
+        runner_exec_options(
+            runner,
+            vec![homeboy_path.to_string(), "--version".to_string()],
+        ),
+    )?;
+    if exit_code != 0 {
+        return Ok(None);
+    }
+
+    let output = if output.stdout.trim().is_empty() {
+        output.stderr.trim()
+    } else {
+        output.stdout.trim()
+    };
+
+    if output.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(output.to_string()))
+    }
 }
 
 fn runner_bare_homeboy_version(
@@ -2192,12 +2240,30 @@ mod tests {
             |runner_id, options| {
                 commands.push(options.command.clone());
                 let (stdout, stderr, exit_code) = match commands.len() {
-                    1 => ("homeboy 0.232.0\n".to_string(), String::new(), 0),
+                    1 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
                     2 => ("{\"success\":true}\n".to_string(), String::new(), 0),
-                    3 => ("homeboy 0.232.0\n".to_string(), String::new(), 0),
-                    4 if options.command[0] == source_binary => {
+                    3 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
+                    4 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
+                    5 if options.command[0] == source_binary => {
                         (format!("homeboy {}\n", current_version()), String::new(), 0)
                     }
+                    6 if options.command[0] == source_binary => (
+                        format!("{}\n", build_identity::current().display),
+                        String::new(),
+                        0,
+                    ),
                     other => (
                         String::new(),
                         format!("unexpected command {other}: {:?}", options.command),
@@ -2226,7 +2292,10 @@ mod tests {
         assert!(updated[0].success);
         assert!(updated[0].upgraded);
         assert_eq!(updated[0].homeboy_path, source_binary);
-        assert_eq!(updated[0].previous_version.as_deref(), Some("0.232.0"));
+        assert_eq!(
+            updated[0].previous_version.as_deref(),
+            Some(current_version())
+        );
         assert_eq!(updated[0].new_version.as_deref(), Some(current_version()));
         assert_eq!(updated[0].bare_homeboy_version, None);
         assert_eq!(updated[0].path_drift, None);
