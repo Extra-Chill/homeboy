@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [2.124.0] - 2026-06-16
+
+### Added
+- make AI runtimes first-class
+
 ## [2.123.0] - 2026-06-16
 
 ### Added
