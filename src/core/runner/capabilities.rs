@@ -183,6 +183,7 @@ pub(crate) fn validate_runner_capability_preflight(
             .iter()
             .map(|command| format!("Install '{command}' on the runner and ensure it is on PATH.")),
     );
+    remediation.extend(shell_command_remediation(command, &missing_commands));
     remediation.extend(missing_env.iter().map(|name| {
         format!("Set required environment variable '{name}' on the runner or pass it with the runner exec request.")
     }));
@@ -200,6 +201,20 @@ pub(crate) fn validate_runner_capability_preflight(
         Some(runner_id.to_string()),
         Some(remediation),
     ))
+}
+
+fn shell_command_remediation(command: &str, missing_commands: &[String]) -> Vec<String> {
+    if command != "runner.exec"
+        || !missing_commands
+            .iter()
+            .any(|missing| missing.trim() == "zsh")
+    {
+        return Vec::new();
+    }
+
+    vec![
+        "Linux runners often have bash but not zsh; if the snippet is bash-compatible, retry the raw shell command with `bash -lc ...` instead of `zsh -lc ...`.".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Default)]
@@ -709,6 +724,37 @@ mod tests {
             .get("tried")
             .and_then(Value::as_array)
             .expect("remediation details");
+        assert!(tried.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("Remote execution was not started"))));
+    }
+
+    #[test]
+    fn runner_exec_missing_zsh_suggests_bash_lc_without_fallback() {
+        let preflight = RunnerCapabilityPreflight {
+            command: "runner.exec".to_string(),
+            required_commands: vec!["zsh".to_string()],
+            ..Default::default()
+        };
+        let capabilities = RunnerCapabilitySnapshot {
+            tools: BTreeSet::new(),
+            commands: BTreeSet::new(),
+            components: BTreeSet::new(),
+        };
+
+        let err =
+            validate_runner_capability_preflight("lab", &preflight, &capabilities, &HashMap::new())
+                .expect_err("missing zsh still fails capability parity");
+
+        assert!(err.message.contains("commands: zsh"));
+        let tried = err
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .expect("remediation details");
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("bash -lc"))));
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("Remote execution was not started"))));
