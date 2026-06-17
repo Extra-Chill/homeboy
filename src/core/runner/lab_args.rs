@@ -698,6 +698,12 @@ pub(super) fn rewrite_lab_offload_args(
 }
 
 pub(super) fn rewrite_runner_resident_lab_offload_args(args: &[String]) -> Vec<String> {
+    // A runner-side `tunnel service expose` should not require a separate
+    // server declaration for the selected runner: in that context the runner
+    // itself is the server (#4606). Drop the controller-side `--server` value
+    // and mark the runner-side declaration as runner-local instead.
+    let is_service_expose = is_tunnel_service_command(args, "expose");
+    let already_runner_local = args.iter().any(|arg| arg == "--runner-local");
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -729,12 +735,33 @@ pub(super) fn rewrite_runner_resident_lab_offload_args(args: &[String]) -> Vec<S
         if arg.starts_with("--output=") {
             continue;
         }
+        if is_service_expose && arg == "--server" {
+            let _ = iter.next();
+            continue;
+        }
+        if is_service_expose && arg.starts_with("--server=") {
+            continue;
+        }
         stripped.push(arg.clone());
+    }
+    if is_service_expose && !already_runner_local {
+        stripped.push("--runner-local".to_string());
     }
     if !has_force_hot {
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+/// Returns true when `args` invoke `tunnel service <subcommand>`.
+fn is_tunnel_service_command(args: &[String], subcommand: &str) -> bool {
+    args.windows(3).any(|window| {
+        matches!(
+            window,
+            [first, second, third]
+                if first == "tunnel" && second == "service" && third == subcommand
+        )
+    })
 }
 
 #[cfg(test)]
@@ -791,6 +818,72 @@ mod tests {
                 "npm run dev".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn runner_resident_rewrite_expose_drops_server_and_marks_runner_local() {
+        // `tunnel service expose --runner homeboy-lab --server homeboy-lab`
+        // should not carry a server declaration to the runner: the runner is
+        // the server in that context, so the rewrite drops --server and marks
+        // the runner-side declaration runner-local (#4606/#4607).
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "expose".to_string(),
+            "preview".to_string(),
+            "--server".to_string(),
+            "homeboy-lab".to_string(),
+            "--remote-host".to_string(),
+            "127.0.0.1".to_string(),
+            "--remote-port".to_string(),
+            "7331".to_string(),
+            "--auth-mode".to_string(),
+            "ssh-only".to_string(),
+        ];
+
+        let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "--force-hot".to_string(),
+                "tunnel".to_string(),
+                "service".to_string(),
+                "expose".to_string(),
+                "preview".to_string(),
+                "--remote-host".to_string(),
+                "127.0.0.1".to_string(),
+                "--remote-port".to_string(),
+                "7331".to_string(),
+                "--auth-mode".to_string(),
+                "ssh-only".to_string(),
+                "--runner-local".to_string(),
+            ]
+        );
+        assert!(!rewritten.iter().any(|arg| arg == "--server"));
+        assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
+    }
+
+    #[test]
+    fn runner_resident_rewrite_expose_handles_inline_server_value() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner=homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "expose".to_string(),
+            "preview".to_string(),
+            "--server=homeboy-lab".to_string(),
+            "--remote-host".to_string(),
+            "127.0.0.1".to_string(),
+        ];
+
+        let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+        assert!(!rewritten.iter().any(|arg| arg.starts_with("--server")));
+        assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
     }
 
     #[test]

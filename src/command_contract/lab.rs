@@ -194,6 +194,17 @@ impl Commands {
                 contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
                 contract
             }
+            Commands::Tunnel(args) if args.is_service_expose() => {
+                let mut contract = LabCommandContract::explicit_runner(
+                    "tunnel service expose",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                );
+                contract.source_path_mode = LabSourcePathMode::RunnerResident;
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
+                contract
+            }
             _ => return None,
         };
 
@@ -521,6 +532,22 @@ mod tests {
         .supports_lab_runner());
         assert!(parsed_command(&[
             "homeboy",
+            "tunnel",
+            "service",
+            "expose",
+            "preview",
+            "--server",
+            "homeboy-lab",
+            "--remote-host",
+            "127.0.0.1",
+            "--remote-port",
+            "7331",
+            "--auth-mode",
+            "ssh-only",
+        ])
+        .supports_lab_runner());
+        assert!(parsed_command(&[
+            "homeboy",
             "agent-task",
             "auth",
             "status",
@@ -791,6 +818,34 @@ mod tests {
         );
         assert!(!tunnel_service_start.default_lab_offload);
         assert!(!tunnel_service_start.infer_source_path_tools);
+
+        let tunnel_service_expose = parsed_command(&[
+            "homeboy",
+            "tunnel",
+            "service",
+            "expose",
+            "preview",
+            "--server",
+            "homeboy-lab",
+            "--remote-host",
+            "127.0.0.1",
+            "--remote-port",
+            "7331",
+            "--auth-mode",
+            "ssh-only",
+        ])
+        .lab_contract()
+        .expect("tunnel service expose contract");
+        assert_eq!(
+            tunnel_service_expose.source_path_mode,
+            LabSourcePathMode::RunnerResident
+        );
+        assert_eq!(
+            tunnel_service_expose.workspace_mode_policy,
+            LabWorkspaceModePolicy::RunnerResident
+        );
+        assert!(!tunnel_service_expose.default_lab_offload);
+        assert!(!tunnel_service_expose.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()

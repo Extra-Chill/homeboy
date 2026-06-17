@@ -151,6 +151,15 @@ impl TunnelArgs {
             }
         )
     }
+
+    pub(crate) fn is_service_expose(&self) -> bool {
+        matches!(
+            self.command,
+            TunnelCommand::Service {
+                command: TunnelServiceCommand::Expose { .. }
+            }
+        )
+    }
 }
 
 #[derive(Subcommand)]
@@ -419,8 +428,14 @@ enum TunnelServiceCommand {
         id: String,
 
         /// SSH server that can reach the private service
+        #[arg(long, required_unless_present = "runner_local")]
+        server: Option<String>,
+
+        /// Declare a runner-local service without a separate server declaration.
+        /// In a runner-local context the runner itself is the server, so a
+        /// duplicate server declaration is not required (#4606).
         #[arg(long)]
-        server: String,
+        runner_local: bool,
 
         /// Hostname or IP of the service as seen from the SSH server
         #[arg(long)]
@@ -1167,6 +1182,7 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
         TunnelServiceCommand::Expose {
             id,
             server,
+            runner_local,
             remote_host,
             remote_port,
             scheme,
@@ -1180,7 +1196,8 @@ fn run_service(command: TunnelServiceCommand) -> CmdResult<TunnelOutput> {
             preview_keep_alive_until,
         } => expose_service(ExposeServiceTunnelSpec {
             id,
-            server_id: server,
+            server_id: server.unwrap_or_default(),
+            runner_local,
             scheme,
             local_port,
             auth: ServiceTunnelAuth {
@@ -1510,7 +1527,8 @@ mod tests {
             create_server();
             let (output, exit_code) = run_service(TunnelServiceCommand::Expose {
                 id: "site-preview".to_string(),
-                server: "private-host".to_string(),
+                server: Some("private-host".to_string()),
+                runner_local: false,
                 remote_host: "127.0.0.1".to_string(),
                 remote_port: 7331,
                 scheme: "http".to_string(),
@@ -1528,6 +1546,33 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(output.command, "tunnel.service.expose");
             assert_eq!(output.entity.expect("entity").id, "site-preview");
+        });
+    }
+
+    #[test]
+    fn expose_service_command_supports_runner_local_without_server() {
+        test_support::with_isolated_home(|_| {
+            let (output, exit_code) = run_service(TunnelServiceCommand::Expose {
+                id: "runner-local-preview".to_string(),
+                server: None,
+                runner_local: true,
+                remote_host: "127.0.0.1".to_string(),
+                remote_port: 7331,
+                scheme: "http".to_string(),
+                local_port: Some(8831),
+                auth_mode: ServiceTunnelAuthModeArg::SshOnly,
+                auth_env: None,
+                auth_header: None,
+                allowed_clients: Vec::new(),
+                description: None,
+                preview_policy: ServiceTunnelPreviewPolicyArg::None,
+                preview_keep_alive_until: None,
+            })
+            .expect("runner-local expose succeeds without server declaration");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output.command, "tunnel.service.expose");
+            assert_eq!(output.entity.expect("entity").id, "runner-local-preview");
         });
     }
 

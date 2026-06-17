@@ -77,6 +77,7 @@ fn expose_records_private_loopback_declaration_without_running_tunnel() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: Some("Private preview service".to_string()),
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -85,6 +86,46 @@ fn expose_records_private_loopback_declaration_without_running_tunnel() {
         assert!(report.declared);
         assert!(!report.running);
         assert_eq!(report.local_url, "http://127.0.0.1:8831");
+    });
+}
+
+#[test]
+fn expose_runner_local_does_not_require_a_server_declaration() {
+    test_support::with_isolated_home(|_| {
+        // No server is declared on this (runner-local) host: in a runner-local
+        // context the runner itself is the server, so expose must not demand a
+        // duplicate server declaration (#4606).
+        let tunnel = expose(ExposeServiceTunnelSpec {
+            id: "runner-local-preview".to_string(),
+            server_id: "homeboy-lab".to_string(),
+            target: ServiceTunnelTarget {
+                host: "127.0.0.1".to_string(),
+                port: 7331,
+            },
+            scheme: "http".to_string(),
+            local_port: Some(8831),
+            auth: ServiceTunnelAuth {
+                mode: ServiceTunnelAuthMode::SshOnly,
+                env_var: None,
+                header: None,
+            },
+            policy: ServiceTunnelPolicy {
+                exposure: ServiceTunnelExposure::PrivateLoopback,
+                require_auth: true,
+                allowed_clients: Vec::new(),
+                preview: ServiceTunnelPreviewPolicy::default(),
+                native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
+            },
+            description: None,
+            runner_local: true,
+        })
+        .expect("runner-local expose without server declaration");
+
+        assert_eq!(tunnel.id, "runner-local-preview");
+        assert_eq!(tunnel.server_id, RUNNER_LOCAL_SERVICE_SERVER_ID);
+        assert!(is_runner_local_server_id(&tunnel.server_id));
+        let report = status("runner-local-preview").expect("status");
+        assert!(report.declared);
     });
 }
 
@@ -115,6 +156,7 @@ fn list_serializes_stable_service_ids() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: Some("Copy-pasteable service".to_string()),
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -152,6 +194,7 @@ fn validation_rejects_auth_mode_without_env_var() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect_err("missing auth env should fail");
 
@@ -189,6 +232,7 @@ fn start_status_and_stop_manage_local_service_runtime_state() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -266,6 +310,7 @@ fn start_cleans_runtime_state_when_readiness_fails() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -325,6 +370,7 @@ fn proof_readiness_waits_for_stdout_signal_not_just_process_liveness() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -389,6 +435,7 @@ fn preview_readiness_can_require_artifact_status() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -457,6 +504,7 @@ fn preview_start_fails_when_listener_process_exits_after_readiness() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -518,6 +566,7 @@ fn status_refresh_clears_exited_process_readiness() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -581,6 +630,7 @@ fn command_backend_records_public_url_and_cleans_up_backend_process() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
@@ -660,6 +710,7 @@ fn status_reports_degraded_when_backend_outlives_service_process() {
                 native_preview_auth: ServiceTunnelNativePreviewAuthPolicy::default(),
             },
             description: None,
+            runner_local: false,
         })
         .expect("expose service");
 
