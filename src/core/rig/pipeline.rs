@@ -7,6 +7,7 @@
 //! a `PipelineOutcome` with overall success/failure.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -642,6 +643,8 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
         dir,
         component,
         component_path_contains,
+        executable,
+        executable_env,
         prepare_command,
         prepare_phases,
         cwd,
@@ -687,10 +690,10 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
         path_specs.push(("dir", value));
     }
 
-    if path_specs.is_empty() && component_path_contains.is_none() {
+    if path_specs.is_empty() && component_path_contains.is_none() && executable.is_none() {
         return Err(Error::validation_invalid_argument(
             "requirement",
-            "Requirement must specify at least one of `path`, `file`, `dir`, or `component_path_contains`",
+            "Requirement must specify at least one of `path`, `file`, `dir`, `component_path_contains`, or `executable`",
             None,
             None,
         ));
@@ -701,6 +704,12 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
         .filter_map(|(kind, declared)| {
             requirement_path_failure(rig, cwd.as_deref(), kind, declared)
         })
+        .chain(requirement_executable_failure(
+            rig,
+            executable.as_deref(),
+            executable_env.as_deref(),
+            env,
+        ))
         .collect::<Vec<_>>();
 
     if !missing_before_prepare.is_empty()
@@ -720,6 +729,12 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
         .filter_map(|(kind, declared)| {
             requirement_path_failure(rig, cwd.as_deref(), kind, declared)
         })
+        .chain(requirement_executable_failure(
+            rig,
+            executable.as_deref(),
+            executable_env.as_deref(),
+            env,
+        ))
         .collect::<Vec<_>>();
 
     if !missing.is_empty() {
@@ -757,6 +772,75 @@ fn requirement_path_failure(
             )
         }
     })
+}
+
+fn requirement_executable_failure(
+    rig: &RigSpec,
+    executable: Option<&str>,
+    executable_env: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    let executable = executable?;
+    let executable = expand_vars(rig, executable);
+    let override_value = executable_env.and_then(|name| env_value(name, env));
+    let candidate = override_value
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| expand_vars(rig, value))
+        .unwrap_or_else(|| executable.clone());
+
+    if find_executable(&candidate, env).is_some() {
+        return None;
+    }
+
+    Some(match (executable_env, override_value) {
+        (Some(name), Some(value)) if !value.trim().is_empty() => format!(
+            "executable `{}` does not exist or is not executable from {}={}",
+            executable, name, value
+        ),
+        (Some(name), _) => format!(
+            "executable `{}` not found on PATH ({} is unset or empty)",
+            executable, name
+        ),
+        _ => format!("executable `{}` not found on PATH", executable),
+    })
+}
+
+fn env_value(name: &str, env: &HashMap<String, String>) -> Option<String> {
+    env.get(name).cloned().or_else(|| std::env::var(name).ok())
+}
+
+fn find_executable(candidate: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
+    let path = Path::new(candidate);
+    if candidate.contains(std::path::MAIN_SEPARATOR) || path.is_absolute() {
+        return is_executable_file(path).then(|| path.to_path_buf());
+    }
+
+    let path_var = env
+        .get("PATH")
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let path_var = path_var?;
+
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(candidate))
+        .find(|path| is_executable_file(path))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn resolve_requirement_path(rig: &RigSpec, cwd: Option<&str>, declared: &str) -> PathBuf {
@@ -1307,6 +1391,7 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
             dir,
             component,
             component_path_contains,
+            executable,
             label,
             ..
         } => label.clone().unwrap_or_else(|| {
@@ -1318,6 +1403,8 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
                 format!("require path {}", truncate(path, 60))
             } else if let (Some(component), Some(required)) = (component, component_path_contains) {
                 format!("require {} path contains {}", component, required)
+            } else if let Some(executable) = executable {
+                format!("require executable {}", executable)
             } else {
                 format!("requirement #{}", idx + 1)
             }

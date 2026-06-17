@@ -220,6 +220,31 @@ Runs git in the component checkout. Supported operations are `status`, `pull`, `
 
 Delegates to `homeboy stack sync <stack-id>` for the named component. The component must declare `stack`, and the rig component `path` must match the stack spec's `component_path`. `homeboy rig sync <id>` runs this for every stacked component without needing a pipeline step.
 
+### `requirement`
+
+```jsonc
+{
+  "kind": "requirement",
+  "executable": "wp",
+  "executable_env": "WP_CLI_BIN",
+  "remediation": "install WP-CLI or set WP_CLI_BIN to the executable path"
+}
+```
+
+Validates a declarative local preflight requirement. A step must declare at least one of `path`, `file`, `dir`, `component_path_contains`, or `executable`.
+
+Filesystem requirements resolve relative paths against `cwd` when set. Component path requirements require both `component` and `component_path_contains`.
+
+Executable requirements are provider-agnostic. If `executable_env` is set and that environment variable has a non-empty value, Homeboy resolves that value first. Otherwise Homeboy searches `PATH` for `executable`. The step `env` map participates in lookup and takes precedence over the process environment, so specs can provide a scoped `PATH` or env-var override without shell shims.
+
+```jsonc
+{
+  "kind": "requirement",
+  "executable": "node",
+  "env": { "PATH": "${components.node-toolchain.path}/bin:${env.PATH}" }
+}
+```
+
 ### `patch`
 
 ```jsonc
