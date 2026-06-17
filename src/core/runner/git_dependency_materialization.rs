@@ -376,6 +376,27 @@ fn terminal_dependency_error(
             "Or make the dirty checkout the primary bench workspace with --path so its working tree is snapshotted directly instead of as a clean git-only rig dependency.".to_string(),
         );
     }
+    if freshness.status == DependencyUpdateStatus::DetachedUnpinned {
+        hints.push(format!(
+            "Use a branch-backed dependency checkout before Lab offload: git -C {} switch <branch>",
+            shell_arg(&local_path.display().to_string())
+        ));
+        hints.push(
+            "If this detached checkout is the component under test, create/select a branch-backed worktree and rerun the rig proof with --path <component-path>.".to_string(),
+        );
+        hints.push(
+            "If the detached commit is intentional and reviewable, pin the rig component dependency with an explicit ref.".to_string(),
+        );
+    }
+    if freshness.status == DependencyUpdateStatus::NoUpstream {
+        hints.push(format!(
+            "Set an upstream for the dependency branch before Lab offload: git -C {} branch --set-upstream-to=<remote>/<branch>",
+            shell_arg(&local_path.display().to_string())
+        ));
+        hints.push(
+            "Or use a branch-backed worktree with an upstream and pass it as the rig component --path when it is the component under test.".to_string(),
+        );
+    }
     if let Some(error) = &source_error {
         hints.push(format!("Fetch failure: {}", error.message));
     }
@@ -402,6 +423,16 @@ fn terminal_dependency_error(
         ),
         Some(hints),
     )
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn run_git(local_path: &Path, args: &[&str]) -> Result<()> {
@@ -496,6 +527,16 @@ mod tests {
             ensure_git_dependency_fresh(checkout.path(), None, false).expect_err("detached fails");
 
         assert!(err.message.contains("detached_unpinned"));
+        let hints = err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .filter_map(|hint| hint.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(hints.contains("git -C"));
+        assert!(hints.contains("switch <branch>"));
+        assert!(hints.contains("--path <component-path>"));
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), head);
     }
 

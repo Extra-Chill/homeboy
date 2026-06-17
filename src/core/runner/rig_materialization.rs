@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::core::component::Component;
 use crate::core::rig;
 use crate::core::{Error, Result};
+use crate::extensions::deps_provider;
 
 use super::{
     exec, load, materialize_git_dependency, sync_workspace,
@@ -78,6 +80,7 @@ pub(super) fn sync_lab_offload_rigs(
                 .source_root
                 .clone()
                 .unwrap_or_else(|| metadata.package_path.clone());
+            validate_installed_rig_source(rig_id, &source_root, &metadata.package_path)?;
             let synced = sync_workspace(
                 runner_id,
                 RunnerWorkspaceSyncOptions {
@@ -399,6 +402,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
+        prepare_rig_component_dependency(&dependency)?;
         synced.push(materialize_git_dependency(
             &runner,
             RunnerGitDependencyMaterializationOptions {
@@ -416,6 +420,65 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         materializations: synced,
         component_path_env,
     })
+}
+
+fn validate_installed_rig_source(
+    rig_id: &str,
+    source_root: &str,
+    package_path: &str,
+) -> Result<()> {
+    if Path::new(source_root).is_dir() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "rig",
+        format!(
+            "runner dispatch cannot materialize rig `{rig_id}` because its installed source metadata points at a missing path"
+        ),
+        Some(source_root.to_string()),
+        Some(vec![
+            format!(
+                "Repair the rig source metadata with: homeboy rig install {} --id {} --reinstall",
+                shell_arg(package_path),
+                shell_arg(rig_id)
+            ),
+            format!(
+                "Or remove the stale source metadata with: homeboy rig sources remove {}",
+                shell_arg(package_path)
+            ),
+            "Run `homeboy rig sources list` to inspect installed rig sources.".to_string(),
+        ]),
+    ))
+}
+
+fn prepare_rig_component_dependency(dependency: &RigComponentDependency) -> Result<()> {
+    let path = Path::new(&dependency.local_checkout_root);
+    let component = Component {
+        id: dependency.component_id.clone(),
+        local_path: dependency.local_checkout_root.clone(),
+        remote_url: dependency.remote_url.clone(),
+        ..Component::default()
+    };
+    let providers = match deps_provider::resolve_dependency_providers(&component, path) {
+        Ok(providers) => providers,
+        Err(_) => return Ok(()),
+    };
+
+    for provider in providers {
+        provider.install(&component, path)?;
+    }
+    Ok(())
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Join a runner-side checkout root with the component's required subpath.
@@ -794,6 +857,29 @@ mod tests {
             installed_source_selector_for_rig(&stdout, "target-rig").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn stale_installed_rig_source_metadata_suggests_reinstall() {
+        let err = validate_installed_rig_source(
+            "woocommerce-performance",
+            "/missing/homeboy-rigs/woocommerce/woocommerce",
+            "/Users/chubes/Developer/homeboy-rigs@issue-323-codebox-fresh/woocommerce/woocommerce",
+        )
+        .expect_err("missing source should fail");
+
+        assert!(err.message.contains("installed source metadata"));
+        assert_eq!(err.details["field"], "rig");
+        let hints = err.details["tried"]
+            .as_array()
+            .expect("tried hints")
+            .iter()
+            .filter_map(|hint| hint.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(hints.contains("homeboy rig install"));
+        assert!(hints.contains("--id woocommerce-performance --reinstall"));
+        assert!(hints.contains("homeboy rig sources list"));
     }
 
     #[test]

@@ -287,9 +287,48 @@ impl ComposerDependencyProvider {
     fn install(
         &self,
         _component: &Component,
-        _path: &Path,
+        path: &Path,
     ) -> Result<Option<DependencyCommandResult>> {
-        Ok(None)
+        let args = vec!["install".to_string(), "--no-interaction".to_string()];
+        let output = Command::new("composer")
+            .args(&args)
+            .current_dir(path)
+            .output()
+            .map_err(|e| {
+                Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let status = output.status.code();
+        if !output.status.success() {
+            return Err(Error::validation_invalid_argument(
+                "dependency_provider",
+                format!(
+                    "Dependency provider install failed with status {}: {}",
+                    output.status,
+                    first_non_empty_line(&stderr)
+                        .or_else(|| first_non_empty_line(&stdout))
+                        .unwrap_or("no output")
+                ),
+                None,
+                Some(vec![format!(
+                    "Run manually in {}: composer {}",
+                    path.display(),
+                    args.join(" ")
+                )]),
+            ));
+        }
+
+        Ok(Some(DependencyCommandResult {
+            command: std::iter::once("composer".to_string())
+                .chain(args)
+                .collect(),
+            skipped: false,
+            status,
+            stdout,
+            stderr,
+        }))
     }
 }
 
@@ -634,4 +673,50 @@ fn read_optional_json_file(path: &Path) -> Result<Option<Value>> {
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().find(|line| !line.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composer_install_runs_full_dependency_install_lifecycle() {
+        let _guard = crate::test_support::home_env_guard();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let bin = tempfile::tempdir().expect("bin tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let composer = bin.path().join("composer");
+        std::fs::write(
+            &composer,
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > composer-args.txt\n",
+        )
+        .expect("fake composer");
+        let mode = std::fs::metadata(&composer)
+            .expect("fake composer metadata")
+            .permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = mode;
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&composer, mode).expect("chmod fake composer");
+        }
+        std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
+        std::fs::write(project.path().join("composer.json"), "{}").expect("composer json");
+
+        let result = ComposerDependencyProvider
+            .install(&Component::default(), project.path())
+            .expect("composer install");
+
+        std::env::set_var("PATH", old_path);
+        let result = result.expect("install result");
+        assert_eq!(
+            result.command,
+            vec!["composer", "install", "--no-interaction"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("composer-args.txt")).unwrap(),
+            "install\n--no-interaction\n"
+        );
+    }
 }
