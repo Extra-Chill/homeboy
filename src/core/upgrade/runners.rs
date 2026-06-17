@@ -248,17 +248,14 @@ fn upgrade_runner_with_executor(
     let mut new_version = runner_homeboy_version(runner, &upgrade_homeboy_path, exec)
         .ok()
         .flatten();
-    let configured_identity = runner_homeboy_identity(runner, &upgrade_homeboy_path, exec)
-        .ok()
-        .flatten();
     let mut source_path_realigned = false;
     if let Some(realignment) = source_upgrade_homeboy_path_realignment(
         runner,
         &original_homeboy_path,
         method_override,
         command_source_path.as_deref(),
+        &upgrade_homeboy_path,
         new_version.as_deref(),
-        configured_identity.as_deref(),
         exec,
     ) {
         match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
@@ -638,16 +635,19 @@ fn source_upgrade_homeboy_path_realignment(
     original_homeboy_path: &str,
     method_override: Option<InstallMethod>,
     command_source_path: Option<&str>,
+    configured_homeboy_path: &str,
     configured_version: Option<&str>,
-    configured_identity: Option<&str>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<SourceUpgradeHomeboyPathRealignment> {
     if method_override != Some(InstallMethod::Source) {
         return None;
     }
     let current_identity = build_identity::current().display;
+    let configured_identity = runner_homeboy_identity(runner, configured_homeboy_path, exec)
+        .ok()
+        .flatten();
     if configured_version == Some(current_version())
-        && configured_identity == Some(current_identity.as_str())
+        && configured_identity.as_deref() == Some(current_identity.as_str())
     {
         return None;
     }
