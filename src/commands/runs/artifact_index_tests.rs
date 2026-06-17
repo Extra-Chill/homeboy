@@ -98,7 +98,7 @@ fn rig_runs_list_surfaces_compact_artifact_index() {
             .artifact_index_path
             .ends_with("rig-artifact-index.json"));
         assert_eq!(
-            artifact_index.artifacts_command,
+            artifact_index.evidence_commands.artifacts_command,
             format!("homeboy runs artifacts {}", run.id)
         );
         assert!(artifact_index

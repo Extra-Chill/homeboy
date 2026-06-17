@@ -23,6 +23,39 @@ use crate::core::{Error, Result};
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
 const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMAND";
 
+/// Maximum number of bytes retained per captured stream in a promotion command
+/// report. Mirrors the bounded-capture cap used by extension self-checks so the
+/// retained evidence cannot grow without bound (#5077).
+const PROMOTION_CAPTURE_LIMIT_BYTES: usize = 65_536;
+
+/// Truncation metadata describing how much of a captured stream was retained.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionStreamCapture {
+    pub limit_bytes: usize,
+    pub seen_bytes: usize,
+    pub retained_bytes: usize,
+    pub truncated: bool,
+}
+
+/// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
+/// (most relevant tail) and returning the retained text plus truncation
+/// metadata. Mirrors the `BoundedCapture` pattern in extension self-checks.
+fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, AgentTaskPromotionStreamCapture) {
+    let seen = bytes.len();
+    let retained: &[u8] = if seen > limit {
+        &bytes[seen - limit..]
+    } else {
+        bytes
+    };
+    let metadata = AgentTaskPromotionStreamCapture {
+        limit_bytes: limit,
+        seen_bytes: seen,
+        retained_bytes: retained.len(),
+        truncated: seen > retained.len(),
+    };
+    (String::from_utf8_lossy(retained).to_string(), metadata)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionOptions {
     pub source: String,
@@ -113,6 +146,32 @@ pub struct AgentTaskPromotionCommandReport {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+    /// Per-stream truncation metadata describing the retained-byte bound applied
+    /// to `stdout`/`stderr`. Skipped when both streams fit within the cap so the
+    /// historical serialized shape is preserved (#5077).
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskPromotionCommandCapture::is_empty"
+    )]
+    pub capture: AgentTaskPromotionCommandCapture,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionCommandCapture {
+    #[serde(default, skip_serializing_if = "is_untruncated_stream")]
+    pub stdout: AgentTaskPromotionStreamCapture,
+    #[serde(default, skip_serializing_if = "is_untruncated_stream")]
+    pub stderr: AgentTaskPromotionStreamCapture,
+}
+
+impl AgentTaskPromotionCommandCapture {
+    fn is_empty(&self) -> bool {
+        is_untruncated_stream(&self.stdout) && is_untruncated_stream(&self.stderr)
+    }
+}
+
+fn is_untruncated_stream(stream: &AgentTaskPromotionStreamCapture) -> bool {
+    !stream.truncated
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -878,11 +937,23 @@ fn run_provider_command(
         )
     })?;
     let exit_code = output.status.code().unwrap_or(1);
+    // The full stdout is parsed for the provider response below, but the bytes
+    // retained in the evidence report are bounded with truncation metadata so
+    // a pathologically large stream cannot grow the report without bound.
+    let full_stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let (retained_stdout, stdout_capture) =
+        bound_captured_stream(&output.stdout, PROMOTION_CAPTURE_LIMIT_BYTES);
+    let (retained_stderr, stderr_capture) =
+        bound_captured_stream(&output.stderr, PROMOTION_CAPTURE_LIMIT_BYTES);
     let report = AgentTaskPromotionCommandReport {
         command: std::iter::once(program).chain(args).collect(),
         exit_code,
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout: retained_stdout,
+        stderr: retained_stderr,
+        capture: AgentTaskPromotionCommandCapture {
+            stdout: stdout_capture,
+            stderr: stderr_capture,
+        },
     };
     if !output.status.success() {
         return Err(Error::validation_invalid_argument(
@@ -896,7 +967,7 @@ fn run_provider_command(
         ));
     }
     let response: AgentTaskPromotionApplyResponse =
-        serde_json::from_str(&report.stdout).map_err(|error| {
+        serde_json::from_str(&full_stdout).map_err(|error| {
             Error::validation_invalid_json(
                 error,
                 Some("agent-task promotion provider response".to_string()),
@@ -1018,6 +1089,7 @@ mod tests {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
+            capture: AgentTaskPromotionCommandCapture::default(),
         }
     }
 

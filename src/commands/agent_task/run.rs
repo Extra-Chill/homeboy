@@ -3,11 +3,11 @@
 
 use serde_json::Value;
 
+use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
 
-use super::super::agent_task_dispatch::dispatch_with_executor;
 use super::super::CmdResult;
 use super::args::{AgentTaskLoopArgs, RetryArgs, RunPlanArgs, StatusArgs, SubmitArgs};
 
@@ -33,7 +33,8 @@ where
         dispatch_args.prompt = args.goal.clone();
     }
     dispatch_args.queue_only = false;
-    let (dispatch_value, _dispatch_exit) = dispatch_with_executor(dispatch_args, executor.clone())?;
+    let (dispatch_value, _dispatch_exit) =
+        dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
     let run_id = dispatch_value["run_id"]
         .as_str()
         .ok_or_else(|| {

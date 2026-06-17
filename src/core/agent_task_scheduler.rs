@@ -216,8 +216,11 @@ where
                                     &mut backpressure,
                                     &mut events,
                                 );
-                                completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
-                                outcomes.push(outcome);
+                                record_completed_outcome(
+                                    &mut completed_by_task,
+                                    &mut outcomes,
+                                    outcome,
+                                );
                                 blocked_count += 1;
                                 continue;
                             }
@@ -284,8 +287,7 @@ where
                         scheduled.attempt,
                         outcome.summary.clone(),
                     ));
-                    completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
-                    outcomes.push(outcome);
+                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                     continue;
                 }
                 let task_id = request.task_id.clone();
@@ -383,8 +385,7 @@ where
                         });
                         continue;
                     }
-                    completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
-                    outcomes.push(outcome);
+                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -442,6 +443,18 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+}
+
+/// Record a finalized outcome in the completed-by-task index and the ordered
+/// outcomes list. Shared by the scheduler's dependency-block, dependency-render,
+/// and task-completion paths to keep recording behavior identical.
+fn record_completed_outcome(
+    completed_by_task: &mut HashMap<String, AgentTaskOutcome>,
+    outcomes: &mut Vec<AgentTaskOutcome>,
+    outcome: AgentTaskOutcome,
+) {
+    completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
+    outcomes.push(outcome);
 }
 
 struct AgentTaskScheduleSupport;
@@ -621,6 +634,18 @@ impl AgentTaskScheduleSupport {
             ));
         };
 
+        // Resolve the fallback for a missing binding value: default if set,
+        // a required-error if the binding is required, else an empty string.
+        let missing_binding_fallback = |required_error: String| -> Result<Value, String> {
+            if !binding.default.is_null() {
+                return Ok(binding.default.clone());
+            }
+            if binding.required {
+                return Err(required_error);
+            }
+            Ok(Value::String(String::new()))
+        };
+
         if let Some(artifact_binding) = &binding.artifact {
             let Some(artifact) = outcome.artifacts.iter().find(|artifact| {
                 artifact.kind == artifact_binding.kind
@@ -641,16 +666,10 @@ impl AgentTaskScheduleSupport {
                         })
                         .unwrap_or(true)
             }) else {
-                if !binding.default.is_null() {
-                    return Ok(binding.default.clone());
-                }
-                if binding.required {
-                    return Err(format!(
-                        "task '{}' skipped because required artifact binding '{}' with kind '{}' was missing from task '{}'",
-                        request.task_id, name, artifact_binding.kind, binding.task_id
-                    ));
-                }
-                return Ok(Value::String(String::new()));
+                return missing_binding_fallback(format!(
+                    "task '{}' skipped because required artifact binding '{}' with kind '{}' was missing from task '{}'",
+                    request.task_id, name, artifact_binding.kind, binding.task_id
+                ));
             };
 
             let artifact_value = serde_json::to_value(artifact).unwrap_or(Value::Null);
@@ -663,16 +682,10 @@ impl AgentTaskScheduleSupport {
                 {
                     return Ok(value.clone());
                 }
-                if !binding.default.is_null() {
-                    return Ok(binding.default.clone());
-                }
-                if binding.required {
-                    return Err(format!(
-                        "task '{}' skipped because required artifact binding '{}' payload was missing at '{}' from task '{}'",
-                        request.task_id, name, payload_path, binding.task_id
-                    ));
-                }
-                return Ok(Value::String(String::new()));
+                return missing_binding_fallback(format!(
+                    "task '{}' skipped because required artifact binding '{}' payload was missing at '{}' from task '{}'",
+                    request.task_id, name, payload_path, binding.task_id
+                ));
             }
 
             return Ok(artifact_value);
@@ -682,16 +695,10 @@ impl AgentTaskScheduleSupport {
         if let Some(value) = outcome_value.pointer(&binding.path) {
             return Ok(value.clone());
         }
-        if !binding.default.is_null() {
-            return Ok(binding.default.clone());
-        }
-        if binding.required {
-            return Err(format!(
-                "task '{}' skipped because required output binding '{}' was missing at '{}' from task '{}'",
-                request.task_id, name, binding.path, binding.task_id
-            ));
-        }
-        Ok(Value::String(String::new()))
+        missing_binding_fallback(format!(
+            "task '{}' skipped because required output binding '{}' was missing at '{}' from task '{}'",
+            request.task_id, name, binding.path, binding.task_id
+        ))
     }
 
     fn skipped_output_dependency_outcome(

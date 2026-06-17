@@ -16,7 +16,9 @@ use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
 
-use super::super::agent_task_dispatch::{dispatch_with_executor, DispatchArgs};
+use homeboy::core::agent_tasks::dispatch_service;
+
+use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
@@ -207,7 +209,7 @@ where
 {
     fn dispatch(&self, request: &Value) -> homeboy::core::Result<(Value, i32)> {
         let dispatch_args = dispatch_args_from_controller_request(request)?;
-        dispatch_with_executor(dispatch_args, self.executor.clone())
+        dispatch_service::run_dispatch_command(dispatch_args.into(), self.executor.clone())
     }
 }
 

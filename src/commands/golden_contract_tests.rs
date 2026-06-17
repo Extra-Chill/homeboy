@@ -108,8 +108,10 @@ fn runs_command_json_contract_matches_golden_fixture() {
                         component_id: Some("homeboy".to_string()),
                         rig_id: Some("contract-rig".to_string()),
                         git_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-                        evidence_command: "homeboy runs evidence run-contract-1".to_string(),
-                        artifacts_command: "homeboy runs artifacts run-contract-1".to_string(),
+                        evidence_commands: homeboy::core::observation::RunEvidenceCommands {
+                            evidence_command: "homeboy runs evidence run-contract-1".to_string(),
+                            artifacts_command: "homeboy runs artifacts run-contract-1".to_string(),
+                        },
                     }],
                     artifacts: vec![runs_refs_artifact_record()],
                     aggregate_artifacts: vec![runs_refs_artifact_record()],

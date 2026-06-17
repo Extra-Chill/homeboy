@@ -620,6 +620,18 @@ fn run_runner_resident_lab_offload(
             .build(),
     );
 
+    // Refuse to dispatch caller-derived argv to the runner if any argument still
+    // embeds the controller-local source path instead of the runner-resident
+    // workspace. This mirrors the path-translation preflight used by the
+    // patch-provider offload path before its remote dispatch (#5071).
+    let source_path = lab_offload_source_path(request.normalized_args)?;
+    preflight_remote_argv_path_translation(
+        runner_id,
+        &command,
+        &source_path,
+        runner_workspace_root,
+    )?;
+
     eprintln!(
         "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
         command.join(" "),

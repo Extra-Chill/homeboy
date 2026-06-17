@@ -267,10 +267,10 @@ fn stdout_with_persisted_run_retrieval(
     ));
     rendered.push_str("- **ID scope:** runtime, temp, and artifact identifiers above are offload context; use the persisted Homeboy run ID for local retrieval.\n");
     rendered.push_str("- **Retrieve evidence:** `");
-    rendered.push_str(&retrieval.evidence_command);
+    rendered.push_str(&retrieval.commands.evidence_command);
     rendered.push_str("`\n");
     rendered.push_str("- **List artifacts:** `");
-    rendered.push_str(&retrieval.artifacts_command);
+    rendered.push_str(&retrieval.commands.artifacts_command);
     rendered.push_str("`\n");
     rendered.push_str("- **Export run bundle:** `");
     rendered.push_str(&retrieval.export_command);

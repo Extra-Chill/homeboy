@@ -1,13 +1,8 @@
 use clap::Args;
-use serde::Serialize;
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchRequest};
-use homeboy::core::agent_tasks::provider::{
-    default_backend_for_component, ExtensionProviderAgentTaskExecutor,
-};
-use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskExecutorAdapter};
-use homeboy::core::agent_tasks::AgentTaskAggregateReport;
+use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchCommand};
+use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -86,169 +81,40 @@ pub struct DispatchArgs {
     pub queue_only: bool,
 }
 
+impl From<DispatchArgs> for AgentTaskDispatchCommand {
+    fn from(args: DispatchArgs) -> Self {
+        AgentTaskDispatchCommand {
+            prompt: args.prompt,
+            tasks: args.tasks,
+            tasks_json: args.tasks_json,
+            cwd: args.cwd,
+            workspace: args.workspace,
+            repo: args.repo,
+            task_url: args.task_url,
+            backend: args.backend,
+            selector: args.selector,
+            model: args.model,
+            required_capabilities: args.required_capabilities,
+            secret_env: args.secret_env,
+            provider_config: args.provider_config,
+            client_context: args.client_context,
+            concurrency: args.concurrency,
+            attempts: args.attempts,
+            run_id: args.run_id,
+            queue_only: args.queue_only,
+        }
+    }
+}
+
 pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    dispatch_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+    dispatch_service::run_dispatch_command(
+        args.into(),
+        ExtensionProviderAgentTaskExecutor::discover(),
+    )
 }
 
 pub(crate) fn cook(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
-}
-
-fn cook_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    let target_worktree = args.workspace.clone();
-    let (mut value, exit_code) = dispatch_with_executor(args, executor)?;
-    value["handoff"] = cook_handoff(&value, target_worktree.as_deref());
-    Ok((value, exit_code))
-}
-
-pub(crate) fn dispatch_with_executor<E>(args: DispatchArgs, executor: E) -> CmdResult<Value>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    let result = dispatch_service::dispatch(dispatch_request_from_args(args)?, executor)?;
-    Ok((command_json_value(result.value)?, result.exit_code))
-}
-
-pub(crate) fn dispatch_request_from_args(
-    args: DispatchArgs,
-) -> homeboy::core::Result<AgentTaskDispatchRequest> {
-    dispatch_request_from_args_with_default(args, default_backend_for_component)
-}
-
-fn dispatch_request_from_args_with_default(
-    args: DispatchArgs,
-    default_backend: impl FnOnce(Option<&str>) -> homeboy::core::Result<Option<String>>,
-) -> homeboy::core::Result<AgentTaskDispatchRequest> {
-    let backend = match args.backend {
-        Some(backend) => backend,
-        None => default_backend(args.repo.as_deref())?.ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "backend",
-                "agent-task dispatch requires --backend because no default backend policy is configured",
-                None,
-                Some(vec![
-                    "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
-                ]),
-            )
-        })?,
-    };
-
-    Ok(AgentTaskDispatchRequest {
-        prompt: args.prompt,
-        tasks: args.tasks,
-        tasks_json: args.tasks_json,
-        cwd: args.cwd,
-        workspace: args.workspace,
-        repo: args.repo,
-        task_url: args.task_url,
-        backend,
-        selector: args.selector,
-        model: args.model,
-        required_capabilities: args.required_capabilities,
-        secret_env: args.secret_env,
-        provider_config: args.provider_config,
-        client_context: args.client_context,
-        concurrency: args.concurrency,
-        attempts: args.attempts,
-        run_id: args.run_id,
-        queue_only: args.queue_only,
-    })
-}
-
-fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
-    serde_json::to_value(value)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
-}
-
-fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
-    let run_id = value["run_id"].as_str().unwrap_or("<run-id>");
-    let aggregate_path = value["aggregate_path"].as_str().unwrap_or(run_id);
-    let aggregate_review = value
-        .get("aggregate")
-        .and_then(|aggregate| serde_json::from_value::<AgentTaskAggregate>(aggregate.clone()).ok())
-        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes))
-        .unwrap_or_else(|| AgentTaskAggregateReport::from(Vec::new()));
-    let promotion_commands =
-        cook_promotion_commands(aggregate_path, to_worktree, &aggregate_review);
-    let patch_artifact_produced = !promotion_commands.is_empty();
-    let mut next_actions = Vec::new();
-
-    if patch_artifact_produced {
-        next_actions.push("patch artifact produced; promote one candidate before claiming worktree changes or PR completion".to_string());
-        if to_worktree.is_some() {
-            next_actions.push(
-                "run one `promote_commands` entry to apply the patch into the target worktree"
-                    .to_string(),
-            );
-        } else {
-            next_actions.push(format!(
-                "run `homeboy agent-task review {run_id} --to-worktree <handle>` to generate exact promote commands"
-            ));
-        }
-        next_actions.push(format!(
-            "after promotion and verification, run `homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>`"
-        ));
-    } else if value["queued"].as_bool().unwrap_or(false) {
-        next_actions.push(format!(
-            "queued only; run `homeboy agent-task run {run_id}` or let a daemon claim it with `homeboy agent-task run-next`"
-        ));
-    } else {
-        next_actions.push("no patch artifact was produced; inspect `aggregate` candidates before retrying or reporting".to_string());
-    }
-
-    serde_json::json!({
-        "schema": "homeboy/agent-task-cook-handoff/v1",
-        "states": {
-            "patch_artifact_produced": patch_artifact_produced,
-            "patch_promoted": false,
-            "pr_opened": false
-        },
-        "boundary": if value["queued"].as_bool().unwrap_or(false) {
-            "queued"
-        } else if patch_artifact_produced {
-            "patch_artifact_only"
-        } else {
-            "no_patch_artifact"
-        },
-        "promote_commands": promotion_commands,
-        "finalize_command": format!(
-            "homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>"
-        ),
-        "next_actions": next_actions
-    })
-}
-
-fn cook_promotion_commands(
-    source: &str,
-    to_worktree: Option<&str>,
-    review: &AgentTaskAggregateReport,
-) -> Vec<Vec<String>> {
-    review
-        .apply_candidates
-        .iter()
-        .flat_map(|candidate| {
-            candidate.artifact_ids.iter().map(move |artifact_id| {
-                let mut command = vec![
-                    "homeboy".to_string(),
-                    "agent-task".to_string(),
-                    "promote".to_string(),
-                    source.to_string(),
-                    "--task-id".to_string(),
-                    candidate.task_id.clone(),
-                    "--artifact-id".to_string(),
-                    artifact_id.clone(),
-                ];
-                if let Some(to_worktree) = to_worktree {
-                    command.push("--to-worktree".to_string());
-                    command.push(to_worktree.to_string());
-                }
-                command
-            })
-        })
-        .collect()
+    dispatch_service::run_cook_command(args.into(), ExtensionProviderAgentTaskExecutor::discover())
 }
 
 #[cfg(test)]
@@ -256,7 +122,9 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_task::AgentTaskRequest;
-    use homeboy::core::agent_tasks::scheduler::AgentTaskExecutionContext;
+    use homeboy::core::agent_tasks::scheduler::{
+        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
+    };
     use homeboy::core::agent_tasks::{
         AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
         AGENT_TASK_OUTCOME_SCHEMA,
@@ -267,14 +135,15 @@ mod tests {
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
 
-            let (value, exit_code) = dispatch_with_executor(
+            let (value, exit_code) = dispatch_service::run_dispatch_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Queue this minion.".to_string()),
                     cwd: Some(workspace.path().display().to_string()),
                     queue_only: true,
                     run_id: Some("dispatch-queued".to_string()),
                     ..DispatchArgOverrides::default()
-                }),
+                })
+                .into(),
                 NoopExecutor,
             )
             .expect("dispatch queued");
@@ -301,13 +170,14 @@ mod tests {
                 .to_string();
             let patch_path = std::path::Path::new(&workspace).join("changes.patch");
             std::fs::write(&patch_path, "diff --git a/file b/file\n").expect("patch fixture");
-            let (value, exit_code) = cook_with_executor(
+            let (value, exit_code) = dispatch_service::run_cook_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Cook a patch.".to_string()),
                     workspace: Some(workspace.clone()),
                     run_id: Some("cook-handoff".to_string()),
                     ..DispatchArgOverrides::default()
-                }),
+                })
+                .into(),
                 PatchExecutor { patch_path },
             )
             .expect("cook run");
@@ -342,13 +212,14 @@ mod tests {
     #[test]
     fn queued_cook_handoff_surfaces_run_command_without_patch_claims() {
         with_isolated_home(|_| {
-            let (value, exit_code) = cook_with_executor(
+            let (value, exit_code) = dispatch_service::run_cook_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Queue this cook.".to_string()),
                     queue_only: true,
                     run_id: Some("cook-queued".to_string()),
                     ..DispatchArgOverrides::default()
-                }),
+                })
+                .into(),
                 PatchExecutor {
                     patch_path: std::path::PathBuf::new(),
                 },
@@ -368,7 +239,7 @@ mod tests {
 
     #[test]
     fn dispatch_request_uses_declared_default_backend_when_backend_is_absent() {
-        let request = dispatch_request_from_args_with_default(
+        let request = dispatch_service::resolve_dispatch_request_with_default(
             DispatchArgs {
                 prompt: Some("run with default".to_string()),
                 tasks: Vec::new(),
@@ -388,7 +259,8 @@ mod tests {
                 attempts: 1,
                 run_id: None,
                 queue_only: false,
-            },
+            }
+            .into(),
             |_| Ok(Some("fake-default".to_string())),
         )
         .expect("default backend request");
@@ -398,7 +270,7 @@ mod tests {
 
     #[test]
     fn dispatch_request_errors_when_backend_and_default_are_absent() {
-        let error = dispatch_request_from_args_with_default(
+        let error = dispatch_service::resolve_dispatch_request_with_default(
             DispatchArgs {
                 prompt: Some("run without default".to_string()),
                 tasks: Vec::new(),
@@ -418,7 +290,8 @@ mod tests {
                 attempts: 1,
                 run_id: None,
                 queue_only: false,
-            },
+            }
+            .into(),
             |_| Ok(None),
         )
         .expect_err("missing backend should fail");
