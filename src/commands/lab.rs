@@ -3,6 +3,9 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::{CmdResult, GlobalArgs};
+use homeboy::core::command_execution_plan::{
+    CommandExecutionPlan, CommandOutputContract, CommandSourcePolicy, CommandWorkspacePolicy,
+};
 use homeboy::core::runners::{
     self as runner, runner_exec_failure_error, RunnerExecOptions, RunnerExecOutput,
     RunnerRequiredTool, RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -119,6 +122,7 @@ pub struct LabExtensionSyncOutput {
     runner_source: Option<String>,
     source_revision: String,
     replace: bool,
+    execution_plan: CommandExecutionPlan,
     install_command: Vec<String>,
     execution: RunnerExecOutput,
 }
@@ -281,7 +285,7 @@ fn sync_lab_extension(
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
     let materialized_source = materialize_lab_extension_source(&runner_id, source)?;
-    let install_command = runner_extension_install_command(
+    let execution_plan = lab_extension_sync_execution_plan(
         &homeboy_path,
         &materialized_source.runner_source,
         extension_id,
@@ -294,7 +298,7 @@ fn sync_lab_extension(
             cwd: None,
             project_id: None,
             allow_diagnostic_ssh: true,
-            command: install_command.clone(),
+            command: execution_plan.remote_argv.clone(),
             env: runner_config.env.clone(),
             secret_env_names: Vec::new(),
             capture_patch: false,
@@ -339,7 +343,8 @@ fn sync_lab_extension(
                 .then_some(materialized_source.runner_source),
             source_revision: revision.to_string(),
             replace,
-            install_command,
+            install_command: execution_plan.remote_argv.clone(),
+            execution_plan,
             execution,
         })),
         exit_code,
@@ -422,6 +427,22 @@ fn runner_extension_install_command(
         command.push("--replace".to_string());
     }
     command
+}
+
+fn lab_extension_sync_execution_plan(
+    homeboy_path: &str,
+    source: &str,
+    extension_id: &str,
+    revision: &str,
+    replace: bool,
+) -> CommandExecutionPlan {
+    CommandExecutionPlan::remote(
+        "lab.extension_sync",
+        runner_extension_install_command(homeboy_path, source, extension_id, revision, replace),
+        CommandSourcePolicy::MaterializeControllerPath,
+        CommandWorkspacePolicy::Snapshot,
+        CommandOutputContract::structured_json_with_execution_plan(),
+    )
 }
 
 fn installed_extension_source_revision(stdout: &str) -> Option<String> {
@@ -563,8 +584,12 @@ fn shell_arg(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        controller_local_source_path, installed_extension_source_revision, lab_followups,
-        lab_runner_homeboy_refresh_commands, revision_matches, runner_extension_install_command,
+        controller_local_source_path, installed_extension_source_revision,
+        lab_extension_sync_execution_plan, lab_followups, lab_runner_homeboy_refresh_commands,
+        revision_matches, runner_extension_install_command,
+    };
+    use homeboy::core::command_execution_plan::{
+        CommandOutputContract, CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
     };
     use std::fs;
 
@@ -612,6 +637,47 @@ mod tests {
                 "--ref",
                 "main",
             ]
+        );
+    }
+
+    #[test]
+    fn lab_extension_sync_execution_plan_exposes_remote_policy_and_output_contract() {
+        let plan = lab_extension_sync_execution_plan(
+            "homeboy",
+            "/runner/source/path",
+            "wordpress",
+            "main",
+            true,
+        );
+
+        assert_eq!(plan.label, "lab.extension_sync");
+        assert_eq!(plan.portability, CommandPortability::Portable);
+        assert_eq!(
+            plan.safe_remote_argv().unwrap(),
+            plan.remote_argv.as_slice()
+        );
+        assert_eq!(
+            plan.remote_argv,
+            vec![
+                "homeboy",
+                "extension",
+                "install",
+                "/runner/source/path",
+                "--id",
+                "wordpress",
+                "--ref",
+                "main",
+                "--replace",
+            ]
+        );
+        assert_eq!(
+            plan.source_policy,
+            CommandSourcePolicy::MaterializeControllerPath
+        );
+        assert_eq!(plan.workspace_policy, CommandWorkspacePolicy::Snapshot);
+        assert_eq!(
+            plan.output_contract,
+            CommandOutputContract::structured_json_with_execution_plan()
         );
     }
 
