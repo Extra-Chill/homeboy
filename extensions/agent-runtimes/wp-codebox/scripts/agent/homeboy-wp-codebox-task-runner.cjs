@@ -104,8 +104,66 @@ function claudeCodeRequiredSecretEnv() {
   return ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'];
 }
 
+function codexRequiredAuthEnv() {
+  return [
+    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+  ];
+}
+
 function isClaudeCodeRequest(request) {
   return request.provider === 'claude-code';
+}
+
+function isCodexRequest(request) {
+  return request.provider === 'codex';
+}
+
+function parseUnixTimestamp(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return NaN;
+  }
+  if (/^\d+$/.test(raw)) {
+    const parsed = Number.parseInt(raw, 10);
+    return parsed > 100000000000 ? Math.floor(parsed / 1000) : parsed;
+  }
+  const parsedDate = Date.parse(raw);
+  return Number.isFinite(parsedDate) ? Math.floor(parsedDate / 1000) : NaN;
+}
+
+function codexAuthGuidance() {
+  return 'Refresh Codex OAuth credentials before launching WP Codebox, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the codebox executor.';
+}
+
+function assertCodexAuthPreflight(request) {
+  if (!isCodexRequest(request)) {
+    return;
+  }
+
+  const names = secretEnvNames(request);
+  const missingMapping = codexRequiredAuthEnv().filter((name) => !names.includes(name));
+  if (missingMapping.length > 0) {
+    throw new Error(`Codex provider auth preflight failed: missing required secret environment mapping: ${missingMapping.join(', ')}. ${codexAuthGuidance()}`);
+  }
+
+  const missing = codexRequiredAuthEnv().filter((name) => !process.env[name]);
+  if (missing.length > 0) {
+    throw new Error(`Codex provider auth preflight failed: missing required secret environment value: ${missing.join(', ')}. ${codexAuthGuidance()}`);
+  }
+
+  const expiresAt = parseUnixTimestamp(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT);
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
+    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is malformed. ${codexAuthGuidance()}`);
+  }
+
+  const safetyWindowSeconds = 300;
+  const now = Math.floor(Date.now() / 1000);
+  if (expiresAt <= now + safetyWindowSeconds) {
+    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is expired or expires within ${safetyWindowSeconds} seconds. ${codexAuthGuidance()}`);
+  }
 }
 
 function assertClaudeCodeAuthPreflight(request) {
@@ -1715,6 +1773,7 @@ function runWpCodeboxParentTask(request) {
 
 try {
   const request = readTaskRequest();
+  assertCodexAuthPreflight(request);
   assertClaudeCodeAuthPreflight(request);
   assertRequiredSecretEnvAvailable(request);
   process.exitCode = runWpCodeboxParentTask(request);

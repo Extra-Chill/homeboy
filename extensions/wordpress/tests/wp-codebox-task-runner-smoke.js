@@ -598,6 +598,37 @@ try {
   assert(!JSON.stringify(codexInput).includes('access-token-value'));
   assert(!JSON.stringify(codexInput).includes('refresh-token-value'));
 
+  const expiredCodexCapturePath = path.join(root, 'capture-expired-codex.json');
+  const expiredCodexResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      provider: 'codex',
+      model: 'gpt-5.5',
+      provider_plugin_paths: ['/components/ai-provider-for-openai'],
+      secret_env: codexSecretEnv,
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: expiredCodexCapturePath,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'expired-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'expired-refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'expired-account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+    },
+  });
+  assert.equal(expiredCodexResult.status, 1, expiredCodexResult.stderr || expiredCodexResult.stdout);
+  assert.match(expiredCodexResult.stderr, /Codex provider auth preflight failed/);
+  assert.match(expiredCodexResult.stderr, /AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT/);
+  assert.match(expiredCodexResult.stderr, /Refresh Codex OAuth credentials/);
+  assert(!expiredCodexResult.stderr.includes('expired-access-token-value'));
+  assert(!expiredCodexResult.stderr.includes('expired-refresh-token-value'));
+  assert(!fs.existsSync(expiredCodexCapturePath));
+
   const implicitRuntimeRequest = { ...request };
   delete implicitRuntimeRequest.runtime_component_paths;
   const implicitRuntimeCapturePath = path.join(root, 'capture-implicit-runtime-stack.json');
