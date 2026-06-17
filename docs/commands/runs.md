@@ -11,6 +11,7 @@ homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario 
 homeboy runs show <run-id>
 homeboy runs resume-plan <run-id>
 homeboy runs artifacts <run-id>
+homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs export --run <run-id> --output <dir>
 homeboy runs export --since <duration> --output <dir>
@@ -26,6 +27,13 @@ homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run
 `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
+
+`homeboy runs refs` emits a compact machine-readable ref index for matching runs. It is intended for matrix orchestration scripts and agents that need stable run refs and aggregate artifact refs without scraping human stdout. The output includes `homeboy://run/<id>` refs, `homeboy://run/<id>/artifact/<artifact-id>` refs, evidence/artifact follow-up commands, and detected aggregate artifact refs. Aggregate detection is schema-blind by default (`aggregate` in artifact id/kind/path); pass `--aggregate-artifact-kind <kind>` to mark additional artifact kinds as aggregate outputs.
+
+```bash
+homeboy --output json runs refs --kind bench --component studio --rig studio-bfb --since 24h
+homeboy --output json runs refs --kind trace --component gutenberg --aggregate-artifact-kind trace_summary
+```
 
 `homeboy runs resume-plan <run-id>` reads generic `validation_progress` metadata from a run and reports the last completed command, any active command, and the next pending command. Homeboy core records this ledger for Homeboy-managed validation command sets without understanding npm, smoke groups, benchmarks, or implementation-specific command names; command manifests come from project configuration or extension-provided runners.
 

@@ -31,6 +31,73 @@
       "payload": {
         "data": {
           "payload": {
+            "aggregate_artifact_count": 1,
+            "aggregate_artifacts": [
+              {
+                "artifact_id": "artifact-aggregate",
+                "get_command": "homeboy runs artifact get run-contract-1 artifact-aggregate",
+                "kind": "trace_aggregate",
+                "mime": "application/json",
+                "path": "artifacts/aggregate.json",
+                "ref_id": "homeboy://run/run-contract-1/artifact/artifact-aggregate",
+                "run_id": "run-contract-1",
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size_bytes": 1234,
+                "type": "file",
+                "url": null
+              }
+            ],
+            "artifact_count": 1,
+            "artifacts": [
+              {
+                "artifact_id": "artifact-aggregate",
+                "get_command": "homeboy runs artifact get run-contract-1 artifact-aggregate",
+                "kind": "trace_aggregate",
+                "mime": "application/json",
+                "path": "artifacts/aggregate.json",
+                "ref_id": "homeboy://run/run-contract-1/artifact/artifact-aggregate",
+                "run_id": "run-contract-1",
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size_bytes": 1234,
+                "type": "file",
+                "url": null
+              }
+            ],
+            "command": "runs.refs",
+            "filters": {
+              "component_id": "homeboy",
+              "kind": "bench",
+              "limit": 50,
+              "rig": "contract-rig",
+              "status": "pass"
+            },
+            "run_count": 1,
+            "runs": [
+              {
+                "artifacts_command": "homeboy runs artifacts run-contract-1",
+                "component_id": "homeboy",
+                "evidence_command": "homeboy runs evidence run-contract-1",
+                "finished_at": "2026-05-24T00:01:00Z",
+                "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": "bench",
+                "ref_id": "homeboy://run/run-contract-1",
+                "rig_id": "contract-rig",
+                "run_id": "run-contract-1",
+                "started_at": "2026-05-24T00:00:00Z",
+                "status": "pass"
+              }
+            ]
+          },
+          "variant": "refs"
+        },
+        "success": true
+      },
+      "scenario": "runs refs json"
+    },
+    {
+      "payload": {
+        "data": {
+          "payload": {
             "command": "runs.show",
             "run": {
               "artifacts": [
