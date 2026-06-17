@@ -410,6 +410,19 @@ pub fn provider_secret_sources_for_plan(
     provider_secret_sources_for_plan_with_providers(plan, &providers)
 }
 
+pub fn provider_secret_sources_for_providers(
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for provider in providers {
+        sources.extend(provider_secret_sources(provider, None));
+        for defaults in provider.provider_defaults.values() {
+            sources.extend(provider_config_secret_sources(defaults));
+        }
+    }
+    sources
+}
+
 pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
@@ -2124,6 +2137,47 @@ process.stdout.write(JSON.stringify({
                 "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
                 "12345".to_string()
             )));
+        });
+    }
+
+    #[test]
+    fn provider_default_secret_sources_feed_secret_readiness_status() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("codex-auth.json");
+            fs::write(
+                &auth_path,
+                json!({
+                    "tokens": {
+                        "access_token": "provider-owned-access-token"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write auth");
+            let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+            provider.provider_defaults.insert(
+                "codex".to_string(),
+                json!({
+                    "secret_env_sources": {
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "tokens.access_token"
+                        }
+                    }
+                }),
+            );
+            let fallback_sources = provider_secret_sources_for_providers(&[provider]);
+
+            let status = crate::core::agent_task_secrets::secret_env_status_with_fallbacks(
+                &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+                &fallback_sources,
+            );
+
+            assert_eq!(status.len(), 1);
+            assert!(status[0].configured);
+            assert_eq!(status[0].source, "json-file");
         });
     }
 

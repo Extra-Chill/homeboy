@@ -281,11 +281,14 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
 
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let providers = executor.providers();
+    let fallback_sources =
+        homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
-            "providers": executor.providers(),
-            "secret_env": homeboy::core::agent_tasks::secret_env_status(&args.secret_env),
+            "providers": providers,
+            "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,
     ))

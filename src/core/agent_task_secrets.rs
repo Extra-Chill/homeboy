@@ -37,7 +37,22 @@ pub fn resolve_secret_env_plan(
 }
 
 pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
-    secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        &HashMap::new(),
+    )
+}
+
+pub fn secret_env_status_with_fallbacks(
+    names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        fallback_sources,
+    )
 }
 
 pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvStatus> {
@@ -216,6 +231,14 @@ fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
 ) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(names, config, &HashMap::new())
+}
+
+fn secret_env_status_with_config_and_fallbacks(
+    names: &[String],
+    config: &AgentTaskSecretConfig,
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
     let mut bundle_cache = HashMap::new();
     names
         .iter()
@@ -228,7 +251,10 @@ fn secret_env_status_with_config(
                 };
             }
 
-            let source = config.secrets.get(name);
+            let source = config
+                .secrets
+                .get(name)
+                .or_else(|| fallback_sources.get(name));
             AgentTaskSecretEnvStatus {
                 name: name.clone(),
                 configured: source
