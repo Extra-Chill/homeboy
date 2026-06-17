@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.8] - 2026-06-17
+
+### Fixed
+- preflight stale codex codebox auth
+
 ## [3.3.7] - 2026-06-17
 
 ### Changed
