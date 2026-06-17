@@ -1254,10 +1254,7 @@ fn fixture_artifact_root(request: &AgentTaskRequest) -> PathBuf {
         })
 }
 
-fn fixture_success_outcome(
-    request: &AgentTaskRequest,
-    artifact_root: &PathBuf,
-) -> AgentTaskOutcome {
+fn fixture_success_outcome(request: &AgentTaskRequest, artifact_root: &Path) -> AgentTaskOutcome {
     let changed_file = request
         .executor
         .config
@@ -1329,7 +1326,7 @@ fn fixture_success_outcome(
 
 fn fixture_empty_patch_outcome(
     request: &AgentTaskRequest,
-    artifact_root: &PathBuf,
+    artifact_root: &Path,
 ) -> AgentTaskOutcome {
     let patch_path = artifact_root.join("empty.patch");
     let _ = std::fs::write(&patch_path, "");
@@ -1345,7 +1342,7 @@ fn fixture_empty_patch_outcome(
 
 fn fixture_empty_runtime_bundle_outcome(
     request: &AgentTaskRequest,
-    artifact_root: &PathBuf,
+    artifact_root: &Path,
 ) -> AgentTaskOutcome {
     let bundle_path = artifact_root.join("runtime-bundle");
     let _ = std::fs::create_dir_all(&bundle_path);
@@ -3326,6 +3323,7 @@ process.stdout.write(JSON.stringify({
             label: "Test provider auth".to_string(),
             secret_env: vec![secret_name.clone()],
             env_path: None,
+            executable: None,
             remediation: None,
             extra: BTreeMap::new(),
         }];
