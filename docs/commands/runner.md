@@ -6,7 +6,7 @@
 homeboy runner <COMMAND>
 ```
 
-`runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server.
+`runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server. Both storage shapes share the same runner capability contract: workspace root, settings, environment, secret references, resources, and policy.
 
 Runner configuration separates printable environment from secrets:
 

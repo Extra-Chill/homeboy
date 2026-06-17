@@ -165,6 +165,23 @@ impl Server {
     }
 }
 
+pub fn validate_runner_settings(
+    settings: &RunnerSettings,
+    concurrency_field: &str,
+    id: Option<String>,
+) -> Result<()> {
+    if settings.concurrency_limit == Some(0) {
+        return Err(Error::validation_invalid_argument(
+            concurrency_field,
+            format!("{concurrency_field} must be greater than zero"),
+            id,
+            None,
+        ));
+    }
+
+    Ok(())
+}
+
 impl ConfigEntity for Server {
     const ENTITY_TYPE: &'static str = "server";
     const DIR_NAME: &'static str = "servers";
@@ -191,18 +208,8 @@ impl ConfigEntity for Server {
     }
 
     fn validate(&self) -> Result<()> {
-        if self
-            .runner
-            .as_ref()
-            .and_then(|runner| runner.settings.concurrency_limit)
-            == Some(0)
-        {
-            return Err(Error::validation_invalid_argument(
-                "runner.concurrency_limit",
-                "runner.concurrency_limit must be greater than zero",
-                None,
-                None,
-            ));
+        if let Some(runner) = self.runner.as_ref() {
+            validate_runner_settings(&runner.settings, "runner.concurrency_limit", None)?;
         }
 
         Ok(())
