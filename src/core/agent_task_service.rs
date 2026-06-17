@@ -16,11 +16,13 @@ use crate::core::agent_task_lifecycle::{
 use crate::core::agent_task_promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
-use crate::core::agent_task_provider::apply_provider_runner_secret_env_contracts;
+use crate::core::agent_task_provider::{
+    apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
+};
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler, AgentTaskState,
 };
-use crate::core::agent_task_secrets::validate_secret_env;
+use crate::core::agent_task_secrets::validate_secret_env_with_fallbacks;
 use crate::core::secret_env_plan::SecretEnvPlan;
 use crate::core::{config, Error, Result};
 
@@ -627,7 +629,11 @@ fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
             .flat_map(|task| task.executor.secret_env.iter().cloned()),
     );
 
-    validate_secret_env(&secret_env_plan.secret_env_names()).map_err(|error| {
+    validate_secret_env_with_fallbacks(
+        &secret_env_plan.secret_env_names(),
+        &provider_secret_sources_for_plan(plan),
+    )
+    .map_err(|error| {
         Error::validation_invalid_argument(
             "secret_env",
             error.message,

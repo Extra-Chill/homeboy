@@ -54,6 +54,7 @@ pub fn map_secret_to_env(
         AgentTaskSecretSource {
             source: "env".to_string(),
             env_var: env_var.map(str::to_string),
+            path: None,
             scope: None,
             name: None,
             field: None,
@@ -74,6 +75,7 @@ pub fn set_config_secret(name: &str, value: &str) -> crate::core::Result<AgentTa
         AgentTaskSecretSource {
             source: "config".to_string(),
             env_var: None,
+            path: None,
             scope: None,
             name: None,
             field: None,
@@ -103,6 +105,7 @@ pub fn set_keychain_secret(
         AgentTaskSecretSource {
             source: "keychain".to_string(),
             env_var: None,
+            path: None,
             scope: Some(scope.to_string()),
             name: Some(keychain_name.to_string()),
             field: None,
@@ -149,6 +152,7 @@ pub fn map_secret_to_keychain_bundle(
         AgentTaskSecretSource {
             source: "keychain-bundle".to_string(),
             env_var: None,
+            path: None,
             scope: Some(scope.unwrap_or("agent-task").to_string()),
             name: Some(keychain_name.unwrap_or(bundle).to_string()),
             field: Some(field.to_string()),
@@ -190,6 +194,24 @@ pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolu
     resolve_secret_env(names).map(|_| ())
 }
 
+pub fn validate_secret_env_with_fallbacks(
+    names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Result<(), AgentTaskSecretResolutionError> {
+    resolve_secret_env_with_fallbacks(names, fallback_sources).map(|_| ())
+}
+
+pub fn resolve_secret_env_with_fallbacks(
+    names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    resolve_secret_env_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        fallback_sources,
+    )
+}
+
 fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
@@ -224,6 +246,14 @@ fn resolve_secret_env_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
 ) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    resolve_secret_env_with_config_and_fallbacks(names, config, &HashMap::new())
+}
+
+fn resolve_secret_env_with_config_and_fallbacks(
+    names: &[String],
+    config: &AgentTaskSecretConfig,
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
     if names.is_empty() {
         return Ok(Vec::new());
     }
@@ -241,6 +271,7 @@ fn resolve_secret_env_with_config(
         match config
             .secrets
             .get(name)
+            .or_else(|| fallback_sources.get(name))
             .and_then(|source| source.resolve(name, &mut bundle_cache))
         {
             Some(value) => resolved.push((name.clone(), value)),
@@ -306,6 +337,7 @@ impl AgentTaskSecretSource {
         match self.source.as_str() {
             "config" => self.value.clone(),
             "env" => env::var(self.env_var.as_deref().unwrap_or(requested_name)).ok(),
+            "json-file" => self.resolve_json_file(requested_name, bundle_cache),
             "keychain" => keychain::get(
                 self.scope.as_deref().unwrap_or("agent-task"),
                 self.name.as_deref().unwrap_or(requested_name),
@@ -315,6 +347,25 @@ impl AgentTaskSecretSource {
             "keychain-bundle" => self.resolve_keychain_bundle(requested_name, bundle_cache),
             _ => None,
         }
+    }
+
+    fn resolve_json_file(
+        &self,
+        requested_name: &str,
+        bundle_cache: &mut HashMap<String, Option<Value>>,
+    ) -> Option<String> {
+        let raw_path = self.path.as_deref()?;
+        let path = shellexpand::tilde(raw_path).to_string();
+        let bundle = bundle_cache
+            .entry(format!("json-file\0{path}"))
+            .or_insert_with(|| {
+                fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            })
+            .as_ref()?;
+        let field = self.field.as_deref().unwrap_or(requested_name);
+        bundle_field_value(bundle, field)
     }
 
     fn resolve_keychain_bundle(
@@ -416,6 +467,7 @@ mod tests {
             AgentTaskSecretSource {
                 source: "env".to_string(),
                 env_var: Some(source_name.clone()),
+                path: None,
                 scope: None,
                 name: None,
                 field: None,
@@ -504,6 +556,7 @@ mod tests {
         let source = AgentTaskSecretSource {
             source: "keychain-bundle".to_string(),
             env_var: None,
+            path: None,
             scope: Some("agent-task".to_string()),
             name: Some("provider-oauth".to_string()),
             field: Some("tokens.access".to_string()),
@@ -570,5 +623,48 @@ mod tests {
             assert_eq!(source.name.as_deref(), Some("provider-oauth"));
             assert_eq!(source.field.as_deref(), Some("tokens.access"));
         });
+    }
+
+    #[test]
+    fn resolves_provider_hint_from_json_file_without_exposing_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "tokens": {
+                    "access_token": "json-file-access-token",
+                    "expires_at": 12345
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth file");
+        let name = "AI_PROVIDER_EXAMPLE_ACCESS_TOKEN".to_string();
+        std::env::remove_var(&name);
+        let mut fallbacks = HashMap::new();
+        fallbacks.insert(
+            name.clone(),
+            AgentTaskSecretSource {
+                source: "json-file".to_string(),
+                env_var: None,
+                path: Some(auth_path.to_string_lossy().to_string()),
+                scope: None,
+                name: None,
+                field: Some("tokens.access_token".to_string()),
+                value: None,
+            },
+        );
+
+        let resolved = resolve_secret_env_with_fallbacks(std::slice::from_ref(&name), &fallbacks)
+            .expect("json file fallback resolves");
+
+        assert_eq!(resolved, vec![(name, "json-file-access-token".to_string())]);
+        let status = secret_env_status(std::slice::from_ref(
+            &"AI_PROVIDER_EXAMPLE_ACCESS_TOKEN".to_string(),
+        ));
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("json-file-access-token"));
     }
 }

@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use crate::core::agent_tasks::provider::provider_runner_secret_env_for_plan;
+use crate::core::agent_tasks::provider::{
+    provider_runner_secret_env_for_plan, provider_secret_sources_for_plan,
+};
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::{config, Error, Result};
@@ -120,8 +122,6 @@ pub(super) fn preflight_agent_task_runner_secret_env(
         return Ok(());
     }
 
-    let is_missing = |name: &str| !env.contains_key(name) && !runner.secret_env.contains_key(name);
-
     // Dedupe missing env names while preserving first-seen order so the
     // operator-facing message lists each name exactly once, even when several
     // plan tasks declare the same requirement.
@@ -129,7 +129,10 @@ pub(super) fn preflight_agent_task_runner_secret_env(
     let mut required_by_tasks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     for task in &tasks {
         for name in &task.secret_env {
-            if !is_missing(name) {
+            if env.contains_key(name)
+                || runner.secret_env.contains_key(name)
+                || task.secret_sources.contains(name)
+            {
                 continue;
             }
             if !missing.iter().any(|seen| seen == name) {
@@ -371,6 +374,7 @@ fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
 struct PlanTaskSecretEnv {
     task_id: String,
     secret_env: Vec<String>,
+    secret_sources: Vec<String>,
 }
 
 fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanTaskSecretEnv> {
@@ -391,10 +395,14 @@ fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanT
 
     let mut tasks = Vec::new();
     let provider_names = provider_runner_secret_env_for_plan(&plan);
+    let provider_secret_sources: Vec<String> = provider_secret_sources_for_plan(&plan)
+        .into_keys()
+        .collect();
     if !provider_names.is_empty() {
         tasks.push(PlanTaskSecretEnv {
             task_id: PLAN_PROVIDER_PROVENANCE.to_string(),
             secret_env: provider_names,
+            secret_sources: provider_secret_sources.clone(),
         });
     }
     for request in plan.tasks {
@@ -414,6 +422,7 @@ fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanT
         tasks.push(PlanTaskSecretEnv {
             task_id: request.task_id,
             secret_env: names,
+            secret_sources: provider_secret_sources.clone(),
         });
     }
     tasks

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -14,7 +14,9 @@ use crate::core::agent_task::{
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
-use crate::core::agent_task_secrets::{resolve_secret_env, AgentTaskSecretResolutionError};
+use crate::core::agent_task_secrets::{
+    resolve_secret_env_with_fallbacks, AgentTaskSecretResolutionError,
+};
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
@@ -347,6 +349,13 @@ pub fn provider_runner_secret_env_for_plan(plan: &AgentTaskPlan) -> Vec<String> 
     provider_runner_secret_env_for_plan_with_providers(plan, &providers)
 }
 
+pub fn provider_secret_sources_for_plan(
+    plan: &AgentTaskPlan,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let providers = discover_agent_task_executor_providers();
+    provider_secret_sources_for_plan_with_providers(plan, &providers)
+}
+
 pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
@@ -416,6 +425,20 @@ fn provider_runner_secret_env_for_plan_with_providers(
     names
 }
 
+fn provider_secret_sources_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for request in &plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        sources.extend(provider_secret_sources(provider, Some(request)));
+    }
+    sources
+}
+
 fn provider_secret_env(
     provider: &AgentTaskExecutorProvider,
     request: Option<&AgentTaskRequest>,
@@ -453,6 +476,80 @@ fn provider_secret_env(
     names.sort();
     names.dedup();
     names
+}
+
+fn provider_secret_sources(
+    provider: &AgentTaskExecutorProvider,
+    request: Option<&AgentTaskRequest>,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for requirement in &provider.secret_env_requirements {
+        if requirement_matches_request(requirement.when.as_ref(), request) {
+            sources.extend(secret_source_map_from_extra(&requirement.extra));
+        }
+    }
+    if let Some(request) = request {
+        if let Some(provider_name) = request
+            .executor
+            .config
+            .get("provider")
+            .and_then(Value::as_str)
+        {
+            if let Some(defaults) = provider.provider_defaults.get(provider_name) {
+                sources.extend(provider_config_secret_sources(defaults));
+            }
+        }
+    }
+    sources
+}
+
+fn secret_source_map_from_extra(
+    extra: &BTreeMap<String, Value>,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    for key in [
+        "secret_env_sources",
+        "secretEnvSources",
+        "credential_sources",
+        "credentialSources",
+    ] {
+        if let Some(value) = extra.get(key) {
+            return secret_source_map(value);
+        }
+    }
+    HashMap::new()
+}
+
+fn provider_config_secret_sources(
+    config: &Value,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let Some(config) = config.as_object() else {
+        return HashMap::new();
+    };
+    for key in [
+        "secret_env_sources",
+        "secretEnvSources",
+        "credential_sources",
+        "credentialSources",
+    ] {
+        if let Some(value) = config.get(key) {
+            return secret_source_map(value);
+        }
+    }
+    HashMap::new()
+}
+
+fn secret_source_map(value: &Value) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let Some(entries) = value.as_object() else {
+        return HashMap::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(name, source)| {
+            serde_json::from_value::<defaults::AgentTaskSecretSource>(source.clone())
+                .ok()
+                .map(|source| (name.clone(), source))
+        })
+        .collect()
 }
 
 fn provider_config_secret_env(config: &Value) -> Vec<String> {
@@ -1169,7 +1266,10 @@ fn provider_command_env(
                 .unwrap_or_default(),
         ),
     ];
-    env.extend(resolve_secret_env(&request.executor.secret_env)?);
+    env.extend(resolve_secret_env_with_fallbacks(
+        &request.executor.secret_env,
+        &provider_secret_sources(provider, Some(request)),
+    )?);
     Ok(env)
 }
 
@@ -1803,6 +1903,100 @@ mod tests {
             "test",
             None
         ));
+    }
+
+    #[test]
+    fn provider_default_secret_sources_resolve_required_env_without_duplicate_mapping() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("codex-auth.json");
+            fs::write(
+                &auth_path,
+                json!({
+                    "tokens": {
+                        "access_token": "provider-owned-access-token",
+                        "refresh_token": "provider-owned-refresh-token"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write auth");
+            let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+            request.executor.config = json!({ "provider": "codex" });
+            request.executor.secret_env = vec![
+                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+            ];
+            provider.provider_defaults.insert(
+                "codex".to_string(),
+                json!({
+                    "secret_env": request.executor.secret_env,
+                    "secret_env_sources": {
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "tokens.access_token"
+                        },
+                        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "tokens.refresh_token"
+                        }
+                    }
+                }),
+            );
+
+            let env = provider_command_env(&request, &provider).expect("provider env resolves");
+
+            assert!(env.contains(&(
+                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                "provider-owned-access-token".to_string()
+            )));
+            let rendered =
+                serde_json::to_string(&provider_secret_sources(&provider, Some(&request)))
+                    .expect("sources json");
+            assert!(!rendered.contains("provider-owned-access-token"));
+        });
+    }
+
+    #[test]
+    fn provider_default_secret_sources_accept_keychain_bundle_sources() {
+        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        request.executor.config = json!({ "provider": "claude-code" });
+        provider.provider_defaults.insert(
+            "claude-code".to_string(),
+            json!({
+                "secret_env": [
+                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+                    "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+                ],
+                "secret_env_sources": {
+                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN": {
+                        "source": "keychain-bundle",
+                        "scope": "agent-task",
+                        "name": "claude-code-oauth",
+                        "field": "access_token"
+                    },
+                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+                        "source": "keychain-bundle",
+                        "scope": "agent-task",
+                        "name": "claude-code-oauth",
+                        "field": "refresh_token"
+                    }
+                }
+            }),
+        );
+
+        let sources = provider_secret_sources(&provider, Some(&request));
+
+        let refresh = sources
+            .get("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
+            .expect("refresh token source is declared");
+        assert_eq!(refresh.source, "keychain-bundle");
+        assert_eq!(refresh.scope.as_deref(), Some("agent-task"));
+        assert_eq!(refresh.name.as_deref(), Some("claude-code-oauth"));
+        assert_eq!(refresh.field.as_deref(), Some("refresh_token"));
     }
 
     #[test]
