@@ -629,7 +629,7 @@ mod tests {
                 .expect("relink should materialize shared runtime");
 
             assert!(home
-                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
         });
     }

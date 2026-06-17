@@ -322,7 +322,11 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
             continue;
         }
 
-        let target = extensions_dir.join(shared_dir);
+        let target = if shared_dir == "agent-runtimes" {
+            paths::agent_runtimes()?
+        } else {
+            extensions_dir.join(shared_dir)
+        };
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| {
                 Error::internal_io(
@@ -1337,7 +1341,7 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
-                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
         });
     }
@@ -1357,7 +1361,7 @@ exec '{}' "$@"
             install(&remote_url.to_string_lossy(), Some("wordpress"))
                 .expect("install cloned extension");
             assert!(!home
-                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
 
             write_shared_runtime_fixture(&source);
@@ -1367,7 +1371,7 @@ exec '{}' "$@"
             update("wordpress", false).expect("update cloned extension");
 
             assert!(home
-                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
         });
     }
@@ -1422,7 +1426,7 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
-                .join(".config/homeboy/extensions/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
                 .exists());
         });
     }
