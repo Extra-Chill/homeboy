@@ -566,7 +566,11 @@ fn materialize_snapshot_piped(
     run_shell_command(&command, action)
 }
 
-fn snapshot_archive_command(local_path: &Path, target_command: &str, excludes: &[String]) -> String {
+fn snapshot_archive_command(
+    local_path: &Path,
+    target_command: &str,
+    excludes: &[String],
+) -> String {
     format!(
         "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - . | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
