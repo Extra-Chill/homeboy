@@ -178,12 +178,16 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
-    if should_force_diagnostic_ssh(&runner, &options) {
+    let run_capability_preflight = |runner: &Runner| -> Result<()> {
         preflight_runner_capability_plan(
-            &runner,
+            runner,
             options.capability_preflight.as_ref(),
             &request_env,
-        )?;
+        )
+    };
+
+    if should_force_diagnostic_ssh(&runner, &options) {
+        run_capability_preflight(&runner)?;
         return exec_diagnostic_ssh(
             &runner,
             cwd,
@@ -214,11 +218,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
     if connected.connected {
         if let Some(session) = connected.session {
-            preflight_runner_capability_plan(
-                &runner,
-                options.capability_preflight.as_ref(),
-                &request_env,
-            )?;
+            run_capability_preflight(&runner)?;
             if let Some(local_url) = session.local_url.as_deref() {
                 return exec_via_daemon(
                     &runner,
@@ -414,27 +414,18 @@ fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let result = result_event_data(&events).unwrap_or_else(|| json!({}));
-    let (stdout, stderr) = redact_runner_exec_streams(
-        string_field(&result, "stdout"),
-        string_field(&result, "stderr"),
+    let RunnerJobResultFields {
+        result: _,
+        stdout,
+        stderr,
+        metrics,
+        exit_code,
+    } = runner_job_result_fields(
+        &events,
+        job.status,
         &redaction_env,
         &redaction_secret_env_names,
     );
-    let metrics = result
-        .get("metrics")
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or_else(|| {
-            if job.status == JobStatus::Succeeded {
-                0
-            } else {
-                1
-            }
-        });
 
     print_lab_offload_handoff(
         &runner.id,
@@ -563,27 +554,13 @@ fn exec_via_daemon(
         &secret_env_names,
     );
 
-    let result = result_event_data(&events).unwrap_or_else(|| json!({}));
-    let (stdout, stderr) = redact_runner_exec_streams(
-        string_field(&result, "stdout"),
-        string_field(&result, "stderr"),
-        &env,
-        &secret_env_names,
-    );
-    let metrics = result
-        .get("metrics")
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let exit_code = result
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok())
-        .unwrap_or_else(|| {
-            if job.status == JobStatus::Succeeded {
-                0
-            } else {
-                1
-            }
-        });
+    let RunnerJobResultFields {
+        result,
+        stdout,
+        stderr,
+        metrics,
+        exit_code,
+    } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
     let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
@@ -955,6 +932,54 @@ fn result_event_data(events: &[JobEvent]) -> Option<Value> {
         .rev()
         .find(|event| matches!(event.kind, crate::core::api_jobs::JobEventKind::Result))
         .and_then(|event| event.data.clone())
+}
+
+/// Stream + metric fields derived from a runner job's terminal result event.
+struct RunnerJobResultFields {
+    result: Value,
+    stdout: String,
+    stderr: String,
+    metrics: Option<RunnerResourceMetrics>,
+    exit_code: i32,
+}
+
+/// Extract the terminal result payload from a runner job's events and derive
+/// the redacted streams, metrics, and exit code. Shared by the reverse-broker
+/// and daemon execution paths to keep their result handling identical (#5067).
+fn runner_job_result_fields(
+    events: &[JobEvent],
+    job_status: JobStatus,
+    redaction_env: &HashMap<String, String>,
+    redaction_secret_env_names: &[String],
+) -> RunnerJobResultFields {
+    let result = result_event_data(events).unwrap_or_else(|| json!({}));
+    let (stdout, stderr) = redact_runner_exec_streams(
+        string_field(&result, "stdout"),
+        string_field(&result, "stderr"),
+        redaction_env,
+        redaction_secret_env_names,
+    );
+    let metrics = result
+        .get("metrics")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let exit_code = result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+        .unwrap_or_else(|| {
+            if job_status == JobStatus::Succeeded {
+                0
+            } else {
+                1
+            }
+        });
+    RunnerJobResultFields {
+        result,
+        stdout,
+        stderr,
+        metrics,
+        exit_code,
+    }
 }
 
 fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutput, i32)> {

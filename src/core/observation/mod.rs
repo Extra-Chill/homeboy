@@ -26,8 +26,8 @@ pub use records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, ArtifactViewerLink,
     FindingListFilter, FindingRecord, NewFindingRecord, NewRunRecord, NewRunRecordBuilder,
     NewTraceRunRecord, NewTraceRunRecordBuilder, NewTraceSpanRecord, NewTraceSpanRecordBuilder,
-    NewTriageItemRecord, RecordedHomeboyFinding, RunListFilter, RunRecord, RunStatus,
-    TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
+    NewTriageItemRecord, RecordedHomeboyFinding, RunEvidenceCommands, RunListFilter, RunRecord,
+    RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord, TriagePullRequestSignals,
 };
 pub use store::{
     ObservationDbStatus, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,

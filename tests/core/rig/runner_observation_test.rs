@@ -134,7 +134,7 @@ fn test_run_check_persists_failing_observation() {
             .ends_with("rig-artifact-index.json"));
         assert!(std::path::Path::new(&artifact_index.artifact_index_path).is_file());
         assert_eq!(
-            artifact_index.artifacts_command,
+            artifact_index.evidence_commands.artifacts_command,
             format!("homeboy runs artifacts {run_id}")
         );
         assert!(artifact_index

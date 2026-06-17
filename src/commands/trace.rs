@@ -15,7 +15,8 @@ use homeboy::core::extension::trace::{
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{
-    NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunStatus,
+    NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunEvidenceCommands,
+    RunStatus,
 };
 use homeboy::core::rig::{self, RigSpec};
 
@@ -1457,8 +1458,7 @@ pub(super) struct LabTraceDispatchObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PersistedRunRetrieval {
     pub run_id: String,
-    pub evidence_command: String,
-    pub artifacts_command: String,
+    pub commands: RunEvidenceCommands,
     pub export_command: String,
 }
 
@@ -1466,8 +1466,7 @@ impl PersistedRunRetrieval {
     pub(super) fn for_run(run_id: &str) -> Self {
         Self {
             run_id: run_id.to_string(),
-            evidence_command: format!("homeboy runs evidence {run_id}"),
-            artifacts_command: format!("homeboy runs artifacts {run_id}"),
+            commands: RunEvidenceCommands::for_run_id(run_id),
             export_command: format!(
                 "homeboy runs export --run {run_id} --output homeboy-run-{run_id}"
             ),
@@ -1479,8 +1478,8 @@ impl PersistedRunRetrieval {
             "persisted_run_id": self.run_id,
             "id_scope": "persisted_homeboy_run",
             "retrieval_commands": {
-                "evidence": self.evidence_command,
-                "artifacts": self.artifacts_command,
+                "evidence": self.commands.evidence_command,
+                "artifacts": self.commands.artifacts_command,
                 "export": self.export_command,
             }
         })
@@ -1512,6 +1511,13 @@ pub(super) fn start_lab_dispatch_observation(
     });
     let store = ObservationStore::open_initialized().ok()?;
     let cwd = std::env::current_dir().ok();
+    let lab_dispatch_metadata = || {
+        serde_json::json!({
+            "phase": "route_before_lab_dispatch",
+            "runner_id": runner_id,
+            "status": "running"
+        })
+    };
     let run =
         store
             .start_run(
@@ -1527,11 +1533,7 @@ pub(super) fn start_lab_dispatch_observation(
                     .metadata(serde_json::json!({
                         "scenario_id": scenario_id,
                         "component_path": component_path,
-                        "lab_dispatch": {
-                            "phase": "route_before_lab_dispatch",
-                            "runner_id": runner_id,
-                            "status": "running"
-                        }
+                        "lab_dispatch": lab_dispatch_metadata()
                     }))
                     .build(),
             )
@@ -1552,11 +1554,7 @@ pub(super) fn start_lab_dispatch_observation(
         )
         .trace_rig_id(observation.rig_id.as_deref())
         .metadata(serde_json::json!({
-            "lab_dispatch": {
-                "phase": "route_before_lab_dispatch",
-                "runner_id": runner_id,
-                "status": "running"
-            }
+            "lab_dispatch": lab_dispatch_metadata()
         }))
         .build(),
     );

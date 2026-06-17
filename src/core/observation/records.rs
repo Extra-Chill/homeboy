@@ -17,6 +17,28 @@ pub use trace_run_builder::NewTraceRunRecordBuilder;
 pub use trace_span_builder::NewTraceSpanRecordBuilder;
 pub use triage_items::{NewTriageItemRecord, TriageItemRecord, TriagePullRequestSignals};
 
+/// Shared CLI commands that retrieve a run's evidence and artifacts. Embedded
+/// via `#[serde(flatten)]` so the historical flat `evidence_command` /
+/// `artifacts_command` keys are preserved while the field group is defined once
+/// instead of being repeated across run-reference structs (#5068).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunEvidenceCommands {
+    pub evidence_command: String,
+    pub artifacts_command: String,
+}
+
+impl RunEvidenceCommands {
+    /// Build the standard `homeboy runs evidence/artifacts` retrieval commands
+    /// for a run id. `run_id` is interpolated verbatim; callers that need shell
+    /// quoting should pass an already-escaped value.
+    pub fn for_run_id(run_id: &str) -> Self {
+        Self {
+            evidence_command: format!("homeboy runs evidence {run_id}"),
+            artifacts_command: format!("homeboy runs artifacts {run_id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NewRunRecord {
     pub kind: String,

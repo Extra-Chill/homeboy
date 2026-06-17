@@ -2833,6 +2833,22 @@ fn collect_required_artifacts_from_declarations(
     let Some(declarations) = value.as_array() else {
         return;
     };
+    // Resolve the first non-empty string field on a declaration from an ordered
+    // list of candidate paths. Each path is either a single top-level key or a
+    // `(parent, child)` pair resolving `declaration[parent][child]`.
+    let first_non_empty_str = |declaration: &Value, paths: &[&[&str]]| -> Option<String> {
+        paths
+            .iter()
+            .filter_map(|path| {
+                let mut node = declaration;
+                for segment in path.iter() {
+                    node = node.get(segment)?;
+                }
+                node.as_str()
+            })
+            .find(|value| !value.is_empty())
+            .map(str::to_string)
+    };
     for declaration in declarations {
         let required = declaration
             .get("required")
@@ -2847,21 +2863,14 @@ fn collect_required_artifacts_from_declarations(
         if !required {
             continue;
         }
-        let Some(artifact_id) = declaration
-            .get("artifact_id")
-            .or_else(|| declaration.get("id"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+        let Some(artifact_id) = first_non_empty_str(declaration, &[&["artifact_id"], &["id"]])
         else {
             continue;
         };
-        let Some(kind) = declaration
-            .get("kind")
-            .or_else(|| declaration.get("artifact_type"))
-            .or_else(|| declaration.get("data").and_then(|data| data.get("kind")))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        else {
+        let Some(kind) = first_non_empty_str(
+            declaration,
+            &[&["kind"], &["artifact_type"], &["data", "kind"]],
+        ) else {
             continue;
         };
         if artifacts

@@ -1,7 +1,9 @@
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{
+    ArtifactRecord, ObservationStore, RunEvidenceCommands, RunListFilter, RunRecord,
+};
 
 use super::common::since_threshold;
 use super::{CmdResult, RunsOutput};
@@ -77,8 +79,8 @@ pub struct RunRef {
     pub component_id: Option<String>,
     pub rig_id: Option<String>,
     pub git_sha: Option<String>,
-    pub evidence_command: String,
-    pub artifacts_command: String,
+    #[serde(flatten)]
+    pub evidence_commands: RunEvidenceCommands,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -185,8 +187,7 @@ fn run_ref(run: &RunRecord) -> RunRef {
         component_id: run.component_id.clone(),
         rig_id: run.rig_id.clone(),
         git_sha: run.git_sha.clone(),
-        evidence_command: format!("homeboy runs evidence {}", shell_arg(&run.id)),
-        artifacts_command: format!("homeboy runs artifacts {}", shell_arg(&run.id)),
+        evidence_commands: RunEvidenceCommands::for_run_id(&shell_arg(&run.id)),
     }
 }
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::pipeline::PipelineOutcome;
 use super::spec::RigSpec;
-use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use crate::core::observation::{ArtifactRecord, ObservationStore, RunEvidenceCommands, RunRecord};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RigRunArtifactIndex {
@@ -14,8 +14,8 @@ pub struct RigRunArtifactIndex {
     pub artifact_root: String,
     pub artifact_index_path: String,
     pub artifact_index_command: String,
-    pub evidence_command: String,
-    pub artifacts_command: String,
+    #[serde(flatten)]
+    pub evidence_commands: RunEvidenceCommands,
     pub export_command: String,
     pub retrieval_commands: Vec<String>,
     pub key_report_refs: Vec<RigRunArtifactRef>,
@@ -118,8 +118,10 @@ fn build(
         artifact_root: artifact_root.display().to_string(),
         artifact_index_path: artifact_index_path.display().to_string(),
         artifact_index_command: artifacts_command.clone(),
-        evidence_command: evidence_command.clone(),
-        artifacts_command: artifacts_command.clone(),
+        evidence_commands: RunEvidenceCommands {
+            evidence_command: evidence_command.clone(),
+            artifacts_command: artifacts_command.clone(),
+        },
         export_command: export_command.clone(),
         retrieval_commands: vec![artifacts_command, evidence_command, export_command],
         key_report_refs,
