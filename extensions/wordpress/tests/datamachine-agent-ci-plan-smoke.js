@@ -11,6 +11,16 @@ const {
   datamachineAgentCiRunnerSpec,
   validateAgentTaskRunnerSpec,
 } = require('../lib/datamachine-agent-ci-plan');
+const datamachineAgentCi = require('../../datamachine-agent-ci');
+
+assert.equal(
+  datamachineAgentCi.DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
+  'datamachine/run-agent-bundle'
+);
+assert.equal(
+  datamachineAgentCi.DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS.path_aliases.agent_runtime.includes('runtime_component:data_machine'),
+  true
+);
 
 const bundleTask = datamachineAgentCiBundleTaskRequest({
   taskId: 'concept-agent',
