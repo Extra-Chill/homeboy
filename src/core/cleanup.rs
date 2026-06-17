@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
-use crate::core::{Error, Result};
+use crate::core::{git, Error, Result};
 
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
     ("target", "rust_target"),
@@ -177,7 +176,11 @@ fn resolve_root(path: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
-    let output = git_output(root, &["worktree", "list", "--porcelain"])?;
+    let output = git::run_git(
+        root,
+        &["worktree", "list", "--porcelain"],
+        "git worktree list",
+    )?;
     let mut worktrees = Vec::new();
     for line in output.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
@@ -239,7 +242,7 @@ fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>> {
 }
 
 fn git_safety(worktree: &Path) -> Result<GitSafety> {
-    let status = git_output(worktree, &["status", "--porcelain=v1"])?;
+    let status = git::run_git(worktree, &["status", "--porcelain=v1"], "git status")?;
     let mut dirty_paths = Vec::new();
     let mut source_dirty = false;
     for line in status.lines() {
@@ -253,8 +256,11 @@ fn git_safety(worktree: &Path) -> Result<GitSafety> {
         }
     }
 
-    let unpushed_commits = match git_output(worktree, &["rev-list", "--count", "@{upstream}..HEAD"])
-    {
+    let unpushed_commits = match git::run_git(
+        worktree,
+        &["rev-list", "--count", "@{upstream}..HEAD"],
+        "git rev-list upstream",
+    ) {
         Ok(count) => count.trim().parse::<u32>().unwrap_or(0) > 0,
         Err(_) => false,
     };
@@ -353,33 +359,14 @@ fn remove_artifact_path(path: &Path) -> Result<()> {
 }
 
 fn git_root(path: &Path) -> Result<PathBuf> {
-    let output = git_output(path, &["rev-parse", "--show-toplevel"])?;
+    let output = git::run_git(path, &["rev-parse", "--show-toplevel"], "git root")?;
     Ok(PathBuf::from(output.trim()))
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("run git {}", args.join(" "))))
-        })?;
-    if !output.status.success() {
-        return Err(Error::git_command_failed(format!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|e| Error::internal_unexpected(format!("git output was not UTF-8: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
