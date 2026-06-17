@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.3] - 2026-06-17
+
+### Fixed
+- fix(wp-codebox): persist refreshed Codex auth
+
 ## [3.4.2] - 2026-06-17
 
 ### Fixed
