@@ -104,7 +104,7 @@ fn run_ordered_steps(
         let label = step_label(rig, step, idx);
         crate::log_status!("rig", "{}: {}", name, label);
 
-        let result = run_step(rig, step);
+        let result = run_step(rig, name, step);
 
         let outcome = match &result {
             Ok(()) => PipelineStepOutcome {
@@ -151,7 +151,7 @@ fn step_matches_groups(step: &PipelineStep, wanted: &BTreeSet<&str>) -> bool {
     }
 }
 
-fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
+fn run_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep) -> Result<()> {
     match step {
         PipelineStep::Service { id, op, .. } => run_service_step(rig, id, *op),
         PipelineStep::Build { component, .. } => run_build_step(rig, component),
@@ -171,6 +171,7 @@ fn run_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
         PipelineStep::Command { .. } | PipelineStep::CommandIfMissing { .. } => {
             run_command_pipeline_step(rig, step)
         }
+        PipelineStep::Requirement { .. } => run_requirement_step(rig, pipeline_name, step),
         PipelineStep::Symlink { op, .. } => run_symlink_step(rig, *op),
         PipelineStep::SharedPath { op, .. } => run_shared_path_step(rig, *op),
         PipelineStep::Patch {
@@ -284,6 +285,7 @@ fn step_id(step: &PipelineStep) -> Option<&str> {
         | PipelineStep::Stack { step_id, .. }
         | PipelineStep::Command { step_id, .. }
         | PipelineStep::CommandIfMissing { step_id, .. }
+        | PipelineStep::Requirement { step_id, .. }
         | PipelineStep::Symlink { step_id, .. }
         | PipelineStep::SharedPath { step_id, .. }
         | PipelineStep::Patch { step_id, .. }
@@ -300,6 +302,7 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
         | PipelineStep::Stack { depends_on, .. }
         | PipelineStep::Command { depends_on, .. }
         | PipelineStep::CommandIfMissing { depends_on, .. }
+        | PipelineStep::Requirement { depends_on, .. }
         | PipelineStep::Symlink { depends_on, .. }
         | PipelineStep::SharedPath { depends_on, .. }
         | PipelineStep::Patch { depends_on, .. }
@@ -630,6 +633,149 @@ fn run_command_if_missing_step(
     }
 
     run_command_step(rig, cmd, cwd, env)
+}
+
+fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep) -> Result<()> {
+    let PipelineStep::Requirement {
+        path,
+        file,
+        dir,
+        component,
+        component_path_contains,
+        prepare_command,
+        prepare_phases,
+        cwd,
+        env,
+        remediation,
+        ..
+    } = step
+    else {
+        unreachable!("requirement helper only accepts requirement steps")
+    };
+
+    if component.is_some() != component_path_contains.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "requirement.component_path_contains",
+            "Requirement must specify both `component` and `component_path_contains` or neither",
+            None,
+            None,
+        ));
+    }
+
+    if let (Some(component_id), Some(required)) = (component, component_path_contains) {
+        let (_, component_path) = resolve_component_path(rig, component_id)?;
+        if !component_path.contains(required) {
+            return Err(requirement_failed(
+                rig,
+                format!(
+                    "component `{}` path `{}` does not contain `{}`",
+                    component_id, component_path, required
+                ),
+                remediation.as_deref(),
+            ));
+        }
+    }
+
+    let mut path_specs = Vec::new();
+    if let Some(value) = path {
+        path_specs.push(("path", value));
+    }
+    if let Some(value) = file {
+        path_specs.push(("file", value));
+    }
+    if let Some(value) = dir {
+        path_specs.push(("dir", value));
+    }
+
+    if path_specs.is_empty() && component_path_contains.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "requirement",
+            "Requirement must specify at least one of `path`, `file`, `dir`, or `component_path_contains`",
+            None,
+            None,
+        ));
+    }
+
+    let missing_before_prepare = path_specs
+        .iter()
+        .filter_map(|(kind, declared)| {
+            requirement_path_failure(rig, cwd.as_deref(), kind, declared)
+        })
+        .collect::<Vec<_>>();
+
+    if !missing_before_prepare.is_empty()
+        && prepare_command.is_some()
+        && prepare_phases.iter().any(|phase| phase == pipeline_name)
+    {
+        run_command_step(
+            rig,
+            prepare_command.as_deref().unwrap(),
+            cwd.as_deref(),
+            env,
+        )?;
+    }
+
+    let missing = path_specs
+        .iter()
+        .filter_map(|(kind, declared)| {
+            requirement_path_failure(rig, cwd.as_deref(), kind, declared)
+        })
+        .collect::<Vec<_>>();
+
+    if !missing.is_empty() {
+        return Err(requirement_failed(
+            rig,
+            missing.join("; "),
+            remediation.as_deref(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn requirement_path_failure(
+    rig: &RigSpec,
+    cwd: Option<&str>,
+    kind: &str,
+    declared: &str,
+) -> Option<String> {
+    let resolved = resolve_requirement_path(rig, cwd, declared);
+    let ok = match kind {
+        "file" => resolved.is_file(),
+        "dir" => resolved.is_dir(),
+        _ => resolved.exists(),
+    };
+
+    (!ok).then(|| {
+        let display = resolved.display();
+        if declared == display.to_string() {
+            format!("{} does not exist: {}", kind, display)
+        } else {
+            format!(
+                "{} does not exist: {} (declared: {})",
+                kind, display, declared
+            )
+        }
+    })
+}
+
+fn resolve_requirement_path(rig: &RigSpec, cwd: Option<&str>, declared: &str) -> PathBuf {
+    let expanded = expand_vars(rig, declared);
+    let path = PathBuf::from(&expanded);
+    if path.is_absolute() {
+        path
+    } else if let Some(cwd) = cwd {
+        PathBuf::from(expand_vars(rig, cwd)).join(path)
+    } else {
+        path
+    }
+}
+
+fn requirement_failed(rig: &RigSpec, message: String, remediation: Option<&str>) -> Error {
+    let detail = remediation
+        .map(|text| format!("{}. Remediation: {}", message, expand_vars(rig, text)))
+        .unwrap_or(message);
+    Error::rig_pipeline_failed(&rig.id, "requirement", detail)
 }
 
 #[cfg(unix)]
@@ -1097,6 +1243,7 @@ fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::Stack { .. } => "stack",
         PipelineStep::Command { .. } => "command",
         PipelineStep::CommandIfMissing { .. } => "command-if-missing",
+        PipelineStep::Requirement { .. } => "requirement",
         PipelineStep::Symlink { .. } => "symlink",
         PipelineStep::SharedPath { .. } => "shared-path",
         PipelineStep::Patch { .. } => "patch",
@@ -1154,6 +1301,27 @@ fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> String {
         PipelineStep::CommandIfMissing { cmd, label, .. } => label
             .clone()
             .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
+        PipelineStep::Requirement {
+            path,
+            file,
+            dir,
+            component,
+            component_path_contains,
+            label,
+            ..
+        } => label.clone().unwrap_or_else(|| {
+            if let Some(path) = file {
+                format!("require file {}", truncate(path, 60))
+            } else if let Some(path) = dir {
+                format!("require dir {}", truncate(path, 60))
+            } else if let Some(path) = path {
+                format!("require path {}", truncate(path, 60))
+            } else if let (Some(component), Some(required)) = (component, component_path_contains) {
+                format!("require {} path contains {}", component, required)
+            } else {
+                format!("requirement #{}", idx + 1)
+            }
+        }),
         PipelineStep::Symlink { op, .. } => format!("symlink {}", serialize_symlink_op(*op)),
         PipelineStep::SharedPath { op, .. } => {
             format!("shared-path {}", serialize_shared_path_op(*op))

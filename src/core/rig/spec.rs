@@ -1322,6 +1322,55 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Declarative local requirement for common rig preflight checks.
+    ///
+    /// Use this for simple filesystem/component-path assertions instead of
+    /// inline shell. When `prepare_command` is set, it runs only in listed
+    /// `prepare_phases`; normal `check` remains read-only and reports the
+    /// declared remediation.
+    Requirement {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Existing path. Relative paths resolve against `cwd` when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Existing regular file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        /// Existing directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+        /// Component whose resolved path must contain `component_path_contains`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component: Option<String>,
+        /// Required substring in the resolved component path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component_path_contains: Option<String>,
+        /// Command to run when the filesystem requirement is missing and the
+        /// current pipeline name appears in `prepare_phases`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prepare_command: Option<String>,
+        /// Pipeline names allowed to run `prepare_command`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prepare_phases: Vec<String>,
+        /// Working directory for `prepare_command` and relative paths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// Env vars (merged over inherited environment) for `prepare_command`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        env: HashMap<String, String>,
+        /// Human remediation shown when the requirement is not satisfied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remediation: Option<String>,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Ensure a declared symlink exists (or verify it in `check` pipelines).
     Symlink {
         /// Optional stable node ID for dependency-aware pipeline ordering.
