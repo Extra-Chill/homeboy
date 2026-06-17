@@ -680,6 +680,7 @@ fn promote_attempt(
     let (source, source_path) = promotion_source(run_id)?;
     promote(AgentTaskPromotionOptions {
         source,
+        source_run_id: Some(run_id.to_string()),
         source_path,
         to_worktree: options.to_worktree.clone(),
         task_id: None,

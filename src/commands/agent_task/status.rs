@@ -120,6 +120,14 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
             summary["aggregate_path"] = aggregate_path.clone();
         }
     }
+    if let Some(latest_promotion) = record
+        .get("metadata")
+        .and_then(|metadata| metadata.get("latest_promotion"))
+    {
+        if !latest_promotion.is_null() {
+            summary["latest_promotion"] = latest_promotion.clone();
+        }
+    }
     summary
 }
 
@@ -343,4 +351,42 @@ fn evidence_is_test(kind: &str, uri: &str) -> bool {
         || kind.contains("gate")
         || uri.contains("test")
         || uri.contains("transcript")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_status_surfaces_latest_promotion() {
+        let record = json!({
+            "run_id": "agent-task-run-1",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": {
+                "latest_promotion": {
+                    "schema": "homeboy/agent-task-promotion-status/v1",
+                    "status": "applied",
+                    "source_run_id": "agent-task-run-1",
+                    "patch_artifact_id": "patch.diff",
+                    "to_worktree": "homeboy@fix-5055",
+                    "operator_notification": {
+                        "status": "completed",
+                        "message": "patch promoted"
+                    }
+                }
+            }
+        });
+
+        let summary = compact_status_summary(&record, "agent-task-run-1");
+
+        assert_eq!(
+            summary["latest_promotion"]["patch_artifact_id"],
+            "patch.diff"
+        );
+        assert_eq!(
+            summary["latest_promotion"]["operator_notification"]["status"],
+            "completed"
+        );
+    }
 }

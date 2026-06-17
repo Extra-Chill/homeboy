@@ -26,6 +26,8 @@ const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMA
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionOptions {
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run_id: Option<String>,
     pub source_path: Option<PathBuf>,
     pub to_worktree: String,
     pub task_id: Option<String>,
@@ -48,6 +50,7 @@ pub struct AgentTaskPromotionReport {
     pub status: AgentTaskPromotionStatus,
     pub source: AgentTaskPromotionSource,
     pub to_worktree: String,
+    pub target: AgentTaskPromotionTarget,
     pub patch_artifact: AgentTaskPromotionArtifactRef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,
@@ -59,6 +62,7 @@ pub struct AgentTaskPromotionReport {
     pub gate_results: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
+    pub operator_notification: AgentTaskPromotionNotification,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,7 +78,22 @@ pub struct AgentTaskPromotionSource {
     pub kind: String,
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionTarget {
+    pub worktree: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +113,43 @@ pub struct AgentTaskPromotionCommandReport {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPromotionNotification {
+    pub status: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumable_blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+}
+
+impl AgentTaskPromotionTarget {
+    fn from_worktree(worktree: String, path: Option<&Path>) -> Self {
+        Self {
+            worktree,
+            path: path.map(|path| path.display().to_string()),
+            branch: path.and_then(|path| git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])),
+            head: path.and_then(|path| git_output(path, &["rev-parse", "HEAD"])),
+            dirty: path.and_then(|path| {
+                git_output(path, &["status", "--porcelain"]).map(|status| !status.is_empty())
+            }),
+        }
+    }
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
@@ -200,24 +256,27 @@ fn promote_with_provider(
         .map(HomeboyGateResult::from)
         .collect();
 
+    let status = status_for_report(options.dry_run, has_gate_failure);
+    let target = AgentTaskPromotionTarget::from_worktree(
+        options.to_worktree.clone(),
+        applied_worktree_path.as_deref(),
+    );
+    let operator_notification = promotion_notification(status, &target);
+
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-        status: if options.dry_run {
-            AgentTaskPromotionStatus::DryRun
-        } else if has_gate_failure {
-            AgentTaskPromotionStatus::GateFailed
-        } else {
-            AgentTaskPromotionStatus::Applied
-        },
+        status,
         source: AgentTaskPromotionSource {
             kind: source_kind,
             task_id: outcome.task_id.clone(),
+            run_id: options.source_run_id,
             path: options
                 .source_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
         },
         to_worktree: options.to_worktree,
+        target,
         patch_artifact: AgentTaskPromotionArtifactRef {
             id: artifact.id,
             kind: artifact.kind,
@@ -233,7 +292,55 @@ fn promote_with_provider(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
         }),
+        operator_notification,
     })
+}
+
+fn status_for_report(dry_run: bool, has_gate_failure: bool) -> AgentTaskPromotionStatus {
+    if dry_run {
+        AgentTaskPromotionStatus::DryRun
+    } else if has_gate_failure {
+        AgentTaskPromotionStatus::GateFailed
+    } else {
+        AgentTaskPromotionStatus::Applied
+    }
+}
+
+fn promotion_notification(
+    status: AgentTaskPromotionStatus,
+    target: &AgentTaskPromotionTarget,
+) -> AgentTaskPromotionNotification {
+    let target_path = target.path.as_deref().unwrap_or(target.worktree.as_str());
+    match status {
+        AgentTaskPromotionStatus::Applied => AgentTaskPromotionNotification {
+            status: "completed".to_string(),
+            message: format!(
+                "patch promoted into {}; verify and finalize from {}",
+                target.worktree, target_path
+            ),
+            resumable_blocker: None,
+            next_command: Some(format!(
+                "homeboy agent-task finalize-pr --run-id <run-id> --path {target_path} --title <title> --commit-message <message>"
+            )),
+        },
+        AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionNotification {
+            status: "blocked".to_string(),
+            message: "patch promoted, but deterministic gates failed".to_string(),
+            resumable_blocker: Some(
+                "run `homeboy agent-task gate-feedback` with the promotion report, then retry the follow-up request".to_string(),
+            ),
+            next_command: None,
+        },
+        AgentTaskPromotionStatus::DryRun => AgentTaskPromotionNotification {
+            status: "blocked".to_string(),
+            message: "dry run validated a patch artifact but did not apply it".to_string(),
+            resumable_blocker: Some("rerun promote without `--dry-run` to apply the patch".to_string()),
+            next_command: Some(format!(
+                "homeboy agent-task promote <run-id> --to-worktree {}",
+                target.worktree
+            )),
+        },
+    }
 }
 
 const AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA: &str =
@@ -1117,6 +1224,7 @@ mod tests {
 
         let report = promote(AgentTaskPromotionOptions {
             source,
+            source_run_id: None,
             source_path: Some(source_path),
             to_worktree: "repo@promoted-task".to_string(),
             task_id: None,
@@ -1152,6 +1260,7 @@ mod tests {
         let report = promote_with_provider(
             AgentTaskPromotionOptions {
                 source,
+                source_run_id: Some("run-1".to_string()),
                 source_path: Some(source_path),
                 to_worktree: "repo@controlled-worktree".to_string(),
                 task_id: None,
@@ -1243,6 +1352,7 @@ mod tests {
         let report = promote_with_provider(
             AgentTaskPromotionOptions {
                 source,
+                source_run_id: None,
                 source_path: Some(source_path),
                 to_worktree: "homeboy@promoted-task".to_string(),
                 task_id: None,
@@ -1277,6 +1387,7 @@ mod tests {
 
         let err = promote(AgentTaskPromotionOptions {
             source,
+            source_run_id: None,
             source_path: Some(source_path),
             to_worktree: "repo@controlled-worktree".to_string(),
             task_id: None,
@@ -1301,6 +1412,7 @@ mod tests {
         // keys must stay at the top level of the serialized options.
         let options = AgentTaskPromotionOptions {
             source: "source.json".to_string(),
+            source_run_id: Some("run-1".to_string()),
             source_path: None,
             to_worktree: "repo@flatten".to_string(),
             task_id: None,
@@ -1364,9 +1476,17 @@ mod tests {
             source: AgentTaskPromotionSource {
                 kind: "outcome".to_string(),
                 task_id: "task-1".to_string(),
+                run_id: Some("run-1".to_string()),
                 path: None,
             },
             to_worktree: "repo@controlled-worktree".to_string(),
+            target: AgentTaskPromotionTarget {
+                worktree: "repo@controlled-worktree".to_string(),
+                path: Some("/tmp/repo@controlled-worktree".to_string()),
+                branch: Some("fix/test".to_string()),
+                head: Some("abc123".to_string()),
+                dirty: Some(true),
+            },
             patch_artifact: AgentTaskPromotionArtifactRef {
                 id: "patch".to_string(),
                 kind: "patch".to_string(),
@@ -1381,6 +1501,12 @@ mod tests {
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
             provenance: Value::Null,
+            operator_notification: AgentTaskPromotionNotification {
+                status: "completed".to_string(),
+                message: "patch promoted".to_string(),
+                resumable_blocker: None,
+                next_command: None,
+            },
         };
 
         let value = serde_json::to_value(report).expect("serialize report");
