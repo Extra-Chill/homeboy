@@ -1308,6 +1308,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             dependency_failure_patterns: Vec::new(),
             timeout_artifact_discovery: Default::default(),
             role_aliases: Default::default(),
+            runtime_contract: Default::default(),
             extension_id: None,
             extension_path: None,
             runtime_id: None,
