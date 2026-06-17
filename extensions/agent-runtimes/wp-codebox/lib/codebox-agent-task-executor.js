@@ -215,8 +215,10 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
   const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions);
+  const homeboyToolPolicy = homeboyAgentToolPolicy();
   const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, runtimeOptions, defaults);
-  const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools);
+  const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools, homeboyToolPolicy);
+  const sandboxAllowedTools = allowedToolsForSandboxPolicy(allowedTools, sandboxToolPolicy);
   const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const homeboySecretEnvPlan = homeboyAgentTaskSecretEnvPlan();
@@ -250,7 +252,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     goal: request.instructions,
     target,
     workspace_materialization: workspaceMaterialization,
-    allowed_tools: allowedTools || [],
+    allowed_tools: sandboxAllowedTools || [],
     expected_artifacts: request.expected_artifacts || [],
     artifact_declarations: artifactDeclarations,
     policy: request.policy || {},
@@ -276,7 +278,10 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_stack_mounts: config.runtime_stack_mounts || runtimeOptions.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || runtimeOptions.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: runtimeOverlays,
-    runtime_env: firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
+    runtime_env: {
+      ...firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
+      ...homeboyAgentToolContractEnv(),
+    },
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
     runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeOptions.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
     secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
@@ -618,12 +623,98 @@ function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defa
   return uniqueStrings([...(defaults.allowedTools || []), ...declared]);
 }
 
-function sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools) {
+function sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults, allowedTools, homeboyToolPolicy) {
   const explicit = firstDefined(inputs.sandbox_tool_policy, inputs.sandboxToolPolicy, config.sandbox_tool_policy, config.sandboxToolPolicy, options.sandboxToolPolicy);
   if (explicit !== undefined) {
     return explicit;
   }
-  return workspaceSandboxToolPolicyWithAllowedTools(defaults.sandboxToolPolicy, allowedTools);
+  const homeboySandboxPolicy = sandboxToolPolicyFromHomeboyAgentToolPolicy(homeboyToolPolicy);
+  return workspaceSandboxToolPolicyWithAllowedTools(homeboySandboxPolicy || defaults.sandboxToolPolicy, allowedTools);
+}
+
+function homeboyAgentToolPolicy() {
+  const policy = parseJsonObject(process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON);
+  if (!policy || policy.schema !== 'homeboy/agent-tool-policy/v1') {
+    return null;
+  }
+  return policy;
+}
+
+function homeboyAgentToolContractEnv() {
+  return Object.fromEntries([
+    'HOMEBOY_AGENT_TOOL_POLICY_JSON',
+    'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
+    'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
+    'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
+  ].map((name) => [name, process.env[name]]).filter(([, value]) => typeof value === 'string' && value !== ''));
+}
+
+function sandboxToolPolicyFromHomeboyAgentToolPolicy(policy) {
+  const tools = Object.entries(policy?.tools || {})
+    .map(([toolId, rule]) => sandboxToolFromHomeboyToolPolicyRule(toolId, rule, policy))
+    .filter(Boolean);
+  if (tools.length === 0) {
+    return null;
+  }
+  return {
+    schema: 'wp-codebox/sandbox-tool-policy/v1',
+    version: 1,
+    tools,
+    metadata: {
+      source: 'homeboy_agent_tool_policy',
+      homeboy_policy_schema: policy.schema,
+      homeboy_default_location: policy.default_location || 'disabled',
+    },
+  };
+}
+
+function sandboxToolFromHomeboyToolPolicyRule(toolId, rule = {}, policy = {}) {
+  const id = typeof toolId === 'string' ? toolId.trim() : '';
+  if (!id) {
+    return null;
+  }
+  const location = rule.execution_location || policy.default_location || 'disabled';
+  const runnerOwned = location === 'runner';
+  const controlPlaneOwned = location === 'control_plane';
+  return {
+    id,
+    runtime_tool_id: runtimeToolIdFromHomeboyToolId(id),
+    execution_location: runnerOwned ? 'sandbox' : 'parent',
+    transport_visibility: runnerOwned ? 'sandbox' : controlPlaneOwned ? 'parent' : 'hidden',
+    allowed: runnerOwned,
+    runtime: {
+      environment: runnerOwned ? 'runtime_local' : 'control_plane',
+      capability_scope: runnerOwned ? 'runtime_local' : 'control_plane',
+    },
+    metadata: Object.fromEntries(Object.entries({
+      source: 'homeboy_agent_tool_policy',
+      homeboy_execution_location: location,
+      timeout_ms: rule.timeout_ms,
+      reason: rule.reason,
+    }).filter(([, value]) => value !== undefined && value !== '')),
+  };
+}
+
+function runtimeToolIdFromHomeboyToolId(toolId) {
+  return String(toolId || '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'homeboy_tool';
+}
+
+function allowedToolsForSandboxPolicy(allowedTools, sandboxToolPolicy) {
+  if (!Array.isArray(allowedTools) || !sandboxToolPolicy || sandboxToolPolicy.metadata?.source !== 'homeboy_agent_tool_policy') {
+    return allowedTools;
+  }
+  const explicitHomeboyTools = new Map((sandboxToolPolicy.tools || [])
+    .filter((tool) => tool?.metadata?.source === 'homeboy_agent_tool_policy')
+    .flatMap((tool) => [[tool.id, tool], [tool.runtime_tool_id, tool]]));
+  return allowedTools.filter((tool) => {
+    const policyTool = explicitHomeboyTools.get(tool) || explicitHomeboyTools.get(runtimeToolIdFromHomeboyToolId(tool));
+    if (!policyTool) {
+      return true;
+    }
+    return policyTool.allowed === true
+      && policyTool.runtime?.environment === 'runtime_local'
+      && policyTool.runtime?.capability_scope === 'runtime_local';
+  });
 }
 
 function normalizeToolIds(value) {
@@ -654,7 +745,7 @@ function workspaceSandboxToolPolicyWithAllowedTools(basePolicy, allowedTools) {
   if (!basePolicy || typeof basePolicy !== 'object' || !Array.isArray(allowedTools)) {
     return basePolicy;
   }
-  const existingRuntimeToolIds = new Set((basePolicy.tools || []).map((tool) => tool?.runtime_tool_id || tool?.id).filter(Boolean));
+  const existingRuntimeToolIds = new Set((basePolicy.tools || []).flatMap((tool) => [tool?.id, tool?.runtime_tool_id]).filter(Boolean));
   const extraTools = allowedTools
     .filter((tool) => !existingRuntimeToolIds.has(tool))
     .map((tool) => ({
