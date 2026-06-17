@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.1.0] - 2026-06-17
+
+### Added
+- make AI runtimes first-class
+
+### Fixed
+- consolidate wp-codebox agent runtime
+- allow non-codebox manifest runtimes
+
 ## [2.124.0] - 2026-06-16
 
 ### Added
