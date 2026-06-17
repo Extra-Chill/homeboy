@@ -997,7 +997,9 @@ fn run_provider_command(
         .timeout_ms
         .or(request.limits.max_runtime_ms)
         .map(|timeout_ms| (timeout_ms, timeout_with_grace(timeout_ms)));
-    let input = match serde_json::to_vec(request) {
+    let mut provider_request = request.clone();
+    provider_request.normalize_artifact_declarations();
+    let input = match serde_json::to_vec(&provider_request) {
         Ok(input) => input,
         Err(error) => {
             return failure_outcome(
@@ -1505,6 +1507,41 @@ mod tests {
                 .role_aliases
                 .output_aliases_for_role("provider_run_result"),
             vec!["custom_run_result"]
+        );
+    }
+
+    #[test]
+    fn provider_command_receives_canonical_artifact_declarations() {
+        let command = format!(
+            "node {}",
+            script(
+                r#"
+const fs = require('fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify({
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: input.task_id,
+  status: 'succeeded',
+  artifacts: [],
+  typed_artifacts: [],
+  evidence_refs: [],
+  diagnostics: [],
+  outputs: { artifact_declarations: input.artifact_declarations },
+  metadata: null
+}));
+"#
+            )
+        );
+        let (mut request, provider) = request("task-artifact-normalization", command);
+        request.expected_artifacts = vec!["patch".to_string()];
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.outputs["artifact_declarations"][0]["name"], "patch");
+        assert_eq!(
+            outcome.outputs["artifact_declarations"][0]["required"],
+            true
         );
     }
 

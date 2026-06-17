@@ -182,7 +182,7 @@ fn matrix_template_request(
     executor_backend: &str,
     run_args: &BenchRunArgs,
 ) -> AgentTaskRequest {
-    AgentTaskRequest {
+    let mut request = AgentTaskRequest {
         schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
         task_id: format!("{plan_id}/template"),
         group_key: Some(plan_id.to_string()),
@@ -217,7 +217,9 @@ fn matrix_template_request(
         expected_artifacts: run_args.expected_artifact.clone(),
         artifact_declarations: Vec::new(),
         metadata: serde_json::json!({ "product_command": "bench.matrix" }),
-    }
+    };
+    request.normalize_artifact_declarations();
+    request
 }
 
 #[derive(Clone)]
@@ -358,5 +360,18 @@ mod tests {
         assert_eq!(err.details["field"], "matrix");
         assert!(err.message.contains("no-op cell"));
         assert!(err.message.contains("no benchmark workload ran"));
+    }
+
+    #[test]
+    fn matrix_template_canonicalizes_expected_artifacts() {
+        let mut args = run_args(Some("studio-web"));
+        args.expected_artifact = vec!["bench-results".to_string()];
+
+        let request = matrix_template_request("bench/studio-web", "studio-web", "codebox", &args);
+
+        assert_eq!(request.expected_artifacts, vec!["bench-results"]);
+        assert_eq!(request.artifact_declarations.len(), 1);
+        assert_eq!(request.artifact_declarations[0].name, "bench-results");
+        assert!(request.artifact_declarations[0].required);
     }
 }

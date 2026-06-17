@@ -146,6 +146,44 @@ pub struct AgentTaskRequest {
     pub metadata: Value,
 }
 
+impl AgentTaskRequest {
+    pub fn canonical_artifact_declarations(&self) -> Vec<AgentTaskArtifactDeclaration> {
+        let mut declarations = Vec::new();
+        for declaration in &self.artifact_declarations {
+            if let Some(declaration) = declaration.canonical() {
+                push_artifact_declaration_once(&mut declarations, declaration);
+            }
+        }
+
+        for expected in &self.expected_artifacts {
+            if let Some(declaration) =
+                AgentTaskArtifactDeclaration::from_expected_artifact(expected)
+            {
+                push_artifact_declaration_once(&mut declarations, declaration);
+            }
+        }
+
+        declarations
+    }
+
+    pub fn normalize_artifact_declarations(&mut self) {
+        self.artifact_declarations = self.canonical_artifact_declarations();
+    }
+}
+
+fn push_artifact_declaration_once(
+    declarations: &mut Vec<AgentTaskArtifactDeclaration>,
+    declaration: AgentTaskArtifactDeclaration,
+) {
+    if declarations
+        .iter()
+        .any(|existing| existing.name == declaration.name)
+    {
+        return;
+    }
+    declarations.push(declaration);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskComponentContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,9 +504,22 @@ pub enum AgentTaskFailureClassification {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskArtifactDeclaration {
     pub name: String,
-    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "type",
+        alias = "artifact_type",
+        alias = "artifactType",
+        alias = "kind",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artifact_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "artifactSchema",
+        alias = "content_schema",
+        alias = "contentSchema",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artifact_schema: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -478,6 +529,39 @@ pub struct AgentTaskArtifactDeclaration {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+impl AgentTaskArtifactDeclaration {
+    fn canonical(&self) -> Option<Self> {
+        let name = non_empty_trimmed(&self.name)?;
+        Some(Self {
+            name,
+            artifact_type: self.artifact_type.as_deref().and_then(non_empty_trimmed),
+            artifact_schema: self.artifact_schema.as_deref().and_then(non_empty_trimmed),
+            path: self.path.as_deref().and_then(non_empty_trimmed),
+            required: self.required,
+            description: self.description.as_deref().and_then(non_empty_trimmed),
+            metadata: self.metadata.clone(),
+        })
+    }
+
+    fn from_expected_artifact(expected: &str) -> Option<Self> {
+        let name = non_empty_trimmed(expected)?;
+        Some(Self {
+            name,
+            artifact_type: None,
+            artifact_schema: None,
+            path: None,
+            required: true,
+            description: None,
+            metadata: Value::Null,
+        })
+    }
+}
+
+fn non_empty_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -885,6 +969,40 @@ mod tests {
             Some("AnalysisReport")
         );
         assert!(request.artifact_declarations[0].required);
+    }
+
+    #[test]
+    fn request_canonicalizes_artifact_declarations_from_expected_artifacts() {
+        let mut request: AgentTaskRequest = serde_json::from_value(json!({
+            "schema": AGENT_TASK_REQUEST_SCHEMA,
+            "task_id": "task-artifact-normalization",
+            "executor": { "backend": "codebox" },
+            "instructions": "Return artifacts.",
+            "expected_artifacts": [" patch ", "analysis_report", ""],
+            "artifact_declarations": [{
+                "name": " analysis_report ",
+                "kind": "AnalysisReport",
+                "contentSchema": "example/analysis-report/v1",
+                "required": false
+            }]
+        }))
+        .expect("decode request with artifact aliases");
+
+        request.normalize_artifact_declarations();
+
+        assert_eq!(request.artifact_declarations.len(), 2);
+        assert_eq!(request.artifact_declarations[0].name, "analysis_report");
+        assert_eq!(
+            request.artifact_declarations[0].artifact_type.as_deref(),
+            Some("AnalysisReport")
+        );
+        assert_eq!(
+            request.artifact_declarations[0].artifact_schema.as_deref(),
+            Some("example/analysis-report/v1")
+        );
+        assert!(!request.artifact_declarations[0].required);
+        assert_eq!(request.artifact_declarations[1].name, "patch");
+        assert!(request.artifact_declarations[1].required);
     }
 
     #[test]
