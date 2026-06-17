@@ -7,6 +7,7 @@ const {
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 	AGENT_TASK_OUTCOME_SCHEMA,
 	agentTaskProviderContractFields,
+	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
 } = require('../../lib/agent-task-provider-contract');
 
@@ -34,7 +35,7 @@ const OPENCODE_CAPABILITIES = [
 
 function providerContract(options = {}) {
 	const contractFields = agentTaskProviderContractFields();
-	contractFields.redacted_metadata_keys.push('codex_auth', 'opencode_auth');
+	contractFields.redacted_metadata_keys = extendRedactedMetadataKeys('codex_auth', 'opencode_auth');
 
 	return {
 		schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,

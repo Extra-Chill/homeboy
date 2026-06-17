@@ -10,17 +10,19 @@ const path = require('node:path');
  * Internal dependencies
  */
 const {
+  AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
   AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_OUTCOME_SCHEMA,
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
+  agentTaskArtifactFromRef,
+  agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
   providerDefaultsContract,
 } = require('../../lib/agent-task-provider-contract');
 
-const AGENT_TASK_ARTIFACT_SCHEMA = 'homeboy/agent-task-artifact/v1';
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
@@ -396,7 +398,7 @@ function wpCodeboxArtifactDeclarationFromLegacy(defaultName, declaration) {
     || declaration.content_schema
     || declaration.contentSchema
     || (declaration.schema && ![
-      'homeboy/agent-task-artifact-declaration/v1',
+      AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
       'wp-codebox/artifact-declaration/v1',
     ].includes(declaration.schema) ? declaration.schema : undefined);
   return Object.fromEntries(Object.entries({
@@ -1855,19 +1857,15 @@ function typedBundleOutputArtifacts(result) {
 }
 
 function artifactFromCodeboxArtifact(artifact, index) {
-  const id = artifact.id || artifact.sha256 || artifact.path || artifact.url || `codebox-artifact-${index + 1}`;
-  return {
-    schema: AGENT_TASK_ARTIFACT_SCHEMA,
-    id,
-    kind: artifact.kind || artifact.type || 'codebox_artifact',
-    name: artifact.name,
-    path: artifact.path || artifact.directory,
-    url: artifact.url,
-    mime: artifact.mime,
-    size_bytes: artifact.size_bytes,
-    sha256: artifact.sha256,
-    metadata: sanitizePublicMetadata(artifact.metadata || {}),
-  };
+  return agentTaskArtifactFromRef(
+    {
+      ...artifact,
+      id: artifact.id || artifact.sha256 || artifact.path || artifact.url || `codebox-artifact-${index + 1}`,
+      kind: artifact.kind || artifact.type || 'codebox_artifact',
+    },
+    index,
+    sanitizePublicMetadata
+  );
 }
 
 function pathValue(source, dottedPath) {
@@ -2140,20 +2138,12 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
       appendUniqueEvidenceRef(refs, ref);
     }
     for (const ref of result?.evidence_refs || result?.evidence || []) {
-      appendUniqueEvidenceRef(refs, {
-        kind: ref.kind || ref.type || 'codebox_evidence',
-        uri: ref.uri || ref.url || ref.path,
-        label: ref.label || ref.name,
-      });
+      appendUniqueEvidenceRef(refs, agentTaskEvidenceRefFromRef(ref, 'codebox_evidence'));
     }
     return refs;
   }
   const evidenceRefs = result?.evidence_refs || result?.evidence || [];
-  return evidenceRefs.map((ref) => ({
-    kind: ref.kind || ref.type || 'codebox_evidence',
-    uri: ref.uri || ref.url || ref.path,
-    label: ref.label || ref.name,
-  })).filter((ref) => ref.uri);
+  return evidenceRefs.map((ref) => agentTaskEvidenceRefFromRef(ref, 'codebox_evidence')).filter((ref) => ref.uri);
 }
 
 function agentRuntimeBundleArtifacts(result) {
