@@ -12,7 +12,7 @@
 //! returned from [`Commands::descriptor`].
 
 use crate::cli_surface::Commands;
-use crate::commands::{changelog, file, logs, report, review, trace, version};
+use crate::commands::{changelog, file, logs, report, review, runtime, trace, version};
 
 use super::lab::apply_lab_contract_to_descriptor;
 
@@ -169,6 +169,9 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
+            Commands::Runtime(args) if runtime::is_plain_mode(args) => {
+                raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
+            }
             Commands::Report(args) if report::is_markdown_mode(args) => workspace_descriptor(
                 CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
