@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.0] - 2026-06-17
+
+### Added
+- publish WordPress page profiling helpers
+
 ## [3.1.0] - 2026-06-17
 
 ### Added
