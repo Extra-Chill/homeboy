@@ -2,6 +2,27 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.2] - 2026-06-17
+
+### Fixed
+- prefer runtime helpers in extension wrappers
+- declare wp-codebox runtime policy defaults
+- drop stale WordPress audit role exceptions
+
+## [3.2.0] - 2026-06-17
+
+### Added
+- publish WordPress page profiling helpers
+
+## [3.1.0] - 2026-06-17
+
+### Added
+- make AI runtimes first-class
+
+### Fixed
+- consolidate wp-codebox agent runtime
+- allow non-codebox manifest runtimes
+
 ## [2.124.0] - 2026-06-16
 
 ### Added

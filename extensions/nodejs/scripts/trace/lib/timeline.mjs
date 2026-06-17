@@ -141,6 +141,54 @@ export function createTraceReporter(options = {}) {
     };
 }
 
+export function createTraceWorkload(options = {}) {
+    const reporter = createTraceReporter(options);
+
+    return {
+        get recorder() {
+            return reporter.recorder;
+        },
+        get timeline() {
+            return reporter.timeline;
+        },
+        get assertions() {
+            return reporter.assertions;
+        },
+        get artifacts() {
+            return reporter.artifacts;
+        },
+        event(source, event, data = {}) {
+            return reporter.mark(event, data, source);
+        },
+        mark(name, data = {}, source = 'scenario') {
+            return reporter.mark(name, data, source);
+        },
+        artifact(labelOrOptions, path = undefined, kind = undefined) {
+            if (labelOrOptions && typeof labelOrOptions === 'object' && !Array.isArray(labelOrOptions)) {
+                return reporter.artifact(labelOrOptions);
+            }
+
+            return reporter.artifact({ label: labelOrOptions, path, kind });
+        },
+        assertion(idOrOptions, status = undefined, message = undefined, data = undefined) {
+            if (idOrOptions && typeof idOrOptions === 'object' && !Array.isArray(idOrOptions)) {
+                return reporter.assertion(idOrOptions);
+            }
+
+            return reporter.assertion({ id: idOrOptions, status, message, data });
+        },
+        check(id, ok, message, data = undefined) {
+            return reporter.assertion({ id, status: ok ? 'pass' : 'fail', message, data });
+        },
+        pass(metrics = {}, options = {}) {
+            return reporter.pass(metrics, options);
+        },
+        fail(error, metrics = {}, options = {}) {
+            return reporter.fail(error, metrics, options);
+        },
+    };
+}
+
 function deriveStatus(assertions) {
     if (assertions.some((assertion) => assertion.status === 'fail')) return 'fail';
     if (assertions.length > 0 && assertions.every((assertion) => assertion.status === 'skip')) return 'skip';

@@ -10,12 +10,14 @@ const runtimeDir = path.join(rootDir, 'agent-runtimes', 'fake-runtime');
 const manifestPath = path.join(runtimeDir, 'fake-runtime.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 
-const requiredRootFields = ['name', 'version', 'description', 'agent_task_executors'];
+const requiredRootFields = ['schema', 'id', 'name', 'version', 'description', 'agent_task_executors'];
 for (const field of requiredRootFields) {
 	assert.ok(manifest[field], `missing root manifest field: ${field}`);
 }
 
 assert.ok(Array.isArray(manifest.agent_task_executors), 'agent_task_executors must be an array');
+assert.equal(manifest.schema, 'homeboy/agent-runtime-manifest/v1');
+assert.equal(manifest.id, 'fake-runtime');
 assert.equal(manifest.agent_task_executors.length, 1, 'fake runtime should expose one executor');
 
 const provider = manifest.agent_task_executors[0];
@@ -34,6 +36,8 @@ const requiredProviderFields = [
 	'capabilities',
 	'workspace_materialization',
 	'secret_requirements',
+	'secret_env_requirements',
+	'provider_defaults',
 	'diagnostics',
 	'status',
 	'integration_contract',
@@ -54,7 +58,11 @@ assert.ok(provider.redacted_metadata_keys.includes('secrets'));
 assert.ok(provider.capabilities.includes('structured_outcome'));
 assert.equal(provider.workspace_materialization.cwd, 'git_checkout');
 assert.equal(provider.workspace_materialization.requires_git, true);
+assert.equal(provider.workspace_materialization.write_scope, 'artifacts');
+assert.deepEqual(provider.workspace_materialization.artifact_paths, ['.homeboy/fake-runtime']);
 assert.ok(provider.secret_requirements.some((secret) => secret.name === 'FAKE_RUNTIME_TOKEN'));
+assert.deepEqual(provider.secret_env_requirements[0].env, ['FAKE_RUNTIME_TOKEN']);
+assert.deepEqual(provider.provider_defaults['fake-runtime'].secret_env, ['FAKE_RUNTIME_TOKEN']);
 assert.ok(provider.diagnostics.outcome_fields.includes('diagnostics'));
 
 const command = provider.command.replace('{{runtime_path}}', runtimeDir);

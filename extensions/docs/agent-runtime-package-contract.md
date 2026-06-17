@@ -24,6 +24,9 @@ runtime modules.
 
 The manifest root must declare:
 
+- `schema`: runtime manifest schema, currently `homeboy/agent-runtime-manifest/v1`.
+- `id`: stable runtime package id. For standalone installs, Homeboy treats the
+  containing directory name as authoritative and may override this value.
 - `name`: human-readable runtime name.
 - `version`: runtime package contract version.
 - `description`: one-sentence runtime summary.

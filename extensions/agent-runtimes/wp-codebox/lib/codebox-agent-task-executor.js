@@ -14,52 +14,9 @@ const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
 
-const PROVIDER_CAPABILITIES = [
-  'browser_runtime',
-  'wordpress_sandbox',
-  'workspace_mounts',
-  'workspace_tools',
-  'artifact_materialization',
-  'patch_artifacts',
-  'verification_artifacts',
-  'run_registry',
-  'cleanup_observability',
-  'screenshots',
-  'structured_outcome',
-  'agent_bundle_execution',
-  'typed_bundle_outputs',
-  'external_recipe_packs',
-  'recipe_probe_artifacts',
-  'tool:datamachine/run-agent-bundle',
-  'tool:github_issue_publish',
-  'tool:github_pull_request_publish',
-  'tool:comment_github_pull_request',
-  'ability:datamachine/run-agent-bundle',
-  'ability:github_issue_publish',
-  'ability:github_pull_request_publish',
-  'ability:comment_github_pull_request',
-];
-
-const DEFAULT_WORKSPACE_READONLY_TOOLS = [
-  'workspace_ls',
-  'workspace_read',
-  'workspace_git_status',
-];
-
-// Additional workspace tools exposed when the repo workspace is mounted
-// read-write, so a coding task can actually edit files instead of only
-// inspecting them. These ids are registered by the data-machine-code runtime.
-const DEFAULT_WORKSPACE_WRITE_TOOLS = [
-  'workspace_run_runner_command',
-  'workspace_write',
-  'workspace_edit',
-  'workspace_apply_patch',
-  'workspace_delete',
-  'workspace_git_add',
-];
-
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects with a non-empty string kind, for example { "kind": "bundled-library", "library": "php-ai-client", "source": "/path/to/php-ai-client" }. The legacy type field is not accepted.';
+const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -182,10 +139,12 @@ function providerContract(options = {}) {
     failure_classifications: AGENT_TASK_FAILURE_CLASSIFICATIONS,
     redacted_metadata_keys: AGENT_TASK_REDACTED_METADATA_KEYS,
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
-    capabilities: PROVIDER_CAPABILITIES,
+    capabilities: normalizeArray(options.capabilities || PROVIDER_CAPABILITIES),
     workspace_materialization: {
       cwd: 'git_checkout',
     },
+    workspace_tools: runtimeWorkspaceTools(options),
+    component_path_defaults: runtimeComponentPathDefaults(options),
     provider_defaults: providerDefaultsContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
@@ -222,6 +181,34 @@ function runtimeManifest() {
 
 function runtimeExecutorManifest() {
   return runtimeManifest().agent_task_executors?.[0] || {};
+}
+
+function runtimeProviderCapabilities() {
+  return normalizeArray(runtimeExecutorManifest().capabilities);
+}
+
+function runtimeWorkspaceTools(options = {}) {
+  const configured = firstObject(options.workspaceTools, runtimeExecutorManifest().workspace_tools) || {};
+  return {
+    readonly: normalizeArray(configured.readonly),
+    readwrite: normalizeArray(configured.readwrite),
+  };
+}
+
+function runtimeComponentPathDefaults(options = {}) {
+  return firstObject(options.componentPathDefaults, runtimeExecutorManifest().component_path_defaults) || {};
+}
+
+function runtimeComponentPathAliases(options = {}) {
+  return firstObject(options.componentPathAliases, runtimeComponentPathDefaults(options).path_aliases) || {};
+}
+
+function runtimeComponentContractSlugMap(options = {}) {
+  return firstObject(options.componentContractSlugMap, runtimeComponentPathDefaults(options).contract_slug_map) || {};
+}
+
+function runtimeComponentDiscovery(options = {}) {
+  return firstObject(options.componentDiscovery, runtimeComponentPathDefaults(options).discovery) || {};
 }
 
 function runtimeProviderDefaults() {
@@ -690,29 +677,70 @@ function runtimeComponentPaths(config, options = {}) {
   const explicit = config.runtime_component_paths && typeof config.runtime_component_paths === 'object'
     ? config.runtime_component_paths
     : {};
-  const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || []);
-  const legacyRuntimePath = config[LEGACY_RUNTIME_PREFIX] || config[`${LEGACY_RUNTIME_PREFIX}_path`] || options.legacyRuntime;
-  const legacyToolsKey = `${LEGACY_RUNTIME_PREFIX}_code`;
-  const legacyRuntimeToolsPath = config[legacyToolsKey] || config[`${legacyToolsKey}_path`] || options.legacyRuntimeTools;
-  return Object.fromEntries(Object.entries({
+  const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || [], options);
+  const aliases = runtimeComponentPathAliases(options);
+  const resolved = {
     ...contractPaths,
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
-    agents_api: explicit.agents_api || runtimeComponents.agents_api || contractPaths.agents_api || config.agents_api || config.agents_api_path || options.agentsApi,
-    agent_runtime: explicit.agent_runtime || runtimeComponents.agent_runtime || runtimeComponents.data_machine || contractPaths.agent_runtime || config.agent_runtime || config.agent_runtime_path || legacyRuntimePath,
-    agent_runtime_tools: explicit.agent_runtime_tools || runtimeComponents.agent_runtime_tools || runtimeComponents.data_machine_code || contractPaths.agent_runtime_tools || config.agent_runtime_tools_path || config.agent_runtime_tools || legacyRuntimeToolsPath,
-  }).filter(([, value]) => value !== undefined && value !== ''));
+  };
+
+  for (const [key, candidates] of Object.entries(aliases)) {
+    if (resolved[key]) {
+      continue;
+    }
+    resolved[key] = firstValue(...normalizeArray(candidates).map((candidate) => componentPathCandidateValue(candidate, {
+      config,
+      runtimeComponents,
+      explicit,
+      contractPaths,
+      options,
+    })));
+  }
+
+  return Object.fromEntries(Object.entries(resolved).filter(([, value]) => value !== undefined && value !== ''));
 }
 
-function runtimeComponentPathsFromContracts(contracts) {
+function componentPathCandidateValue(candidate, sources) {
+  if (typeof candidate !== 'string') {
+    return '';
+  }
+  const [scope, key] = candidate.split(':');
+  if (!key) {
+    return sources.explicit[candidate]
+      || sources.runtimeComponents[candidate]
+      || sources.contractPaths[candidate]
+      || sources.config[candidate]
+      || sources.config[`${candidate}_path`]
+      || sources.options[candidate]
+      || '';
+  }
+  if (scope === 'explicit') {
+    return sources.explicit[key] || '';
+  }
+  if (scope === 'runtime_component') {
+    return sources.runtimeComponents[key] || '';
+  }
+  if (scope === 'contract') {
+    return sources.contractPaths[key] || '';
+  }
+  if (scope === 'config') {
+    return sources.config[key] || '';
+  }
+  if (scope === 'config_path') {
+    return sources.config[`${key}_path`] || '';
+  }
+  if (scope === 'option') {
+    return sources.options[key] || '';
+  }
+  return '';
+}
+
+function runtimeComponentPathsFromContracts(contracts, options = {}) {
   if (!Array.isArray(contracts)) {
     return {};
   }
-  const slugToKey = new Map([
-    ['agents-api', 'agents_api'],
-    ['data-machine', 'agent_runtime'],
-    ['data-machine-code', 'agent_runtime_tools'],
-  ]);
+  const slugToKey = new Map(Object.entries(runtimeComponentContractSlugMap(options)));
   return Object.fromEntries(contracts
     .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
     .filter(([key, value]) => key && value));
@@ -720,25 +748,16 @@ function runtimeComponentPathsFromContracts(contracts) {
 
 function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const settings = firstObject(options.settings, parseJsonObject(process.env.HOMEBOY_SETTINGS_JSON)) || {};
-  const settingsRuntimePathKey = `wp_codebox_${LEGACY_RUNTIME_PREFIX}_path`;
-  const settingsRuntimeToolsPathKey = `wp_codebox_${LEGACY_RUNTIME_PREFIX}_code_path`;
+  const discovery = runtimeComponentDiscovery(options);
   const workspaceRoot = resolveWorkspaceRoot(request, config, inputs, settings, options);
   const workspaceBase = workspaceRoot ? path.dirname(workspaceRoot) : process.cwd();
   const dataMachinePath = firstExistingPath(
     options.agentRuntime,
-    settings[settingsRuntimePathKey],
-    settings[`${LEGACY_RUNTIME_PREFIX}_path`],
-    process.env.HOMEBOY_DATA_MACHINE_PATH,
-    activeSitePluginPath('data-machine'),
-    siblingPath(workspaceBase, 'data-machine'),
+    ...componentDiscoveryCandidates('agent_runtime', discovery, settings, workspaceBase),
   );
   const dataMachineCodePath = firstExistingPath(
     options.agentRuntimeTools,
-    settings[settingsRuntimeToolsPathKey],
-    settings[`${LEGACY_RUNTIME_PREFIX}_code_path`],
-    process.env.HOMEBOY_DATA_MACHINE_CODE_PATH,
-    activeSitePluginPath('data-machine-code'),
-    siblingPath(workspaceBase, 'data-machine-code'),
+    ...componentDiscoveryCandidates('agent_runtime_tools', discovery, settings, workspaceBase),
   );
   const providerPluginPath = firstExistingPath(
     settings.wp_codebox_provider_plugin_path,
@@ -750,10 +769,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
-    settings.wp_codebox_agents_api_path,
-    settings.agents_api_path,
-    process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
-    bundledAgentsApiPath(dataMachinePath),
+    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase, { agent_runtime: dataMachinePath }),
   );
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
 
@@ -774,8 +790,8 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     workspaceRoot,
     mounts: defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options),
     workspaces: defaultWorkspaces(config, inputs, options),
-    allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs)),
-    sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceMode(request, config, inputs)),
+    allowedTools: defaultWorkspaceAllowedTools(workspaceRoot, workspaceMode(request, config, inputs), options),
+    sandboxToolPolicy: defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceMode(request, config, inputs), options),
   };
 }
 
@@ -856,6 +872,33 @@ function normalizeArray(value) {
   return value ? [value] : [];
 }
 
+function componentDiscoveryCandidates(componentKey, discovery, settings, workspaceBase, resolved = {}) {
+  return normalizeArray(discovery[componentKey]).flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [entry];
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return [];
+    }
+    if (entry.settings) {
+      return normalizeArray(entry.settings).map((key) => settings[key]);
+    }
+    if (entry.env) {
+      return normalizeArray(entry.env).map((key) => process.env[key]);
+    }
+    if (entry.active_plugin) {
+      return [activeSitePluginPath(entry.active_plugin)];
+    }
+    if (entry.sibling) {
+      return [siblingPath(workspaceBase, entry.sibling)];
+    }
+    if (entry.bundled_provider) {
+      return bundledProviderPaths(resolved[entry.bundled_provider], entry.paths);
+    }
+    return [];
+  });
+}
+
 function firstExistingPath(...candidates) {
   for (const candidate of candidates.flatMap((value) => normalizeArray(value))) {
     if (candidate && fs.existsSync(candidate)) {
@@ -878,11 +921,8 @@ function activeSitePluginPath(slug) {
   return fs.existsSync(candidate) ? candidate : '';
 }
 
-function bundledAgentsApiPath(dataMachinePath) {
-  return dataMachinePath ? [
-    path.join(dataMachinePath, 'vendor', 'wordpress', 'agents-api'),
-    path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api'),
-  ] : [];
+function bundledProviderPaths(providerPath, childPaths) {
+  return providerPath ? normalizeArray(childPaths).map((childPath) => path.join(providerPath, childPath)) : [];
 }
 
 function defaultSecretEnv(config, options, settings, providerConfig) {
@@ -957,28 +997,29 @@ function readJsonFile(filePath) {
   }
 }
 
-function defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue) {
+function defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue, options = {}) {
   if (!workspaceRoot) {
     return [];
   }
+  const configuredTools = runtimeWorkspaceTools(options);
   if (workspaceModeValue === 'readwrite') {
-    return [...DEFAULT_WORKSPACE_READONLY_TOOLS, ...DEFAULT_WORKSPACE_WRITE_TOOLS];
+    return uniqueStrings([...configuredTools.readonly, ...configuredTools.readwrite]);
   }
-  return [...DEFAULT_WORKSPACE_READONLY_TOOLS];
+  return configuredTools.readonly;
 }
 
-function defaultWorkspaceAllowedTools(workspaceRoot, workspaceModeValue) {
-  return defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue);
+function defaultWorkspaceAllowedTools(workspaceRoot, workspaceModeValue, options = {}) {
+  return defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue, options);
 }
 
-function defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceModeValue) {
+function defaultWorkspaceSandboxToolPolicy(workspaceRoot, workspaceModeValue, options = {}) {
   if (!workspaceRoot) {
     return undefined;
   }
   return {
     schema: 'wp-codebox/sandbox-tool-policy/v1',
     version: 1,
-    tools: defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue).map((tool) => ({
+    tools: defaultWorkspaceToolIds(workspaceRoot, workspaceModeValue, options).map((tool) => ({
       id: tool,
       runtime_tool_id: tool,
       execution_location: 'sandbox',

@@ -47,6 +47,8 @@ export default async function () {
     assert.equal(process.env.HOMEBOY_WORDPRESS_REQUEST_PROFILER_HELPER, manifest.helpers.requestProfiler);
     assert.equal(process.env.HOMEBOY_WORDPRESS_TIMING_CORRELATOR_HELPER, manifest.helpers.timingCorrelator);
     assert.equal(process.env.HOMEBOY_WORDPRESS_BOOTSTRAP_TIMELINE_HELPER, manifest.helpers.bootstrapTimeline);
+    assert.ok(manifest.helpers.pageProfiler, 'page profiler helper is published');
+    assert.ok(manifest.helpers.adminPageScenarios, 'admin page scenarios helper is published');
 
     for (const helperPath of Object.values(manifest.helpers)) {
         assert.ok(existsSync(helperPath), `helper exists at ${helperPath}`);
@@ -74,7 +76,7 @@ import { readFileSync } from 'node:fs';
 const results = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const scenario = results.scenarios?.[0];
 if (!scenario) throw new Error('missing scenario');
-if (scenario.metrics?.helper_count !== 7) {
+if (scenario.metrics?.helper_count !== 12) {
     throw new Error(`helper count metric regressed: ${JSON.stringify(scenario.metrics)}`);
 }
 if (!scenario.metadata?.wordpress_helper_manifest?.endsWith('/wordpress/lib/helper-manifest.js')) {

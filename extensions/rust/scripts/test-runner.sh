@@ -60,174 +60,20 @@ rust_cargo_test_threads() {
     esac
 }
 
-rust_resolve_changed_scope_json() {
-    python3 - "$PROJECT_PATH" "${HOMEBOY_CHANGED_TEST_FILES:-}" "${HOMEBOY_TEST_RUNNER_ARGS:-}" <<'PY'
+rust_test_scope_json() {
+    python3 - "${HOMEBOY_TEST_SCOPE_KIND:-workspace}" "${HOMEBOY_TEST_SCOPE_MESSAGE:-}" "${HOMEBOY_TEST_RUNNER_ARGS:-}" <<'PY'
 import json
-import os
-import re
 import sys
-from pathlib import Path
 
-project = Path(sys.argv[1]).resolve()
-changed_raw = sys.argv[2]
-runner_args_raw = sys.argv[3]
-
-
-def cargo_package_name(manifest: Path):
-    try:
-        try:
-            import tomllib
-            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-            package = data.get("package") if isinstance(data, dict) else None
-            name = package.get("name") if isinstance(package, dict) else None
-            return str(name) if name else None
-        except Exception:
-            text = manifest.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    in_package = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == "[package]":
-            in_package = True
-            continue
-        if stripped.startswith("[") and stripped != "[package]":
-            in_package = False
-        if in_package:
-            match = re.match(r'name\s*=\s*["\']([^"\']+)["\']', stripped)
-            if match:
-                return match.group(1)
-    return None
-
-
-def nearest_manifest(path: Path):
-    current = path if path.is_dir() else path.parent
-    while True:
-        if project not in [current, *current.parents]:
-            return None
-        manifest = current / "Cargo.toml"
-        if manifest.exists():
-            return manifest
-        if current == project:
-            return None
-        current = current.parent
-
-
-changed = []
-for raw in changed_raw.splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    candidate = Path(raw)
-    if candidate.is_absolute():
-        try:
-            rel = candidate.resolve().relative_to(project)
-        except ValueError:
-            print(json.dumps({
-                "kind": "fallback",
-                "reason": f"Changed path is outside the Cargo project: {raw}",
-                "args": [],
-                "package": None,
-                "test_target": None,
-            }))
-            sys.exit(0)
-    else:
-        rel = candidate
-    changed.append(rel)
-
-existing_args = [line for line in runner_args_raw.splitlines() if line]
-if not changed:
-    print(json.dumps({
-        "kind": "workspace",
-        "reason": "No changed-file scope was provided; running the default Cargo test command.",
-        "args": existing_args,
-        "package": None,
-        "test_target": None,
-    }))
-    sys.exit(0)
-
-cross_cutting_names = {"Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", "build.rs"}
-cross_cutting_dirs = {".cargo"}
-packages = {}
-test_target = None
-
-for rel in changed:
-    parts = rel.parts
-    if not parts:
-        continue
-    if parts[0] in cross_cutting_dirs or rel.name in cross_cutting_names:
-        print(json.dumps({
-            "kind": "fallback",
-            "reason": f"Changed path is cross-cutting for Cargo: {rel.as_posix()}",
-            "args": existing_args,
-            "package": None,
-            "test_target": None,
-        }))
-        sys.exit(0)
-
-    absolute = (project / rel).resolve()
-    manifest = nearest_manifest(absolute)
-    if manifest is None:
-        print(json.dumps({
-            "kind": "fallback",
-            "reason": f"Changed path is not inside a Cargo package: {rel.as_posix()}",
-            "args": existing_args,
-            "package": None,
-            "test_target": None,
-        }))
-        sys.exit(0)
-
-    package = cargo_package_name(manifest)
-    if not package:
-        print(json.dumps({
-            "kind": "fallback",
-            "reason": f"Could not resolve Cargo package name for {rel.as_posix()}",
-            "args": existing_args,
-            "package": None,
-            "test_target": None,
-        }))
-        sys.exit(0)
-
-    packages[package] = manifest
-
-    try:
-        package_rel = absolute.relative_to(manifest.parent)
-    except ValueError:
-        package_rel = rel
-    package_parts = package_rel.parts
-    if len(changed) == 1 and len(package_parts) == 2 and package_parts[0] == "tests" and package_rel.suffix == ".rs":
-        test_target = package_rel.stem
-
-if len(packages) != 1:
-    print(json.dumps({
-        "kind": "fallback",
-        "reason": "Changed files span multiple Cargo packages; running the default Cargo test command.",
-        "args": existing_args,
-        "package": None,
-        "test_target": None,
-    }))
-    sys.exit(0)
-
-package = next(iter(packages))
-args = ["-p", package]
-if test_target and not existing_args:
-    args.extend(["--test", test_target])
-args.extend(existing_args)
-
-if test_target and not existing_args:
-    kind = "file"
-    reason = f"Scoped to changed integration test target: {test_target} in package {package}."
-else:
-    kind = "package"
-    reason = f"Scoped to changed Cargo package: {package}."
+kind, message, runner_args_raw = sys.argv[1:]
+args = [line for line in runner_args_raw.splitlines() if line]
+if not kind or kind == "full":
+    kind = "workspace"
 
 print(json.dumps({
     "kind": kind,
-    "reason": reason,
+    "reason": message,
     "args": args,
-    "package": package,
-    "test_target": test_target,
 }))
 PY
 }
@@ -260,7 +106,7 @@ rust_emit_test_plan() {
     local exit_code="${5:-0}"
     local plan_tmp
 
-    if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
+    if ! type homeboy_merge_annotations >/dev/null 2>&1; then
         return 0
     fi
 
@@ -281,8 +127,6 @@ record = {
     "command": command,
     "scope": scope.get("kind") or "workspace",
     "scope_reason": scope.get("reason") or "",
-    "package": scope.get("package"),
-    "test_target": scope.get("test_target"),
     "args": scope.get("args") or [],
     "status": status,
     "exit_code": int(exit_code or 0),
@@ -291,7 +135,7 @@ with open(target, "w", encoding="utf-8") as handle:
     json.dump([record], handle, indent=2)
     handle.write("\n")
 PY
-    homeboy_sidecar_merge test.results "$plan_tmp" || true
+    homeboy_merge_annotations rust-test-plan "$plan_tmp" || true
     rm -f "$plan_tmp"
 }
 
@@ -449,7 +293,7 @@ print(json.dumps(result, indent=2))
 fi
 
 SELECTED_RUNNER="$(rust_test_runner)"
-SCOPE_JSON="$(rust_resolve_changed_scope_json)"
+SCOPE_JSON="$(rust_test_scope_json)"
 SCOPE_KIND="$(printf '%s' "$SCOPE_JSON" | jq -r '.kind // "workspace"')"
 SCOPE_REASON="$(printf '%s' "$SCOPE_JSON" | jq -r '.reason // empty')"
 

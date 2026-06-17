@@ -7,26 +7,26 @@ Node.js trace workloads can import reusable helpers from the directory exposed a
 import { pathToFileURL } from 'node:url';
 
 const helperDir = process.env.HOMEBOY_TRACE_HELPER_DIR;
-const { createTraceRecorder } = await import(pathToFileURL(`${helperDir}/timeline.mjs`).href);
+const { createTraceWorkload } = await import(pathToFileURL(`${helperDir}/timeline.mjs`).href);
 const { createHttpStatusHistory, pollHttp, pollJsonFile, pollProcess, parseLogLines } = await import(pathToFileURL(`${helperDir}/probes.mjs`).href);
 
-const recorder = createTraceRecorder();
-const onEvent = recorder.recordEvent.bind(recorder);
+const trace = createTraceWorkload();
 
 await pollHttp('http://127.0.0.1:3000/', {
-    readyStatus: [200, 399],
-    timeoutMs: 30000,
-    intervalMs: 250,
-    requestTimeoutMs: 1000,
-    onEvent,
+	readyStatus: [200, 399],
+	timeoutMs: 30000,
+	intervalMs: 250,
+	requestTimeoutMs: 1000,
+	onEvent: trace.event,
 });
 
-await recorder.writeTraceResults({ summary: 'Trace completed' });
+trace.assertion('app-ready', 'pass', 'App became ready.');
+await trace.pass({}, { summary: 'Trace completed' });
 ```
 
 ## Helper Modules
 
-- `timeline.mjs` — `createTraceRecorder()` writes timeline JSONL, assertions, artifacts, and the final trace envelope.
+- `timeline.mjs` — `createTraceWorkload()` exposes generic `event`, `artifact`, `assertion`, `check`, `pass`, and `fail` helpers for workloads. `createTraceRecorder()` remains available when a workload needs direct recorder access. Both paths write timeline JSONL, assertions, artifacts, and the final trace envelope through the same normalized shapes.
 - `process.mjs` — process launch, cleanup, exit waiting, and process-tree capture helpers.
 - `desktop.mjs` — best-effort desktop observation helpers for local trace evidence.
 - `probes.mjs` — app-agnostic polling and bridge helpers for common trace observations.
