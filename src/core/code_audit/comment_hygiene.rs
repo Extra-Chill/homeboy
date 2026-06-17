@@ -8,6 +8,7 @@ use super::conventions::{AuditFinding, Language};
 use super::detectors::upstream_workaround;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use crate::core::component::DetectorProfileConfig;
 
 const TODO_MARKERS: &[&str] = &["TODO", "FIXME", "HACK", "XXX"];
 const LEGACY_MARKERS: &[&str] = &[
@@ -18,9 +19,12 @@ const LEGACY_MARKERS: &[&str] = &[
     "outdated",
 ];
 
-pub(super) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+pub(super) fn run(
+    fingerprints: &[&FileFingerprint],
+    detector_profile: &DetectorProfileConfig,
+) -> Vec<Finding> {
     let mut findings = analyze_comment_hygiene(fingerprints);
-    findings.extend(upstream_workaround::run(fingerprints));
+    findings.extend(upstream_workaround::run(fingerprints, detector_profile));
     findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.description.cmp(&b.description)));
     findings
 }
@@ -179,6 +183,7 @@ mod tests {
     use super::*;
     use crate::core::code_audit::conventions::Language;
     use crate::core::code_audit::fingerprint::FileFingerprint;
+    use crate::core::component::DetectorProfileConfig;
 
     fn make_fp(path: &str, lang: Language, content: &str) -> FileFingerprint {
         FileFingerprint {
@@ -199,7 +204,7 @@ mod tests {
             Language::Rust,
             "// TODO: fix later\nfn x() {}\n",
         );
-        let findings = run(&[&fp]);
+        let findings = run(&[&fp], &DetectorProfileConfig::default());
         assert!(findings.iter().any(|f| f.kind == AuditFinding::TodoMarker));
     }
 

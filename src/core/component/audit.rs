@@ -84,6 +84,111 @@ pub struct AuditConfig {
     /// rules without knowing the language or test harness semantics.
     #[serde(default, skip_serializing_if = "TestWiringConfig::is_empty")]
     pub test_wiring: TestWiringConfig,
+    /// Ecosystem profile data for detectors that need project-specific marker,
+    /// tracker, path, or version-guard catalogues.
+    #[serde(default, skip_serializing_if = "DetectorProfileConfig::is_empty")]
+    pub detector_profile: DetectorProfileConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DetectorProfileConfig {
+    /// Include Homeboy's built-in detector profile defaults. Components can set
+    /// this to false when they provide a fully custom, non-PHP/non-WordPress profile.
+    #[serde(
+        default = "default_use_builtin_detector_profile",
+        skip_serializing_if = "is_true"
+    )]
+    pub use_builtin_defaults: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workaround_marker_literals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workaround_leading_markers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workaround_marker_regexes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracker_reference_regexes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_guard_regexes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_guard_constants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_guard_languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vendored_path_markers: Vec<String>,
+}
+
+impl Default for DetectorProfileConfig {
+    fn default() -> Self {
+        Self {
+            use_builtin_defaults: true,
+            workaround_marker_literals: Vec::new(),
+            workaround_leading_markers: Vec::new(),
+            workaround_marker_regexes: Vec::new(),
+            tracker_reference_regexes: Vec::new(),
+            version_guard_regexes: Vec::new(),
+            version_guard_constants: Vec::new(),
+            version_guard_languages: Vec::new(),
+            vendored_path_markers: Vec::new(),
+        }
+    }
+}
+
+impl DetectorProfileConfig {
+    pub fn is_empty(&self) -> bool {
+        self.use_builtin_defaults
+            && self.workaround_marker_literals.is_empty()
+            && self.workaround_leading_markers.is_empty()
+            && self.workaround_marker_regexes.is_empty()
+            && self.tracker_reference_regexes.is_empty()
+            && self.version_guard_regexes.is_empty()
+            && self.version_guard_constants.is_empty()
+            && self.version_guard_languages.is_empty()
+            && self.vendored_path_markers.is_empty()
+    }
+
+    fn merge(&mut self, other: &DetectorProfileConfig) {
+        self.use_builtin_defaults = self.use_builtin_defaults && other.use_builtin_defaults;
+        extend_unique(
+            &mut self.workaround_marker_literals,
+            &other.workaround_marker_literals,
+        );
+        extend_unique(
+            &mut self.workaround_leading_markers,
+            &other.workaround_leading_markers,
+        );
+        extend_unique(
+            &mut self.workaround_marker_regexes,
+            &other.workaround_marker_regexes,
+        );
+        extend_unique(
+            &mut self.tracker_reference_regexes,
+            &other.tracker_reference_regexes,
+        );
+        extend_unique(
+            &mut self.version_guard_regexes,
+            &other.version_guard_regexes,
+        );
+        extend_unique(
+            &mut self.version_guard_constants,
+            &other.version_guard_constants,
+        );
+        extend_unique(
+            &mut self.version_guard_languages,
+            &other.version_guard_languages,
+        );
+        extend_unique(
+            &mut self.vendored_path_markers,
+            &other.vendored_path_markers,
+        );
+    }
+}
+
+fn default_use_builtin_detector_profile() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1085,6 +1190,7 @@ impl AuditConfig {
             && self.remote_execution_safety.is_empty()
             && self.artifact_portability.is_empty()
             && self.test_wiring.is_empty()
+            && self.detector_profile.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -1121,6 +1227,7 @@ impl AuditConfig {
         self.remote_execution_safety
             .merge(&other.remote_execution_safety);
         self.artifact_portability.merge(&other.artifact_portability);
+        self.detector_profile.merge(&other.detector_profile);
         for rule in &other.source_policies {
             if !self
                 .source_policies
@@ -1270,6 +1377,20 @@ mod tests {
     }
 
     #[test]
+    fn detector_profile_marks_audit_config_non_empty_when_customized() {
+        let config = AuditConfig {
+            detector_profile: DetectorProfileConfig {
+                use_builtin_defaults: false,
+                version_guard_languages: vec!["rust".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
     fn merge_dedupes_core_boundary_leak_config() {
         let mut config = AuditConfig {
             core_boundary_leaks: CoreBoundaryLeakConfig {
@@ -1404,6 +1525,37 @@ mod tests {
         assert_eq!(config.test_wiring.policies.len(), 2);
         assert_eq!(config.test_wiring.policies[0].id, "nested");
         assert_eq!(config.test_wiring.policies[1].id, "external");
+    }
+
+    #[test]
+    fn merge_extends_detector_profile_and_preserves_disable_defaults() {
+        let mut config = AuditConfig {
+            detector_profile: DetectorProfileConfig {
+                use_builtin_defaults: false,
+                version_guard_languages: vec!["rust".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.merge(&AuditConfig {
+            detector_profile: DetectorProfileConfig {
+                version_guard_languages: vec!["rust".to_string(), "typescript".to_string()],
+                version_guard_constants: vec!["RUNTIME_VERSION".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert!(!config.detector_profile.use_builtin_defaults);
+        assert_eq!(
+            config.detector_profile.version_guard_languages,
+            vec!["rust", "typescript"]
+        );
+        assert_eq!(
+            config.detector_profile.version_guard_constants,
+            vec!["RUNTIME_VERSION"]
+        );
     }
 
     fn test_wiring_policy(id: &str) -> TestWiringPolicy {

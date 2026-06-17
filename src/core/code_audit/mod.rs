@@ -720,7 +720,7 @@ fn audit_internal(
         &mut timing,
         "detector.comment_hygiene",
         plan.run_comment_hygiene(),
-        || comment_hygiene::run(&all_fingerprints),
+        || comment_hygiene::run(&all_fingerprints, &audit_config.detector_profile),
         Vec::new,
     );
     if !comment_findings.is_empty() {
