@@ -477,10 +477,15 @@ fn preserve_artifacts_normalizes_existing_manifest() {
         std::fs::write(artifact.join("declared.log"), "hello").expect("write artifact");
         let manifest = homeboy::core::artifact_manifest::ArtifactManifest::new(vec![
             homeboy::core::artifact_manifest::ArtifactManifestEntry {
+                id: None,
                 path: "declared.log".to_string(),
                 kind: "runner-log".to_string(),
                 label: Some("Runner log".to_string()),
                 content_type: None,
+                provenance: None,
+                viewer: None,
+                public_url: None,
+                public_url_state: None,
                 size_bytes: None,
                 sha256: None,
                 redaction: Some(homeboy::core::artifact_manifest::ArtifactRedactionState::Raw),
