@@ -7,6 +7,9 @@ pub use super::artifact_address::{
     validated_public_url, ArtifactAddress, ArtifactAddressKind, ArtifactAddressValidation,
     ARTIFACT_ADDRESS_SCHEMA,
 };
+pub use super::artifact_contract::{
+    ArtifactContract, EvidenceContract, ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA,
+};
 pub use super::artifact_inputs::ResolvedArtifactInput;
 pub use super::artifact_links::{
     annotate_public_artifact_url_validation, cached_validated_viewer_links,

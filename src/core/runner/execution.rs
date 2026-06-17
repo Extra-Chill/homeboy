@@ -6,6 +6,9 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::core::agent_tasks::{
+    provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
+};
 use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
@@ -1229,6 +1232,7 @@ fn resolve_controller_secret_env_for_command(
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
     let mut resolved = HashMap::new();
+    let fallback_sources = provider_secret_sources_for_discovered_providers();
     for name in required_names {
         if env.contains_key(name.as_str()) {
             continue;
@@ -1245,6 +1249,16 @@ fn resolve_controller_secret_env_for_command(
                 name.clone(),
                 source.clone(),
             )]))?);
+            continue;
+        }
+
+        if fallback_sources.contains_key(name) {
+            if let Ok(values) = agent_task_secrets::resolve_secret_env_with_fallbacks(
+                std::slice::from_ref(name),
+                &fallback_sources,
+            ) {
+                resolved.extend(values);
+            }
         }
     }
     Ok(resolved)

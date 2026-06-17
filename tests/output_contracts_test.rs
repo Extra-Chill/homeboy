@@ -538,8 +538,8 @@ fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) ->
 fn extension_show_output_contracts_use_top_level_structured_sidecars() {
     let output = typed_output_value(ExtensionOutput::Show {
         extension: ExtensionDetail {
-            id: "wordpress".to_string(),
-            name: "WordPress".to_string(),
+            id: "sample-extension".to_string(),
+            name: "Sample Extension".to_string(),
             version: "1.0.0".to_string(),
             description: None,
             author: None,
@@ -553,7 +553,7 @@ fn extension_show_output_contracts_use_top_level_structured_sidecars() {
             ready_reason: None,
             ready_detail: None,
             linked: false,
-            path: "/extensions/wordpress".to_string(),
+            path: "/extensions/sample-extension".to_string(),
             source_revision: None,
             cli: None,
             actions: Vec::new(),

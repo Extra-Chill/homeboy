@@ -56,7 +56,7 @@ fn resources() -> RigResourcesSpec {
         exclusive: vec!["studio-runtime".to_string()],
         paths: vec!["~/Developer/studio".to_string()],
         ports: vec![9724],
-        process_patterns: vec!["wordpress-server-child.mjs".to_string()],
+        process_patterns: vec!["app-server-child.mjs".to_string()],
     }
 }
 

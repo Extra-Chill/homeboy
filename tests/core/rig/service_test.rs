@@ -168,17 +168,17 @@ mod lifecycle {
     fn test_discover_newest_from_ps_requires_all_argv_selectors() {
         let now = 1_000;
         let ps_output = r#"
-101  00:00:50  node /Applications/Studio.app/wordpress-server-child.mjs
-202  00:00:40  node /Users/chubes/Developer/studio@bfb-mu-plugin/playground-server-child.mjs wordpress-server-child.mjs
-303  00:00:30  node /Users/chubes/Developer/studio@other/playground-server-child.mjs wordpress-server-child.mjs
+101  00:00:50  node /Applications/Sample.app/app-server-child.mjs
+202  00:00:40  node /Users/chubes/Developer/sample-app@feature-a/preview-server-child.mjs app-server-child.mjs
+303  00:00:30  node /Users/chubes/Developer/sample-app@other/preview-server-child.mjs app-server-child.mjs
 "#;
         let selectors = vec![
-            "studio@bfb-mu-plugin".to_string(),
-            "playground-server-child.mjs".to_string(),
+            "sample-app@feature-a".to_string(),
+            "preview-server-child.mjs".to_string(),
         ];
 
         let found = super::super::platform::discover_newest_from_ps(
-            "wordpress-server-child.mjs",
+            "app-server-child.mjs",
             &selectors,
             now,
             999,
@@ -192,13 +192,13 @@ mod lifecycle {
 
     #[test]
     fn test_discover_newest_from_ps_returns_none_when_argv_selector_misses() {
-        let selectors = vec!["studio@bfb-mu-plugin".to_string()];
+        let selectors = vec!["sample-app@feature-a".to_string()];
         let found = super::super::platform::discover_newest_from_ps(
-            "wordpress-server-child.mjs",
+            "app-server-child.mjs",
             &selectors,
             1_000,
             999,
-            "101  00:00:50  node /Applications/Studio.app/wordpress-server-child.mjs",
+            "101  00:00:50  node /Applications/Sample.app/app-server-child.mjs",
         );
 
         assert_eq!(found, None);

@@ -81,7 +81,7 @@ fn test_state_round_trips_with_materialized_ownership() {
                 exclusive: vec!["studio-dev".to_string()],
                 paths: vec!["/tmp/studio".to_string()],
                 ports: vec![9724],
-                process_patterns: vec!["wordpress-server-child".to_string()],
+                process_patterns: vec!["app-server-child".to_string()],
             },
             components: Default::default(),
         }),
@@ -95,7 +95,7 @@ fn test_state_round_trips_with_materialized_ownership() {
     assert_eq!(materialized.resources.ports, vec![9724]);
     assert_eq!(
         materialized.resources.process_patterns,
-        vec!["wordpress-server-child"]
+        vec!["app-server-child"]
     );
 }
 

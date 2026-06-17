@@ -6,8 +6,11 @@ use std::path::PathBuf;
 use crate::core::defaults::{self, AgentTaskSecretSource};
 use crate::core::keychain;
 use crate::core::paths;
-use crate::core::secret_env_plan::SecretEnvPlan;
+use crate::core::secret_env_plan::{
+    resolve_secret_env_names, SecretEnvPlan, SecretEnvValueProvider,
+};
 use crate::core::Error;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -37,7 +40,22 @@ pub fn resolve_secret_env_plan(
 }
 
 pub fn secret_env_status(names: &[String]) -> Vec<AgentTaskSecretEnvStatus> {
-    secret_env_status_with_config(names, &AgentTaskSecretConfig::load())
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        &HashMap::new(),
+    )
+}
+
+pub fn secret_env_status_with_fallbacks(
+    names: &[String],
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(
+        names,
+        &AgentTaskSecretConfig::load(),
+        fallback_sources,
+    )
 }
 
 pub fn secret_env_plan_status(plan: &SecretEnvPlan) -> Vec<AgentTaskSecretEnvStatus> {
@@ -216,6 +234,14 @@ fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,
 ) -> Vec<AgentTaskSecretEnvStatus> {
+    secret_env_status_with_config_and_fallbacks(names, config, &HashMap::new())
+}
+
+fn secret_env_status_with_config_and_fallbacks(
+    names: &[String],
+    config: &AgentTaskSecretConfig,
+    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Vec<AgentTaskSecretEnvStatus> {
     let mut bundle_cache = HashMap::new();
     names
         .iter()
@@ -228,12 +254,15 @@ fn secret_env_status_with_config(
                 };
             }
 
-            let source = config.secrets.get(name);
+            let source = resolve_secret_source(
+                name,
+                config.secrets.get(name),
+                fallback_sources.get(name),
+                &mut bundle_cache,
+            );
             AgentTaskSecretEnvStatus {
                 name: name.clone(),
-                configured: source
-                    .and_then(|source| source.resolve(name, &mut bundle_cache))
-                    .is_some(),
+                configured: source.is_some(),
                 source: source
                     .map(|source| source.source.clone())
                     .unwrap_or_else(|| "missing".to_string()),
@@ -254,42 +283,43 @@ fn resolve_secret_env_with_config_and_fallbacks(
     config: &AgentTaskSecretConfig,
     fallback_sources: &HashMap<String, AgentTaskSecretSource>,
 ) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
-    if names.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut resolved = Vec::new();
-    let mut missing = Vec::new();
     let mut bundle_cache = HashMap::new();
+    resolve_secret_env_names(
+        names.iter().cloned(),
+        vec![
+            SecretEnvValueProvider::new("env", |name| env::var(name).ok()),
+            SecretEnvValueProvider::new("agent-task", move |name| {
+                config
+                    .secrets
+                    .get(name)
+                    .and_then(|source| source.resolve(name, &mut bundle_cache))
+                    .or_else(|| {
+                        fallback_sources
+                            .get(name)
+                            .and_then(|source| source.resolve(name, &mut bundle_cache))
+                    })
+            }),
+        ],
+        "missing required agent-task secret env",
+    )
+    .map(|resolution| resolution.env)
+    .map_err(|error| AgentTaskSecretResolutionError {
+        missing_secret_env: error.missing_secret_env,
+        message: error.message,
+    })
+}
 
-    for name in names {
-        if let Ok(value) = env::var(name) {
-            resolved.push((name.clone(), value));
-            continue;
-        }
-
-        match config
-            .secrets
-            .get(name)
-            .or_else(|| fallback_sources.get(name))
-            .and_then(|source| source.resolve(name, &mut bundle_cache))
-        {
-            Some(value) => resolved.push((name.clone(), value)),
-            None => missing.push(name.clone()),
-        }
-    }
-
-    if missing.is_empty() {
-        Ok(resolved)
-    } else {
-        Err(AgentTaskSecretResolutionError {
-            message: format!(
-                "missing required agent-task secret env: {}",
-                missing.join(", ")
-            ),
-            missing_secret_env: missing,
+fn resolve_secret_source<'a>(
+    name: &str,
+    configured_source: Option<&'a AgentTaskSecretSource>,
+    fallback_source: Option<&'a AgentTaskSecretSource>,
+    bundle_cache: &mut HashMap<String, Option<Value>>,
+) -> Option<&'a AgentTaskSecretSource> {
+    configured_source
+        .and_then(|source| source.resolve(name, bundle_cache).map(|_| source))
+        .or_else(|| {
+            fallback_source.and_then(|source| source.resolve(name, bundle_cache).map(|_| source))
         })
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -338,6 +368,9 @@ impl AgentTaskSecretSource {
             "config" => self.value.clone(),
             "env" => env::var(self.env_var.as_deref().unwrap_or(requested_name)).ok(),
             "json-file" => self.resolve_json_file(requested_name, bundle_cache),
+            "json-file-jwt-expiration" => {
+                self.resolve_json_file_jwt_expiration(requested_name, bundle_cache)
+            }
             "keychain" => keychain::get(
                 self.scope.as_deref().unwrap_or("agent-task"),
                 self.name.as_deref().unwrap_or(requested_name),
@@ -365,7 +398,16 @@ impl AgentTaskSecretSource {
             })
             .as_ref()?;
         let field = self.field.as_deref().unwrap_or(requested_name);
-        bundle_field_value(bundle, field)
+        bundle_field_value(bundle, field).or_else(|| self.value.clone())
+    }
+
+    fn resolve_json_file_jwt_expiration(
+        &self,
+        requested_name: &str,
+        bundle_cache: &mut HashMap<String, Option<Value>>,
+    ) -> Option<String> {
+        let token = self.resolve_json_file(requested_name, bundle_cache)?;
+        jwt_expiration(&token).or_else(|| self.value.clone())
     }
 
     fn resolve_keychain_bundle(
@@ -401,6 +443,15 @@ fn bundle_field_value(bundle: &Value, field: &str) -> Option<String> {
         Value::Number(number) => Some(number.to_string()),
         _ => None,
     }
+}
+
+fn jwt_expiration(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    bundle_field_value(&value, "exp")
 }
 
 #[cfg(test)]
@@ -666,5 +717,167 @@ mod tests {
         assert!(!serde_json::to_string(&status)
             .unwrap()
             .contains("json-file-access-token"));
+    }
+
+    #[test]
+    fn reports_json_file_fallback_status_without_exposing_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "tokens": {
+                    "refresh_token": "json-file-refresh-token"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth file");
+        let name = "AI_PROVIDER_EXAMPLE_REFRESH_TOKEN".to_string();
+        std::env::remove_var(&name);
+        let mut fallbacks = HashMap::new();
+        fallbacks.insert(
+            name.clone(),
+            AgentTaskSecretSource {
+                source: "json-file".to_string(),
+                env_var: None,
+                path: Some(auth_path.to_string_lossy().to_string()),
+                scope: None,
+                name: None,
+                field: Some("tokens.refresh_token".to_string()),
+                value: None,
+            },
+        );
+
+        let status = secret_env_status_with_fallbacks(std::slice::from_ref(&name), &fallbacks);
+
+        assert_eq!(status[0].name, name);
+        assert!(status[0].configured);
+        assert_eq!(status[0].source, "json-file");
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("json-file-refresh-token"));
+    }
+
+    #[test]
+    fn json_file_source_uses_static_value_when_field_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        fs::write(&auth_path, serde_json::json!({ "tokens": {} }).to_string())
+            .expect("write auth file");
+        let source = AgentTaskSecretSource {
+            source: "json-file".to_string(),
+            env_var: None,
+            path: Some(auth_path.to_string_lossy().to_string()),
+            scope: None,
+            name: None,
+            field: Some("tokens.fedramp".to_string()),
+            value: Some("false".to_string()),
+        };
+        let mut cache = HashMap::new();
+
+        assert_eq!(
+            source.resolve("AI_PROVIDER_OPENAI_CODEX_FEDRAMP", &mut cache),
+            Some("false".to_string())
+        );
+    }
+
+    #[test]
+    fn json_file_jwt_expiration_source_reads_exp_claim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({ "alg": "none" }).to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({ "exp": 4102444800u64 }).to_string());
+        let token = format!("{header}.{payload}.signature");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "tokens": {
+                    "access_token": token
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth file");
+        let source = AgentTaskSecretSource {
+            source: "json-file-jwt-expiration".to_string(),
+            env_var: None,
+            path: Some(auth_path.to_string_lossy().to_string()),
+            scope: None,
+            name: None,
+            field: Some("tokens.access_token".to_string()),
+            value: None,
+        };
+        let mut cache = HashMap::new();
+
+        assert_eq!(
+            source.resolve("AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT", &mut cache),
+            Some("4102444800".to_string())
+        );
+    }
+
+    #[test]
+    fn unresolved_configured_env_source_does_not_shadow_json_file_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp.path().join("auth.json");
+        fs::write(
+            &auth_path,
+            serde_json::json!({
+                "tokens": {
+                    "access_token": "fallback-access-token"
+                }
+            })
+            .to_string(),
+        )
+        .expect("write auth file");
+        let name = "AI_PROVIDER_EXAMPLE_SHADOWED_ACCESS_TOKEN".to_string();
+        std::env::remove_var(&name);
+
+        let mut config = AgentTaskSecretConfig::default();
+        config.secrets.insert(
+            name.clone(),
+            AgentTaskSecretSource {
+                source: "env".to_string(),
+                env_var: None,
+                path: None,
+                scope: None,
+                name: None,
+                field: None,
+                value: None,
+            },
+        );
+
+        let mut fallbacks = HashMap::new();
+        fallbacks.insert(
+            name.clone(),
+            AgentTaskSecretSource {
+                source: "json-file".to_string(),
+                env_var: None,
+                path: Some(auth_path.to_string_lossy().to_string()),
+                scope: None,
+                name: None,
+                field: Some("tokens.access_token".to_string()),
+                value: None,
+            },
+        );
+
+        let status = secret_env_status_with_config_and_fallbacks(
+            std::slice::from_ref(&name),
+            &config,
+            &fallbacks,
+        );
+        let resolved = resolve_secret_env_with_config_and_fallbacks(
+            std::slice::from_ref(&name),
+            &config,
+            &fallbacks,
+        )
+        .expect("fallback resolves despite stale env mapping");
+
+        assert_eq!(status[0].name, name);
+        assert!(status[0].configured);
+        assert_eq!(status[0].source, "json-file");
+        assert_eq!(resolved[0].1, "fallback-access-token");
     }
 }

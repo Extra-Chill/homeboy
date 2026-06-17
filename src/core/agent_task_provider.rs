@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -20,8 +20,30 @@ use crate::core::agent_task_secrets::{
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
+pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
+pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
+    "homeboy/agent-task-provider-capability-contract/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderCapabilityContract {
+    pub schema: String,
+    pub provider_schema: String,
+    pub request_schema: String,
+    pub outcome_schema: String,
+}
+
+pub fn provider_capability_contract() -> AgentTaskProviderCapabilityContract {
+    AgentTaskProviderCapabilityContract {
+        schema: AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA.to_string(),
+        provider_schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
+        request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+        outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
+    #[serde(default = "default_provider_schema")]
     pub schema: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,7 +52,9 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "is_false")]
     pub default_backend: bool,
     pub command: String,
+    #[serde(default = "default_request_schema")]
     pub request_schema: String,
+    #[serde(default = "default_outcome_schema")]
     pub outcome_schema: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
@@ -66,6 +90,18 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+}
+
+fn default_provider_schema() -> String {
+    AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string()
+}
+
+fn default_request_schema() -> String {
+    AGENT_TASK_REQUEST_SCHEMA.to_string()
+}
+
+fn default_outcome_schema() -> String {
+    AGENT_TASK_OUTCOME_SCHEMA.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -408,6 +444,25 @@ pub fn provider_secret_sources_for_plan(
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let providers = discover_agent_task_executor_providers();
     provider_secret_sources_for_plan_with_providers(plan, &providers)
+}
+
+pub fn provider_secret_sources_for_discovered_providers(
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let providers = discover_agent_task_executor_providers();
+    provider_secret_sources_for_providers(&providers)
+}
+
+pub fn provider_secret_sources_for_providers(
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for provider in providers {
+        sources.extend(provider_secret_sources(provider, None));
+        for defaults in provider.provider_defaults.values() {
+            sources.extend(provider_config_secret_sources(defaults));
+        }
+    }
+    sources
 }
 
 pub(crate) fn role_aliases_for_executor(
@@ -1377,10 +1432,39 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
     use std::fs;
+
+    #[test]
+    fn provider_capability_contract_exports_core_owned_schema_ids() {
+        let contract = provider_capability_contract();
+
+        assert_eq!(
+            contract.schema,
+            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            contract.provider_schema,
+            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
+        );
+        assert_eq!(contract.request_schema, AGENT_TASK_REQUEST_SCHEMA);
+        assert_eq!(contract.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+    }
+
+    #[test]
+    fn provider_manifest_defaults_core_owned_schema_ids() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "minimal.provider",
+            "backend": "minimal",
+            "command": "minimal-provider"
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(provider.schema, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA);
+        assert_eq!(provider.request_schema, AGENT_TASK_REQUEST_SCHEMA);
+        assert_eq!(provider.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+    }
 
     fn script(body: &str) -> String {
         let path = std::env::temp_dir().join(format!(
@@ -1394,7 +1478,7 @@ mod tests {
 
     fn request(task_id: &str, command: String) -> (AgentTaskRequest, AgentTaskExecutorProvider) {
         let provider = AgentTaskExecutorProvider {
-            schema: "homeboy/agent-task-executor-provider/v1".to_string(),
+            schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
             id: "test.provider".to_string(),
             label: None,
             backend: "test".to_string(),
@@ -2062,6 +2146,33 @@ process.stdout.write(JSON.stringify({
     }
 
     #[test]
+    fn provider_secret_sources_for_providers_include_default_json_sources() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.provider_defaults.insert(
+            "codex".to_string(),
+            json!({
+                "secret_env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "secret_env_sources": {
+                    "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                        "source": "json-file",
+                        "path": "~/.codex/auth.json",
+                        "field": "tokens.access_token"
+                    }
+                }
+            }),
+        );
+
+        let sources = provider_secret_sources_for_providers(&[provider]);
+
+        let source = sources
+            .get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+            .expect("provider default source discovered");
+        assert_eq!(source.source, "json-file");
+        assert_eq!(source.path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
+    }
+
+    #[test]
     fn provider_default_secret_sources_accept_nested_json_sources() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
@@ -2124,6 +2235,47 @@ process.stdout.write(JSON.stringify({
                 "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
                 "12345".to_string()
             )));
+        });
+    }
+
+    #[test]
+    fn provider_default_secret_sources_feed_secret_readiness_status() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("codex-auth.json");
+            fs::write(
+                &auth_path,
+                json!({
+                    "tokens": {
+                        "access_token": "provider-owned-access-token"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write auth");
+            let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+            provider.provider_defaults.insert(
+                "codex".to_string(),
+                json!({
+                    "secret_env_sources": {
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path,
+                            "field": "tokens.access_token"
+                        }
+                    }
+                }),
+            );
+            let fallback_sources = provider_secret_sources_for_providers(&[provider]);
+
+            let status = crate::core::agent_task_secrets::secret_env_status_with_fallbacks(
+                &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+                &fallback_sources,
+            );
+
+            assert_eq!(status.len(), 1);
+            assert!(status[0].configured);
+            assert_eq!(status[0].source, "json-file");
         });
     }
 

@@ -165,7 +165,7 @@ fn test_expand_resources_expands_string_entries() {
             "${components.studio.path}/apps/cli".to_string(),
         ];
         rig.resources.ports = vec![9724];
-        rig.resources.process_patterns = vec!["wordpress-server-child.mjs".to_string()];
+        rig.resources.process_patterns = vec!["app-server-child.mjs".to_string()];
 
         let resources = expand_resources(&rig);
         let expected_paths = vec![
@@ -193,10 +193,7 @@ fn test_expand_resources_expands_string_entries() {
             vec!["studio-runtime", "studio-runtime:bench-a"]
         );
         assert_eq!(resources.ports, vec![9724]);
-        assert_eq!(
-            resources.process_patterns,
-            vec!["wordpress-server-child.mjs"]
-        );
+        assert_eq!(resources.process_patterns, vec!["app-server-child.mjs"]);
         assert_eq!(resources.paths, expected_paths);
     });
 }
@@ -261,7 +258,7 @@ fn test_expand_resources_derives_paths_ports_and_process_patterns() {
                 env: HashMap::new(),
                 health: None,
                 discover: Some(DiscoverSpec {
-                    pattern: "wordpress-server-child.mjs".to_string(),
+                    pattern: "app-server-child.mjs".to_string(),
                     argv_contains: Vec::new(),
                 }),
             },
@@ -280,10 +277,7 @@ fn test_expand_resources_derives_paths_ports_and_process_patterns() {
             ]
         );
         assert_eq!(resources.ports, vec![9724]);
-        assert_eq!(
-            resources.process_patterns,
-            vec!["wordpress-server-child.mjs"]
-        );
+        assert_eq!(resources.process_patterns, vec!["app-server-child.mjs"]);
     });
 }
 
@@ -294,7 +288,7 @@ fn test_expand_resources_merges_explicit_resources_and_deduplicates() {
         rig.resources.paths = vec!["~/bin/studio".to_string(), "~/Developer/manual".to_string()];
         rig.resources.ports = vec![9724, 3000];
         rig.resources.process_patterns = vec![
-            "wordpress-server-child.mjs".to_string(),
+            "app-server-child.mjs".to_string(),
             "manual-process".to_string(),
         ];
         rig.symlinks = vec![SymlinkSpec {
@@ -323,7 +317,7 @@ fn test_expand_resources_merges_explicit_resources_and_deduplicates() {
                 env: HashMap::new(),
                 health: None,
                 discover: Some(DiscoverSpec {
-                    pattern: "wordpress-server-child.mjs".to_string(),
+                    pattern: "app-server-child.mjs".to_string(),
                     argv_contains: Vec::new(),
                 }),
             },
@@ -345,7 +339,7 @@ fn test_expand_resources_merges_explicit_resources_and_deduplicates() {
         assert_eq!(resources.ports, vec![9724, 3000]);
         assert_eq!(
             resources.process_patterns,
-            vec!["wordpress-server-child.mjs", "manual-process"]
+            vec!["app-server-child.mjs", "manual-process"]
         );
     });
 }

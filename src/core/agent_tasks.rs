@@ -95,7 +95,8 @@ pub use super::agent_task_loop_controller::{
 
 // Secret-env status type is referenced from review/dispatch commands.
 pub use super::agent_task_secrets::{
-    resolve_secret_env_plan, secret_env_plan_status, secret_env_status, AgentTaskSecretEnvStatus,
+    resolve_secret_env_plan, secret_env_plan_status, secret_env_status,
+    secret_env_status_with_fallbacks, AgentTaskSecretEnvStatus,
 };
 pub use super::secret_env_plan::{
     SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
@@ -103,7 +104,9 @@ pub use super::secret_env_plan::{
 };
 
 // Provider helpers used directly from the facade root for common callers.
-pub use super::agent_task_provider::required_extension_ids_for_plan;
+pub use super::agent_task_provider::{
+    provider_secret_sources_for_discovered_providers, required_extension_ids_for_plan,
+};
 
 // ----------------------------------------------------------------------------
 // Explicit API groups
@@ -221,13 +224,16 @@ pub mod promotion {
 pub mod provider {
     pub use super::super::agent_task_provider::{
         default_backend, default_backend_for_component, dependency_failure_patterns,
-        provider_requires_cwd_git_checkout, provider_runner_readiness_contracts,
-        provider_runner_secret_env_for_plan, provider_runner_source_contracts,
-        provider_secret_sources_for_plan, required_extension_ids_for_plan,
-        AgentTaskExecutorProvider, AgentTaskProviderDependencyFailurePattern,
-        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
-        AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
-        AgentTaskProviderWorkspaceMaterialization, ExtensionProviderAgentTaskExecutor,
+        provider_capability_contract, provider_requires_cwd_git_checkout,
+        provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
+        provider_runner_source_contracts, provider_secret_sources_for_plan,
+        provider_secret_sources_for_providers, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderCapabilityContract,
+        AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
+        AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
+        AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
+        ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
 }
 
@@ -255,7 +261,8 @@ pub mod scheduler {
 pub mod secrets {
     pub use super::super::agent_task_secrets::{
         map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
-        resolve_secret_env, secret_env_status, set_config_secret, set_keychain_bundle,
+        resolve_secret_env, resolve_secret_env_with_fallbacks, secret_env_status,
+        secret_env_status_with_fallbacks, set_config_secret, set_keychain_bundle,
         set_keychain_secret, validate_secret_env, AgentTaskSecretEnvStatus,
         AgentTaskSecretResolutionError,
     };
