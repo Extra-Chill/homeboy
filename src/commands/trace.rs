@@ -549,10 +549,7 @@ fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution
         &args,
         rig_context.as_ref(),
         ctx.extension_id.as_deref(),
-        args.aggregate.as_deref() == Some("spans")
-            && args.phase_preset.is_none()
-            && args.phases.is_empty()
-            && args.spans.is_empty(),
+        args.phase_preset.is_none() && args.phases.is_empty() && args.spans.is_empty(),
     )?;
     let component_path_for_overlays = path_override
         .clone()

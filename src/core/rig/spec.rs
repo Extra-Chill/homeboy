@@ -89,6 +89,11 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_workload_defaults: HashMap<String, WorkloadDefaultsSpec>,
 
+    /// Rig-level reusable phase/span metadata templates. Workloads and workload
+    /// defaults can reference these by name with `trace_phase_template`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_phase_templates: HashMap<String, TracePhaseTemplateSpec>,
+
     /// Named trace variants that can apply overlays across rig components.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
@@ -309,6 +314,9 @@ pub struct WorkloadSpec {
     pub path: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_phase_template: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_preview: Option<TracePublicPreviewSpec>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -348,6 +356,9 @@ pub struct WorkloadSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkloadDefaultsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_phase_template: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_preview: Option<TracePublicPreviewSpec>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,8 +395,23 @@ pub struct WorkloadDefaultsSpec {
     pub runner_capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TracePhaseTemplateSpec {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_phase_presets: HashMap<String, Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_default_phase_preset: Option<String>,
+}
+
 impl WorkloadSpec {
     pub fn apply_defaults(&mut self, defaults: &WorkloadDefaultsSpec) {
+        if self.trace_phase_template.is_none() {
+            self.trace_phase_template = defaults.trace_phase_template.clone();
+        }
         if self.public_preview.is_none() {
             self.public_preview = defaults.public_preview.clone();
         }
@@ -407,6 +433,14 @@ impl WorkloadSpec {
         merge_defaults_map(&mut self.trace_phase_presets, &defaults.trace_phase_presets);
         merge_defaults_map(&mut self.trace_span_metadata, &defaults.trace_span_metadata);
         merge_defaults_map(&mut self.trace_variants, &defaults.trace_variants);
+    }
+
+    pub fn apply_phase_template(&mut self, template: &TracePhaseTemplateSpec) {
+        if self.trace_default_phase_preset.is_none() {
+            self.trace_default_phase_preset = template.trace_default_phase_preset.clone();
+        }
+        merge_defaults_map(&mut self.trace_phase_presets, &template.trace_phase_presets);
+        merge_defaults_map(&mut self.trace_span_metadata, &template.trace_span_metadata);
     }
 }
 
@@ -717,6 +751,7 @@ mod tests {
     fn test_trace_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: None,
@@ -885,6 +920,7 @@ mod tests {
     fn test_trace_default_phase_preset() {
         let workload = WorkloadSpec {
             path: "trace.mjs".to_string(),
+            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: None,
@@ -909,6 +945,7 @@ mod tests {
     fn test_port_range_size() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: Some(8),
@@ -933,6 +970,7 @@ mod tests {
     fn test_named_leases() {
         let workload = WorkloadSpec {
             path: "bench.mjs".to_string(),
+            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: None,
