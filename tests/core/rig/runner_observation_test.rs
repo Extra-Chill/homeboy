@@ -303,6 +303,7 @@ fn write_rig_source_metadata(rig_id: &str) {
             rig_path: "/tmp/rigs/rig.json".to_string(),
             discovery_path: Some("/tmp/rigs".to_string()),
             linked: false,
+            materialized: false,
             source_revision: Some("abc123".to_string()),
         })
         .expect("serialize source metadata"),
