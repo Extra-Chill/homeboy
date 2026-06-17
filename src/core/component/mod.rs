@@ -21,6 +21,7 @@ pub use audit::{
     MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
     RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode,
     SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm, TestWiringConfig, TestWiringPolicy,
+    VersionSource,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,

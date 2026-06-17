@@ -854,7 +854,7 @@ fn audit_internal(
         &mut timing,
         "detector.field_patterns",
         plan.run_field_patterns(),
-        || field_patterns::run(root),
+        || field_patterns::run(root, &audit_config.detector_profile),
         Vec::new,
     );
     if !field_pattern_findings.is_empty() {
@@ -879,7 +879,7 @@ fn audit_internal(
         &mut timing,
         "detector.deprecation_age",
         plan.run_deprecation_age(),
-        || deprecation_age::run(&all_fingerprints, root),
+        || deprecation_age::run(&all_fingerprints, root, &audit_config.detector_profile),
         Vec::new,
     );
     if !deprecation_findings.is_empty() {
@@ -1440,7 +1440,7 @@ fn audit_root_only(
         timing,
         "detector.field_patterns",
         plan.run_field_patterns(),
-        || field_patterns::run(root),
+        || field_patterns::run(root, &audit_config.detector_profile),
         Vec::new,
     );
     if !field_pattern_findings.is_empty() {

@@ -29,9 +29,10 @@ mod field_patterns_data_contracts {
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::core::component::DetectorProfileConfig;
 use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
-use super::conventions::AuditFinding;
+use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 #[allow(unused_imports)]
 use super::fingerprint::FileFingerprint;
@@ -42,8 +43,82 @@ const MIN_OCCURRENCES: usize = 3;
 /// Minimum number of fields in a group to report.
 const MIN_GROUP_SIZE: usize = 2;
 
-pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
-    detect_repeated_field_patterns(root)
+pub(in crate::core::code_audit) fn run(
+    root: &Path,
+    config: &DetectorProfileConfig,
+) -> Vec<Finding> {
+    let settings = ResolvedFieldScan::from_config(config);
+    if settings.scan_tokens.is_empty() {
+        // No scan tokens resolved (builtin defaults disabled and none declared):
+        // core ships no built-in ecosystem scan list inside the detector, so the
+        // detector stays inert until a component declares its languages.
+        return Vec::new();
+    }
+    detect_repeated_field_patterns(root, &settings)
+}
+
+/// Resolved field-scan settings. Concrete language/extension tokens come from
+/// [`DetectorProfileConfig`] (or the agnostic builtin token catalogue when a
+/// component opts into defaults); this detector keeps no hardcoded ecosystem
+/// literals of its own.
+struct ResolvedFieldScan {
+    scan_tokens: Vec<String>,
+    type_before_name_tokens: Vec<String>,
+    inline_test_strip_tokens: Vec<String>,
+    test_file_suffixes: Vec<String>,
+}
+
+impl ResolvedFieldScan {
+    fn from_config(config: &DetectorProfileConfig) -> Self {
+        let scan_tokens = if !config.field_pattern_scan_tokens.is_empty() {
+            config.field_pattern_scan_tokens.clone()
+        } else if config.use_builtin_defaults {
+            Language::builtin_extension_tokens()
+                .iter()
+                .map(|token| (*token).to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            scan_tokens,
+            type_before_name_tokens: config.field_pattern_type_before_name_tokens.clone(),
+            inline_test_strip_tokens: config.field_pattern_inline_test_strip_tokens.clone(),
+            test_file_suffixes: config.test_file_suffixes.clone(),
+        }
+    }
+
+    fn syntax_for_path(&self, path: &str) -> FieldSyntax {
+        let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        if self
+            .type_before_name_tokens
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        {
+            FieldSyntax::TypeBeforeName
+        } else {
+            FieldSyntax::NameBeforeType
+        }
+    }
+
+    fn needs_inline_test_strip(&self, path: &str) -> bool {
+        let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        self.inline_test_strip_tokens
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+    }
+
+    fn is_test_path(&self, path: &str) -> bool {
+        let lower = path.to_lowercase();
+        lower.contains("/tests/")
+            || lower.contains("/test/")
+            || lower.starts_with("tests/")
+            || lower.starts_with("test/")
+            || self
+                .test_file_suffixes
+                .iter()
+                .any(|suffix| lower.ends_with(&suffix.to_lowercase()))
+    }
 }
 
 /// A parsed field from a struct definition.
@@ -75,15 +150,9 @@ enum FieldSyntax {
     TypeBeforeName,
 }
 
-fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
+fn detect_repeated_field_patterns(root: &Path, settings: &ResolvedFieldScan) -> Vec<Finding> {
     let config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec![
-            "rs".to_string(),
-            "php".to_string(),
-            "ts".to_string(),
-            "js".to_string(),
-            "go".to_string(),
-        ]),
+        extensions: ExtensionFilter::Only(settings.scan_tokens.clone()),
         ..Default::default()
     };
     let files = codebase_scan::walk_files(root, &config);
@@ -97,7 +166,7 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
         };
 
         // Skip test files.
-        if is_test_path(&relative) {
+        if settings.is_test_path(&relative) {
             continue;
         }
 
@@ -105,13 +174,13 @@ fn detect_repeated_field_patterns(root: &Path) -> Vec<Finding> {
             continue;
         };
 
-        let scan_content = if relative.ends_with(".rs") {
+        let scan_content = if settings.needs_inline_test_strip(&relative) {
             strip_rust_cfg_test_modules(&content)
         } else {
             content
         };
 
-        let syntax = field_syntax_for_path(&relative);
+        let syntax = settings.syntax_for_path(&relative);
         let structs = extract_structs(&scan_content, &relative, syntax);
         all_structs.extend(structs);
     }
@@ -306,14 +375,6 @@ fn extract_structs(content: &str, file: &str, syntax: FieldSyntax) -> Vec<Struct
     result
 }
 
-fn field_syntax_for_path(path: &str) -> FieldSyntax {
-    if path.ends_with(".php") {
-        FieldSyntax::TypeBeforeName
-    } else {
-        FieldSyntax::NameBeforeType
-    }
-}
-
 /// Try to extract a type name from a line that starts a struct/class/interface.
 fn extract_type_name(line: &str) -> Option<String> {
     // Skip comments and attributes.
@@ -392,7 +453,7 @@ fn parse_field_line(line: &str, _syntax: FieldSyntax) -> Option<FieldSignature> 
         FieldSyntax::NameBeforeType => {}
     }
 
-    // Rust-style: `[pub] name: Type[,]`
+    // Name-before-type: `[pub] name: Type[,]`
     // Strip visibility prefix.
     let content = trimmed
         .strip_prefix("pub(crate) ")
@@ -462,18 +523,6 @@ fn parse_type_before_name_field(line: &str) -> Option<FieldSignature> {
         name,
         field_type: field_type.to_string(),
     })
-}
-
-fn is_test_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("/tests/")
-        || lower.contains("/test/")
-        || lower.starts_with("tests/")
-        || lower.starts_with("test/")
-        || lower.ends_with("_test.rs")
-        || lower.ends_with("_test.php")
-        || lower.ends_with(".test.ts")
-        || lower.ends_with(".test.js")
 }
 
 fn is_low_value_generic_group(fields: &[FieldSignature], locations: &[(String, String)]) -> bool {
@@ -732,10 +781,51 @@ fn raw_string_closes_at(bytes: &[u8], start: usize, hashes: usize) -> bool {
 mod tests {
     use super::*;
 
+    /// Representative multi-language scan settings for tests, mirroring what an
+    /// extension/component profile would declare.
+    fn test_scan() -> ResolvedFieldScan {
+        ResolvedFieldScan {
+            scan_tokens: vec![
+                "rs".to_string(),
+                "php".to_string(),
+                "ts".to_string(),
+                "js".to_string(),
+                "go".to_string(),
+            ],
+            type_before_name_tokens: vec!["php".to_string()],
+            inline_test_strip_tokens: vec!["rs".to_string()],
+            test_file_suffixes: vec![
+                "_test.rs".to_string(),
+                "_test.php".to_string(),
+                ".test.ts".to_string(),
+                ".test.js".to_string(),
+            ],
+        }
+    }
+
     #[test]
     fn test_run() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(run(dir.path()).is_empty());
+        // Empty profile (no tokens, builtin defaults on) → still empty on empty dir.
+        assert!(run(dir.path(), &DetectorProfileConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn run_is_inert_without_scan_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.rs"),
+            "struct A { verbose: bool, quiet: bool }\nstruct B { verbose: bool, quiet: bool }\nstruct C { verbose: bool, quiet: bool }\n",
+        )
+        .unwrap();
+        let config = DetectorProfileConfig {
+            use_builtin_defaults: false,
+            ..Default::default()
+        };
+        assert!(
+            run(dir.path(), &config).is_empty(),
+            "no scan tokens declared and builtin defaults off → inert"
+        );
     }
 
     #[test]
@@ -869,7 +959,7 @@ class {} {{
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "presentation arrays and WP_CLI call sites are not extractable field groups: {:?}",
@@ -949,7 +1039,7 @@ class {} {{
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "PHP self::class registration arguments should not be reported as fields"
@@ -986,7 +1076,7 @@ struct FindingRecord {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "small scalar coordinate overlaps across boundary records are not extractable: {:?}",
@@ -1042,7 +1132,7 @@ struct Foo {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "inline Rust test fixtures should not be scanned as production structs: {:?}",
@@ -1146,7 +1236,7 @@ struct Foo {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             !findings.is_empty(),
             "Should detect repeated [verbose, quiet] pattern"
@@ -1220,7 +1310,7 @@ struct ReviewArgs {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "boundary DTO overlap across command/workflow/refactor layers should not suggest extraction: {:?}",
@@ -1242,7 +1332,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path())
+        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path(), &test_scan())
             .into_iter()
             .map(|finding| finding.description)
             .collect();
@@ -1310,7 +1400,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "generic DTO field pairs across unrelated modules should not become extraction work: {:?}",
@@ -1359,7 +1449,7 @@ struct ReviewArgs {
             std::fs::write(file, format!("struct {name} {{\n    {fields}\n}}\n")).unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "boundary data contract field overlaps should not suggest extraction: {:?}",
@@ -1395,7 +1485,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path())
+        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path(), &test_scan())
             .into_iter()
             .map(|finding| finding.description)
             .collect();
@@ -1433,7 +1523,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             !findings.is_empty(),
             "Should detect repeated [alpha, middle, zebra] pattern"
@@ -1471,7 +1561,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path());
+        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
         assert!(
             findings.is_empty(),
             "Two occurrences should be below threshold"

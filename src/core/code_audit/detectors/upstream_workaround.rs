@@ -411,15 +411,7 @@ enum DetectorProfileField {
 }
 
 fn language_matches(configured: &str, language: &Language) -> bool {
-    let normalized = configured.trim().to_ascii_lowercase();
-    serde_json::from_value::<Language>(serde_json::Value::String(normalized.clone()))
-        .ok()
-        .or_else(|| {
-            let configured_language = Language::from_extension(&normalized);
-            (configured_language != Language::Unknown).then_some(configured_language)
-        })
-        .as_ref()
-        .is_some_and(|configured_language| configured_language == language)
+    language.matches_token(configured)
 }
 
 fn version_guard_description(
