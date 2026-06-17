@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.5] - 2026-06-17
+
+### Fixed
+- fix(wp-codebox): pass host tool policy to Data Machine
+- fix(wp-codebox): keep valid Codex access tokens
+
 ## [3.4.4] - 2026-06-17
 
 ### Changed
