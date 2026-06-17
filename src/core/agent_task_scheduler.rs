@@ -7,7 +7,8 @@ use serde_json::{Map, Value};
 
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
-    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_OUTCOME_SCHEMA,
+    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
+    AGENT_TASK_OUTCOME_SCHEMA,
 };
 pub use crate::core::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
@@ -878,6 +879,11 @@ impl AgentTaskScheduleSupport {
         mut outcome: AgentTaskOutcome,
         running: Option<&RunningTask>,
     ) -> AgentTaskOutcome {
+        if let Some(running) = running {
+            Self::normalize_required_typed_artifacts(&mut outcome, &running.request);
+            Self::recover_missing_typed_artifacts_wrapper_failure(&mut outcome, &running.request);
+        }
+
         Self::classify_failed_nested_executor_status(&mut outcome);
         Self::classify_incomplete_executor_result(&mut outcome);
 
@@ -903,6 +909,97 @@ impl AgentTaskScheduleSupport {
             }
         }
         outcome
+    }
+
+    fn normalize_required_typed_artifacts(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        let required = request
+            .canonical_artifact_declarations()
+            .into_iter()
+            .filter(|declaration| declaration.required)
+            .map(|declaration| declaration.name)
+            .collect::<Vec<_>>();
+
+        for name in required {
+            if outcome
+                .typed_artifacts
+                .iter()
+                .any(|artifact| artifact.name == name)
+            {
+                continue;
+            }
+
+            if let Some(artifact) = outcome
+                .artifacts
+                .iter()
+                .find(|artifact| artifact_matches_required_artifact(&name, artifact))
+                .cloned()
+            {
+                outcome.typed_artifacts.push(typed_artifact_from_artifact(
+                    &name,
+                    artifact,
+                    "runtime_artifact",
+                ));
+                continue;
+            }
+
+            if let Some(evidence) = outcome
+                .evidence_refs
+                .iter()
+                .find(|evidence| evidence_matches_required_artifact(&name, evidence))
+            {
+                outcome.typed_artifacts.push(typed_artifact_from_evidence(
+                    &name,
+                    evidence,
+                    "runtime_evidence",
+                ));
+                continue;
+            }
+
+            if name == "agent_result" && runtime_result_is_materializable(outcome) {
+                let typed_artifact = typed_artifact_from_outcome(outcome);
+                outcome.typed_artifacts.push(typed_artifact);
+            }
+        }
+    }
+
+    fn recover_missing_typed_artifacts_wrapper_failure(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        if outcome.status == AgentTaskOutcomeStatus::Succeeded
+            || !missing_typed_artifacts_failure(outcome)
+        {
+            return;
+        }
+
+        let missing = missing_required_typed_artifacts(outcome, request);
+        if !missing.is_empty() {
+            return;
+        }
+
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        outcome.failure_classification = None;
+        outcome.summary = Some(
+            outcome
+                .summary
+                .clone()
+                .unwrap_or_else(|| "runtime artifacts normalized successfully".to_string()),
+        );
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.required_typed_artifacts_normalized".to_string(),
+            message: "required typed artifacts were materialized from runtime artifacts"
+                .to_string(),
+            data: serde_json::json!({
+                "typed_artifacts": outcome
+                    .typed_artifacts
+                    .iter()
+                    .map(|artifact| artifact.name.clone())
+                    .collect::<Vec<_>>(),
+            }),
+        });
     }
 
     fn classify_failed_nested_executor_status(outcome: &mut AgentTaskOutcome) {
@@ -1522,6 +1619,157 @@ fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) 
     }
 }
 
+fn missing_required_typed_artifacts(
+    outcome: &AgentTaskOutcome,
+    request: &AgentTaskRequest,
+) -> Vec<String> {
+    request
+        .canonical_artifact_declarations()
+        .into_iter()
+        .filter(|declaration| declaration.required)
+        .map(|declaration| declaration.name)
+        .filter(|name| {
+            !outcome
+                .typed_artifacts
+                .iter()
+                .any(|artifact| artifact.name == *name)
+        })
+        .collect()
+}
+
+fn missing_typed_artifacts_failure(outcome: &AgentTaskOutcome) -> bool {
+    outcome
+        .summary
+        .as_deref()
+        .map(text_reports_missing_typed_artifacts)
+        .unwrap_or(false)
+        || outcome.diagnostics.iter().any(|diagnostic| {
+            text_reports_missing_typed_artifacts(&diagnostic.class)
+                || text_reports_missing_typed_artifacts(&diagnostic.message)
+        })
+}
+
+fn text_reports_missing_typed_artifacts(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("missing required typed artifacts")
+        || value.contains("did not produce required typed artifacts")
+}
+
+fn artifact_matches_required_artifact(name: &str, artifact: &AgentTaskArtifact) -> bool {
+    [
+        Some(artifact.kind.as_str()),
+        Some(artifact.id.as_str()),
+        artifact.name.as_deref(),
+        artifact.path.as_deref(),
+        artifact.mime.as_deref(),
+        artifact.metadata.get("role").and_then(Value::as_str),
+        artifact.metadata.get("artifact").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| value_matches_required_artifact(name, candidate))
+}
+
+fn evidence_matches_required_artifact(name: &str, evidence: &AgentTaskEvidenceRef) -> bool {
+    [
+        Some(evidence.kind.as_str()),
+        Some(evidence.uri.as_str()),
+        evidence.label.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| value_matches_required_artifact(name, candidate))
+}
+
+fn value_matches_required_artifact(name: &str, value: &str) -> bool {
+    let name = normalize_artifact_role_token(name);
+    let value = normalize_artifact_role_token(value);
+    if value == name || value.contains(&name) {
+        return true;
+    }
+
+    match name.as_str() {
+        "patch" => {
+            value.contains("diff") || value.contains("textxpatch") || value.contains("textxdiff")
+        }
+        "transcript" => value.contains("log"),
+        "agentresult" => value.contains("agentresult"),
+        _ => false,
+    }
+}
+
+fn normalize_artifact_role_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn typed_artifact_from_artifact(
+    name: &str,
+    artifact: AgentTaskArtifact,
+    source: &str,
+) -> AgentTaskTypedArtifact {
+    AgentTaskTypedArtifact {
+        name: name.to_string(),
+        artifact_type: Some("file".to_string()),
+        artifact_schema: None,
+        payload: serde_json::json!({
+            "artifact_id": artifact.id.clone(),
+            "kind": artifact.kind.clone(),
+            "path": artifact.path.clone(),
+            "url": artifact.url.clone(),
+            "size_bytes": artifact.size_bytes,
+            "sha256": artifact.sha256.clone(),
+        }),
+        artifact: Some(artifact),
+        metadata: serde_json::json!({ "normalized_from": source }),
+    }
+}
+
+fn typed_artifact_from_evidence(
+    name: &str,
+    evidence: &AgentTaskEvidenceRef,
+    source: &str,
+) -> AgentTaskTypedArtifact {
+    AgentTaskTypedArtifact {
+        name: name.to_string(),
+        artifact_type: Some("evidence_ref".to_string()),
+        artifact_schema: None,
+        payload: serde_json::json!({
+            "kind": evidence.kind,
+            "uri": evidence.uri,
+            "label": evidence.label,
+        }),
+        artifact: None,
+        metadata: serde_json::json!({ "normalized_from": source }),
+    }
+}
+
+fn typed_artifact_from_outcome(outcome: &AgentTaskOutcome) -> AgentTaskTypedArtifact {
+    AgentTaskTypedArtifact {
+        name: "agent_result".to_string(),
+        artifact_type: Some("json".to_string()),
+        artifact_schema: Some(AGENT_TASK_OUTCOME_SCHEMA.to_string()),
+        payload: serde_json::json!({
+            "task_id": outcome.task_id.clone(),
+            "status": outcome.status,
+            "summary": outcome.summary.clone(),
+            "outputs": outcome.outputs.clone(),
+        }),
+        artifact: None,
+        metadata: serde_json::json!({ "normalized_from": "runtime_outcome" }),
+    }
+}
+
+fn runtime_result_is_materializable(outcome: &AgentTaskOutcome) -> bool {
+    !outcome.artifacts.is_empty()
+        || !outcome.evidence_refs.is_empty()
+        || !outcome.outputs.is_null()
+        || outcome.summary.is_some()
+}
+
 fn provider_run_result_is_empty_incomplete(result: &Value) -> bool {
     // The provider run state may live at the top level of the result object or
     // nested under an `outputs` key (the shape Codebox reports today, e.g.
@@ -2069,6 +2317,60 @@ mod tests {
                     .get("actionable_patch")
                     .and_then(Value::as_bool)
                     == Some(true)
+        }));
+    }
+
+    #[test]
+    fn runtime_bundle_artifacts_materialize_required_typed_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bundle = temp.path().join("runtime-123");
+        let files = bundle.join("files");
+        fs::create_dir_all(&files).expect("runtime files");
+        let patch_path = files.join("patch.diff");
+        let transcript_path = files.join("transcript.json");
+        fs::write(&patch_path, "diff --git a/a.txt b/a.txt\n").expect("patch");
+        fs::write(&transcript_path, "{\"events\":[]}").expect("transcript");
+
+        let scheduler = AgentTaskScheduler::new(RuntimeBundleOutcomeExecutor {
+            patch_path: patch_path.clone(),
+            transcript_path: transcript_path.clone(),
+        });
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].expected_artifacts = vec![
+            "patch".to_string(),
+            "agent_result".to_string(),
+            "transcript".to_string(),
+        ];
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(aggregate.totals.succeeded, 1);
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        for name in ["patch", "agent_result", "transcript"] {
+            assert!(
+                outcome
+                    .typed_artifacts
+                    .iter()
+                    .any(|artifact| artifact.name == name),
+                "missing typed artifact {name}"
+            );
+        }
+        let patch = outcome
+            .typed_artifacts
+            .iter()
+            .find(|artifact| artifact.name == "patch")
+            .expect("patch typed artifact");
+        assert_eq!(
+            patch
+                .artifact
+                .as_ref()
+                .and_then(|artifact| artifact.path.as_deref()),
+            Some(patch_path.to_str().expect("patch path"))
+        );
+        assert!(outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.required_typed_artifacts_normalized"
         }));
     }
 
@@ -3120,6 +3422,11 @@ mod tests {
 
     struct NestedOutputsIncompleteExecutor;
 
+    struct RuntimeBundleOutcomeExecutor {
+        patch_path: std::path::PathBuf,
+        transcript_path: std::path::PathBuf,
+    }
+
     impl AgentTaskExecutorAdapter for NestedOutputsIncompleteExecutor {
         fn execute(
             &self,
@@ -3127,6 +3434,77 @@ mod tests {
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
             nested_outputs_incomplete_outcome(request.task_id)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for RuntimeBundleOutcomeExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Failed,
+                summary: Some(
+                    "WP Codebox agent task did not produce required typed artifacts: patch, agent_result, transcript."
+                        .to_string(),
+                ),
+                failure_classification: Some(AgentTaskFailureClassification::Provider),
+                artifacts: vec![
+                    AgentTaskArtifact {
+                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                        id: "codebox-patch".to_string(),
+                        kind: "patch".to_string(),
+                        name: Some("patch.diff".to_string()),
+                        path: Some(self.patch_path.display().to_string()),
+                        url: None,
+                        mime: Some("text/x-patch".to_string()),
+                        size_bytes: Some(24),
+                        sha256: Some("sha256:patch".to_string()),
+                        metadata: json!({
+                            "artifact": "files/patch.diff",
+                            "provider_kind": "codebox-patch",
+                            "role": "patch"
+                        }),
+                    },
+                    AgentTaskArtifact {
+                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                        id: "codebox-transcript".to_string(),
+                        kind: "codebox-transcript".to_string(),
+                        name: Some("transcript.json".to_string()),
+                        path: Some(self.transcript_path.display().to_string()),
+                        url: None,
+                        mime: Some("application/json".to_string()),
+                        size_bytes: Some(13),
+                        sha256: None,
+                        metadata: json!({ "artifact": "files/transcript.json" }),
+                    },
+                ],
+                typed_artifacts: Vec::new(),
+                evidence_refs: vec![AgentTaskEvidenceRef {
+                    kind: "codebox-artifact-bundle".to_string(),
+                    uri: self
+                        .patch_path
+                        .parent()
+                        .and_then(|path| path.parent())
+                        .unwrap_or_else(|| self.patch_path.as_path())
+                        .display()
+                        .to_string(),
+                    label: Some("WP Codebox artifact bundle".to_string()),
+                }],
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "agent_task.required_typed_artifacts_missing".to_string(),
+                    message: "WP Codebox agent task did not produce required typed artifacts: patch, agent_result, transcript."
+                        .to_string(),
+                    data: Value::Null,
+                }],
+                outputs: json!({ "runtime_status": "succeeded" }),
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
         }
     }
 
