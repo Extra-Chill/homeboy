@@ -16,10 +16,10 @@
 //! that would warrant a single `gh api` GraphQL query.
 
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::path::Path;
 
 use crate::core::error::{Error, Result};
-use crate::core::git::resolve_target;
+use crate::core::git::{self, resolve_target};
 
 /// Per-commit detail row for the inspect output.
 #[derive(Debug, Clone, Serialize)]
@@ -160,11 +160,11 @@ fn resolve_base(path: &str, override_base: Option<&str>) -> Result<(String, bool
 
     // Try @{upstream} of HEAD. If unset, return a clear error pointing the
     // user at --base.
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git rev-parse @{{upstream}}: {}", e)))?;
+    let output = git::run_git_output(
+        Path::new(path),
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+        "git rev-parse @{upstream}",
+    )?;
 
     if !output.status.success() {
         return Err(Error::validation_invalid_argument(
@@ -194,11 +194,11 @@ fn resolve_base(path: &str, override_base: Option<&str>) -> Result<(String, bool
 
 /// Get the current branch name (or `HEAD` for detached HEAD).
 fn current_branch(path: &str) -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git rev-parse HEAD: {}", e)))?;
+    let output = git::run_git_output(
+        Path::new(path),
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "git rev-parse HEAD",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -216,16 +216,16 @@ fn list_commits_over_base(path: &str, base: &str) -> Result<Vec<InspectCommitDet
     let range = format!("{}..HEAD", base);
     // Reverse so output is oldest-first (rebase order). Tab-separated
     // columns: full SHA, subject, author name, ISO date.
-    let output = Command::new("git")
-        .args([
+    let output = git::run_git_output(
+        Path::new(path),
+        &[
             "log",
             "--reverse",
             "--format=%H%x09%s%x09%an%x09%aI",
             &range,
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git log {}: {}", range, e)))?;
+        ],
+        &format!("git log {}", range),
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -293,52 +293,15 @@ enum PrLookup {
 /// free-text search for the SHA reliably returns the PR(s) containing
 /// that commit.
 fn find_pr_for_commit(path: &str, sha: &str, repo: Option<&str>) -> Result<PrLookup> {
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "list".into(),
-        "--search".into(),
-        sha.to_string(),
-        "--state".into(),
-        "all".into(),
-        "--json".into(),
-        "number,state,title,url".into(),
-        "--limit".into(),
-        "5".into(),
-    ];
-    if let Some(repo) = repo {
-        args.push("--repo".into());
-        args.push(repo.to_string());
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    let output = Command::new("gh")
-        .args(&arg_refs)
-        .current_dir(path)
-        .output()
-        .map_err(|e| {
-            Error::git_command_failed(format!(
-                "gh pr list --search: {} (is `gh` installed and authenticated?)",
-                e
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::git_command_failed(format!(
-            "gh pr list --search {}: {}",
-            sha,
-            stderr.trim()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Vec<InspectPr> = serde_json::from_str(&stdout).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse `gh pr list --search {}`", sha)),
-            Some(stdout.chars().take(200).collect()),
-        )
-    })?;
+    let parsed = git::pr_find_by_commit(Path::new(path), sha, repo, 5)?
+        .into_iter()
+        .map(|item| InspectPr {
+            number: item.number,
+            state: item.state,
+            title: item.title,
+            url: item.url,
+        })
+        .collect::<Vec<_>>();
 
     match parsed.len() {
         0 => Ok(PrLookup::None),

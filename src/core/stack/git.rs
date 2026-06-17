@@ -1,15 +1,12 @@
 //! Shared git command helpers for stack verbs.
 
-use std::process::Command;
+use std::path::Path;
 
-use crate::core::error::{Error, Result};
+use crate::core::error::Result;
+use crate::core::git;
 
 pub(crate) fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|e| Error::git_command_failed(format!("git {}: {}", args.join(" "), e)))
+    git::run_git_output(Path::new(path), args, &format!("git {}", args.join(" ")))
 }
 
 #[cfg(test)]
