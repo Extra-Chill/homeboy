@@ -10,8 +10,13 @@ pub struct JsonCommandRun {
     pub stdout_result: homeboy::core::Result<Value>,
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
-    pub human_stdout: Option<String>,
-    pub human_stderr: Option<String>,
+    pub presentation: CommandPresentation,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CommandPresentation {
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
 }
 
 impl JsonCommandRun {
@@ -20,9 +25,13 @@ impl JsonCommandRun {
             stdout_result,
             exit_code,
             output_file_result: None,
-            human_stdout: None,
-            human_stderr: None,
+            presentation: CommandPresentation::default(),
         }
+    }
+
+    pub fn with_presentation(mut self, presentation: CommandPresentation) -> Self {
+        self.presentation = presentation;
+        self
     }
 
     pub fn from_raw(
@@ -43,8 +52,7 @@ impl JsonCommandRun {
                 stdout_result: output_file_result,
                 exit_code,
                 output_file_result: None,
-                human_stdout: None,
-                human_stderr: None,
+                presentation: CommandPresentation::default(),
             },
             raw_stdout,
         )
@@ -68,11 +76,11 @@ impl<'a> OutputService<'a> {
 
     pub fn emit_run(&self, run: JsonCommandRun, mode: CommandOutputFileMode) -> i32 {
         self.write_output_file(&run, mode);
-        if let Some(human_stderr) = run.human_stderr {
-            eprint!("{}", human_stderr);
+        if let Some(stderr) = run.presentation.stderr {
+            eprint!("{}", stderr);
         }
-        if let Some(human_stdout) = run.human_stdout {
-            print!("{}", human_stdout);
+        if let Some(stdout) = run.presentation.stdout {
+            print!("{}", stdout);
         } else {
             output::print_json_result(run.stdout_result, run.exit_code).ok();
         }
@@ -183,8 +191,7 @@ pub fn run_json(
                 stdout_result,
                 exit_code,
                 output_file_result,
-                human_stdout: None,
-                human_stderr: None,
+                presentation: CommandPresentation::default(),
             }
         }
         (_, command) => super::json_output::run_command_output(command, global),
@@ -239,8 +246,7 @@ mod tests {
             stdout_result: Ok(json!({ "kind": "stdout" })),
             exit_code: 0,
             output_file_result,
-            human_stdout: None,
-            human_stderr: None,
+            presentation: CommandPresentation::default(),
         }
     }
 
@@ -300,6 +306,23 @@ mod tests {
     fn generic_output_file_uses_stdout_result() {
         let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
 
+        assert_eq!(
+            select_output_file_result(&run, CommandOutputFileMode::GenericEnvelope)
+                .as_ref()
+                .unwrap(),
+            &json!({ "kind": "stdout" })
+        );
+    }
+
+    #[test]
+    fn presentation_does_not_replace_structured_stdout_or_file_payload() {
+        let run = JsonCommandRun::from_stdout_result(Ok(json!({ "kind": "stdout" })), 0)
+            .with_presentation(CommandPresentation {
+                stdout: Some("short summary\n".to_string()),
+                stderr: Some("progress\n".to_string()),
+            });
+
+        assert_eq!(run.presentation.stdout.as_deref(), Some("short summary\n"));
         assert_eq!(
             select_output_file_result(&run, CommandOutputFileMode::GenericEnvelope)
                 .as_ref()
