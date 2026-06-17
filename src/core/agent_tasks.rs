@@ -248,8 +248,10 @@ pub mod provider {
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
         AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
         AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
-        ExtensionProviderAgentTaskExecutor, WorkspaceMaterializationSpec, WorkspaceMountSpec,
-        AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+        AgentTaskRuntimeContract, AgentTaskRuntimeLifecycleStates, AgentTaskRuntimeNormalization,
+        AgentTaskRuntimeOutputArtifactMapping, ExtensionProviderAgentTaskExecutor,
+        WorkspaceMaterializationSpec, WorkspaceMountSpec, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
     pub(crate) use super::super::agent_task_provider::{
         provider_runner_secret_env_for_plan_with_providers,
