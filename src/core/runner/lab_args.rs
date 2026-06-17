@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
 use crate::core::config::read_json_spec_to_string;
+use crate::core::defaults;
 use crate::core::worktree;
 use crate::core::{Error, Result};
 
@@ -81,6 +83,49 @@ pub(super) fn remap_provider_config_in_args(
         out.push(arg.clone());
     }
     out
+}
+
+pub(super) fn inject_agent_task_default_provider_config_in_args(
+    args: &[String],
+) -> Result<Vec<String>> {
+    if !is_agent_task_dispatch_or_cook(args) || args_have_provider_config(args) {
+        return Ok(args.to_vec());
+    }
+
+    let settings = defaults::load_config().settings;
+    if settings.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    let config = materialize_provider_config_refs(Value::Object(settings.into_iter().collect()))?;
+    if config.as_object().is_none_or(|map| map.is_empty()) {
+        return Ok(args.to_vec());
+    }
+
+    let config = serde_json::to_string(&config).map_err(|err| {
+        Error::validation_invalid_argument(
+            "provider_config",
+            "failed to serialize materialized agent-task provider config for Lab offload",
+            Some(err.to_string()),
+            None,
+        )
+    })?;
+
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut inserted = false;
+    for arg in args {
+        if !inserted && arg == "--" {
+            out.push("--provider-config".to_string());
+            out.push(config.clone());
+            inserted = true;
+        }
+        out.push(arg.clone());
+    }
+    if !inserted {
+        out.push("--provider-config".to_string());
+        out.push(config);
+    }
+    Ok(out)
 }
 
 pub(super) fn remap_agent_task_plan_in_args(
@@ -404,6 +449,33 @@ fn remap_path_json_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String
         .unwrap_or_else(|_| raw.to_string())
 }
 
+fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {
+    let Some(agent_task_index) = args.iter().position(|arg| arg == "agent-task") else {
+        return false;
+    };
+    args.iter()
+        .skip(agent_task_index + 1)
+        .find(|arg| !arg.starts_with('-'))
+        .is_some_and(|command| matches!(command.as_str(), "dispatch" | "cook"))
+}
+
+fn args_have_provider_config(args: &[String]) -> bool {
+    let mut passthrough = false;
+    for arg in args {
+        if passthrough {
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            continue;
+        }
+        if arg == "--provider-config" || arg.starts_with("--provider-config=") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
 /// embedded local paths, and return inline JSON.
 ///
@@ -668,6 +740,7 @@ pub(super) fn rewrite_runner_resident_lab_offload_args(args: &[String]) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn lab_source_path_uses_agent_task_dispatch_cwd() {
@@ -819,6 +892,115 @@ mod tests {
         // unrelated args preserved
         assert!(out.iter().any(|a| a == "--prompt"));
         assert!(out.iter().any(|a| a == "fix it"));
+    }
+
+    #[test]
+    fn injects_default_provider_config_for_agent_task_cook() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                settings: HashMap::from([
+                    ("provider".to_string(), serde_json::json!("codex")),
+                    (
+                        "provider_plugin_paths".to_string(),
+                        serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                    ),
+                ]),
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "fix it".to_string(),
+            ];
+
+            let out = inject_agent_task_default_provider_config_in_args(&args).expect("inject");
+            let cfg_idx = out
+                .iter()
+                .position(|arg| arg == "--provider-config")
+                .unwrap()
+                + 1;
+            let config: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("config");
+
+            assert_eq!(config["provider"], "codex");
+            assert_eq!(
+                config["provider_plugin_paths"][0],
+                "/Users/chubes/Developer/ai-provider-for-openai@codex"
+            );
+            assert!(out.iter().any(|arg| arg == "--prompt"));
+        });
+    }
+
+    #[test]
+    fn injected_default_provider_config_is_remappable() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                settings: HashMap::from([(
+                    "provider_plugin_paths".to_string(),
+                    serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                )]),
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "dispatch".to_string(),
+                "--prompt".to_string(),
+                "fix it".to_string(),
+            ];
+            let injected =
+                inject_agent_task_default_provider_config_in_args(&args).expect("inject");
+            let remapped = remap_provider_config_in_args(
+                &injected,
+                &[LabPathRemap {
+                    local: "/Users/chubes/Developer/ai-provider-for-openai@codex".to_string(),
+                    remote: "/home/chubes/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+                        .to_string(),
+                }],
+            );
+            let cfg_idx = remapped
+                .iter()
+                .position(|arg| arg == "--provider-config")
+                .unwrap()
+                + 1;
+            let config: serde_json::Value =
+                serde_json::from_str(&remapped[cfg_idx]).expect("config");
+
+            assert_eq!(
+                config["provider_plugin_paths"][0],
+                "/home/chubes/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_provider_config_prevents_default_injection() {
+        crate::test_support::with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig {
+                settings: HashMap::from([(
+                    "provider_plugin_paths".to_string(),
+                    serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                )]),
+                ..defaults::HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--provider-config".to_string(),
+                "{\"provider\":\"explicit\"}".to_string(),
+            ];
+
+            let out = inject_agent_task_default_provider_config_in_args(&args).expect("inject");
+            assert_eq!(out, args);
+        });
     }
 
     #[test]
