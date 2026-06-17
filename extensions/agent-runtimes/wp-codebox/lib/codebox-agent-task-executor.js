@@ -209,15 +209,17 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools);
   const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
+  const homeboySecretEnvPlan = homeboyAgentTaskSecretEnvPlan();
+  const plannedSecretEnv = secretEnvNamesFromPlan(homeboySecretEnvPlan);
   const agent = firstValue(config.agent, runtimeOptions.agent, '');
   const runtimeTask = runtimeTaskWithExecutionDefaults(
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
     { provider, model, agentBundles }
   );
   const explicitSecretEnv = [
-    ...normalizeArray(request.executor?.secret_env),
+    ...(plannedSecretEnv.length > 0 ? plannedSecretEnv : normalizeArray(request.executor?.secret_env)),
     ...normalizeArray(config.secret_env),
-    ...normalizeArray(runtimeOptions.secretEnv),
+    ...(plannedSecretEnv.length > 0 ? [] : normalizeArray(runtimeOptions.secretEnv)),
   ];
   const timeoutSeconds = request.limits?.task_timeout_seconds || request.limits?.taskTimeoutSeconds;
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
@@ -888,6 +890,20 @@ function parseJsonObject(value) {
   } catch {
     return null;
   }
+}
+
+function homeboyAgentTaskSecretEnvPlan() {
+  return parseJsonObject(process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON);
+}
+
+function secretEnvNamesFromPlan(plan) {
+  if (!plan || plan.schema !== 'homeboy/secret-env-plan/v1') {
+    return [];
+  }
+  return uniquePaths([
+    ...normalizeArray(plan.secret_env_names),
+    ...Object.values(plan.env_name_mapping || {}).flatMap(normalizeArray),
+  ]);
 }
 
 function normalizeArray(value) {

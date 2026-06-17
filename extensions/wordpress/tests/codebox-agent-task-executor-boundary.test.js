@@ -392,6 +392,39 @@ try {
 assert.deepEqual(codexTaskInput.provider_plugin_paths, ['/missing/stale-openai-provider']);
 assert.deepEqual(codexTaskInput.secret_env, provider.provider_defaults.codex.secret_env);
 
+const previousSecretEnvPlan = process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
+process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = JSON.stringify({
+  schema: 'homeboy/secret-env-plan/v1',
+  secret_env_names: ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
+  env_name_mapping: {
+    'wordpress.codebox-agent-task-executor': ['HOMEBOY_PLANNED_CODEBOX_SECRET'],
+  },
+  status: [{ name: 'HOMEBOY_PLANNED_CODEBOX_SECRET', configured: true, source: 'env' }],
+});
+let plannedSecretEnvTaskInput;
+try {
+  plannedSecretEnvTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+    schema: 'homeboy/agent-task-request/v1',
+    task_id: 'planned-secret-env-codebox-task-1',
+    executor: {
+      backend: 'codebox',
+      config: { provider: 'codex', secret_env: ['EXPLICIT_CODEBOX_SECRET'] },
+    },
+    instructions: 'Run a Codex-backed Codebox task with Homeboy-planned secret env.',
+    inputs: {},
+  });
+} finally {
+  if (previousSecretEnvPlan === undefined) {
+    delete process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON;
+  } else {
+    process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON = previousSecretEnvPlan;
+  }
+}
+assert.deepEqual(plannedSecretEnvTaskInput.secret_env, [
+  'HOMEBOY_PLANNED_CODEBOX_SECRET',
+  'EXPLICIT_CODEBOX_SECRET',
+]);
+
 const claudeCodeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'claude-code-codebox-task-1',
