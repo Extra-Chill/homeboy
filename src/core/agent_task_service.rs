@@ -24,7 +24,7 @@ use crate::core::agent_task_scheduler::{
 };
 use crate::core::agent_task_secrets::validate_secret_env_with_fallbacks;
 use crate::core::secret_env_plan::SecretEnvPlan;
-use crate::core::{config, Error, Result};
+use crate::core::{config, worktree, Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct AgentTaskRunResult<T> {
@@ -491,7 +491,7 @@ pub fn run_loaded_plan<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    prepare_plan_for_execution(&mut plan)?;
+    prepare_plan_for_execution(&mut plan, record_run_id)?;
 
     if let Some(run_id) = record_run_id {
         agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
@@ -521,7 +521,7 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
-    prepare_plan_for_execution(&mut plan)?;
+    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
     agent_task_lifecycle::mark_running(&run_id)?;
     run_prepared_claimed(run_id, plan, executor)
 }
@@ -596,7 +596,7 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
-    prepare_plan_for_execution(&mut plan)?;
+    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
     run_prepared_claimed(run_id, plan, executor)
 }
 
@@ -616,10 +616,18 @@ where
     })
 }
 
-fn prepare_plan_for_execution(plan: &mut AgentTaskPlan) -> Result<()> {
-    normalize_plan_workspaces(plan)?;
+fn prepare_plan_for_execution(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Result<()> {
+    prepare_plan_workspaces(plan, run_id)?;
     apply_provider_runner_secret_env_contracts(plan);
     preflight_plan_secret_env(plan)
+}
+
+fn prepare_plan_workspaces(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Result<()> {
+    for request in &mut plan.tasks {
+        prepare_component_worktree_workspace(request, run_id)?;
+    }
+
+    Ok(())
 }
 
 fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
@@ -808,15 +816,7 @@ fn normalize_component_worktree_workspace(request: &mut AgentTaskRequest) -> Res
         .or_else(|| materialization_string(&request.workspace.materialization, "resolved_root"));
 
     let Some(root) = resolved_root else {
-        return Err(Error::validation_invalid_argument(
-            "workspace.root",
-            format!(
-                "agent-task task '{}' requested component-worktree workspace for component '{}' but no resolved root was provided; creating component worktrees depends on the generic Homeboy worktree primitive tracked by Extra-Chill/homeboy#3362",
-                request.task_id, component_id
-            ),
-            None,
-            None,
-        ));
+        return Ok(());
     };
 
     request.workspace.kind = None;
@@ -831,6 +831,104 @@ fn normalize_component_worktree_workspace(request: &mut AgentTaskRequest) -> Res
     request.workspace.materialization = Value::Null;
 
     Ok(())
+}
+
+fn prepare_component_worktree_workspace(
+    request: &mut AgentTaskRequest,
+    run_id: Option<&str>,
+) -> Result<()> {
+    if request.workspace.kind.as_deref() != Some("component-worktree") {
+        return Ok(());
+    }
+    if request.workspace.root.is_some()
+        || materialization_string(&request.workspace.materialization, "root").is_some()
+        || materialization_string(&request.workspace.materialization, "resolved_root").is_some()
+    {
+        return normalize_component_worktree_workspace(request);
+    }
+
+    let component_id = request.workspace.component_id.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace.component_id",
+            format!(
+                "agent-task task '{}' component-worktree workspace requires component_id",
+                request.task_id
+            ),
+            None,
+            None,
+        )
+    })?;
+    let branch = request.workspace.branch.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace.branch",
+            format!(
+                "agent-task task '{}' component-worktree workspace for component '{}' requires branch",
+                request.task_id, component_id
+            ),
+            None,
+            None,
+        )
+    })?;
+    let cleanup_policy = cleanup_policy_for_workspace(request.workspace.cleanup.as_deref());
+    let created = worktree::create(worktree::WorktreeCreateOptions {
+        component_id: component_id.clone(),
+        branch,
+        from: request.workspace.base_ref.clone(),
+        task_url: request.workspace.task_url.clone().or_else(|| {
+            request
+                .source_refs
+                .iter()
+                .find(|source| source.kind == "task")
+                .or_else(|| request.source_refs.first())
+                .map(source_uri)
+        }),
+        run_id: run_id.map(str::to_string),
+        cleanup_policy,
+    })?;
+    let record = created.record;
+    let cleanup = cleanup_lifecycle_policy(&record.cleanup_policy);
+    request.workspace.kind = None;
+    request.workspace.mode = AgentTaskWorkspaceMode::Existing;
+    request.workspace.root = Some(record.worktree_path.clone());
+    request.workspace.slug = Some(component_id);
+    request.workspace.component_id = None;
+    request.workspace.branch = None;
+    request.workspace.base_ref = None;
+    request.workspace.task_url = None;
+    request.workspace.cleanup = Some(cleanup.to_string());
+    request.workspace.materialization = serde_json::json!({
+        "kind": "homeboy-worktree",
+        "id": record.id,
+        "component_id": record.component_id,
+        "branch": record.branch,
+        "base_ref": record.base_ref,
+        "root": record.worktree_path,
+        "source_checkout": record.source_checkout,
+        "task_url": record.task_url,
+        "run_id": record.run_id,
+        "cleanup_policy": cleanup,
+    });
+
+    Ok(())
+}
+
+fn cleanup_policy_for_workspace(value: Option<&str>) -> Option<worktree::CleanupPolicy> {
+    match value {
+        Some("remove_when_safe") | Some("remove-when-safe") | Some("cleanup") => {
+            Some(worktree::CleanupPolicy::RemoveWhenSafe)
+        }
+        Some("preserve") | Some("preserve_on_failure") | Some("preserve-on-failure") => {
+            Some(worktree::CleanupPolicy::PreserveOnFailure)
+        }
+        _ => None,
+    }
+}
+
+fn cleanup_lifecycle_policy(policy: &worktree::CleanupPolicy) -> &'static str {
+    match policy {
+        worktree::CleanupPolicy::RemoveWhenSafe => "remove_when_safe",
+        worktree::CleanupPolicy::PreserveOnFailure => "preserve",
+    }
 }
 
 fn materialization_string(materialization: &Value, key: &str) -> Option<String> {
@@ -851,6 +949,8 @@ mod tests {
     use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
     use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
     use crate::test_support::with_isolated_home;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn service_run_loaded_plan_persists_durable_lifecycle() {
@@ -888,6 +988,70 @@ mod tests {
             AgentTaskWorkspaceMode::Existing
         );
         assert!(plan.tasks[0].workspace.materialization.is_null());
+    }
+
+    #[test]
+    fn service_materializes_component_worktree_before_provider_dispatch() {
+        with_isolated_home(|home| {
+            let repo = home.path().join("fixture");
+            create_git_repo(&repo);
+            write_component_registration(home.path(), "fixture", &repo);
+            let observed_request = Arc::new(Mutex::new(None));
+            let mut plan = test_plan();
+            plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
+            plan.tasks[0].workspace.component_id = Some("fixture".to_string());
+            plan.tasks[0].workspace.branch = Some("fix/service-task".to_string());
+            plan.tasks[0].workspace.base_ref = Some("HEAD".to_string());
+            plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+            plan.tasks[0].source_refs = vec![AgentTaskSourceRef {
+                kind: "task".to_string(),
+                uri: "https://example.com/tasks/123".to_string(),
+                revision: None,
+            }];
+
+            let result = run_loaded_plan(
+                plan,
+                Some("service-materialized-worktree"),
+                CapturingExecutor {
+                    observed_request: Arc::clone(&observed_request),
+                },
+            )
+            .expect("run-plan completed");
+            let observed = observed_request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .expect("provider saw request");
+            let record = worktree::resolve("fixture@fix-service-task").expect("worktree record");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(
+                record.run_id.as_deref(),
+                Some("service-materialized-worktree")
+            );
+            assert_eq!(
+                record.task_url.as_deref(),
+                Some("https://example.com/tasks/123")
+            );
+            assert_eq!(
+                record.cleanup_policy,
+                worktree::CleanupPolicy::PreserveOnFailure
+            );
+            assert_eq!(observed.workspace.mode, AgentTaskWorkspaceMode::Existing);
+            assert_eq!(
+                observed.workspace.root.as_deref(),
+                Some(record.worktree_path.as_str())
+            );
+            assert_eq!(observed.workspace.slug.as_deref(), Some("fixture"));
+            assert!(observed.workspace.kind.is_none());
+            assert!(observed.workspace.component_id.is_none());
+            assert_eq!(observed.workspace.cleanup.as_deref(), Some("preserve"));
+            assert_eq!(
+                observed.workspace.materialization["id"].as_str(),
+                Some("fixture@fix-service-task")
+            );
+            assert!(Path::new(&record.worktree_path).is_dir());
+        });
     }
 
     #[test]
@@ -1009,6 +1173,77 @@ mod tests {
                 metadata: Value::Null,
             }
         }
+    }
+
+    struct CapturingExecutor {
+        observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
+    }
+
+    impl AgentTaskExecutorAdapter for CapturingExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            *self
+                .observed_request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                failure_classification: None,
+                artifacts: Vec::new(),
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: Value::Null,
+                workflow: None,
+                follow_up: None,
+                metadata: Value::Null,
+            }
+        }
+    }
+
+    fn create_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        run_git(path, &["init", "-q"]);
+        run_git(path, &["config", "user.email", "homeboy@example.com"]);
+        run_git(path, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(path.join("README.md"), "initial\n").expect("readme");
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-q", "-m", "initial"]);
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        let dir = home.join(".config/homeboy/components");
+        std::fs::create_dir_all(&dir).expect("components dir");
+        std::fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_path": format!("wp-content/plugins/{id}")
+            })
+            .to_string(),
+        )
+        .expect("component registration");
     }
 
     fn test_plan() -> AgentTaskPlan {

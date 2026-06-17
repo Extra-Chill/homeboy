@@ -625,18 +625,17 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
 }
 
 #[test]
-fn run_plan_rejects_unresolved_component_worktree_until_core_primitive_exists() {
+fn run_plan_rejects_component_worktree_without_branch() {
     let mut plan = test_plan();
     plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
     plan.tasks[0].workspace.component_id = Some("wp-coding-agents".to_string());
-    plan.tasks[0].workspace.branch = Some("fix/179-homeboy-codebox-guidance".to_string());
 
     let error = run_loaded_plan(plan, None, CapturingExecutor::default())
-        .expect_err("unresolved component worktree rejected");
+        .expect_err("component worktree without branch rejected");
     let message = error.to_string();
 
-    assert!(message.contains("component-worktree workspace"));
-    assert!(message.contains("Extra-Chill/homeboy#3362"));
+    assert!(message.contains("workspace.branch"));
+    assert!(message.contains("requires branch"));
 }
 
 #[test]
