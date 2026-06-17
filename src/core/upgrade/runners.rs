@@ -503,7 +503,25 @@ fn upgrade_runner_with_executor(
         .and_then(|alignment| alignment.drift.clone());
 
     if let Some(alignment) = alignment {
-        if let Some(new_path) = alignment.update_to.as_deref() {
+        if alignment.update_to.is_none()
+            && is_disposable_lab_workspace_homeboy_path(&homeboy_path)
+            && matches!(
+                (new_version.as_deref(), bare_homeboy_version.as_deref()),
+                (Some(configured), Some(bare)) if version_is_newer(configured, bare)
+            )
+        {
+            let repair = repair_stale_bare_homeboy_after_upgrade(
+                runner,
+                force,
+                method_override,
+                command_source_path.as_deref(),
+                new_version.as_deref().unwrap_or_default(),
+                exec,
+            );
+            bare_homeboy_version = repair.bare_version;
+            path_drift = repair.path_drift;
+            path_update_detail = Some(repair.detail);
+        } else if let Some(new_path) = alignment.update_to.as_deref() {
             match update_homeboy_path(&runner.id, new_path) {
                 Ok(()) => {
                     homeboy_path = new_path.to_string();
@@ -997,6 +1015,108 @@ struct FailedUpgradePathRecovery {
     homeboy_path: String,
     bare_version: Option<String>,
     detail: String,
+}
+
+struct StaleBareHomeboyRepair {
+    bare_version: Option<String>,
+    path_drift: Option<String>,
+    detail: String,
+}
+
+fn repair_stale_bare_homeboy_after_upgrade(
+    runner: &Runner,
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&str>,
+    configured_version: &str,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> StaleBareHomeboyRepair {
+    let repair_command = runner_upgrade_command("homeboy", force, method_override, source_path);
+    let repair_result = exec(
+        &runner.id,
+        runner_exec_options(runner, repair_command.clone()),
+    );
+    let repair_detail = match repair_result {
+        Ok((output, 0)) => runner_upgrade_detail(&output),
+        Ok((output, exit_code)) => {
+            let detail = runner_upgrade_detail(&output);
+            let bare_version = runner_homeboy_version(runner, "homeboy", exec)
+                .ok()
+                .flatten();
+            return StaleBareHomeboyRepair {
+                path_drift: Some(format!(
+                    "configured runner executable reports {configured_version}, but managed PATH-visible `homeboy` repair exited {exit_code}: {detail}"
+                )),
+                bare_version,
+                detail: format!(
+                    "managed PATH-visible `homeboy` repair failed with `{}`: {detail}",
+                    repair_command
+                        .iter()
+                        .map(|arg| shell_arg(arg))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            };
+        }
+        Err(err) => {
+            let bare_version = runner_homeboy_version(runner, "homeboy", exec)
+                .ok()
+                .flatten();
+            return StaleBareHomeboyRepair {
+                path_drift: Some(format!(
+                    "configured runner executable reports {configured_version}, but managed PATH-visible `homeboy` repair failed: {}",
+                    err.message
+                )),
+                bare_version,
+                detail: format!(
+                    "managed PATH-visible `homeboy` repair failed with `{}`: {}",
+                    repair_command
+                        .iter()
+                        .map(|arg| shell_arg(arg))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    err.message
+                ),
+            };
+        }
+    };
+
+    let bare_version = runner_homeboy_version(runner, "homeboy", exec)
+        .ok()
+        .flatten();
+    if bare_version.as_deref() == Some(configured_version) {
+        return StaleBareHomeboyRepair {
+            bare_version,
+            path_drift: None,
+            detail: format!(
+                "PATH-visible `homeboy` repaired with `{}` and now reports {configured_version}: {repair_detail}",
+                repair_command
+                    .iter()
+                    .map(|arg| shell_arg(arg))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        };
+    }
+
+    let bare_detail = bare_version
+        .as_deref()
+        .unwrap_or("an unknown version")
+        .to_string();
+    StaleBareHomeboyRepair {
+        path_drift: Some(format!(
+            "configured runner executable reports {configured_version}, but managed PATH-visible `homeboy` repair left bare `homeboy` at {bare_detail}"
+        )),
+        bare_version,
+        detail: format!(
+            "managed PATH-visible `homeboy` repair completed with `{}` but bare `homeboy` still reports {bare_detail}: {repair_detail}",
+            repair_command
+                .iter()
+                .map(|arg| shell_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    }
 }
 
 fn recover_runner_homeboy_path_after_failed_upgrade(
@@ -1912,8 +2032,11 @@ mod tests {
     }
 
     #[test]
-    fn reports_configured_path_and_bare_homeboy_drift() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+    fn repairs_stale_bare_homeboy_after_configured_runner_upgrade() {
+        let runner = ssh_runner(
+            "lab",
+            Some("/home/chubes/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
+        );
         let mut commands = Vec::new();
 
         let (updated, skipped) = upgrade_runners_with_executor(
@@ -1929,6 +2052,52 @@ mod tests {
                     2 => "{\"success\":true}\n",
                     3 => "homeboy 0.228.5\n",
                     4 => "homeboy 0.228.4\n",
+                    5 => "{\"success\":true}\n",
+                    6 => "homeboy 0.228.5\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert_eq!(updated[0].bare_homeboy_version.as_deref(), Some("0.228.5"));
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(commands[4][0], "homeboy");
+        assert_eq!(commands[4][1], "upgrade");
+        assert!(commands[4].contains(&"--skip-runners".to_string()));
+        assert!(updated[0]
+            .detail
+            .contains("PATH-visible `homeboy` repaired"));
+        assert!(!updated[0].detail.contains("runner PATH drift detected"));
+    }
+
+    #[test]
+    fn fails_when_managed_bare_homeboy_repair_leaves_path_drift() {
+        let runner = ssh_runner(
+            "lab",
+            Some("/home/chubes/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
+        );
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            false,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.228.4\n",
+                    2 => "{\"success\":true}\n",
+                    3 => "homeboy 0.228.5\n",
+                    4 => "homeboy 0.228.4\n",
+                    5 => "{\"success\":true}\n",
+                    6 => "homeboy 0.228.4\n",
                     _ => "",
                 };
                 Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
@@ -1943,21 +2112,13 @@ mod tests {
             .path_drift
             .as_deref()
             .unwrap()
-            .contains("bare `homeboy` reports 0.228.4"));
-        assert!(skipped[0]
-            .path_drift
-            .as_deref()
-            .unwrap()
-            .contains("bare `homeboy` is older than the configured runner executable"));
+            .contains("managed PATH-visible `homeboy` repair left bare `homeboy` at 0.228.4"));
         assert!(skipped[0]
             .recovery_commands
             .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
-        assert!(skipped[0].recovery_commands.contains(
-            &"homeboy runner exec lab --ssh -- sh -lc 'type -a homeboy; command -v homeboy; homeboy --version'".to_string()
-        ));
-        assert!(!skipped[0].recovery_commands.contains(
-            &"homeboy runner set lab --json '{\"homeboy_path\":\"homeboy\"}'".to_string()
-        ));
+        assert!(skipped[0]
+            .detail
+            .contains("managed PATH-visible `homeboy` repair completed"));
         assert!(skipped[0].detail.contains("runner PATH drift detected"));
     }
 
