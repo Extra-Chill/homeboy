@@ -130,5 +130,80 @@ structures; adapters are responsible for interpreting backend-specific payloads
 and returning normalized Homeboy artifacts, diagnostics, evidence refs, and
 status values.
 
+## Portable runtime manifest contract
+
+Provider manifests may include `runtime_contract` when a runtime returns stable
+runtime-shaped output that should be normalized into canonical Homeboy fields.
+This keeps Homeboy responsible for durable state, fanout, promotion, status,
+notifications, and canonical artifacts while each runtime adapter owns its launch
+mechanics and native payload vocabulary.
+
+```json
+{
+  "id": "wp-codebox.codex",
+  "backend": "codebox",
+  "capabilities": ["structured_outcome"],
+  "runtime_contract": {
+    "capabilities": ["sandbox", "artifacts", "agent_result"],
+    "lifecycle_states": {
+      "execution_states": {
+        "queued": "queued",
+        "running": "running",
+        "complete": "succeeded",
+        "failed": "failed"
+      },
+      "outcome_statuses": {
+        "complete": "succeeded",
+        "no_changes": "no_op",
+        "failed": "failed",
+        "timed_out": "timeout"
+      }
+    },
+    "normalization": {
+      "status_path": "outputs.codebox.state",
+      "summary_path": "outputs.codebox.summary",
+      "output_artifacts": [
+        {
+          "name": "patch",
+          "type": "patch",
+          "artifact_schema": "text/x-patch",
+          "path": "outputs.codebox.artifacts.patch",
+          "kind": "patch",
+          "mime": "text/x-patch"
+        },
+        {
+          "name": "agent-report",
+          "type": "agent_report",
+          "artifact_schema": "application/json",
+          "path": "outputs.codebox.artifacts.report",
+          "kind": "report",
+          "mime": "application/json"
+        }
+      ]
+    }
+  }
+}
+```
+
+The normalization hook is intentionally manifest-driven and small:
+
+- `capabilities` names runtime capabilities; scheduler routing still uses the
+  existing provider `capabilities` / request `required_capabilities` contract.
+- `lifecycle_states.execution_states` documents native runtime lifecycle names
+  and their canonical `AgentTaskExecutionState` values for async adapters.
+- `lifecycle_states.outcome_statuses` maps native terminal runtime status names
+  to canonical `AgentTaskOutcomeStatus` values.
+- `normalization.status_path` and `summary_path` read dotted paths from the
+  provider outcome's `outputs` or `metadata` objects.
+- `normalization.output_artifacts` maps runtime output paths to canonical
+  `AgentTaskArtifact` records and, when `type` or `artifact_schema` is present,
+  matching `AgentTaskTypedArtifact` records.
+
+For Codebox, the adapter should expose the native Codebox result under a stable
+`outputs.codebox` object and declare the mapping above. Homeboy then treats
+Codebox like any other runtime adapter: it records the run, evaluates canonical
+artifacts, promotes patches, reports status, and leaves Codebox-specific session
+details inside the runtime payload.
+
 For the fanout boundary, see
 [Provider fanout boundary](provider-fanout-boundary.md).

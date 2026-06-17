@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
-    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
-    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionState,
+    AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
+    AgentTaskTypedArtifact, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
+    AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -97,6 +98,8 @@ pub struct AgentTaskExecutorProvider {
         skip_serializing_if = "AgentTaskProviderRoleAliases::is_empty"
     )]
     pub role_aliases: AgentTaskProviderRoleAliases,
+    #[serde(default, skip_serializing_if = "AgentTaskRuntimeContract::is_empty")]
+    pub runtime_contract: AgentTaskRuntimeContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +110,83 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeContract {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskRuntimeLifecycleStates::is_empty"
+    )]
+    pub lifecycle_states: AgentTaskRuntimeLifecycleStates,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskRuntimeNormalization::is_empty"
+    )]
+    pub normalization: AgentTaskRuntimeNormalization,
+}
+
+impl AgentTaskRuntimeContract {
+    fn is_empty(&self) -> bool {
+        self.capabilities.is_empty()
+            && self.lifecycle_states.is_empty()
+            && self.normalization.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeLifecycleStates {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub execution_states: BTreeMap<String, AgentTaskExecutionState>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub outcome_statuses: BTreeMap<String, AgentTaskOutcomeStatus>,
+}
+
+impl AgentTaskRuntimeLifecycleStates {
+    fn is_empty(&self) -> bool {
+        self.execution_states.is_empty() && self.outcome_statuses.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeNormalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_artifacts: Vec<AgentTaskRuntimeOutputArtifactMapping>,
+}
+
+impl AgentTaskRuntimeNormalization {
+    fn is_empty(&self) -> bool {
+        self.status_path.is_none()
+            && self.summary_path.is_none()
+            && self.output_artifacts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeOutputArtifactMapping {
+    pub name: String,
+    #[serde(
+        default,
+        rename = "type",
+        alias = "artifact_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artifact_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_schema: Option<String>,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 fn default_provider_schema() -> String {
@@ -1667,6 +1747,111 @@ fn normalize_provider_outcome_roles(
 ) {
     normalize_provider_artifact_roles(&mut outcome.artifacts, &provider.role_aliases);
     normalize_provider_run_result_output(outcome, &provider.role_aliases);
+    normalize_provider_runtime_contract(outcome, provider);
+}
+
+fn normalize_provider_runtime_contract(
+    outcome: &mut AgentTaskOutcome,
+    provider: &AgentTaskExecutorProvider,
+) {
+    let normalization = &provider.runtime_contract.normalization;
+    if let Some(summary_path) = normalization.summary_path.as_deref() {
+        if let Some(summary) = dotted_value(outcome, summary_path).and_then(Value::as_str) {
+            if !summary.trim().is_empty() {
+                outcome.summary = Some(summary.to_string());
+            }
+        }
+    }
+
+    if let Some(status_path) = normalization.status_path.as_deref() {
+        if let Some(status) = dotted_value(outcome, status_path).and_then(Value::as_str) {
+            if let Some(mapped_status) = provider
+                .runtime_contract
+                .lifecycle_states
+                .outcome_statuses
+                .get(status)
+                .copied()
+            {
+                outcome.status = mapped_status;
+                if mapped_status != AgentTaskOutcomeStatus::Succeeded
+                    && outcome.failure_classification.is_none()
+                {
+                    outcome.failure_classification = Some(AgentTaskFailureClassification::Unknown);
+                }
+            }
+        }
+    }
+
+    for mapping in &normalization.output_artifacts {
+        let Some(value) = dotted_value(outcome, &mapping.path).cloned() else {
+            continue;
+        };
+        normalize_provider_runtime_artifact(outcome, mapping, value);
+    }
+}
+
+fn normalize_provider_runtime_artifact(
+    outcome: &mut AgentTaskOutcome,
+    mapping: &AgentTaskRuntimeOutputArtifactMapping,
+    value: Value,
+) {
+    let id = mapping.id.clone().unwrap_or_else(|| mapping.name.clone());
+    if outcome.artifacts.iter().any(|artifact| artifact.id == id) {
+        return;
+    }
+
+    let path = value.as_str().map(str::to_string).or_else(|| {
+        value
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let url = value.get("url").and_then(Value::as_str).map(str::to_string);
+    let artifact = AgentTaskArtifact {
+        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: id.clone(),
+        kind: mapping
+            .kind
+            .clone()
+            .or_else(|| mapping.artifact_type.clone())
+            .unwrap_or_else(|| mapping.name.clone()),
+        name: Some(mapping.name.clone()),
+        path,
+        url,
+        mime: mapping.mime.clone(),
+        size_bytes: None,
+        sha256: None,
+        metadata: json!({
+            "runtime_contract": true,
+            "source_path": mapping.path,
+        }),
+    };
+
+    outcome.artifacts.push(artifact.clone());
+    if mapping.artifact_type.is_some() || mapping.artifact_schema.is_some() {
+        outcome.typed_artifacts.push(AgentTaskTypedArtifact {
+            name: mapping.name.clone(),
+            artifact_type: mapping.artifact_type.clone(),
+            artifact_schema: mapping.artifact_schema.clone(),
+            payload: value,
+            artifact: Some(artifact),
+            metadata: json!({ "runtime_contract": true }),
+        });
+    }
+}
+
+fn dotted_value<'a>(outcome: &'a AgentTaskOutcome, path: &str) -> Option<&'a Value> {
+    let mut parts = path.split('.');
+    let first = parts.next()?.trim();
+    let mut current = match first {
+        "outputs" => &outcome.outputs,
+        "metadata" => &outcome.metadata,
+        _ => return None,
+    };
+    for part in parts {
+        current = current.get(part.trim())?;
+    }
+    Some(current).filter(|value| !value.is_null())
 }
 
 fn normalize_provider_artifact_roles(
@@ -2046,6 +2231,24 @@ mod tests {
                 "outputs": { "patch": ["diff"] },
                 "provider_alias_policy": "strict"
             },
+            "runtime_contract": {
+                "capabilities": ["sandbox", "artifacts"],
+                "lifecycle_states": {
+                    "execution_states": { "queued": "queued", "done": "succeeded" },
+                    "outcome_statuses": { "ok": "succeeded", "error": "failed" }
+                },
+                "normalization": {
+                    "status_path": "outputs.runtime.status",
+                    "summary_path": "outputs.runtime.summary",
+                    "output_artifacts": [{
+                        "name": "patch",
+                        "type": "patch",
+                        "artifact_schema": "text/x-patch",
+                        "path": "outputs.runtime.artifacts.patch",
+                        "kind": "patch"
+                    }]
+                }
+            },
             "workspace_materialization": {
                 "cwd": "git_checkout",
                 "provider_workspace_mode": "linked"
@@ -2094,6 +2297,22 @@ mod tests {
             "strict"
         );
         assert_eq!(
+            provider.runtime_contract.capabilities,
+            vec!["sandbox".to_string(), "artifacts".to_string()]
+        );
+        assert_eq!(
+            provider
+                .runtime_contract
+                .lifecycle_states
+                .outcome_statuses
+                .get("ok"),
+            Some(&AgentTaskOutcomeStatus::Succeeded)
+        );
+        assert_eq!(
+            provider.runtime_contract.normalization.output_artifacts[0].name,
+            "patch"
+        );
+        assert_eq!(
             provider
                 .workspace_materialization
                 .as_ref()
@@ -2125,9 +2344,123 @@ mod tests {
             "diagnostic"
         );
         assert_eq!(exported["role_aliases"]["provider_alias_policy"], "strict");
+        assert_eq!(exported["runtime_contract"]["capabilities"][0], "sandbox");
+        assert_eq!(
+            exported["runtime_contract"]["normalization"]["output_artifacts"][0]["name"],
+            "patch"
+        );
         assert_eq!(
             exported["workspace_materialization"]["provider_workspace_mode"],
             "linked"
+        );
+    }
+
+    #[test]
+    fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
+        let provider_output = json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task-runtime-normalization",
+            "status": "succeeded",
+            "outputs": {
+                "runtime": {
+                    "status": "done",
+                    "summary": "runtime finished",
+                    "artifacts": {
+                        "patch": "/tmp/runtime.patch",
+                        "report": { "path": "/tmp/report.json" }
+                    }
+                }
+            }
+        });
+        let script = script(&format!(
+            "process.stdout.write(JSON.stringify({}));",
+            provider_output
+        ));
+        let (request, mut provider) =
+            request("task-runtime-normalization", format!("node {script}"));
+        provider.runtime_contract = AgentTaskRuntimeContract {
+            capabilities: vec!["sandbox".to_string()],
+            lifecycle_states: AgentTaskRuntimeLifecycleStates {
+                execution_states: BTreeMap::new(),
+                outcome_statuses: BTreeMap::from([(
+                    "done".to_string(),
+                    AgentTaskOutcomeStatus::Succeeded,
+                )]),
+            },
+            normalization: AgentTaskRuntimeNormalization {
+                status_path: Some("outputs.runtime.status".to_string()),
+                summary_path: Some("outputs.runtime.summary".to_string()),
+                output_artifacts: vec![
+                    AgentTaskRuntimeOutputArtifactMapping {
+                        name: "patch".to_string(),
+                        artifact_type: Some("patch".to_string()),
+                        artifact_schema: Some("text/x-patch".to_string()),
+                        path: "outputs.runtime.artifacts.patch".to_string(),
+                        kind: Some("patch".to_string()),
+                        mime: Some("text/x-patch".to_string()),
+                        id: None,
+                    },
+                    AgentTaskRuntimeOutputArtifactMapping {
+                        name: "report".to_string(),
+                        artifact_type: Some("agent_report".to_string()),
+                        artifact_schema: Some("application/json".to_string()),
+                        path: "outputs.runtime.artifacts.report".to_string(),
+                        kind: Some("report".to_string()),
+                        mime: Some("application/json".to_string()),
+                        id: None,
+                    },
+                ],
+            },
+        };
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
+        assert_eq!(outcome.artifacts.len(), 2);
+        assert_eq!(outcome.artifacts[0].kind, "patch");
+        assert_eq!(
+            outcome.artifacts[0].path.as_deref(),
+            Some("/tmp/runtime.patch")
+        );
+        assert_eq!(outcome.artifacts[1].kind, "report");
+        assert_eq!(
+            outcome.artifacts[1].path.as_deref(),
+            Some("/tmp/report.json")
+        );
+        assert_eq!(outcome.typed_artifacts.len(), 2);
+        assert_eq!(outcome.typed_artifacts[0].name, "patch");
+        assert_eq!(
+            outcome.typed_artifacts[1].artifact_schema.as_deref(),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn runtime_contract_maps_failed_runtime_status() {
+        let provider_output = json!({
+            "schema": AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task-runtime-failed",
+            "status": "succeeded",
+            "outputs": { "codebox": { "state": "failed" } }
+        });
+        let script = script(&format!(
+            "process.stdout.write(JSON.stringify({}));",
+            provider_output
+        ));
+        let (request, mut provider) = request("task-runtime-failed", format!("node {script}"));
+        provider.backend = "codebox".to_string();
+        provider.runtime_contract.lifecycle_states.outcome_statuses =
+            BTreeMap::from([("failed".to_string(), AgentTaskOutcomeStatus::Failed)]);
+        provider.runtime_contract.normalization.status_path =
+            Some("outputs.codebox.state".to_string());
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Unknown)
         );
     }
 
@@ -2209,6 +2542,7 @@ mod tests {
             dependency_failure_patterns: Vec::new(),
             timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
+            runtime_contract: AgentTaskRuntimeContract::default(),
             extension_id: None,
             extension_path: None,
             runtime_id: None,
