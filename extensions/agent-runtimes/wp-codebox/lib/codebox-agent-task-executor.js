@@ -288,24 +288,26 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
 }
 
 function artifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
-  const declarations = firstDefined(
+  const declarations = firstNonEmptyArray(
     request.artifact_declarations,
+    options.artifactDeclarations,
+    []
+  );
+  if (declarations.length > 0) {
+    return declarations
+      .map((declaration) => wpCodeboxArtifactDeclarationFromHomeboy(declaration))
+      .filter(Boolean);
+  }
+  return legacyArtifactDeclarationsFromAgentTaskRequest(request, config, inputs, options);
+}
+
+function legacyArtifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
+  const declarations = [
     request.artifactDeclarations,
     inputs.artifact_declarations,
     inputs.artifactDeclarations,
     config.artifact_declarations,
     config.artifactDeclarations,
-    options.artifactDeclarations,
-    []
-  );
-  if (Array.isArray(declarations) && declarations.length > 0) {
-    return declarations;
-  }
-  return genericArtifactDeclarationsFromAgentTaskRequest(request, config, inputs, options);
-}
-
-function genericArtifactDeclarationsFromAgentTaskRequest(request, config = {}, inputs = {}, options = {}) {
-  const declarations = [
     request.artifact_outputs,
     request.artifactOutputs,
     request.output_artifacts,
@@ -341,7 +343,7 @@ function genericArtifactDeclarationsFromAgentTaskRequest(request, config = {}, i
     options.outputArtifacts,
   ].flatMap(genericArtifactDeclarationEntries);
   return declarations
-    .map(([name, declaration]) => wpCodeboxArtifactDeclarationFromGeneric(name, declaration))
+    .map(([name, declaration]) => wpCodeboxArtifactDeclarationFromLegacy(name, declaration))
     .filter(Boolean);
 }
 
@@ -355,7 +357,11 @@ function genericArtifactDeclarationEntries(value) {
   return Object.entries(value);
 }
 
-function wpCodeboxArtifactDeclarationFromGeneric(defaultName, declaration) {
+function wpCodeboxArtifactDeclarationFromHomeboy(declaration) {
+  return wpCodeboxArtifactDeclarationFromLegacy('', declaration);
+}
+
+function wpCodeboxArtifactDeclarationFromLegacy(defaultName, declaration) {
   if (typeof declaration === 'string') {
     return {
       schema: 'wp-codebox/artifact-declaration/v1',
@@ -374,12 +380,16 @@ function wpCodeboxArtifactDeclarationFromGeneric(defaultName, declaration) {
     || declaration.artifactSchema
     || declaration.content_schema
     || declaration.contentSchema
-    || (declaration.schema && declaration.schema !== 'wp-codebox/artifact-declaration/v1' ? declaration.schema : undefined);
+    || (declaration.schema && ![
+      'homeboy/agent-task-artifact-declaration/v1',
+      'wp-codebox/artifact-declaration/v1',
+    ].includes(declaration.schema) ? declaration.schema : undefined);
   return Object.fromEntries(Object.entries({
     schema: 'wp-codebox/artifact-declaration/v1',
     name,
     type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType,
     artifact_schema: artifactSchema,
+    path: declaration.path,
     required: declaration.required === undefined ? true : declaration.required === true,
     description: declaration.description,
     metadata: declaration.metadata,
