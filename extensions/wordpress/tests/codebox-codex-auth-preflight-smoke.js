@@ -131,7 +131,7 @@ try {
       ...process.env,
       AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'stale-access-token-value',
       AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'stale-refresh-token-value',
-      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
       AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'stale-account-id-value',
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
       HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: oauthServer.url,
@@ -147,6 +147,39 @@ try {
   assert.match(outcome.diagnostics[0].data.stderr, /Refresh Codex OAuth credentials/);
   assert(!JSON.stringify(outcome).includes('stale-access-token-value'));
   assert(!JSON.stringify(outcome).includes('stale-refresh-token-value'));
+
+  const validAccessResult = spawnSync(process.execPath, [wpCodeboxTaskRunner], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      schema: 'wp-codebox/task-input/v1',
+      version: 1,
+      goal: 'Use fresh Codex access token without refreshing first.',
+      target: {},
+      allowed_tools: [],
+      expected_artifacts: [],
+      structured_artifacts: [],
+      agent_bundles: [],
+      sandbox_tool_policy: {},
+      policy: {},
+      context: {},
+      provider: 'codex',
+      model: 'gpt-5.5',
+      secret_env: codexSecretEnv,
+      wp_codebox_bin: '/bin/false',
+    }),
+    env: {
+      ...process.env,
+      AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'valid-access-token-value',
+      AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'rejecting-refresh-token-value',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
+      AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
+      HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: oauthServer.url,
+    },
+  });
+  assert.notEqual(validAccessResult.status, 0, 'fake WP Codebox command should fail after auth preflight');
+  assert(!`${validAccessResult.stdout}${validAccessResult.stderr}`.includes('OAuth refresh returned HTTP 401'));
+  assert(!`${validAccessResult.stdout}${validAccessResult.stderr}`.includes('rejecting-refresh-token-value'));
 
   oauthServer.stop();
   oauthServer = createRotatingOAuthServer();
@@ -185,7 +218,7 @@ try {
       ...process.env,
       AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'stale-access-token-value',
       AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'stale-refresh-token-value',
-      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '4102444800',
+      AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: '1',
       AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: 'account-id-value',
       AI_PROVIDER_OPENAI_CODEX_FEDRAMP: '0',
       HOMEBOY_WP_CODEBOX_CODEX_TOKEN_URL: oauthServer.url,

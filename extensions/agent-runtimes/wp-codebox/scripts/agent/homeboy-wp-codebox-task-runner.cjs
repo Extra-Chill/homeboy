@@ -284,8 +284,8 @@ async function codexAuthPreflightEnv(request) {
 
   const safetyWindowSeconds = 300;
   const now = Math.floor(Date.now() / 1000);
-  if (expiresAt <= now + safetyWindowSeconds) {
-    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is expired or expires within ${safetyWindowSeconds} seconds. ${codexAuthGuidance()}`);
+  if (expiresAt > now + safetyWindowSeconds) {
+    return {};
   }
 
   return refreshCodexAuthEnv();
