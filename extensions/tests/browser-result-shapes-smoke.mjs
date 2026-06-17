@@ -6,6 +6,7 @@ import {
     HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
     buildBenchResultsEnvelope,
     buildBrowserBenchResult,
+    normalizeBrowserBenchWorkloadResult,
 } from '../scripts/lib/browser-result-shapes.mjs';
 
 test('buildBenchResultsEnvelope emits Homeboy core schema shape', () => {
@@ -57,5 +58,25 @@ test('buildBrowserBenchResult composes browser evidence workload result', () => 
     assert.deepEqual(result.metadata, {
         browser_evidence_schema: HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
         route: '/wp-admin/',
+    });
+});
+
+test('normalizeBrowserBenchWorkloadResult only normalizes browser-shaped workloads', () => {
+    const standard = { metrics: { custom_metric: 1 }, metadata: { kind: 'standard' } };
+    assert.equal(normalizeBrowserBenchWorkloadResult(standard), standard);
+
+    const browser = normalizeBrowserBenchWorkloadResult({
+        browserMetrics: { browser_ready_ms: 12.3456 },
+        browserArtifacts: { trace: { path: 'trace.zip', kind: 'playwright-trace', ignored: true } },
+        metadata: { route: '/' },
+    });
+
+    assert.deepEqual(browser, {
+        metrics: { browser_ready_ms: 12.346 },
+        artifacts: { trace: { kind: 'playwright-trace', path: 'trace.zip' } },
+        metadata: {
+            browser_evidence_schema: HOMEBOY_BROWSER_EVIDENCE_SCHEMA,
+            route: '/',
+        },
     });
 });

@@ -45,6 +45,10 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { resolve, relative, basename, delimiter, dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
+import {
+    normalizeBenchArtifact,
+    normalizeBrowserBenchWorkloadResult,
+} from '../../../scripts/lib/browser-result-shapes.mjs';
 
 const helperPath = process.env.HOMEBOY_RUNTIME_BENCH_HELPER_JS;
 if (!helperPath) {
@@ -106,7 +110,9 @@ function validateWorkloadResult(value, iterationLabel) {
         throw new Error(`${iterationLabel} returned invalid result shape (expected undefined or an object)`);
     }
 
-    const { metrics, artifacts, metadata } = value;
+    const normalizedResult = normalizeBrowserBenchWorkloadResult(value);
+    const browserNormalized = normalizedResult !== value;
+    const { metrics, artifacts, metadata } = normalizedResult;
 
     if (metrics !== undefined && (!metrics || typeof metrics !== 'object' || Array.isArray(metrics))) {
         throw new Error(`${iterationLabel} returned invalid metrics shape (expected an object)`);
@@ -125,7 +131,7 @@ function validateWorkloadResult(value, iterationLabel) {
 
     return {
         metrics: validatedMetrics,
-        artifacts: validateWorkloadArtifacts(artifacts, iterationLabel),
+        artifacts: validateWorkloadArtifacts(artifacts, iterationLabel, { browserNormalized }),
         metadata: validateWorkloadMetadata(metadata, iterationLabel),
     };
 }
@@ -146,7 +152,7 @@ function validateWorkloadMetadata(metadata, iterationLabel) {
     }
 }
 
-function validateWorkloadArtifacts(artifacts, iterationLabel) {
+function validateWorkloadArtifacts(artifacts, iterationLabel, options = {}) {
     if (artifacts === undefined) {
         return {};
     }
@@ -157,45 +163,64 @@ function validateWorkloadArtifacts(artifacts, iterationLabel) {
 
     const validated = {};
     for (const [key, artifact] of Object.entries(artifacts)) {
-        if (typeof artifact === 'string') {
-            if (artifact.length === 0) {
-                throw new Error(`${iterationLabel} returned artifact "${key}" with empty path`);
-            }
-            validated[key] = { path: artifact };
+        if (!options.browserNormalized) {
+            validated[key] = validateGenericWorkloadArtifact(key, artifact, iterationLabel);
             continue;
         }
 
-        if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
-            throw new Error(`${iterationLabel} returned artifact "${key}" with invalid shape (expected string path or object)`);
+        const normalized = normalizeBenchArtifact(artifact);
+        if (Object.keys(normalized).length === 0) {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with invalid shape (expected string path or descriptor object)`);
         }
-        if (typeof artifact.path !== 'string' || artifact.path.length === 0) {
-            throw new Error(`${iterationLabel} returned artifact "${key}" without a non-empty string path`);
+        for (const [field, fieldValue] of Object.entries(normalized)) {
+            normalized[field] = validateJsonField(fieldValue, `${iterationLabel} returned artifact "${key}" field "${field}"`);
         }
-        if (artifact.kind !== undefined && typeof artifact.kind !== 'string') {
-            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string kind`);
+        if (normalized.path) {
+            const publicUrl = normalized.url || resolvePublicArtifactUrl(normalized.path);
+            if (publicUrl) normalized.url = publicUrl;
         }
-        if (artifact.label !== undefined && typeof artifact.label !== 'string') {
-            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string label`);
-        }
-        if (artifact.url !== undefined && typeof artifact.url !== 'string') {
-            throw new Error(`${iterationLabel} returned artifact "${key}" with non-string url`);
-        }
-
-        const normalized = { path: artifact.path };
-        if (artifact.kind !== undefined) normalized.kind = artifact.kind;
-        if (artifact.label !== undefined) normalized.label = artifact.label;
-        for (const [field, value] of Object.entries(artifact)) {
-            if (field === 'path' || field === 'kind' || field === 'label' || field === 'url') {
-                continue;
-            }
-            normalized[field] = validateJsonField(value, `${iterationLabel} returned artifact "${key}" field "${field}"`);
-        }
-        const publicUrl = artifact.url || resolvePublicArtifactUrl(artifact.path);
-        if (publicUrl) normalized.url = publicUrl;
         validated[key] = normalized;
     }
 
     return validated;
+}
+
+function validateGenericWorkloadArtifact(key, artifact, iterationLabel) {
+    if (typeof artifact === 'string') {
+        if (artifact.length === 0) {
+            throw new Error(`${iterationLabel} returned artifact "${key}" with empty path`);
+        }
+        return { path: artifact };
+    }
+
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
+        throw new Error(`${iterationLabel} returned artifact "${key}" with invalid shape (expected string path or object)`);
+    }
+    if (typeof artifact.path !== 'string' || artifact.path.length === 0) {
+        throw new Error(`${iterationLabel} returned artifact "${key}" without a non-empty string path`);
+    }
+    if (artifact.kind !== undefined && typeof artifact.kind !== 'string') {
+        throw new Error(`${iterationLabel} returned artifact "${key}" with non-string kind`);
+    }
+    if (artifact.label !== undefined && typeof artifact.label !== 'string') {
+        throw new Error(`${iterationLabel} returned artifact "${key}" with non-string label`);
+    }
+    if (artifact.url !== undefined && typeof artifact.url !== 'string') {
+        throw new Error(`${iterationLabel} returned artifact "${key}" with non-string url`);
+    }
+
+    const normalized = { path: artifact.path };
+    if (artifact.kind !== undefined) normalized.kind = artifact.kind;
+    if (artifact.label !== undefined) normalized.label = artifact.label;
+    for (const [field, value] of Object.entries(artifact)) {
+        if (field === 'path' || field === 'kind' || field === 'label' || field === 'url') {
+            continue;
+        }
+        normalized[field] = validateJsonField(value, `${iterationLabel} returned artifact "${key}" field "${field}"`);
+    }
+    const publicUrl = artifact.url || resolvePublicArtifactUrl(artifact.path);
+    if (publicUrl) normalized.url = publicUrl;
+    return normalized;
 }
 
 function validateJsonField(value, label) {
