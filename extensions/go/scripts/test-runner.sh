@@ -2,11 +2,11 @@
 set -euo pipefail
 
 PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER_PRELUDE="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${SCRIPT_DIR}/../../scripts/lib/runner-prelude.sh}"
 # shellcheck source=/dev/null
-if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
-    source "$SIDECAR_WRITER_HELPER"
-fi
+source "$RUNNER_PRELUDE"
+homeboy_runner_init --sidecar-writer
 OUTPUT_FILE="$(mktemp)"
 trap 'rm -f "$OUTPUT_FILE"' EXIT
 

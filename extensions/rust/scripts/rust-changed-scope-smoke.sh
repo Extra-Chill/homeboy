@@ -91,7 +91,7 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='rust_integration' \
     HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed integration tests: integration_scope' \
     HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
@@ -113,7 +113,7 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES='tests/core/daemon_test.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='rust_filter' \
     HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed files: core::daemon::daemon_test' \
     HOMEBOY_TEST_RUNNER_ARGS=$'--\ncore::daemon::daemon_test' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
@@ -135,7 +135,7 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES=$'tests/core/daemon_test.rs\ntests/core/service_test.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='full' \
     HOMEBOY_TEST_SCOPE_MESSAGE='Changed files include multiple inline test modules; running full cargo test.' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
@@ -156,7 +156,7 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES='tests/core/unknown_nested_test.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='full' \
     HOMEBOY_TEST_SCOPE_MESSAGE='Changed files include nested tests without a direct Cargo target; running full cargo test.' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
@@ -224,7 +224,9 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$WORKSPACE_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES='crates/targeted/src/lib.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='args' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed Cargo package: targeted-pkg.' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'-p\ntargeted-pkg' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"
@@ -244,13 +246,14 @@ OUTPUT=$(
     HOMEBOY_EXTENSION_PATH="$(cd "$SCRIPT_DIR/.." && pwd)" \
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
-    HOMEBOY_CHANGED_TEST_FILES='Cargo.toml' \
+    HOMEBOY_TEST_SCOPE_KIND='full' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Changed path is cross-cutting for Cargo: Cargo.toml' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh"
 )
 
-if [[ "$OUTPUT" != *"Rust test scope fallback: Changed path is cross-cutting for Cargo: Cargo.toml"* ]]; then
+if [[ "$OUTPUT" != *"Rust test scope: Changed path is cross-cutting for Cargo: Cargo.toml"* ]]; then
     printf 'Expected explicit Cargo.toml fallback. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi

@@ -45,6 +45,14 @@ homeboy_sidecar_merge() {
     local safe_target="${target//[^A-Za-z0-9_.-]/_}"
     cp "$source" "${HOMEBOY_SIDECAR_DIR}/${safe_target}.json"
 }
+
+homeboy_merge_annotations() {
+    local target="$1"
+    local source="$2"
+    local safe_target="annotation.${target}"
+    safe_target="${safe_target//[^A-Za-z0-9_.-]/_}"
+    cp "$source" "${HOMEBOY_SIDECAR_DIR}/${safe_target}.json"
+}
 EOF
 
 cat > "$BIN_DIR/cargo" <<'EOF'
@@ -67,7 +75,9 @@ OUTPUT=$(
     HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_RUST_TEST_RUNNER=nextest \
-    HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='rust_integration' \
+    HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed integration tests: integration_scope' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     HOMEBOY_RUNTIME_SIDECAR_WRITER="$HELPER_DIR/sidecar-writer.sh" \
@@ -81,19 +91,24 @@ if [[ "$OUTPUT" != *"Running cargo nextest"* ]]; then
     exit 1
 fi
 
-EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n-p\nrust-nextest-smoke\n--test\nintegration_scope'
+EXPECTED_ARGS=$'nextest\nrun\n--manifest-path\n'"$PROJECT_DIR"$'/Cargo.toml\n--test\nintegration_scope'
 ACTUAL_ARGS="$(cat "$WORKDIR/cargo-args.txt")"
 if [ "$ACTUAL_ARGS" != "$EXPECTED_ARGS" ]; then
     printf 'Expected nextest command shape:\n%s\nActual:\n%s\n' "$EXPECTED_ARGS" "$ACTUAL_ARGS" >&2
     exit 1
 fi
 
-if [ ! -f "$SIDECAR_DIR/test.results.json" ]; then
-    printf 'Expected test.results sidecar metadata. Output:\n%s\n' "$OUTPUT" >&2
+if [ -f "$SIDECAR_DIR/test.results.json" ]; then
+    printf 'Command plan metadata must not be written to test.results. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
 
-python3 - "$SIDECAR_DIR/test.results.json" <<'PY'
+if [ ! -f "$SIDECAR_DIR/annotation.rust-test-plan.json" ]; then
+    printf 'Expected rust-test-plan annotation metadata. Output:\n%s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+python3 - "$SIDECAR_DIR/annotation.rust-test-plan.json" <<'PY'
 import json
 import sys
 
@@ -102,10 +117,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 record = data[0]
 assert record["runner"] == "nextest", record
-assert record["scope"] == "file", record
-assert record["package"] == "rust-nextest-smoke", record
-assert record["test_target"] == "integration_scope", record
-assert record["args"] == ["-p", "rust-nextest-smoke", "--test", "integration_scope"], record
+assert record["scope"] == "rust_integration", record
+assert record["args"] == ["--test", "integration_scope"], record
 PY
 
 cat > "$BIN_DIR/cargo" <<'EOF'
@@ -128,7 +141,8 @@ OUTPUT=$(
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_RUST_TEST_RUNNER=nextest \
     HOMEBOY_RUST_NEXTEST_FALLBACK=0 \
-    HOMEBOY_CHANGED_TEST_FILES='tests/integration_scope.rs' \
+    HOMEBOY_TEST_SCOPE_KIND='rust_integration' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
     HOMEBOY_RUNTIME_RUNNER_STEPS="$HELPER_DIR/runner-steps.sh" \
     bash "$SCRIPT_DIR/test-runner.sh" 2>&1 || true
