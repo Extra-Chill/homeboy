@@ -528,7 +528,7 @@ fn apply_provider_runner_secret_env_contracts_with_providers(
     }
 }
 
-fn provider_runner_secret_env_for_plan_with_providers(
+pub(crate) fn provider_runner_secret_env_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
 ) -> Vec<String> {
@@ -544,7 +544,7 @@ fn provider_runner_secret_env_for_plan_with_providers(
     names
 }
 
-fn provider_secret_sources_for_plan_with_providers(
+pub(crate) fn provider_secret_sources_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {

@@ -9,11 +9,16 @@
 use std::collections::HashMap;
 
 use crate::core::agent_tasks::provider::{
-    provider_runner_secret_env_for_plan, provider_secret_sources_for_plan,
-    provider_secret_sources_for_providers, ExtensionProviderAgentTaskExecutor,
+    provider_runner_secret_env_for_plan, provider_runner_secret_env_for_plan_with_providers,
+    provider_secret_sources_for_plan, provider_secret_sources_for_plan_with_providers,
+    provider_secret_sources_for_providers, AgentTaskExecutorProvider,
+    ExtensionProviderAgentTaskExecutor,
 };
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
+use crate::core::agent_tasks::{
+    AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
+};
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -182,6 +187,14 @@ fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
         return Vec::new();
     }
 
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    declared_agent_task_controller_secret_env_with_providers(args, executor.providers())
+}
+
+fn declared_agent_task_controller_secret_env_with_providers(
+    args: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
     let mut names = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -208,6 +221,11 @@ fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
         }
         index += 1;
     }
+    if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args) {
+        names.extend(provider_runner_secret_env_for_plan_with_providers(
+            &plan, providers,
+        ));
+    }
     names.sort();
     names.dedup();
     names
@@ -219,12 +237,90 @@ fn declared_agent_task_controller_secret_sources(
     let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
         return HashMap::new();
     };
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    declared_agent_task_controller_secret_sources_with_providers(
+        args,
+        agent_task_index,
+        executor.providers(),
+    )
+}
+
+fn declared_agent_task_controller_secret_sources_with_providers(
+    args: &[String],
+    agent_task_index: usize,
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, crate::core::defaults::AgentTaskSecretSource> {
     if args.get(agent_task_index + 1).map(String::as_str) != Some("providers") {
-        return HashMap::new();
+        return agent_task_dispatch_provider_plan_from_args(args)
+            .map(|plan| provider_secret_sources_for_plan_with_providers(&plan, providers))
+            .unwrap_or_default();
     }
 
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    provider_secret_sources_for_providers(executor.providers())
+    provider_secret_sources_for_providers(providers)
+}
+
+fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Option<AgentTaskPlan> {
+    let agent_task_index = subcommand_index(args, "agent-task")?;
+    let command = args.get(agent_task_index + 1)?.as_str();
+    if !matches!(command, "cook" | "dispatch" | "loop") {
+        return None;
+    }
+
+    let backend = option_arg_after(args, agent_task_index + 2, "--backend")?;
+    let selector = option_arg_after(args, agent_task_index + 2, "--selector");
+    let model = option_arg_after(args, agent_task_index + 2, "--model");
+    let provider_config = option_arg_after(args, agent_task_index + 2, "--provider-config")
+        .and_then(|spec| config::read_json_spec_to_string(&spec).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    Some(AgentTaskPlan::new(
+        "lab-agent-task-dispatch-secret-discovery".to_string(),
+        vec![AgentTaskRequest {
+            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "lab-secret-discovery".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend,
+                selector,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model,
+                config: provider_config,
+            },
+            instructions: String::new(),
+            inputs: serde_json::Value::Null,
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: Default::default(),
+            limits: Default::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: serde_json::Value::Null,
+        }],
+    ))
+}
+
+fn option_arg_after(args: &[String], start: usize, flag: &str) -> Option<String> {
+    let prefix = format!("{flag}=");
+    let mut index = start;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            break;
+        }
+        if arg == flag {
+            return args.get(index + 1).cloned();
+        }
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+        index += 1;
+    }
+    None
 }
 
 pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
@@ -732,6 +828,58 @@ mod tests {
     }
 
     #[test]
+    fn declared_agent_task_cook_provider_defaults_include_controller_sources() {
+        let provider = fixture_provider_with_codex_defaults();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--backend".to_string(),
+            "codebox".to_string(),
+            "--provider-config".to_string(),
+            serde_json::json!({ "provider": "codex" }).to_string(),
+        ];
+
+        let names = declared_agent_task_controller_secret_env_with_providers(
+            &args,
+            std::slice::from_ref(&provider),
+        );
+        let sources = declared_agent_task_controller_secret_sources_with_providers(
+            &args,
+            1,
+            std::slice::from_ref(&provider),
+        );
+
+        assert!(names.contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
+        let source = sources
+            .get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+            .expect("codex provider default source discovered for cook");
+        assert_eq!(source.source, "json-file");
+        assert_eq!(source.path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
+    }
+
+    #[test]
+    fn declared_agent_task_providers_still_include_provider_default_sources() {
+        let provider = fixture_provider_with_codex_defaults();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--secret-env".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        ];
+
+        let sources = declared_agent_task_controller_secret_sources_with_providers(
+            &args,
+            1,
+            std::slice::from_ref(&provider),
+        );
+
+        assert!(sources.contains_key("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
+    }
+
+    #[test]
     fn declared_agent_task_secret_env_includes_run_plan_task_secrets() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan_path = temp.path().join("plan.json");
@@ -1119,6 +1267,48 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             secret_env,
             resources: HashMap::new(),
             policy: RunnerPolicy::default(),
+        }
+    }
+
+    fn fixture_provider_with_codex_defaults() -> AgentTaskExecutorProvider {
+        let mut provider_defaults = std::collections::BTreeMap::new();
+        provider_defaults.insert(
+            "codex".to_string(),
+            serde_json::json!({
+                "secret_env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "secret_env_sources": {
+                    "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                        "source": "json-file",
+                        "path": "~/.codex/auth.json",
+                        "field": "tokens.access_token"
+                    }
+                }
+            }),
+        );
+
+        AgentTaskExecutorProvider {
+            schema: "homeboy/agent-task-executor-provider/v1".to_string(),
+            id: "wp-codebox.codex".to_string(),
+            label: None,
+            backend: "codebox".to_string(),
+            default_backend: true,
+            command: "wp-codebox agent".to_string(),
+            request_schema: "homeboy/agent-task-request/v1".to_string(),
+            outcome_schema: "homeboy/agent-task-outcome/v1".to_string(),
+            capabilities: Vec::new(),
+            secret_requirements: Vec::new(),
+            secret_env_requirements: Vec::new(),
+            workspace_materialization: None,
+            provider_defaults,
+            runner_readiness: Vec::new(),
+            runner_sources: Vec::new(),
+            dependency_failure_patterns: Vec::new(),
+            timeout_artifact_discovery: Default::default(),
+            role_aliases: Default::default(),
+            extension_id: None,
+            extension_path: None,
+            runtime_id: None,
+            runtime_path: None,
         }
     }
 }
