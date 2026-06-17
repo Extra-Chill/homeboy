@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.12] - 2026-06-17
+
+### Changed
+- Verify agent-task contract drift against Homeboy core
+
 ## [3.3.11] - 2026-06-17
 
 ### Fixed
