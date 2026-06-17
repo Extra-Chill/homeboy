@@ -45,6 +45,11 @@ pub struct StatusArgs {
     /// Show only outdated components (local != remote)
     #[arg(long)]
     pub outdated: bool,
+
+    /// Show only components carrying merged-but-unreleased work (commits on
+    /// origin/<default-branch> that are past the latest release tag).
+    #[arg(long)]
+    pub unreleased: bool,
 }
 
 /// Per-component upstream drift info.
@@ -67,6 +72,29 @@ impl UpstreamDrift {
     }
 }
 
+/// A component carrying code that is merged to its default branch on origin but
+/// not yet in a release tag — the "merged-not-released" state.
+///
+/// This is the complement of `ready_to_deploy`/`UpstreamDrift`: instead of
+/// asking "is the local checkout ahead of the latest tag" (which depends on a
+/// fresh local checkout and a local-vs-tag diff), it asks the higher-stakes
+/// inverse — "is there work merged on `origin/<default-branch>` that no release
+/// tag covers yet, so the code does NOT exist on prod?"
+///
+/// The count is measured against `origin/<default-branch>` (refreshed by the
+/// tag/branch fetch that already runs for upstream drift), so it is robust to a
+/// stale local HEAD. See issue #4996.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnreleasedMerge {
+    pub component_id: String,
+    /// The latest release tag the unreleased work is measured against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_tag: Option<String>,
+    /// Count of commits on `origin/<default-branch>` past `latest_tag`
+    /// (merge commits excluded, matching release-state counting).
+    pub commits_since_tag: u32,
+}
+
 /// Clarifying note emitted alongside the git-state-only `ready_to_deploy` list.
 ///
 /// `ready_to_deploy` reflects local git/workspace state ("has a clean release
@@ -76,6 +104,15 @@ impl UpstreamDrift {
 /// `homeboy status <project>`, which reports `current` / `outdated` per
 /// component. See issue #4588.
 const READY_TO_DEPLOY_NOTE: &str = "ready_to_deploy is git-state-only (components with a clean release tag that *could* be deployed); it does NOT mean the deploy target is behind. Run `homeboy status <project>` for a target-accurate diff (installed version vs latest release tag).";
+
+/// Clarifying note emitted alongside `unreleased_merges`.
+///
+/// `unreleased_merges` flags components whose `origin/<default-branch>` carries
+/// commits past the latest release tag — i.e. work that is merged but not in any
+/// release, so the code does NOT exist on prod. This is the merged→released axis
+/// of the merged→released→deployed chain; for the released→deployed axis
+/// (installed version vs latest tag) run `homeboy status <project>`. See #4996.
+const UNRELEASED_MERGES_NOTE: &str = "unreleased_merges flags components with commits merged to origin/<default-branch> that are past the latest release tag (merged but NOT released — the code is not on prod yet). A merged PR here is NOT 'shipped'. Cut a release, then run `homeboy status <project>` to confirm installed-vs-tag (released-but-not-deployed).";
 
 #[derive(Debug, Serialize)]
 pub struct StatusOutput {
@@ -105,6 +142,15 @@ pub struct StatusOutput {
     pub behind_upstream: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub upstream_drift: Vec<UpstreamDrift>,
+    /// Components carrying code merged to `origin/<default-branch>` but not yet
+    /// covered by a release tag ("merged-not-released"). Closes the false
+    /// "shipped" read where a merged PR is mistaken for live code. Additive and
+    /// independent of `ready_to_deploy` (issue #4996).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unreleased_merges: Vec<UnreleasedMerge>,
+    /// Clarifying note, emitted only when `unreleased_merges` is non-empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreleased_merges_note: Option<&'static str>,
     pub clean: usize,
 }
 
@@ -243,6 +289,7 @@ fn summarize_components(
     let mut docs_only = Vec::new();
     let mut behind_upstream = Vec::new();
     let mut upstream_drift = Vec::new();
+    let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
 
     // Fetch from origin and detect upstream drift for each component
@@ -252,6 +299,15 @@ fn summarize_components(
                 behind_upstream.push(comp.id.clone());
             }
             upstream_drift.push(drift);
+        }
+    }
+
+    // Detect merged-but-unreleased work per component (issue #4996). This is
+    // measured against origin/<default-branch> (refreshed by the fetch above),
+    // so a stale local checkout does not hide unreleased merges.
+    for comp in &components {
+        if let Some(merge) = detect_unreleased_merges_for(comp) {
+            unreleased_merges.push(merge);
         }
     }
 
@@ -270,7 +326,8 @@ fn summarize_components(
     }
 
     // Apply filters if any are set
-    let has_filter = args.uncommitted || args.needs_release || args.ready || args.docs_only;
+    let has_filter =
+        args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
 
     if has_filter {
         if !args.uncommitted {
@@ -285,6 +342,9 @@ fn summarize_components(
         if !args.docs_only {
             docs_only.clear();
         }
+        if !args.unreleased {
+            unreleased_merges.clear();
+        }
     }
 
     let ready_to_deploy_note = if ready_to_deploy.is_empty() {
@@ -292,6 +352,14 @@ fn summarize_components(
     } else {
         Some(READY_TO_DEPLOY_NOTE)
     };
+
+    let unreleased_merges_note = if unreleased_merges.is_empty() {
+        None
+    } else {
+        Some(UNRELEASED_MERGES_NOTE)
+    };
+
+    log_unreleased_merges(&unreleased_merges);
 
     Ok((
         StatusResult::Summary(StatusOutput {
@@ -304,6 +372,8 @@ fn summarize_components(
             docs_only,
             behind_upstream,
             upstream_drift,
+            unreleased_merges,
+            unreleased_merges_note,
             clean,
         }),
         0,
@@ -558,6 +628,111 @@ fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
     Some(drift)
 }
 
+/// Detect merged-but-unreleased work for a component (issue #4996).
+///
+/// Reuses existing primitives rather than introducing new ones:
+/// - `version::read_component_version` + `git::detect_baseline_with_version`
+///   resolve the same release baseline the local release-state uses (which also
+///   runs the best-effort tag fetch).
+/// - The default origin branch is resolved with the same precedence the deploy
+///   planner uses (`origin/HEAD` symbolic ref, then main/trunk/master).
+/// - Commits past the baseline are counted with `git rev-list --count
+///   --no-merges <baseline>..origin/<branch>`, mirroring the `--no-merges`
+///   counting in `get_commits_since_tag`.
+///
+/// Unlike `ready_to_deploy` (local HEAD vs tag), this measures
+/// `origin/<default-branch>` vs the latest tag, so a stale local checkout cannot
+/// mask unreleased merges. Returns `None` when there is no unreleased work, the
+/// path is not a git repo, or the origin branch cannot be resolved.
+fn detect_unreleased_merges_for(comp: &component::Component) -> Option<UnreleasedMerge> {
+    let path = &comp.local_path;
+
+    let origin_branch = default_origin_branch(path)?;
+
+    let current_version = version::read_component_version(comp)
+        .ok()
+        .map(|info| info.version);
+
+    let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
+    let baseline_ref = baseline.reference.as_deref()?;
+
+    let range = format!("{}..{}", baseline_ref, origin_branch);
+    let count_output = homeboy::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["rev-list", "--count", "--no-merges", &range],
+    )?;
+
+    let commits_since_tag: u32 = count_output.trim().parse().ok()?;
+    if commits_since_tag == 0 {
+        return None;
+    }
+
+    Some(UnreleasedMerge {
+        component_id: comp.id.clone(),
+        latest_tag: baseline.latest_tag.clone(),
+        commits_since_tag,
+    })
+}
+
+/// Log merged-but-unreleased components to stderr for human-readable output.
+///
+/// Mirrors the dashboard table's terminal-only behavior so JSON consumers are
+/// unaffected. Keeps the merged-not-released signal visible in `homeboy status`
+/// without a project argument (issue #4996).
+fn log_unreleased_merges(merges: &[UnreleasedMerge]) {
+    if merges.is_empty() || !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return;
+    }
+
+    eprintln!(
+        "⚠️  {} component(s) carry merged-but-unreleased work (merged to origin, NOT in any release — code is not on prod yet):",
+        merges.len()
+    );
+    for merge in merges {
+        let tag = merge.latest_tag.as_deref().unwrap_or("(no tag)");
+        eprintln!(
+            "    {} — {} commit(s) past {}",
+            merge.component_id, merge.commits_since_tag, tag
+        );
+    }
+    eprintln!("    Cut a release, then `homeboy status <project>` to confirm installed-vs-tag.");
+}
+
+/// Resolve the default origin branch ref for a checkout.
+///
+/// Precedence matches the deploy planner: `origin/HEAD` symbolic ref first, then
+/// the conventional `origin/main` / `origin/trunk` / `origin/master` fallbacks.
+fn default_origin_branch(path: &str) -> Option<String> {
+    if let Some(symbolic) = homeboy::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        let symbolic = symbolic.trim();
+        if !symbolic.is_empty() {
+            return Some(symbolic.to_string());
+        }
+    }
+
+    ["origin/main", "origin/trunk", "origin/master"]
+        .iter()
+        .find(|branch| {
+            homeboy::core::engine::command::run_in_optional(
+                path,
+                "git",
+                &["rev-parse", "--verify", "--quiet", branch],
+            )
+            .is_some()
+        })
+        .map(|branch| (*branch).to_string())
+}
+
 /// Fetch remote (deployed) versions for all components in a project.
 ///
 /// Uses deploy check mode internally, which handles SSH resolution.
@@ -740,6 +915,7 @@ mod tests {
             docs_only: false,
             all: false,
             outdated: false,
+            unreleased: false,
         }
     }
 
@@ -766,6 +942,8 @@ mod tests {
             docs_only: Vec::new(),
             behind_upstream: Vec::new(),
             upstream_drift: Vec::new(),
+            unreleased_merges: Vec::new(),
+            unreleased_merges_note: None,
             clean: 0,
         }
     }
@@ -887,6 +1065,119 @@ mod tests {
             }
             _ => panic!("expected summary output"),
         }
+    }
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .expect("git command");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    fn commit_empty(repo: &std::path::Path, message: &str) {
+        run_git(repo, &["commit", "--allow-empty", "-q", "-m", message]);
+    }
+
+    #[test]
+    fn parser_accepts_unreleased_filter() {
+        let cli = Cli::try_parse_from(["homeboy", "status", "--unreleased"])
+            .expect("status --unreleased parses");
+
+        match cli.command {
+            Commands::Status(args) => assert!(args.unreleased),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn unreleased_merges_note_is_omitted_when_empty() {
+        let output = empty_status_output();
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        assert!(
+            json.get("unreleased_merges").is_none(),
+            "empty unreleased_merges must not leak into the JSON contract"
+        );
+        assert!(
+            json.get("unreleased_merges_note").is_none(),
+            "note should be omitted when unreleased_merges is empty"
+        );
+    }
+
+    #[test]
+    fn unreleased_merges_note_present_when_merges_exist() {
+        let output = StatusOutput {
+            total: 1,
+            unreleased_merges: vec![UnreleasedMerge {
+                component_id: "extrachill-artist-platform".to_string(),
+                latest_tag: Some("v1.11.0".to_string()),
+                commits_since_tag: 3,
+            }],
+            unreleased_merges_note: Some(UNRELEASED_MERGES_NOTE),
+            ..empty_status_output()
+        };
+        let json = serde_json::to_value(&output).expect("serialize status output");
+
+        let note = json
+            .get("unreleased_merges_note")
+            .and_then(|v| v.as_str())
+            .expect("note present when unreleased_merges is non-empty");
+
+        // The note must steer operators away from reading a merged PR as shipped.
+        assert!(
+            note.contains("merged but NOT released"),
+            "note should flag merged-not-released"
+        );
+        assert!(
+            note.contains("not on prod yet"),
+            "note should clarify the code is not live"
+        );
+    }
+
+    #[test]
+    fn default_origin_branch_resolves_origin_head_symbolic_ref() {
+        let (_dir, repo) = make_git_repo("with-origin");
+        // Build a fake "origin" remote by cloning into a bare repo and wiring it up.
+        commit_empty(&repo, "feat: initial");
+        // Create the origin/main remote-tracking ref directly so the resolver
+        // has something to find without network access.
+        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        let resolved = default_origin_branch(&repo.to_string_lossy());
+        assert_eq!(resolved.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn default_origin_branch_falls_back_to_conventional_branches() {
+        let (_dir, repo) = make_git_repo("fallback-origin");
+        commit_empty(&repo, "feat: initial");
+        // No origin/HEAD symbolic ref; only a conventional remote-tracking ref.
+        run_git(&repo, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+
+        let resolved = default_origin_branch(&repo.to_string_lossy());
+        assert_eq!(resolved.as_deref(), Some("origin/trunk"));
+    }
+
+    #[test]
+    fn default_origin_branch_none_without_remote_refs() {
+        let (_dir, repo) = make_git_repo("no-origin");
+        commit_empty(&repo, "feat: initial");
+
+        assert!(default_origin_branch(&repo.to_string_lossy()).is_none());
     }
 
     #[test]
