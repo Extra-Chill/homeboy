@@ -152,22 +152,20 @@ fn try_execute_direct(
         cmd.args(&parsed.args);
     }
 
-    match cmd.output() {
-        Ok(out) => Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            success: out.status.success(),
-            exit_code: out.status.code().unwrap_or(-1),
-            child_resource: None,
-        }),
-        Err(e) => Ok(CommandOutput {
-            stdout: String::new(),
-            stderr: format!("Command error: {}", e),
-            success: false,
-            exit_code: -1,
-            child_resource: None,
-        }),
-    }
+    let out = cmd.output().map_err(|e| {
+        Error::internal_unexpected(format!(
+            "Failed to spawn direct command '{}': {}",
+            parsed.program, e
+        ))
+    })?;
+
+    Ok(CommandOutput {
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        success: out.status.success(),
+        exit_code: out.status.code().unwrap_or(-1),
+        child_resource: None,
+    })
 }
 
 fn requires_shell_execution(template: &str) -> bool {
@@ -314,6 +312,29 @@ fn build_shell_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn test_project() -> Project {
+        Project {
+            id: "sandbox".to_string(),
+            domain: Some("example.com".to_string()),
+            base_path: Some("/tmp".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn test_cli_config(command_template: &str) -> CliConfig {
+        CliConfig {
+            tool: "test-tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            command_template: command_template.to_string(),
+            default_cli_path: Some("test-tool".to_string()),
+            working_dir_template: None,
+            settings_flags: HashMap::new(),
+            auto_flags: Vec::new(),
+            help: None,
+        }
+    }
 
     #[test]
     fn detects_shell_execution_templates() {
@@ -324,5 +345,45 @@ mod tests {
             "{{cliPath}} {{args}} | tee output.log"
         ));
         assert!(!requires_shell_execution("{{cliPath}} {{args}}"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn missing_direct_program_falls_back_to_shell_execution() {
+        let project = test_project();
+        let cli_config = test_cli_config("HOMEBOY_DIRECT_FALLBACK_MARKER=ran sh -c {{args}}");
+
+        let output = execute_for_project_direct(
+            &project,
+            &cli_config,
+            "test-extension",
+            &["printf \"$HOMEBOY_DIRECT_FALLBACK_MARKER\"".to_string()],
+            "example.com",
+        )
+        .expect("shell fallback should execute");
+
+        assert!(output.success);
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "ran");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_zero_direct_child_exit_returns_command_output() {
+        let project = test_project();
+        let cli_config = test_cli_config("sh -c {{args}}");
+
+        let output = execute_for_project_direct(
+            &project,
+            &cli_config,
+            "test-extension",
+            &["printf direct; exit 7".to_string()],
+            "example.com",
+        )
+        .expect("spawned direct command should return CommandOutput");
+
+        assert!(!output.success);
+        assert_eq!(output.exit_code, 7);
+        assert_eq!(output.stdout, "direct");
     }
 }
