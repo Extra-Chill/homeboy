@@ -707,7 +707,12 @@ fn default_origin_branch(path: &str) -> Option<String> {
     if let Some(symbolic) = homeboy::core::engine::command::run_in_optional(
         path,
         "git",
-        &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
     ) {
         let symbolic = symbolic.trim();
         if !symbolic.is_empty() {
