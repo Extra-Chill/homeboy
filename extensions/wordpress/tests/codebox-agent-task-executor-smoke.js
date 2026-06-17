@@ -478,15 +478,31 @@ const artifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'artifact-declaration-task-123',
   artifact_declarations: [{
-    schema: 'wp-codebox/artifact-declaration/v1',
+    schema: 'homeboy/agent-task-artifact-declaration/v1',
     name: 'analysis_report',
     type: 'AnalysisReport',
     artifact_schema: 'example/analysis-report/v1',
+    path: 'artifacts/analysis-report.json',
     required: true,
   }],
 });
+assert.equal(artifactDeclarationRequest.artifact_declarations[0].schema, 'wp-codebox/artifact-declaration/v1');
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].name, 'analysis_report');
+assert.equal(artifactDeclarationRequest.artifact_declarations[0].path, 'artifacts/analysis-report.json');
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].required, true);
+
+const legacyArtifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'legacy-artifact-declaration-task-123',
+  artifactDeclarations: [{
+    name: 'legacy_report',
+    kind: 'LegacyReport',
+    contentSchema: 'example/legacy-report/v1',
+  }],
+});
+assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].name, 'legacy_report');
+assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].type, 'LegacyReport');
+assert.equal(legacyArtifactDeclarationRequest.artifact_declarations[0].artifact_schema, 'example/legacy-report/v1');
 
 const codeboxRequestWithAbilityTools = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
