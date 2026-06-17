@@ -1,6 +1,7 @@
 use crate::core::error::{Error, Result};
 use std::env;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 mod rigs;
@@ -144,6 +145,101 @@ pub(crate) fn sanitize_path_segment(segment: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Normalize a local path lexically without touching the filesystem.
+///
+/// This removes `.` segments, collapses internal `..` segments, and preserves
+/// leading `..` segments for relative paths. Absolute paths do not escape above
+/// their root. Use this before containment checks when the target path may not
+/// exist yet.
+pub fn normalize_local_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    let mut prefix: Option<OsString> = None;
+    let mut rooted = false;
+    let mut segments: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(value) => {
+                prefix = Some(value.as_os_str().to_os_string());
+            }
+            Component::RootDir => {
+                rooted = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if segments.last().is_some_and(|segment| segment != "..") {
+                    segments.pop();
+                } else if !rooted {
+                    segments.push(OsString::from(".."));
+                }
+            }
+            Component::Normal(value) => segments.push(value.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(prefix) = prefix {
+        normalized.push(prefix);
+    }
+    if rooted {
+        normalized.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for segment in segments {
+        normalized.push(segment);
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+/// Return whether `path` is inside `root` after lexical normalization.
+pub fn local_path_is_contained(root: impl AsRef<Path>, path: impl AsRef<Path>) -> bool {
+    let root = normalize_local_path(root);
+    let path = normalize_local_path(path);
+
+    path == root || path.starts_with(root)
+}
+
+/// Resolve a local path against a root and reject paths that escape that root.
+///
+/// Relative candidates are resolved below `root`. Absolute candidates are
+/// accepted only when they already point inside `root` after lexical
+/// normalization.
+pub fn resolve_contained_local_path(
+    root: impl AsRef<Path>,
+    candidate: impl AsRef<Path>,
+    field: &str,
+) -> Result<PathBuf> {
+    let root = normalize_local_path(root);
+    let candidate = candidate.as_ref();
+    let resolved = if candidate.is_absolute() {
+        normalize_local_path(candidate)
+    } else {
+        normalize_local_path(root.join(candidate))
+    };
+
+    if local_path_is_contained(&root, &resolved) {
+        Ok(resolved)
+    } else {
+        Err(Error::validation_invalid_argument(
+            field,
+            format!(
+                "Path '{}' escapes root '{}'",
+                candidate.display(),
+                root.display()
+            ),
+            Some(candidate.to_string_lossy().to_string()),
+            Some(vec![
+                "Use a relative path inside the configured root".to_string(),
+                "Use an absolute path that starts inside the configured root".to_string(),
+            ]),
+        ))
+    }
 }
 
 /// Projects directory
@@ -427,6 +523,47 @@ mod tests {
         );
         assert_eq!(resolve_optional_base_path(Some("   ")), None);
         assert_eq!(resolve_optional_base_path(None), None);
+    }
+
+    #[test]
+    fn normalize_local_path_collapses_dot_and_parent_segments() {
+        assert_eq!(
+            normalize_local_path("/repo/./packages/../src"),
+            PathBuf::from("/repo/src")
+        );
+        assert_eq!(
+            normalize_local_path("packages/../src/./lib"),
+            PathBuf::from("src/lib")
+        );
+        assert_eq!(
+            normalize_local_path("../../src"),
+            PathBuf::from("../../src")
+        );
+        assert_eq!(normalize_local_path("/../../src"), PathBuf::from("/src"));
+    }
+
+    #[test]
+    fn local_path_containment_is_component_aware() {
+        assert!(local_path_is_contained("/repo", "/repo/src/lib.rs"));
+        assert!(local_path_is_contained("/repo", "/repo/src/../Cargo.toml"));
+        assert!(!local_path_is_contained("/repo", "/repo-other/file"));
+        assert!(!local_path_is_contained("/repo", "/repo/../etc/passwd"));
+    }
+
+    #[test]
+    fn resolve_contained_local_path_resolves_relative_paths_under_root() {
+        assert_eq!(
+            resolve_contained_local_path("/repo", "src/../Cargo.toml", "cwd").unwrap(),
+            PathBuf::from("/repo/Cargo.toml")
+        );
+    }
+
+    #[test]
+    fn resolve_contained_local_path_rejects_parent_escape() {
+        let err = resolve_contained_local_path("/repo/worktree", "../secrets", "cwd")
+            .expect_err("parent escape should fail");
+
+        assert!(err.to_string().contains("escapes root '/repo/worktree'"));
     }
 
     #[test]

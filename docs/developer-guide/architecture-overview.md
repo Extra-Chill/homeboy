@@ -102,6 +102,15 @@ Executes local, remote, and extension commands with:
 - Output capture
 - Exit code handling
 
+Core exposes generic local path helpers for process and runtime adapters:
+- `core::normalize_local_path` performs lexical normalization without requiring
+  paths to exist.
+- `core::local_path_is_contained` performs component-aware containment checks.
+- `core::resolve_contained_local_path` resolves relative paths below a root and
+  rejects absolute or parent-relative escapes.
+- `core::process::prepare_contained_process_step` applies the same containment
+  policy to a generic process step working directory.
+
 Supports:
 - Local commands such as builds, tests, benchmarks, and review gates
 - Remote commands via SSH for configured projects and fleets
