@@ -1,4 +1,6 @@
 {
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "fake-runtime",
   "name": "Fake Agent Runtime",
   "version": "1.0.0",
   "description": "Minimal generic agent runtime fixture for Homeboy contract tests.",
@@ -56,6 +58,22 @@
           "purpose": "Optional fake credential used by the contract fixture."
         }
       ],
+      "secret_env_requirements": [
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": ["FAKE_RUNTIME_TOKEN"],
+          "when": {
+            "path": "executor.config.provider",
+            "equals": "fake-runtime"
+          }
+        }
+      ],
+      "provider_defaults": {
+        "fake-runtime": {
+          "secret_env": ["FAKE_RUNTIME_TOKEN"]
+        }
+      },
       "diagnostics": {
         "outcome_fields": [
           "diagnostics",
