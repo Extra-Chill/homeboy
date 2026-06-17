@@ -74,10 +74,14 @@ impl Commands {
                         | agent_task::AgentTaskCommand::Dispatch(_)
                         | agent_task::AgentTaskCommand::Loop(_)
                         | agent_task::AgentTaskCommand::RunPlan(_)
+                        | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs {
+                            run: true,
+                            ..
+                        })
                 ) =>
             {
                 let mut contract = LabCommandContract::portable(
-                    "agent-task dispatch/cook/loop/run-plan",
+                    "agent-task dispatch/cook/loop/run-plan/retry --run",
                     None,
                     true,
                     LAB_NO_EXTRA_TOOLS,
@@ -461,6 +465,14 @@ mod tests {
                 .supports_lab_runner()
         );
         assert!(
+            parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"])
+                .supports_lab_runner()
+        );
+        assert!(
+            !parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123"])
+                .supports_lab_runner()
+        );
+        assert!(
             !parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
                 .supports_lab_runner()
         );
@@ -577,11 +589,11 @@ mod tests {
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-                "agent-task dispatch/cook/loop/run-plan",
+                "agent-task dispatch/cook/loop/run-plan/retry --run",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-                "agent-task dispatch/cook/loop/run-plan",
+                "agent-task dispatch/cook/loop/run-plan/retry --run",
             ),
             (
                 parsed_command(&[
@@ -595,11 +607,15 @@ mod tests {
                     "--prompt",
                     "cook",
                 ]),
-                "agent-task dispatch/cook/loop/run-plan",
+                "agent-task dispatch/cook/loop/run-plan/retry --run",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
-                "agent-task dispatch/cook/loop/run-plan",
+                "agent-task dispatch/cook/loop/run-plan/retry --run",
+            ),
+            (
+                parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"]),
+                "agent-task dispatch/cook/loop/run-plan/retry --run",
             ),
             (
                 parsed_command(&["homeboy", "agent-task", "providers"]),
