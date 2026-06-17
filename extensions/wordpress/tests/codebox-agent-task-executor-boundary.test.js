@@ -29,6 +29,14 @@ const claudeCodeSecretEnv = [
   'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
 ];
 
+function restoreEnv(name, value) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
 function secretEnvRequirementForProvider(contract, provider) {
   return contract.secret_env_requirements.find((requirement) => (
     requirement.when.any.some((selector) => selector.path === 'executor.config.provider' && selector.equals === provider)
@@ -155,6 +163,50 @@ assert.equal(
   taskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'wordpress.read-post'),
   true
 );
+
+const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
+const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;
+const originalToolResultSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_RESULT_SCHEMA;
+const originalToolPolicySchemaEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_SCHEMA;
+process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON = JSON.stringify({
+  schema: 'homeboy/agent-tool-policy/v1',
+  default_location: 'disabled',
+  tools: {
+    workspace_read: { execution_location: 'runner', reason: 'safe in sandbox' },
+    github_issue_publish: { execution_location: 'control_plane', timeout_ms: 30000, reason: 'host owns GitHub credentials' },
+    github_pull_request_publish: { execution_location: 'disabled', reason: 'not needed in this run' },
+  },
+});
+process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA = 'homeboy/agent-tool-request/v1';
+process.env.HOMEBOY_AGENT_TOOL_RESULT_SCHEMA = 'homeboy/agent-tool-result/v1';
+process.env.HOMEBOY_AGENT_TOOL_POLICY_SCHEMA = 'homeboy/agent-tool-policy/v1';
+const homeboyToolPolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'homeboy-tool-policy-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run with host-owned GitHub tools.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+  tools: ['workspace_read', 'github_issue_publish', 'github_pull_request_publish'],
+});
+restoreEnv('HOMEBOY_AGENT_TOOL_POLICY_JSON', originalToolPolicyEnv);
+restoreEnv('HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA', originalToolRequestSchemaEnv);
+restoreEnv('HOMEBOY_AGENT_TOOL_RESULT_SCHEMA', originalToolResultSchemaEnv);
+restoreEnv('HOMEBOY_AGENT_TOOL_POLICY_SCHEMA', originalToolPolicySchemaEnv);
+
+assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('workspace_read'), true);
+assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_issue_publish'), false);
+assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_pull_request_publish'), false);
+assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, 'homeboy/agent-tool-request/v1');
+const homeboySandboxTools = Object.fromEntries(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.map((tool) => [tool.id, tool]));
+assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy_agent_tool_policy');
+assert.equal(homeboySandboxTools.workspace_read.allowed, true);
+assert.equal(homeboySandboxTools.workspace_read.runtime.environment, 'runtime_local');
+assert.equal(homeboySandboxTools.github_issue_publish.allowed, false);
+assert.equal(homeboySandboxTools.github_issue_publish.execution_location, 'parent');
+assert.equal(homeboySandboxTools.github_issue_publish.transport_visibility, 'parent');
+assert.equal(homeboySandboxTools.github_issue_publish.runtime.environment, 'control_plane');
+assert.equal(homeboySandboxTools.github_issue_publish.metadata.timeout_ms, 30000);
+assert.equal(homeboySandboxTools.github_pull_request_publish.transport_visibility, 'hidden');
 
 const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
