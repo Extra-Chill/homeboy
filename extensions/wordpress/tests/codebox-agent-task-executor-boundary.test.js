@@ -168,7 +168,7 @@ const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;
 const originalToolResultSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_RESULT_SCHEMA;
 const originalToolPolicySchemaEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_SCHEMA;
-process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON = JSON.stringify({
+const homeboyAgentToolPolicyJson = JSON.stringify({
   schema: 'homeboy/agent-tool-policy/v1',
   default_location: 'disabled',
   tools: {
@@ -177,6 +177,7 @@ process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON = JSON.stringify({
     github_pull_request_publish: { execution_location: 'disabled', reason: 'not needed in this run' },
   },
 });
+process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON = homeboyAgentToolPolicyJson;
 process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA = 'homeboy/agent-tool-request/v1';
 process.env.HOMEBOY_AGENT_TOOL_RESULT_SCHEMA = 'homeboy/agent-tool-result/v1';
 process.env.HOMEBOY_AGENT_TOOL_POLICY_SCHEMA = 'homeboy/agent-tool-policy/v1';
@@ -197,6 +198,10 @@ assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('workspace_read')
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_issue_publish'), false);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_pull_request_publish'), false);
 assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, 'homeboy/agent-tool-request/v1');
+assert.deepEqual(
+  JSON.parse(homeboyToolPolicyTaskInput.runtime_env.DATAMACHINE_HOST_TOOL_POLICY_JSON),
+  JSON.parse(homeboyAgentToolPolicyJson)
+);
 const homeboySandboxTools = Object.fromEntries(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.map((tool) => [tool.id, tool]));
 assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy_agent_tool_policy');
 assert.equal(homeboySandboxTools.workspace_read.allowed, true);

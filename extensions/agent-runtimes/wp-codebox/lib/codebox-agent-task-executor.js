@@ -281,6 +281,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_env: {
       ...firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
       ...homeboyAgentToolContractEnv(),
+      ...datamachineHostToolPolicyEnv(),
     },
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
     runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeOptions.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
@@ -647,6 +648,16 @@ function homeboyAgentToolContractEnv() {
     'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
     'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
   ].map((name) => [name, process.env[name]]).filter(([, value]) => typeof value === 'string' && value !== ''));
+}
+
+function datamachineHostToolPolicyEnv() {
+  const policyJson = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
+  if (typeof policyJson !== 'string' || policyJson === '') {
+    return {};
+  }
+  return {
+    DATAMACHINE_HOST_TOOL_POLICY_JSON: policyJson,
+  };
 }
 
 function sandboxToolPolicyFromHomeboyAgentToolPolicy(policy) {
