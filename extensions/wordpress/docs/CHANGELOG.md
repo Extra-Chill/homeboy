@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.7] - 2026-06-17
+
+### Fixed
+- support monorepo source roots in Codebox benches
+
 ## [3.4.5] - 2026-06-17
 
 ### Fixed
