@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.6] - 2026-06-17
+
+### Fixed
+- remap lab runtime component contracts
+
 ## [3.3.5] - 2026-06-17
 
 ### Changed
