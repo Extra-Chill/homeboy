@@ -165,6 +165,17 @@ fn lab_workspace_sync_mode(
     args: &[String],
     source_path: &Path,
 ) -> Result<RunnerWorkspaceSyncMode> {
+    let source_policy =
+        super::super::source_materialization::SourceMaterializationPolicy::from_env();
+    lab_workspace_sync_mode_with_source_policy(policy, args, source_path, &source_policy)
+}
+
+fn lab_workspace_sync_mode_with_source_policy(
+    policy: LabOffloadWorkspaceModePolicy,
+    args: &[String],
+    source_path: &Path,
+    source_policy: &super::super::source_materialization::SourceMaterializationPolicy,
+) -> Result<RunnerWorkspaceSyncMode> {
     let requested = requested_lab_workspace_sync_mode(policy, args);
     if requested != RunnerWorkspaceSyncMode::Git {
         return Ok(requested);
@@ -178,8 +189,10 @@ fn lab_workspace_sync_mode(
         source_path,
         &["config", "--get", "remote.origin.url"],
     )?;
-    if super::super::source_materialization::requires_controller_routed_workspace_sync(&remote_url)
-    {
+    if super::super::source_materialization::requires_controller_routed_workspace_sync_with_policy(
+        &remote_url,
+        source_policy,
+    ) {
         return Ok(RunnerWorkspaceSyncMode::Snapshot);
     }
 
@@ -2315,6 +2328,10 @@ mod tests {
 
     #[test]
     fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
+        let source_policy =
+            crate::core::runner::source_materialization::SourceMaterializationPolicy {
+                private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            };
         let dir = tempfile::tempdir().expect("temp dir");
         std::process::Command::new("git")
             .args(["init"])
@@ -2337,8 +2354,13 @@ mod tests {
             "agent-task".to_string(),
             "cook".to_string(),
         ];
-        let mode = lab_workspace_sync_mode(LabOffloadWorkspaceModePolicy::Git, &args, dir.path())
-            .expect("sync mode");
+        let mode = lab_workspace_sync_mode_with_source_policy(
+            LabOffloadWorkspaceModePolicy::Git,
+            &args,
+            dir.path(),
+            &source_policy,
+        )
+        .expect("sync mode");
 
         assert_eq!(mode, RunnerWorkspaceSyncMode::Snapshot);
     }
