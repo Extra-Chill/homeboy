@@ -1960,43 +1960,69 @@ mod tests {
     }
 
     #[test]
-    fn provider_default_secret_sources_accept_keychain_bundle_sources() {
-        let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
-        request.executor.config = json!({ "provider": "claude-code" });
-        provider.provider_defaults.insert(
-            "claude-code".to_string(),
-            json!({
-                "secret_env": [
-                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
-                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
-                    "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
-                ],
-                "secret_env_sources": {
-                    "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN": {
-                        "source": "keychain-bundle",
-                        "scope": "agent-task",
-                        "name": "claude-code-oauth",
-                        "field": "access_token"
-                    },
-                    "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
-                        "source": "keychain-bundle",
-                        "scope": "agent-task",
-                        "name": "claude-code-oauth",
-                        "field": "refresh_token"
+    fn provider_default_secret_sources_accept_nested_json_sources() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("provider-auth.json");
+            fs::write(
+                &auth_path,
+                json!({
+                    "provider": {
+                        "access": "provider-access-token",
+                        "refresh": "provider-refresh-token",
+                        "expires": 12345
                     }
-                }
-            }),
-        );
+                })
+                .to_string(),
+            )
+            .expect("write auth");
+            let auth_path = auth_path.to_string_lossy().to_string();
+            let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
+            request.executor.config = json!({ "provider": "example-oauth" });
+            request.executor.secret_env = vec![
+                "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
+            ];
+            provider.provider_defaults.insert(
+                "example-oauth".to_string(),
+                json!({
+                    "secret_env": [
+                        "EXAMPLE_PROVIDER_ACCESS_TOKEN",
+                        "EXAMPLE_PROVIDER_REFRESH_TOKEN",
+                        "EXAMPLE_PROVIDER_EXPIRES_AT"
+                    ],
+                    "secret_env_sources": {
+                        "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path.clone(),
+                            "field": "provider.access"
+                        },
+                        "EXAMPLE_PROVIDER_REFRESH_TOKEN": {
+                            "source": "json-file",
+                            "path": auth_path.clone(),
+                            "field": "provider.refresh"
+                        },
+                        "EXAMPLE_PROVIDER_EXPIRES_AT": {
+                            "source": "json-file",
+                            "path": auth_path.clone(),
+                            "field": "provider.expires"
+                        }
+                    }
+                }),
+            );
 
-        let sources = provider_secret_sources(&provider, Some(&request));
+            let env = provider_command_env(&request, &provider).expect("provider env resolves");
 
-        let refresh = sources
-            .get("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-            .expect("refresh token source is declared");
-        assert_eq!(refresh.source, "keychain-bundle");
-        assert_eq!(refresh.scope.as_deref(), Some("agent-task"));
-        assert_eq!(refresh.name.as_deref(), Some("claude-code-oauth"));
-        assert_eq!(refresh.field.as_deref(), Some("refresh_token"));
+            assert!(env.contains(&(
+                "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
+                "provider-refresh-token".to_string()
+            )));
+            assert!(env.contains(&(
+                "EXAMPLE_PROVIDER_EXPIRES_AT".to_string(),
+                "12345".to_string()
+            )));
+        });
     }
 
     #[test]
