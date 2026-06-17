@@ -50,6 +50,35 @@ function readTaskRequest() {
   return request;
 }
 
+function labWorkspaceMapping() {
+  const raw = process.env.HOMEBOY_LAB_OFFLOAD_JSON;
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const workspaces = parsed?.workspace_mapping?.workspaces;
+    return Array.isArray(workspaces) ? workspaces : [];
+  } catch {
+    return [];
+  }
+}
+
+function remapLabWorkspacePath(candidate, componentSlug) {
+  if (!candidate || fs.existsSync(candidate)) {
+    return candidate;
+  }
+  const normalizedCandidate = String(candidate).replace(/\\/g, '/');
+  const candidateName = path.basename(normalizedCandidate);
+  const expectedName = componentSlug || candidateName;
+  const entry = labWorkspaceMapping().find((workspace) => {
+    const localName = path.basename(String(workspace?.local_path || '').replace(/\\/g, '/'));
+    const remoteName = path.basename(String(workspace?.remote_path || '').replace(/\\/g, '/'));
+    return workspace?.remote_path && (localName === expectedName || remoteName === expectedName);
+  });
+  return entry?.remote_path || candidate;
+}
+
 function secretEnvNames(request) {
   return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
@@ -568,13 +597,16 @@ function requestRuntimeComponents(request, mounts = []) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(request.component_contracts || []);
   const workspaceRoot = workspaceRootFromMounts(mounts);
-  const agentRuntimePath = explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
+  const agentRuntimePath = remapLabWorkspacePath(
+    explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine')),
+    'data-machine'
+  );
   return Object.fromEntries(Object.entries({
     ...contractPaths,
     ...explicit,
-    agents_api: explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(agentRuntimePath),
+    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(agentRuntimePath), 'agents-api'),
     agent_runtime: agentRuntimePath,
-    agent_runtime_tools: explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')),
+    agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')), 'data-machine-code'),
   }).filter(([, value]) => value !== '' && value !== undefined));
 }
 

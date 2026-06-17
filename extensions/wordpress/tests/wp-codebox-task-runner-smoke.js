@@ -616,6 +616,56 @@ try {
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, defaultDataMachinePath);
   assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, defaultDataMachineCodePath);
 
+  const labRuntimeRoot = path.join(root, 'lab-runtime-components');
+  const labAgentsApi = path.join(labRuntimeRoot, 'agents-api');
+  const labDataMachine = path.join(labRuntimeRoot, 'data-machine');
+  const labDataMachineCode = path.join(labRuntimeRoot, 'data-machine-code');
+  fs.mkdirSync(labAgentsApi, { recursive: true });
+  fs.mkdirSync(labDataMachine, { recursive: true });
+  fs.mkdirSync(labDataMachineCode, { recursive: true });
+  fs.writeFileSync(path.join(labAgentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
+  fs.writeFileSync(path.join(labDataMachine, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
+  fs.writeFileSync(path.join(labDataMachineCode, 'data-machine-code.php'), "<?php\n/* Plugin Name: Data Machine Code */\n");
+  const labRuntimeCapturePath = path.join(root, 'capture-lab-runtime-components.json');
+  const labRuntimeArtifacts = path.join(root, 'lab-runtime-artifacts');
+  const labRuntimeResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--artifacts', labRuntimeArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_component_paths: {
+        agents_api: '.ci/agents-api',
+        agent_runtime: '.ci/data-machine',
+        agent_runtime_tools: '.ci/data-machine-code',
+      },
+      component_contracts: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: labRuntimeCapturePath,
+      OPENCODE_API_KEY: 'redacted-test-key',
+      HOMEBOY_LAB_OFFLOAD_JSON: JSON.stringify({
+        workspace_mapping: {
+          workspaces: [
+            { role: 'dependency', local_path: '/Users/chubes/Developer/agents-api', remote_path: labAgentsApi },
+            { role: 'dependency', local_path: '/Users/chubes/Developer/data-machine', remote_path: labDataMachine },
+            { role: 'dependency', local_path: '/Users/chubes/Developer/data-machine-code', remote_path: labDataMachineCode },
+          ],
+        },
+      }),
+    },
+  });
+  assert.equal(labRuntimeResult.status, 0, labRuntimeResult.stderr || labRuntimeResult.stdout);
+  const labRuntimeInput = readJson(labRuntimeCapturePath).input;
+  const preparedLabDataMachine = path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine');
+  assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabDataMachine);
+  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
+  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine-code'));
+  assert.equal(fs.existsSync(path.join(preparedLabDataMachine, 'data-machine.php')), true);
+
   const runtimeComponentSource = path.join(root, 'runtime-components', 'data-machine-code');
   const runtimeComponentArtifacts = path.join(root, 'prepared-runtime-component-artifacts');
   fs.mkdirSync(runtimeComponentSource, { recursive: true });
