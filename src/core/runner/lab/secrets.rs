@@ -19,6 +19,7 @@ use crate::core::agent_tasks::secrets as agent_task_secrets;
 use crate::core::agent_tasks::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
+use crate::core::command_invocation::CommandInvocation;
 use crate::core::{config, Error, Result};
 
 use super::super::Runner;
@@ -1294,6 +1295,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             default_backend: true,
             command: "wp-codebox agent".to_string(),
             command_argv: Vec::new(),
+            invocation: CommandInvocation::default(),
             request_schema: "homeboy/agent-task-request/v1".to_string(),
             outcome_schema: "homeboy/agent-task-outcome/v1".to_string(),
             capabilities: Vec::new(),

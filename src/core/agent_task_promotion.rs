@@ -16,6 +16,7 @@ use crate::core::agent_task_gate::{
 };
 use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
+use crate::core::command_invocation::CommandInvocation;
 use crate::core::gate::HomeboyGateResult;
 use crate::core::{Error, Result};
 
@@ -279,18 +280,34 @@ trait AgentTaskPromotionWorkspaceProvider {
 }
 
 struct ExternalPromotionWorkspaceProvider {
-    command: Option<String>,
+    invocation: Option<CommandInvocation>,
 }
 
 impl ExternalPromotionWorkspaceProvider {
     fn from_options(options: &AgentTaskPromotionOptions) -> Self {
         Self {
-            command: options
+            invocation: options
                 .provider_command
                 .clone()
-                .or_else(|| std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok()),
+                .or_else(|| std::env::var(PROMOTION_PROVIDER_COMMAND_ENV).ok())
+                .map(|command| {
+                    eprintln!(
+                        "Warning: agent-task promotion provider string command is deprecated; use argv-capable provider invocation instead"
+                    );
+                    CommandInvocation {
+                        argv: command.split_whitespace().map(str::to_string).collect(),
+                        display: Some(command),
+                        ..Default::default()
+                    }
+                }),
         }
     }
+}
+
+fn invocation_program_and_args(invocation: &CommandInvocation) -> Option<(String, Vec<String>)> {
+    let mut argv = invocation.argv.clone().into_iter();
+    let program = argv.next()?;
+    Some((program, argv.collect()))
 }
 
 impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider {
@@ -298,7 +315,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
-        let command = self.command.as_deref().ok_or_else(|| {
+        let invocation = self.invocation.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "promotion_provider",
                 format!(
@@ -308,7 +325,7 @@ impl AgentTaskPromotionWorkspaceProvider for ExternalPromotionWorkspaceProvider 
                 None,
             )
         })?;
-        run_provider_command(command, &request)
+        run_provider_command(invocation, &request)
     }
 
     fn verify(
@@ -690,9 +707,23 @@ fn validate_workspace_handle(handle: &str) -> Result<()> {
 }
 
 fn run_provider_command(
-    command: &str,
+    invocation: &CommandInvocation,
     request: &AgentTaskPromotionApplyRequest,
 ) -> Result<AgentTaskPromotionWorkspace> {
+    let (program, args) = invocation_program_and_args(invocation).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "promotion_provider.argv",
+            "promotion provider invocation argv must not be empty",
+            None,
+            None,
+        )
+    })?;
+    let display = invocation.display.clone().unwrap_or_else(|| {
+        std::iter::once(program.clone())
+            .chain(args.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
     let request_json = serde_json::to_vec(request).map_err(|error| {
         Error::validation_invalid_json(
             error,
@@ -700,9 +731,13 @@ fn run_provider_command(
             None,
         )
     })?;
-    let mut process = Command::new("sh")
-        .arg("-lc")
-        .arg(command)
+    let mut command_builder = Command::new(&program);
+    command_builder.args(&args);
+    if let Some(cwd) = invocation.cwd.as_deref() {
+        command_builder.current_dir(cwd);
+    }
+
+    let mut process = command_builder
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -737,7 +772,7 @@ fn run_provider_command(
     })?;
     let exit_code = output.status.code().unwrap_or(1);
     let report = AgentTaskPromotionCommandReport {
-        command: vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+        command: std::iter::once(program).chain(args).collect(),
         exit_code,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
@@ -747,8 +782,7 @@ fn run_provider_command(
             "command",
             format!(
                 "promotion provider command failed with exit code {}: {}",
-                exit_code,
-                report.command.join(" ")
+                exit_code, display
             ),
             None,
             Some(vec![report.stderr.clone()]),
@@ -1381,8 +1415,14 @@ mod tests {
             patch_path: temp.path().join("changes.patch").display().to_string(),
             changed_files: vec!["src/lib.rs".to_string()],
         };
-        let workspace = run_provider_command(&format!("cat {}", response_path.display()), &request)
-            .expect("provider response");
+        let workspace = run_provider_command(
+            &CommandInvocation {
+                argv: vec!["cat".to_string(), response_path.display().to_string()],
+                ..Default::default()
+            },
+            &request,
+        )
+        .expect("provider response");
 
         assert!(workspace.path.ends_with("workspace"));
         assert_eq!(
