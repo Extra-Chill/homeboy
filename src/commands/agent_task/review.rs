@@ -11,7 +11,6 @@ use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_tasks::scheduler::AgentTaskAggregate;
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::config;
@@ -129,10 +128,13 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let record = agent_task_lifecycle::status(&args.run_id)?;
     let log = agent_task_lifecycle::logs(&args.run_id)?;
     let artifacts = agent_task_lifecycle::artifacts(&args.run_id)?;
-    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
+    let aggregate = super::completed_run_aggregate(&args.run_id).transpose()?;
     let aggregate_review = aggregate
         .as_ref()
         .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
+    let diagnostic_summary = aggregate
+        .as_ref()
+        .and_then(super::diagnostic_summary_from_aggregate);
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
@@ -163,6 +165,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "logs": log,
             "artifacts": artifacts,
             "aggregate_review": aggregate_review,
+            "diagnostic_summary": diagnostic_summary,
             "promotion_candidates": promotion_candidates,
             "next_actions": next_actions,
             "transport": {
@@ -289,20 +292,6 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
         "master".to_string(),
         "trunk".to_string(),
     ]
-}
-
-fn completed_run_aggregate(run_id: &str) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
-    match agent_task_lifecycle::aggregate_source(run_id) {
-        Ok((raw, _path)) => Some(serde_json::from_str(&raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task aggregate".to_string()),
-                Some(raw),
-            )
-        })),
-        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
-        Err(error) => Some(Err(error)),
-    }
 }
 
 fn promotion_candidates(
