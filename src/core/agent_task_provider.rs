@@ -51,7 +51,10 @@ pub struct AgentTaskExecutorProvider {
     pub backend: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub default_backend: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    #[serde(default, alias = "argv", skip_serializing_if = "Vec::is_empty")]
+    pub command_argv: Vec<String>,
     #[serde(default = "default_request_schema")]
     pub request_schema: String,
     #[serde(default = "default_outcome_schema")]
@@ -1120,8 +1123,8 @@ fn run_provider_command(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
-    let command = render_provider_command(provider);
-    let Some((program, args)) = provider_command_parts(&command) else {
+    let command = render_provider_command_display(provider);
+    let Some((program, args)) = provider_command_parts(provider) else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -1350,7 +1353,15 @@ fn output_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value.get(key).filter(|value| !value.is_null())
 }
 
-fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
+fn render_provider_command_display(provider: &AgentTaskExecutorProvider) -> String {
+    if !provider.command_argv.is_empty() {
+        return render_provider_command_argv(provider).join(" ");
+    }
+
+    render_provider_command_string(provider)
+}
+
+fn render_provider_command_string(provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
     provider
@@ -1359,8 +1370,31 @@ fn render_provider_command(provider: &AgentTaskExecutorProvider) -> String {
         .replace("{{runtime_path}}", runtime_path)
 }
 
-fn provider_command_parts(command: &str) -> Option<(String, Vec<String>)> {
-    let mut parts = command.split_whitespace().map(str::to_string);
+fn render_provider_command_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
+    let extension_path = provider.extension_path.as_deref().unwrap_or_default();
+    let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
+    provider
+        .command_argv
+        .iter()
+        .map(|arg| {
+            arg.replace("{{extension_path}}", extension_path)
+                .replace("{{runtime_path}}", runtime_path)
+        })
+        .collect()
+}
+
+fn provider_command_parts(provider: &AgentTaskExecutorProvider) -> Option<(String, Vec<String>)> {
+    let argv = if provider.command_argv.is_empty() {
+        // Legacy string commands retain their historical split behavior for
+        // compatibility. New provider manifests should use command_argv/argv.
+        render_provider_command_string(provider)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    } else {
+        render_provider_command_argv(provider)
+    };
+    let mut parts = argv.into_iter();
     let program = parts.next()?;
     Some((program, parts.collect()))
 }
@@ -1487,6 +1521,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_manifest_accepts_typed_command_argv_aliases() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "argv.provider",
+            "backend": "argv",
+            "command": "legacy-provider --legacy",
+            "argv": ["{{extension_path}}/bin/provider", "--runtime", "{{runtime_path}}"]
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(provider.command, "legacy-provider --legacy");
+        assert_eq!(
+            provider.command_argv,
+            vec![
+                "{{extension_path}}/bin/provider".to_string(),
+                "--runtime".to_string(),
+                "{{runtime_path}}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn provider_manifest_preserves_unknown_metadata_on_export() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "metadata.provider",
@@ -1604,6 +1659,7 @@ mod tests {
             backend: "test".to_string(),
             default_backend: false,
             command,
+            command_argv: Vec::new(),
             request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             capabilities: vec!["structured_outcome".to_string()],
@@ -1816,6 +1872,47 @@ process.stdout.write(JSON.stringify({
     }
 
     #[test]
+    fn provider_command_argv_preserves_extension_and_runtime_paths_with_spaces() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension_dir = temp.path().join("extension path with spaces");
+        let runtime_dir = temp.path().join("runtime path with spaces");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        fs::write(
+            runtime_dir.join("provider.js"),
+            r#"
+const fs = require('fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify({
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: input.task_id,
+  status: process.argv[2] === '--extension' && process.argv[3].includes('extension path with spaces') ? 'succeeded' : 'failed',
+  summary: process.argv.slice(2).join('|')
+}));
+"#,
+        )
+        .expect("provider script");
+        let (request, mut provider) = request("task-argv-spaces", "legacy unused".to_string());
+        provider.extension_path = Some(extension_dir.to_string_lossy().to_string());
+        provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
+        provider.command_argv = vec![
+            "node".to_string(),
+            "{{runtime_path}}/provider.js".to_string(),
+            "--extension".to_string(),
+            "{{extension_path}}".to_string(),
+        ];
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(outcome
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("extension path with spaces"));
+    }
+
+    #[test]
     fn provider_manifest_parses_runner_and_dependency_contracts() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "schema": "homeboy/agent-task-executor-provider/v1",
@@ -2001,15 +2098,17 @@ process.stdout.write(JSON.stringify({
 
     #[test]
     fn default_backend_is_absent_without_provider_declaration() {
-        let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-        provider_a.backend = "first".to_string();
-        let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-        provider_b.backend = "second".to_string();
+        crate::test_support::with_isolated_home(|_| {
+            let (_request, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+            provider_a.backend = "first".to_string();
+            let (_request, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+            provider_b.backend = "second".to_string();
 
-        let executor =
-            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+            let executor =
+                ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
 
-        assert_eq!(executor.default_backend().unwrap(), None);
+            assert_eq!(executor.default_backend().unwrap(), None);
+        });
     }
 
     #[test]
@@ -2022,7 +2121,7 @@ process.stdout.write(JSON.stringify({
         provider.runtime_path = Some("/agent-runtimes/example".to_string());
 
         assert_eq!(
-            render_provider_command(&provider),
+            render_provider_command_display(&provider),
             "/agent-runtimes/example/bin/provider --extension /extensions/project-type"
         );
     }
@@ -2112,7 +2211,7 @@ process.stdout.write(JSON.stringify({
                 Some(runtime_dir.to_string_lossy().as_ref())
             );
             assert_eq!(
-                render_provider_command(&providers[0]),
+                render_provider_command_display(&providers[0]),
                 format!("node {}/runner.cjs", runtime_dir.display())
             );
         });
@@ -2136,7 +2235,7 @@ process.stdout.write(JSON.stringify({
             "/tmp/custom-runtime".to_string()
         )));
         assert_eq!(
-            render_provider_command(&provider),
+            render_provider_command_display(&provider),
             "node /tmp/custom-runtime/provider.js"
         );
     }

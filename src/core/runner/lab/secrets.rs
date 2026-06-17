@@ -1293,6 +1293,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             backend: "codebox".to_string(),
             default_backend: true,
             command: "wp-codebox agent".to_string(),
+            command_argv: Vec::new(),
             request_schema: "homeboy/agent-task-request/v1".to_string(),
             outcome_schema: "homeboy/agent-task-outcome/v1".to_string(),
             capabilities: Vec::new(),
@@ -1309,6 +1310,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             extension_path: None,
             runtime_id: None,
             runtime_path: None,
+            extra: std::collections::BTreeMap::new(),
         }
     }
 }
