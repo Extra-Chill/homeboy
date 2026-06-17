@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use homeboy::core::artifact_ref::{ArtifactRef, EvidenceRef};
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
 use serde::Serialize;
 use serde_json::Value;
@@ -53,6 +54,8 @@ pub struct RunsEvidenceArtifactIndex {
 
 #[derive(Serialize)]
 pub struct RunsEvidenceArtifact {
+    #[serde(rename = "ref")]
+    pub reference: ArtifactRef,
     pub id: String,
     pub kind: String,
     #[serde(rename = "type")]
@@ -92,6 +95,8 @@ pub type RunsEvidenceDiskBudget = disk::DiskBudget;
 
 #[derive(Serialize)]
 pub struct RunsEvidenceLink {
+    #[serde(rename = "ref")]
+    pub reference: EvidenceRef,
     pub kind: String,
     pub target: String,
     pub label: String,
@@ -190,6 +195,7 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
     let artifacts = artifacts
         .iter()
         .map(|artifact| {
+            let reference = artifact_ref(artifact);
             let public_url = artifact_public_url(artifact);
             let exists = artifact_exists(artifact);
             if !exists {
@@ -204,10 +210,10 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
             let size = artifact_size_bytes(artifact);
             total_size_bytes = total_size_bytes.saturating_add(size);
             RunsEvidenceArtifact {
-                id: artifact.id.clone(),
-                kind: artifact.kind.clone(),
-                artifact_type: artifact.artifact_type.clone(),
-                path: artifact.path.clone(),
+                id: reference.id.clone(),
+                kind: reference.kind.clone(),
+                artifact_type: reference.artifact_type.clone(),
+                path: reference.path.clone(),
                 url: artifact
                     .url
                     .clone()
@@ -221,6 +227,7 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
                 created_at: artifact.created_at.clone(),
                 exists,
                 retention_candidate: artifact.artifact_type != "url",
+                reference,
             }
         })
         .collect::<Vec<_>>();
@@ -238,7 +245,7 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
 
 fn artifact_public_url(artifact: &ArtifactRecord) -> Option<String> {
     if artifact.artifact_type == "url" {
-        return artifact.url.clone().or_else(|| Some(artifact.path.clone()));
+        return artifact_ref(artifact).public_target();
     }
     artifact.public_url.clone().or_else(|| {
         artifact
@@ -247,6 +254,18 @@ fn artifact_public_url(artifact: &ArtifactRecord) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_string)
     })
+}
+
+fn artifact_ref(artifact: &ArtifactRecord) -> ArtifactRef {
+    let mut reference = ArtifactRef::from_record(artifact);
+    if reference.public_url.is_none() {
+        reference.public_url = artifact
+            .metadata_json
+            .get("public_url")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    reference
 }
 
 fn artifact_relative_to(artifact: &ArtifactRecord) -> Option<String> {
@@ -348,10 +367,14 @@ fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
     artifacts
         .iter()
         .filter_map(|artifact| {
-            artifact_public_url(artifact).map(|target| RunsEvidenceLink {
-                kind: artifact.kind.clone(),
-                target,
-                label: artifact.kind.clone(),
+            let target = artifact_public_url(artifact)?;
+            let mut reference = EvidenceRef::new(&artifact.kind, &target, &artifact.kind);
+            reference.artifact = Some(artifact_ref(artifact));
+            Some(RunsEvidenceLink {
+                kind: reference.kind.clone(),
+                target: reference.target.clone(),
+                label: reference.label.clone(),
+                reference,
             })
         })
         .collect()
@@ -485,6 +508,8 @@ mod tests {
                 bench_results.fetch_command.as_deref(),
                 Some(expected_fetch_command.as_str())
             );
+            assert_eq!(bench_results.reference.schema, "homeboy/artifact-ref/v1");
+            assert_eq!(bench_results.reference.id, bench_results.id);
             let review = output
                 .artifact_index
                 .artifacts
@@ -497,6 +522,10 @@ mod tests {
                 Some("https://example.test/evidence")
             );
             assert_eq!(output.evidence_links.len(), 1);
+            assert_eq!(
+                output.evidence_links[0].reference.schema,
+                "homeboy/evidence-ref/v1"
+            );
             assert_eq!(
                 output.evidence_links[0].target,
                 "https://example.test/evidence"
