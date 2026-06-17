@@ -41,6 +41,9 @@ pub enum AgentTaskCommand {
     Dispatch(DispatchArgs),
     /// Run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
+    /// Build, submit, or run a durable WordPress/Codebox runtime-task plan.
+    #[command(name = "wordpress-runtime")]
+    WordPressRuntime(WordPressRuntimeArgs),
     /// Execute a previously submitted durable agent-task run.
     Run(StatusArgs),
     /// Claim and execute the oldest queued durable agent-task run.
@@ -215,6 +218,97 @@ pub struct RunPlanArgs {
     /// Also persist the completed run lifecycle record under this id.
     #[arg(long, value_name = "ID")]
     pub record_run_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct WordPressRuntimeArgs {
+    /// Full WordPressRuntimePlanRequest JSON object, @file, or - for stdin.
+    #[arg(long = "spec", value_name = "JSON|@FILE|-")]
+    pub spec: Option<String>,
+
+    /// Runtime task JSON object to schedule. Repeatable for fanout.
+    #[arg(long = "runtime-task", value_name = "JSON|@FILE")]
+    pub runtime_task: Vec<String>,
+
+    /// Ability shorthand. Builds a runtime task like {"ability":"...","input":...}.
+    #[arg(long = "ability", value_name = "SLUG")]
+    pub ability: Option<String>,
+
+    /// JSON input object for --ability. Defaults to {}.
+    #[arg(long = "ability-input", value_name = "JSON|@FILE")]
+    pub ability_input: Option<String>,
+
+    /// Data Liberation Agent URL extraction shorthand. Repeatable for fanout.
+    #[arg(long = "dla-url", value_name = "URL")]
+    pub dla_url: Vec<String>,
+
+    /// Stable plan id. Generated when omitted.
+    #[arg(long = "plan-id", value_name = "ID")]
+    pub plan_id: Option<String>,
+
+    /// Group key shared by the scheduled tasks.
+    #[arg(long = "group-key", value_name = "KEY")]
+    pub group_key: Option<String>,
+
+    /// Durable run id used by --submit or --run --record.
+    #[arg(long = "run-id", value_name = "ID")]
+    pub run_id: Option<String>,
+
+    /// Executor backend. Defaults to codebox.
+    #[arg(long = "backend", default_value = "codebox", value_name = "BACKEND")]
+    pub backend: String,
+
+    /// Executor provider selector.
+    #[arg(long = "selector", value_name = "ID")]
+    pub selector: Option<String>,
+
+    /// Runtime package id. Defaults to wp-codebox.
+    #[arg(long = "runtime-id", default_value = "wp-codebox", value_name = "ID")]
+    pub runtime_id: String,
+
+    /// Provider id passed to the runtime selection.
+    #[arg(long = "provider", value_name = "ID")]
+    pub provider: Option<String>,
+
+    /// Model id passed to the runtime selection.
+    #[arg(long = "model", value_name = "ID")]
+    pub model: Option<String>,
+
+    /// Runtime substrate ref, such as a Codebox ref, selected by the executor provider.
+    #[arg(long = "substrate-ref", value_name = "REF")]
+    pub substrate_ref: Option<String>,
+
+    /// Required executor capability. Repeatable.
+    #[arg(long = "capability", value_name = "CAPABILITY")]
+    pub capability: Vec<String>,
+
+    /// Secret environment variable to expose through provider auth resolution. Repeatable.
+    #[arg(long = "secret-env", value_name = "ENV")]
+    pub secret_env: Vec<String>,
+
+    /// Expected artifact name. Repeatable.
+    #[arg(long = "expected-artifact", value_name = "NAME")]
+    pub expected_artifact: Vec<String>,
+
+    /// Max concurrent runtime tasks for fanout.
+    #[arg(long = "max-concurrency", default_value_t = 1, value_name = "N")]
+    pub max_concurrency: usize,
+
+    /// Per-task timeout in milliseconds.
+    #[arg(long = "timeout-ms", value_name = "MS")]
+    pub timeout_ms: Option<u64>,
+
+    /// Persist the plan as a queued durable run without executing.
+    #[arg(long = "submit")]
+    pub submit: bool,
+
+    /// Execute the plan immediately through the selected executor provider.
+    #[arg(long = "run")]
+    pub run: bool,
+
+    /// Persist --run lifecycle evidence under --run-id. Ignored without --run.
+    #[arg(long = "record")]
+    pub record: bool,
 }
 
 #[derive(Args, Debug)]

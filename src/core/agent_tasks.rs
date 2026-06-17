@@ -88,6 +88,12 @@ pub use super::agent_task_schedule::AgentTaskProgressEvent;
 
 pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
 
+pub use super::agent_task_wordpress_runtime::{
+    build_wordpress_runtime_plan, dla_extraction_task, WordPressRuntimeExecutorSpec,
+    WordPressRuntimePlanRequest, WordPressRuntimeTaskSpec, WORDPRESS_RUNTIME_PLAN_REQUEST_SCHEMA,
+    WORDPRESS_RUNTIME_TASK_SCHEMA,
+};
+
 // Matrix expansion is `pub(crate)` on the implementation module; expose it
 // through the facade for callers inside the crate that need to expand a plan
 // matrix without depending on the implementation path.

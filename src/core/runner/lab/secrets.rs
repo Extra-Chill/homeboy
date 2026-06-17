@@ -1309,6 +1309,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
             extension_path: None,
             runtime_id: None,
             runtime_path: None,
+            extra: Default::default(),
         }
     }
 }

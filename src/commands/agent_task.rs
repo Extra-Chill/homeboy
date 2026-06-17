@@ -16,6 +16,7 @@ pub mod controller;
 pub mod review;
 pub mod run;
 pub mod status;
+pub mod wordpress_runtime;
 
 pub use args::{
     AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
@@ -25,6 +26,7 @@ pub use args::{
     AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs, AgentTaskLoopArgs, CancelArgs,
     ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
     RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    WordPressRuntimeArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -38,6 +40,9 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
             super::agent_task_dispatch::run(dispatch_args, global)
         }
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
+        AgentTaskCommand::WordPressRuntime(runtime_args) => {
+            wordpress_runtime::wordpress_runtime(runtime_args)
+        }
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::RunNext => run::run_next(),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
