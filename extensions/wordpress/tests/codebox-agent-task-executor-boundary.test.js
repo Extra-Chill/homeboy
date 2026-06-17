@@ -18,6 +18,11 @@ const codexSecretEnv = [
   'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ];
+const claudeCodeSecretEnv = [
+  'AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN',
+  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
+  'AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT',
+];
 
 function secretEnvRequirementForProvider(contract, provider) {
   return contract.secret_env_requirements.find((requirement) => (
@@ -51,9 +56,18 @@ assert.deepEqual(provider.provider_defaults.codex.secret_env, [
   'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
   'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
 ]);
-assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, [
-  'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN',
-]);
+assert.deepEqual(provider.provider_defaults.codex.secret_env_sources.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, {
+  source: 'json-file',
+  path: '~/.codex/auth.json',
+  field: 'tokens.access_token',
+});
+assert.deepEqual(provider.provider_defaults['claude-code'].secret_env, claudeCodeSecretEnv);
+assert.deepEqual(provider.provider_defaults['claude-code'].secret_env_sources.AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN, {
+  source: 'keychain-bundle',
+  scope: 'agent-task',
+  name: 'claude-code-oauth',
+  field: 'refresh_token',
+});
 assert.deepEqual(provider.workspace_tools.readonly, [
   'workspace_ls',
   'workspace_read',

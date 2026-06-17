@@ -71,7 +71,11 @@
         {
           "schema": "homeboy/secret-env-requirement/v1",
           "source": "provider_default",
-          "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
+          "env": [
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+          ],
           "when": {
             "any": [
               { "path": "executor.config.provider", "equals": "claude-code" },
@@ -199,10 +203,61 @@
             "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
             "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID",
             "AI_PROVIDER_OPENAI_CODEX_FEDRAMP"
-          ]
+          ],
+          "secret_env_sources": {
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+              "source": "json-file",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.access_token"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN": {
+              "source": "json-file",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.refresh_token"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT": {
+              "source": "json-file",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.expires_at"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID": {
+              "source": "json-file",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.account_id"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP": {
+              "source": "json-file",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.fedramp"
+            }
+          }
         },
         "claude-code": {
-          "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+          "secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+          ],
+          "secret_env_sources": {
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN": {
+              "source": "keychain-bundle",
+              "scope": "agent-task",
+              "name": "claude-code-oauth",
+              "field": "access_token"
+            },
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
+              "source": "keychain-bundle",
+              "scope": "agent-task",
+              "name": "claude-code-oauth",
+              "field": "refresh_token"
+            },
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT": {
+              "source": "keychain-bundle",
+              "scope": "agent-task",
+              "name": "claude-code-oauth",
+              "field": "expires_at"
+            }
+          }
         }
       },
       "role_aliases": {
