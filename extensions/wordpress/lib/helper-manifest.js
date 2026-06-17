@@ -12,6 +12,8 @@ const HELPER_PATHS = Object.freeze({
 	timingCorrelator: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'timing-correlator.js'),
 	wordpressRouteLatency: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-route-latency.js'),
 	bootstrapTimeline: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-bootstrap-timeline.js'),
+	pageProfiler: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'page-profiler.js'),
+	adminPageScenarios: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'admin-page-scenarios.js'),
 	blockQuality: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'block-quality.js'),
 	materializedSiteQuality: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'materialized-site-quality.js'),
 	editorCanvasProbes: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'editor-canvas-probes.js'),

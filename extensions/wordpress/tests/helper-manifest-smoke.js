@@ -33,6 +33,14 @@ assert.equal(
 	path.resolve(__dirname, '..', 'lib', 'wordpress-bootstrap-timeline.js')
 );
 assert.equal(
+	manifest.helpers.pageProfiler,
+	path.resolve(__dirname, '..', 'lib', 'page-profiler.js')
+);
+assert.equal(
+	manifest.helpers.adminPageScenarios,
+	path.resolve(__dirname, '..', 'lib', 'admin-page-scenarios.js')
+);
+assert.equal(
 	manifest.helpers.blockQuality,
 	path.resolve(__dirname, '..', 'lib', 'block-quality.js')
 );
