@@ -28,8 +28,8 @@ pub use commits::{
 };
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
-    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_merge, pr_view,
-    GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
+    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge,
+    pr_view, GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
     IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
     PrState,
@@ -58,8 +58,8 @@ pub use pr_policy::{
 pub use primitives::{
     clone_repo, clone_repo_at_ref, current_branch, get_component_path_prefix, get_git_root,
     head_sha, head_sha_short, is_workdir_clean_or_not_git, output_optional, output_optional_bytes,
-    pull_repo, remote_origin_url, remote_url, run_git, short_head_revision, status_porcelain,
-    status_porcelain_bytes, toplevel, update_to_remote_default_branch,
+    pull_repo, remote_origin_url, remote_url, run_git, run_git_output, short_head_revision,
+    status_porcelain, status_porcelain_bytes, toplevel, update_to_remote_default_branch,
 };
 pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
 

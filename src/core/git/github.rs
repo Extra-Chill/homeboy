@@ -436,6 +436,60 @@ pub fn pr_find(component_id: Option<&str>, options: PrFindOptions) -> Result<Git
     })
 }
 
+/// Find PRs that contain a commit SHA.
+///
+/// GitHub indexes commit SHAs in PR search, which makes this the shared helper
+/// for read-only stack/branch inspection flows that need to decorate commits.
+pub fn pr_find_by_commit(
+    repo_path: &Path,
+    sha: &str,
+    repo: Option<&str>,
+    limit: usize,
+) -> Result<Vec<GithubFindItem>> {
+    ensure_gh_ready()?;
+
+    let mut args: Vec<String> = vec![
+        "pr".into(),
+        "list".into(),
+        "--search".into(),
+        sha.to_string(),
+        "--state".into(),
+        "all".into(),
+        "--json".into(),
+        "number,state,title,url".into(),
+        "--limit".into(),
+        limit.to_string(),
+    ];
+    if let Some(repo) = repo {
+        args.push("-R".into());
+        args.push(repo.to_string());
+    }
+
+    let output = Command::new("gh")
+        .args(&args)
+        .current_dir(repo_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            Error::git_command_failed(format!(
+                "gh pr list --search: {} (is `gh` installed and authenticated?)",
+                e
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!(
+            "gh pr list --search {}: {}",
+            sha,
+            stderr.trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_pr_list_json(&stdout)
+}
+
 /// Fetch metadata for one PR.
 pub fn pr_view(
     component_id: Option<&str>,
