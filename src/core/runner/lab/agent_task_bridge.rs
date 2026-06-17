@@ -783,6 +783,7 @@ trailing log"#;
             path_contains: "prepared-dependencies/".to_string(),
             error_contains_any: vec!["no such file or directory".to_string()],
             remediation: Some("refresh fixture dependencies".to_string()),
+            extra: Default::default(),
         }];
 
         let message =

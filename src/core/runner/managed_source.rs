@@ -197,6 +197,7 @@ mod tests {
             remote_url: None,
             git_ref: None,
             remediation: None,
+            extra: Default::default(),
         }
     }
 
