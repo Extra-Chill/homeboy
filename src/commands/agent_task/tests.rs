@@ -15,12 +15,15 @@ use super::run::{
     run_resume_with_executor, run_submitted, submit,
 };
 use super::status::{cancel, logs, status};
-use super::{review, CancelArgs, RetryArgs};
+use super::{review, CancelArgs, ProvidersArgs, RetryArgs};
 use homeboy::core::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
 };
 use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{
+    AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+};
 use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 
 use crate::test_support::with_isolated_home;
@@ -40,6 +43,34 @@ use homeboy::core::agent_tasks::{
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn providers_output_includes_core_capability_contract() {
+    with_isolated_home(|_| {
+        let (value, status) = review::providers(ProvidersArgs {
+            secret_env: Vec::new(),
+        })
+        .expect("providers output");
+
+        assert_eq!(status, 0);
+        assert_eq!(
+            value["capability_contract"]["schema"],
+            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["provider_schema"],
+            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["request_schema"],
+            AGENT_TASK_REQUEST_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["outcome_schema"],
+            AGENT_TASK_OUTCOME_SCHEMA
+        );
+    });
+}
 
 #[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {

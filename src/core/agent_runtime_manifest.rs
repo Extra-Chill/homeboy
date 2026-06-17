@@ -134,6 +134,7 @@ mod tests {
 
     use super::*;
     use crate::core::agent_task::{AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA};
+    use crate::core::agent_task_provider::AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA;
 
     fn extension(id: &str) -> ExtensionManifest {
         ExtensionManifest {
@@ -178,7 +179,7 @@ mod tests {
 
     fn provider_json(id: &str, backend: &str) -> Value {
         json!({
-            "schema": "homeboy/agent-task-executor-provider/v1",
+            "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
             "id": id,
             "backend": backend,
             "command": "agent-task-provider",
@@ -233,7 +234,7 @@ mod tests {
                     "description": "Standalone runtime package fixture.",
                     "label": "Standalone Example",
                     "agent_task_executors": [{
-                        "schema": "homeboy/agent-task-executor-provider/v1",
+                        "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                         "id": "standalone-example.default",
                         "backend": "example",
                         "command": "agent-task-provider",

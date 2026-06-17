@@ -287,6 +287,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
+            "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
             "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
