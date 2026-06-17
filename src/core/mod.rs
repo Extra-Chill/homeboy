@@ -37,6 +37,7 @@ pub mod artifact_links;
 pub mod artifact_manifest;
 pub(crate) mod artifact_metadata;
 pub mod artifact_origin;
+pub mod artifact_ref;
 pub mod browser_evidence;
 pub mod build_identity;
 pub mod change_artifact;
