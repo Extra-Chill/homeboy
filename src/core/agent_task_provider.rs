@@ -90,6 +90,8 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 fn default_provider_schema() -> String {
@@ -161,6 +163,8 @@ pub struct AgentTaskProviderRunnerReadiness {
     pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -178,6 +182,8 @@ pub struct AgentTaskProviderEnvPathReadiness {
     /// entirely by the declaring extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_path: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// A named, extension-declared source checkout that homeboy keeps synced on the
@@ -202,6 +208,8 @@ pub struct AgentTaskProviderRunnerSource {
     pub git_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +221,8 @@ pub struct AgentTaskProviderDependencyFailurePattern {
     pub error_contains_any: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -225,6 +235,8 @@ pub struct AgentTaskProviderTimeoutArtifactDiscovery {
     pub config_path_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_patterns: Vec<AgentTaskProviderArtifactPattern>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl AgentTaskProviderTimeoutArtifactDiscovery {
@@ -233,6 +245,7 @@ impl AgentTaskProviderTimeoutArtifactDiscovery {
             && self.metadata_path_keys.is_empty()
             && self.config_path_keys.is_empty()
             && self.artifact_patterns.is_empty()
+            && self.extra.is_empty()
     }
 }
 
@@ -254,6 +267,8 @@ pub struct AgentTaskProviderArtifactPattern {
         skip_serializing_if = "is_empty_metadata"
     )]
     pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 fn default_metadata() -> Value {
@@ -274,6 +289,8 @@ pub struct AgentTaskProviderRoleAliases {
     pub outputs: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, Vec<String>>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl AgentTaskProviderRoleAliases {
@@ -282,6 +299,7 @@ impl AgentTaskProviderRoleAliases {
             && self.artifact_filenames.is_empty()
             && self.outputs.is_empty()
             && self.metadata.is_empty()
+            && self.extra.is_empty()
     }
 
     pub fn artifact_kind_matches_role(&self, role: &str, kind: &str) -> bool {
@@ -357,6 +375,8 @@ pub struct AgentTaskProviderWorkspaceMaterialization {
     pub write_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_paths: Vec<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1466,6 +1486,106 @@ mod tests {
         assert_eq!(provider.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
     }
 
+    #[test]
+    fn provider_manifest_preserves_unknown_metadata_on_export() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "metadata.provider",
+            "backend": "metadata",
+            "command": "metadata-provider",
+            "provider_metadata": {
+                "runtime": "provider-owned"
+            },
+            "runner_readiness": [{
+                "id": "ready",
+                "label": "Ready",
+                "provider_hint": "preserve-me",
+                "env_path": {
+                    "env": ["PROVIDER_HOME"],
+                    "path_kind": "provider-cache"
+                }
+            }],
+            "timeout_artifact_discovery": {
+                "paths": ["artifacts"],
+                "provider_discovery": true,
+                "artifact_patterns": [{
+                    "kind": "log",
+                    "filename_contains": ["provider"],
+                    "provider_role": "diagnostic"
+                }]
+            },
+            "role_aliases": {
+                "outputs": { "patch": ["diff"] },
+                "provider_alias_policy": "strict"
+            },
+            "workspace_materialization": {
+                "cwd": "git_checkout",
+                "provider_workspace_mode": "linked"
+            }
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(
+            provider.extra["provider_metadata"]["runtime"],
+            "provider-owned"
+        );
+        assert_eq!(
+            provider.runner_readiness[0].extra["provider_hint"],
+            "preserve-me"
+        );
+        assert_eq!(
+            provider.runner_readiness[0]
+                .env_path
+                .as_ref()
+                .expect("env path")
+                .extra["path_kind"],
+            "provider-cache"
+        );
+        assert_eq!(
+            provider.timeout_artifact_discovery.extra["provider_discovery"],
+            true
+        );
+        assert_eq!(
+            provider.timeout_artifact_discovery.artifact_patterns[0].extra["provider_role"],
+            "diagnostic"
+        );
+        assert_eq!(
+            provider.role_aliases.extra["provider_alias_policy"],
+            "strict"
+        );
+        assert_eq!(
+            provider
+                .workspace_materialization
+                .as_ref()
+                .expect("workspace materialization")
+                .extra["provider_workspace_mode"],
+            "linked"
+        );
+
+        let exported = serde_json::to_value(&provider).expect("provider export");
+        assert_eq!(exported["provider_metadata"]["runtime"], "provider-owned");
+        assert_eq!(
+            exported["runner_readiness"][0]["provider_hint"],
+            "preserve-me"
+        );
+        assert_eq!(
+            exported["runner_readiness"][0]["env_path"]["path_kind"],
+            "provider-cache"
+        );
+        assert_eq!(
+            exported["timeout_artifact_discovery"]["provider_discovery"],
+            true
+        );
+        assert_eq!(
+            exported["timeout_artifact_discovery"]["artifact_patterns"][0]["provider_role"],
+            "diagnostic"
+        );
+        assert_eq!(exported["role_aliases"]["provider_alias_policy"], "strict");
+        assert_eq!(
+            exported["workspace_materialization"]["provider_workspace_mode"],
+            "linked"
+        );
+    }
+
     fn script(body: &str) -> String {
         let path = std::env::temp_dir().join(format!(
             "homeboy-agent-task-provider-{}-{}.js",
@@ -1500,6 +1620,7 @@ mod tests {
             extension_path: None,
             runtime_id: None,
             runtime_path: None,
+            extra: BTreeMap::new(),
         };
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -1917,6 +2038,7 @@ process.stdout.write(JSON.stringify({
             secret_env: vec!["PROVIDER_A_TOKEN".to_string()],
             env_path: None,
             remediation: Some("Configure provider A auth.".to_string()),
+            extra: BTreeMap::new(),
         }];
         let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
         request_b.executor.backend = "provider-b".to_string();
@@ -1931,6 +2053,7 @@ process.stdout.write(JSON.stringify({
             ],
             env_path: None,
             remediation: None,
+            extra: BTreeMap::new(),
         }];
         let mut plan = AgentTaskPlan::new("plan-a", vec![request_a, request_b]);
 
@@ -2082,6 +2205,7 @@ process.stdout.write(JSON.stringify({
             requires_git: None,
             write_scope: None,
             artifact_paths: Vec::new(),
+            extra: BTreeMap::new(),
         });
 
         assert!(provider_requires_cwd_git_checkout_with_providers(
@@ -2287,6 +2411,7 @@ process.stdout.write(JSON.stringify({
             requires_git: Some(true),
             write_scope: Some("artifacts".to_string()),
             artifact_paths: vec![".homeboy/provider".to_string()],
+            extra: BTreeMap::new(),
         });
 
         assert!(provider_requires_cwd_git_checkout_with_providers(
@@ -2304,6 +2429,7 @@ process.stdout.write(JSON.stringify({
             requires_git: None,
             write_scope: None,
             artifact_paths: Vec::new(),
+            extra: BTreeMap::new(),
         });
 
         assert!(!provider_requires_cwd_git_checkout_with_providers(
