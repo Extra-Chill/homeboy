@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
-use super::args_util::subcommand_index;
+use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
 
 pub(super) fn materialize_inline_agent_task_plan_arg(
     runner_id: &str,
@@ -329,45 +329,25 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
 }
 
 pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {
-    let action_index = subcommand_index(args, "agent-task").and_then(|index| {
-        args.get(index + 1)
-            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-            .map(|_| index + 1)
-    })?;
-
-    let mut iter = args.iter().skip(action_index + 1);
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--run-id" {
-            return iter.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix("--run-id=") {
-            return (!value.is_empty()).then(|| value.to_string());
-        }
-    }
-
-    None
+    let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
+    let action_index = invocation.child_index_matching(&["dispatch", "cook"])?;
+    invocation
+        .option_value_after(action_index, "--run-id")
+        .map(str::to_string)
 }
 
 pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<String>, String)> {
-    let action_index = subcommand_index(args, "agent-task").and_then(|index| {
-        args.get(index + 1)
-            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-            .map(|_| index + 1)
-    })?;
+    let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
+    let action_index = invocation.child_index_matching(&["dispatch", "cook"])?;
 
     if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
         return Some((args.to_vec(), run_id));
     }
 
     let run_id = format!("agent-task-{}", uuid::Uuid::new_v4());
-    let mut out = Vec::with_capacity(args.len() + 2);
-    out.extend_from_slice(&args[..=action_index]);
-    out.push("--run-id".to_string());
-    out.push(run_id.clone());
-    out.extend_from_slice(&args[action_index + 1..]);
+    let out = ArgEditor::new(args)
+        .insert_after(action_index, ["--run-id".to_string(), run_id.clone()])
+        .into_args();
     Some((out, run_id))
 }
 
