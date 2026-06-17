@@ -2,13 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT_DIR}/.." && pwd)/homeboy}"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
 # Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
 # fall back to the co-located direct-invocation copy so the sidecar writer is
 # available outside a release run (homeboy-extensions#1415).
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:?HOMEBOY_RUNTIME_SIDECAR_WRITER is required}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
@@ -96,8 +98,8 @@ if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
 fi
 
 # Resolve execution context (shared helper)
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:?HOMEBOY_RUNTIME_SIDECAR_WRITER is required}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/resolve-context.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/sidecar-writer.sh}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -130,6 +132,7 @@ PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
 PHPSTAN_DEFAULT_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
 PHPSTAN_COMPONENT_CONFIG=""
 PHPSTAN_COMPONENT_CONFIG_SOURCE="extension-default"
+PHPSTAN_COMPONENT_CONFIG_HAS_RULESET=0
 PHPSTAN_BASE_CONFIG="$PHPSTAN_DEFAULT_CONFIG"
 PHPSTAN_LEVEL_SOURCE="extension-default"
 COMPONENT_BASELINE="${PLUGIN_PATH}/phpstan-baseline.neon"
@@ -223,6 +226,9 @@ PHPSTAN_COMPONENT_CONFIG=$(resolve_component_phpstan_config || true)
 if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
     PHPSTAN_COMPONENT_CONFIG_SOURCE="component-local"
     PHPSTAN_BASE_CONFIG="$PHPSTAN_COMPONENT_CONFIG"
+    if grep -Eq '^[[:space:]]*(level|customRulesetUsed):' "$PHPSTAN_COMPONENT_CONFIG"; then
+        PHPSTAN_COMPONENT_CONFIG_HAS_RULESET=1
+    fi
 fi
 
 generate_dependency_config() {
@@ -240,6 +246,9 @@ generate_dependency_config() {
     {
         printf '%s\n' 'includes:'
         if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
+            if [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
+                printf '    - %s\n' "$PHPSTAN_DEFAULT_CONFIG"
+            fi
             printf '    - %s\n' "$PHPSTAN_COMPONENT_CONFIG"
             has_component_config=1
         else
@@ -256,6 +265,9 @@ generate_dependency_config() {
         fi
         printf '%s\n' ''
         printf '%s\n' 'parameters:'
+        if [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+            printf '%s\n' '    customRulesetUsed: false'
+        fi
         printf '%s\n' '    scanDirectories:'
 
         while IFS= read -r dependency_path; do
@@ -346,6 +358,9 @@ generate_scoped_context_config() {
         printf '    - %s\n' "$PHPSTAN_BASE_CONFIG"
         printf '%s\n' ''
         printf '%s\n' 'parameters:'
+        if [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+            printf '%s\n' '    customRulesetUsed: false'
+        fi
 
         while IFS= read -r -d '' context_file; do
             if [ "$has_context_files" -eq 0 ]; then
@@ -542,7 +557,7 @@ PHPSTAN_LEVEL="${HOMEBOY_PHPSTAN_LEVEL:-7}"
 if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ]; then
     PHPSTAN_LEVEL_SOURCE="env"
     phpstan_args+=(--level="$PHPSTAN_LEVEL")
-elif [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+elif [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
     phpstan_args+=(--level="$PHPSTAN_LEVEL")
 else
     PHPSTAN_LEVEL="config"
@@ -722,7 +737,7 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
     # Replace the --configuration arg with our temp config
     phpstan_args=(analyse)
     phpstan_args+=(--configuration="$PHPSTAN_TMPCONFIG")
-    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
         phpstan_args+=(--level="$PHPSTAN_LEVEL")
     fi
     phpstan_args+=(--memory-limit=2G)
@@ -816,7 +831,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         echo "Parallel worker failure detected, retrying single-process (--debug)..."
         prepare_phpstan_retry_config > /dev/null
         retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
-        if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+        if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
             retry_args+=(--level="$PHPSTAN_LEVEL")
         fi
         # Baseline is pulled in via PHPSTAN_TMPCONFIG → PHPSTAN_BASE_CONFIG
@@ -1212,7 +1227,7 @@ if [ "$full_exit" -ne 0 ] && \
     echo "Parallel worker failure detected, retrying single-process (--debug)..."
     prepare_phpstan_retry_config > /dev/null
     retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
-    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ]; then
+    if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
         retry_args+=(--level="$PHPSTAN_LEVEL")
     fi
     # Baseline pulled in via PHPSTAN_TMPCONFIG include chain, same as summary-mode retry.

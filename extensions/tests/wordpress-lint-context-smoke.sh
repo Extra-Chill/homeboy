@@ -78,6 +78,7 @@ assert_contains "$PHPSTAN_RUNNER" "scoper.inc.php"
 assert_contains "$PHPSTAN_CONFIG" "*/vendor_prefixed/*"
 assert_contains "$PHPSTAN_CONFIG" "*/tools/*"
 assert_contains "$PHPSTAN_CONFIG" "*/scoper.inc.php"
+assert_contains "$PHPSTAN_CONFIG" "customRulesetUsed: false"
 
 for non_runtime_file in \
     scoper.inc.php \
@@ -157,6 +158,11 @@ grep -Fq "$EXPECTED_INTERFACE" "$config" || {
 
 grep -Fq "$EXPECTED_VENDOR_PREFIXED" "$config" || {
     echo "scoped config did not include vendor_prefixed dependency context" >&2
+    exit 1
+}
+
+grep -Fq "customRulesetUsed: false" "$config" || {
+    echo "generated PHPStan config did not mark the default ruleset" >&2
     exit 1
 }
 
