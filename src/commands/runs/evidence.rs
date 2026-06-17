@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use homeboy::core::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use homeboy::core::artifact_ref::{ArtifactRef, EvidenceRef};
 use homeboy::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
 use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
@@ -66,6 +67,7 @@ pub struct RunsEvidenceArtifact {
     #[serde(rename = "type")]
     pub artifact_type: String,
     pub path: String,
+    pub address: ArtifactAddress,
     pub url: Option<String>,
     pub public: bool,
     pub public_url: Option<String>,
@@ -203,8 +205,9 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
     let artifacts = artifacts
         .iter()
         .map(|artifact| {
-            let reference = artifact_ref(artifact);
-            let public_url = artifact_public_url(artifact);
+            let address = ArtifactAddress::from_record(artifact);
+            let reference = artifact_ref(artifact, &address);
+            let public_url = public_url_from_address(&address);
             let exists = artifact_exists(artifact);
             if !exists {
                 missing_count += 1;
@@ -221,12 +224,10 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
                 id: reference.id.clone(),
                 kind: reference.kind.clone(),
                 artifact_type: reference.artifact_type.clone(),
-                path: reference.path.clone(),
-                url: artifact
-                    .url
-                    .clone()
-                    .or_else(|| (artifact.artifact_type == "url").then(|| artifact.path.clone())),
-                public: public_url.is_some() || artifact.artifact_type == "url",
+                path: address.value.clone(),
+                address,
+                url: public_url.clone(),
+                public: public_url.is_some(),
                 public_url,
                 relative_to: artifact_relative_to(artifact),
                 fetch_command: artifact_fetch_command(artifact),
@@ -251,33 +252,21 @@ fn evidence_artifact_index(artifacts: &[ArtifactRecord]) -> RunsEvidenceArtifact
     }
 }
 
-fn artifact_public_url(artifact: &ArtifactRecord) -> Option<String> {
-    if artifact.artifact_type == "url" {
-        return artifact_ref(artifact).public_target();
-    }
-    artifact.public_url.clone().or_else(|| {
-        artifact
-            .metadata_json
-            .get("public_url")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    })
-}
-
-fn artifact_ref(artifact: &ArtifactRecord) -> ArtifactRef {
+fn artifact_ref(artifact: &ArtifactRecord, address: &ArtifactAddress) -> ArtifactRef {
     let mut reference = ArtifactRef::from_record(artifact);
-    if reference.public_url.is_none() {
-        reference.public_url = artifact
-            .metadata_json
-            .get("public_url")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-    }
+    reference.path = address.value.clone();
+    reference.url = public_url_from_address(address);
+    reference.public_url = reference.url.clone();
     reference
 }
 
+fn public_url_from_address(address: &ArtifactAddress) -> Option<String> {
+    (address.kind == ArtifactAddressKind::PublicUrl).then(|| address.value.clone())
+}
+
 fn artifact_relative_to(artifact: &ArtifactRecord) -> Option<String> {
-    if artifact.artifact_type == "url" || artifact_public_url(artifact).is_some() {
+    let address = ArtifactAddress::from_record(artifact);
+    if address.reviewer_visible {
         return None;
     }
     if artifact.artifact_type == "file" || artifact.artifact_type == "remote_file" {
@@ -302,6 +291,11 @@ fn artifact_fetch_command(artifact: &ArtifactRecord) -> Option<String> {
 
 fn artifact_exists(artifact: &ArtifactRecord) -> bool {
     if artifact.artifact_type == "url" {
+        return true;
+    }
+    if artifact.artifact_type == "remote_file"
+        || homeboy::core::runners::is_remote_runner_artifact_path(&artifact.path)
+    {
         return true;
     }
     Path::new(&artifact.path).exists()
@@ -375,9 +369,10 @@ fn evidence_links(artifacts: &[ArtifactRecord]) -> Vec<RunsEvidenceLink> {
     artifacts
         .iter()
         .filter_map(|artifact| {
-            let target = artifact_public_url(artifact)?;
-            let mut reference = EvidenceRef::new(&artifact.kind, &target, &artifact.kind);
-            reference.artifact = Some(artifact_ref(artifact));
+            let address = ArtifactAddress::from_record(artifact);
+            let target = address.reviewer_target()?;
+            let mut reference = EvidenceRef::new(&artifact.kind, target, &artifact.kind);
+            reference.artifact = Some(artifact_ref(artifact, &address));
             Some(RunsEvidenceLink {
                 kind: reference.kind.clone(),
                 target: reference.target.clone(),
@@ -563,6 +558,16 @@ mod tests {
                 .expect("bench results artifact");
             assert!(!bench_results.public);
             assert_eq!(
+                bench_results.path,
+                format!("homeboy://run/{}/artifact/{}", run.id, bench_results.id)
+            );
+            assert!(!Path::new(&bench_results.path).is_absolute());
+            assert_eq!(
+                bench_results.address.kind,
+                ArtifactAddressKind::LocalOperatorPath
+            );
+            assert!(!bench_results.address.reviewer_visible);
+            assert_eq!(
                 bench_results.relative_to.as_deref(),
                 Some("homeboy observation artifact store")
             );
@@ -587,6 +592,8 @@ mod tests {
                 review.public_url.as_deref(),
                 Some("https://example.test/evidence")
             );
+            assert_eq!(review.address.kind, ArtifactAddressKind::PublicUrl);
+            assert!(review.address.reviewer_visible);
             assert_eq!(output.evidence_links.len(), 1);
             assert_eq!(
                 output.evidence_links[0].reference.schema,
@@ -619,6 +626,42 @@ mod tests {
                     || output.disk_budget.warning.is_some()
             );
             homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
+    #[test]
+    fn evidence_links_reject_unvalidated_local_urls() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "trace",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({}),
+                ))
+                .expect("run");
+            store
+                .record_url_artifact(&run.id, "review", "http://localhost:8888/evidence")
+                .expect("record url");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            let review = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "review")
+                .expect("review artifact");
+            assert!(!review.public);
+            assert_eq!(review.url, None);
+            assert_eq!(review.public_url, None);
+            assert_eq!(review.address.kind, ArtifactAddressKind::MetadataOnly);
+            assert!(output.evidence_links.is_empty());
         });
     }
 
