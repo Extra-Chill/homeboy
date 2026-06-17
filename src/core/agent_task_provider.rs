@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -20,8 +20,30 @@ use crate::core::agent_task_secrets::{
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
+pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
+pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
+    "homeboy/agent-task-provider-capability-contract/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderCapabilityContract {
+    pub schema: String,
+    pub provider_schema: String,
+    pub request_schema: String,
+    pub outcome_schema: String,
+}
+
+pub fn provider_capability_contract() -> AgentTaskProviderCapabilityContract {
+    AgentTaskProviderCapabilityContract {
+        schema: AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA.to_string(),
+        provider_schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
+        request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+        outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutorProvider {
+    #[serde(default = "default_provider_schema")]
     pub schema: String,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,7 +52,9 @@ pub struct AgentTaskExecutorProvider {
     #[serde(default, skip_serializing_if = "is_false")]
     pub default_backend: bool,
     pub command: String,
+    #[serde(default = "default_request_schema")]
     pub request_schema: String,
+    #[serde(default = "default_outcome_schema")]
     pub outcome_schema: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
@@ -66,6 +90,18 @@ pub struct AgentTaskExecutorProvider {
     pub runtime_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+}
+
+fn default_provider_schema() -> String {
+    AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string()
+}
+
+fn default_request_schema() -> String {
+    AGENT_TASK_REQUEST_SCHEMA.to_string()
+}
+
+fn default_outcome_schema() -> String {
+    AGENT_TASK_OUTCOME_SCHEMA.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1396,10 +1432,39 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
     };
     use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
     use std::fs;
+
+    #[test]
+    fn provider_capability_contract_exports_core_owned_schema_ids() {
+        let contract = provider_capability_contract();
+
+        assert_eq!(
+            contract.schema,
+            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            contract.provider_schema,
+            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
+        );
+        assert_eq!(contract.request_schema, AGENT_TASK_REQUEST_SCHEMA);
+        assert_eq!(contract.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+    }
+
+    #[test]
+    fn provider_manifest_defaults_core_owned_schema_ids() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "minimal.provider",
+            "backend": "minimal",
+            "command": "minimal-provider"
+        }))
+        .expect("provider manifest");
+
+        assert_eq!(provider.schema, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA);
+        assert_eq!(provider.request_schema, AGENT_TASK_REQUEST_SCHEMA);
+        assert_eq!(provider.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
+    }
 
     fn script(body: &str) -> String {
         let path = std::env::temp_dir().join(format!(
@@ -1413,7 +1478,7 @@ mod tests {
 
     fn request(task_id: &str, command: String) -> (AgentTaskRequest, AgentTaskExecutorProvider) {
         let provider = AgentTaskExecutorProvider {
-            schema: "homeboy/agent-task-executor-provider/v1".to_string(),
+            schema: AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA.to_string(),
             id: "test.provider".to_string(),
             label: None,
             backend: "test".to_string(),

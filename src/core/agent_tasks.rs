@@ -224,14 +224,16 @@ pub mod promotion {
 pub mod provider {
     pub use super::super::agent_task_provider::{
         default_backend, default_backend_for_component, dependency_failure_patterns,
-        provider_requires_cwd_git_checkout, provider_runner_readiness_contracts,
-        provider_runner_secret_env_for_plan, provider_runner_source_contracts,
-        provider_secret_sources_for_plan, provider_secret_sources_for_providers,
-        required_extension_ids_for_plan, AgentTaskExecutorProvider,
+        provider_capability_contract, provider_requires_cwd_git_checkout,
+        provider_runner_readiness_contracts, provider_runner_secret_env_for_plan,
+        provider_runner_source_contracts, provider_secret_sources_for_plan,
+        provider_secret_sources_for_providers, required_extension_ids_for_plan,
+        AgentTaskExecutorProvider, AgentTaskProviderCapabilityContract,
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
         AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
         AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
-        ExtensionProviderAgentTaskExecutor,
+        ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
 }
 

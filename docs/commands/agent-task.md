@@ -70,6 +70,15 @@ This is the terminal/daemon-owned review surface for fleet cooking. Kimaki or an
 other chat UI should submit, poll, render, and call these commands rather than
 owning scheduling, state, artifacts, reconciliation, or promotion.
 
+## Provider Contracts
+
+`agent-task providers` returns `capability_contract` with Homeboy-owned schema ids
+for executor provider manifests, requests, and outcomes. Extensions should read
+that metadata, or import the matching `homeboy::core::agent_tasks::provider`
+constants, instead of copying schema strings into downstream code. Provider
+manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
+defaults them to the current core contract ids.
+
 `agent-task status`, `logs`, `artifacts`, and `review` are read-only durable
 lifecycle inspection commands. They do not start workloads and are not gated by
 warm-machine resource policy; use `homeboy runner exec <runner> -- homeboy
