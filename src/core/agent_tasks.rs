@@ -241,6 +241,10 @@ pub mod provider {
         ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
         AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     };
+    pub(crate) use super::super::agent_task_provider::{
+        provider_runner_secret_env_for_plan_with_providers,
+        provider_secret_sources_for_plan_with_providers,
+    };
 }
 
 /// Scheduling primitives: plans, scheduler, execution context, retry/concurrency.

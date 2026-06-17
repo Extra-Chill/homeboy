@@ -18,6 +18,7 @@
 
 use std::path::Path;
 
+use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_provider::provider_available_for_backend;
 use crate::core::agent_tasks::provider::{
@@ -164,6 +165,17 @@ fn lab_workspace_sync_mode(
     args: &[String],
     source_path: &Path,
 ) -> Result<RunnerWorkspaceSyncMode> {
+    let source_policy =
+        super::super::source_materialization::SourceMaterializationPolicy::from_env();
+    lab_workspace_sync_mode_with_source_policy(policy, args, source_path, &source_policy)
+}
+
+fn lab_workspace_sync_mode_with_source_policy(
+    policy: LabOffloadWorkspaceModePolicy,
+    args: &[String],
+    source_path: &Path,
+    source_policy: &super::super::source_materialization::SourceMaterializationPolicy,
+) -> Result<RunnerWorkspaceSyncMode> {
     let requested = requested_lab_workspace_sync_mode(policy, args);
     if requested != RunnerWorkspaceSyncMode::Git {
         return Ok(requested);
@@ -177,8 +189,10 @@ fn lab_workspace_sync_mode(
         source_path,
         &["config", "--get", "remote.origin.url"],
     )?;
-    if super::super::source_materialization::requires_controller_routed_workspace_sync(&remote_url)
-    {
+    if super::super::source_materialization::requires_controller_routed_workspace_sync_with_policy(
+        &remote_url,
+        source_policy,
+    ) {
         return Ok(RunnerWorkspaceSyncMode::Snapshot);
     }
 
@@ -298,7 +312,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start".to_string(),
+                lab_runner_unsupported_message(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -311,7 +325,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start".to_string(),
+                lab_runner_unsupported_message,
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
@@ -477,7 +491,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
 }
 
 fn unsupported_runner_hints(runner_id: &str, normalized_args: &[String]) -> Vec<String> {
-    let mut hints = vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start.".to_string()];
+    let mut hints = vec![lab_runner_unsupported_hint()];
 
     if let Some(service_command) = tunnel_service_command(normalized_args) {
         hints.push(format!(
@@ -2314,6 +2328,10 @@ mod tests {
 
     #[test]
     fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
+        let source_policy =
+            crate::core::runner::source_materialization::SourceMaterializationPolicy {
+                private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            };
         let dir = tempfile::tempdir().expect("temp dir");
         std::process::Command::new("git")
             .args(["init"])
@@ -2336,8 +2354,13 @@ mod tests {
             "agent-task".to_string(),
             "cook".to_string(),
         ];
-        let mode = lab_workspace_sync_mode(LabOffloadWorkspaceModePolicy::Git, &args, dir.path())
-            .expect("sync mode");
+        let mode = lab_workspace_sync_mode_with_source_policy(
+            LabOffloadWorkspaceModePolicy::Git,
+            &args,
+            dir.path(),
+            &source_policy,
+        )
+        .expect("sync mode");
 
         assert_eq!(mode, RunnerWorkspaceSyncMode::Snapshot);
     }

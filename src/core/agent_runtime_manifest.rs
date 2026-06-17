@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_task_provider::AgentTaskExecutorProvider;
@@ -22,6 +23,8 @@ pub struct AgentRuntimeManifest {
     pub extension_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_path: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 pub fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
@@ -99,6 +102,7 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
                 extension_id: Some(extension.id.clone()),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
+                extra: runtime.extra.clone().into_iter().collect(),
             });
         }
     }
@@ -195,6 +199,7 @@ mod tests {
             serde_json::from_value(json!({
                 "id": "example-runtime",
                 "label": "Example Runtime",
+                "runtime_metadata": { "owner": "extension" },
                 "agent_task_executors": [provider_json("example.default", "example")]
             }))
             .expect("runtime manifest"),
@@ -214,6 +219,12 @@ mod tests {
             manifests[0].runtime_path.as_deref(),
             Some("/extensions/runtime-extension")
         );
+        assert_eq!(manifests[0].extra["runtime_metadata"]["owner"], "extension");
+        assert_eq!(
+            serde_json::to_value(&manifests[0]).expect("runtime export")["runtime_metadata"]
+                ["owner"],
+            "extension"
+        );
     }
 
     #[test]
@@ -232,6 +243,7 @@ mod tests {
                     "name": "Standalone Example Package",
                     "version": "1.0.0",
                     "description": "Standalone runtime package fixture.",
+                    "runtime_metadata": { "owner": "standalone" },
                     "label": "Standalone Example",
                     "agent_task_executors": [{
                         "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
@@ -275,6 +287,16 @@ mod tests {
                 manifests[0].runtime_path.as_deref(),
                 Some(runtime_dir.to_str().expect("runtime dir utf-8"))
             );
+            assert_eq!(manifests[0].extra["name"], "Standalone Example Package");
+            assert_eq!(manifests[0].extra["version"], "1.0.0");
+            assert_eq!(
+                manifests[0].extra["runtime_metadata"]["owner"],
+                "standalone"
+            );
+            let exported = serde_json::to_value(&manifests[0]).expect("runtime export");
+            assert_eq!(exported["name"], "Standalone Example Package");
+            assert_eq!(exported["version"], "1.0.0");
+            assert_eq!(exported["runtime_metadata"]["owner"], "standalone");
             assert_eq!(manifests[0].agent_task_executors[0].backend, "example");
             let provider = &manifests[0].agent_task_executors[0];
             let materialization = provider
