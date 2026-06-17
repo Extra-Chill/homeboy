@@ -79,6 +79,12 @@ constants, instead of copying schema strings into downstream code. Provider
 manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
 defaults them to the current core contract ids.
 
+`agent-task contract --format=json` returns `homeboy/agent-task-core-contract/v1`,
+the machine-readable Homeboy-owned contract export for downstream integrations.
+It includes schema ids, provider capability metadata, status/failure enum values,
+and default redaction policy metadata without naming or depending on any specific
+executor provider.
+
 `agent-task status`, `logs`, `artifacts`, and `review` are read-only durable
 lifecycle inspection commands. They do not start workloads and are not gated by
 warm-machine resource policy; use `homeboy runner exec <runner> -- homeboy

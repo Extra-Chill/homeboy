@@ -4,7 +4,7 @@
 //! sibling module lets the `agent_task` root stay a thin dispatcher over the
 //! handler modules (`auth`, `controller`, `run`, `status`, `review`).
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 
 use super::super::agent_task_dispatch::DispatchArgs;
@@ -75,6 +75,8 @@ pub enum AgentTaskCommand {
     GateFeedback(GateFeedbackArgs),
     /// List extension-declared agent-task executor providers and optional secret readiness.
     Providers(ProvidersArgs),
+    /// Export Homeboy's machine-readable agent-task core contract metadata.
+    Contract(ContractArgs),
     /// Configure and inspect agent-task provider authentication secrets.
     Auth(AgentTaskAuthArgs),
     /// Create, inspect, and resume durable multi-agent loop controller state.
@@ -130,6 +132,18 @@ pub struct ProvidersArgs {
     /// Secret environment variable name to check without exposing its value. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ContractArgs {
+    /// Output format for the contract export.
+    #[arg(long, default_value = "json", value_enum)]
+    pub format: ContractFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ContractFormat {
+    Json,
 }
 
 #[derive(Args, Debug)]
