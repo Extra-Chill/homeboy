@@ -743,8 +743,7 @@ fn sanitize_slug(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-        AGENT_TASK_OUTCOME_SCHEMA,
+        AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
     };
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
@@ -1109,44 +1108,6 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    struct PatchExecutor;
-
-    impl AgentTaskExecutorAdapter for PatchExecutor {
-        fn execute(
-            &self,
-            _request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: "cook-task".to_string(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("patch ready".to_string()),
-                failure_classification: None,
-                artifacts: vec![AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "patch-1".to_string(),
-                    kind: "patch".to_string(),
-                    name: Some("changes.patch".to_string()),
-                    path: Some("/tmp/changes.patch".to_string()),
-                    url: None,
-                    mime: None,
-                    size_bytes: None,
-                    sha256: None,
-                    metadata: Value::Null,
-                }],
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),

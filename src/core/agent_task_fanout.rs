@@ -72,7 +72,7 @@ impl AgentTaskFanoutPlan {
         }
     }
 
-    pub fn to_schedule_plan(&self) -> AgentTaskPlan {
+    pub(crate) fn to_schedule_plan(&self) -> AgentTaskPlan {
         let mut plan = AgentTaskPlan::new(
             self.fanout_id.clone(),
             self.tasks
@@ -235,7 +235,7 @@ fn fanout_dependency_step_ids(dependencies: &AgentTaskOutputDependencies) -> Vec
 }
 
 impl AgentTaskFanoutAggregate {
-    pub fn from_schedule(plan: &AgentTaskFanoutPlan, schedule: AgentTaskAggregate) -> Self {
+    pub(crate) fn from_schedule(plan: &AgentTaskFanoutPlan, schedule: AgentTaskAggregate) -> Self {
         let reconciliation = AgentTaskAggregateReport::from(schedule.outcomes.as_slice());
         Self {
             schema: AGENT_TASK_FANOUT_AGGREGATE_SCHEMA.to_string(),
