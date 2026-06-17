@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.5] - 2026-06-17
+
+### Changed
+- Extract provider outcome normalizer
+- Centralize agent task runner contract
+
 ## [3.3.4] - 2026-06-17
 
 ### Fixed
