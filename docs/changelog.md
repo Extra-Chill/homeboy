@@ -4,6 +4,45 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.237.0] - 2026-06-17
+
+### Added
+- emit machine-readable run refs
+- add shared artifact evidence refs
+
+### Changed
+- refactor(command-contract): simplify command output descriptors (#4869)
+- simplify runner upgrade failure and path realignment (#4870)
+- dedupe entity listing and write paths (#4867)
+- share agent task argv editing
+- share tool metadata registry
+- consolidate agent-task argv materialization helpers (#4868)
+- keep agent runtime fixtures generic
+- share core git output helpers
+- keep nested-tree replace tests runtime-agnostic
+- make core detectors and deploy/release language-agnostic
+
+### Fixed
+- persist agent task recovery plans
+- fix(agent-task): allow lab retry runs
+- fix(agent-task): dedupe missing runner secret_env names across plan tasks (#4865)
+- fix(agent-task): surface failure diagnostics
+- fix(agent-task): preserve from-spec cwd context
+- install agent runtimes into canonical root
+- enforce agent runtime provider contracts
+- pass default provider config to Lab agent tasks
+- name lab runner in resource policy guidance
+- preserve portable config precedence
+- add plain helper path output
+- repair stale runner path homeboy
+- ignore generated source metadata dirt
+- make agent runtimes canonical
+- include lint findings in pr digest
+- improve resource policy rerun guidance
+- ignore ci artifacts for autofix sources
+- recover from advanced remote and expose exact release body
+- robust same-filesystem replace for nested package trees
+
 ## [0.236.1] - 2026-06-16
 
 ### Fixed
