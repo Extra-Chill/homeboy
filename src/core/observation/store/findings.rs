@@ -78,8 +78,8 @@ impl ObservationStore {
             .fixable
             .map(|value| if value { 1_i64 } else { 0_i64 });
 
-        self.connection
-            .execute(
+        execute_with_retry("insert finding record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO findings(
                     id, run_id, tool, rule, file, line, severity, fingerprint, message,
@@ -101,7 +101,7 @@ impl ObservationStore {
                     created_at,
                 ],
             )
-            .map_err(sqlite_error("insert finding record"))?;
+        })?;
 
         Ok(FindingRecord {
             id,
@@ -156,8 +156,8 @@ impl ObservationStore {
         let fixable = finding
             .fixable
             .map(|value| if value { 1_i64 } else { 0_i64 });
-        self.connection
-            .execute(
+        execute_with_retry("import finding record", || {
+            self.connection.execute(
                 r#"
                 INSERT INTO findings(
                     id, run_id, tool, rule, file, line, severity, fingerprint, message,
@@ -179,7 +179,7 @@ impl ObservationStore {
                     finding.created_at,
                 ],
             )
-            .map_err(sqlite_error("import finding record"))?;
+        })?;
         Ok(())
     }
 
