@@ -13,6 +13,8 @@ use audit::render_audit_section;
 use bench::render_bench_section;
 use trace::render_trace_section;
 
+const LINT_FINDING_DIGEST_LIMIT: usize = 10;
+
 #[derive(Args, Debug, Clone)]
 pub struct FailureDigestArgs {
     /// Directory containing audit.json, lint.json, test.json, etc.
@@ -218,9 +220,11 @@ fn render_lint_section(out: &mut String, output_dir: &Path, run_url: &str) {
     render_error_details(out, &error);
 
     let top_violations = string_array(&data, "top_violations");
+    let findings = array_value(&data, "findings");
+    render_lint_findings(out, &findings, &data);
     append_details_block(out, "Top lint violations", &top_violations, 10);
 
-    if !has_any_lint_detail(&data, &error) && top_violations.is_empty() {
+    if !has_any_lint_detail(&data, &error) && top_violations.is_empty() && findings.is_empty() {
         out.push_str("- No structured lint details available.\n");
     }
     render_full_log(out, "lint", run_url);
@@ -424,6 +428,63 @@ fn has_any_lint_detail(data: &Map<String, Value>, error: &Map<String, Value>) ->
             .any(|key| string_value(error, key).is_some())
 }
 
+fn render_lint_findings(out: &mut String, findings: &[&Value], data: &Map<String, Value>) {
+    if findings.is_empty() {
+        return;
+    }
+
+    let shown = findings.len().min(LINT_FINDING_DIGEST_LIMIT);
+    let _ = writeln!(out, "- Actionable lint findings ({} shown):", shown);
+    for (idx, item) in findings.iter().take(LINT_FINDING_DIGEST_LIMIT).enumerate() {
+        let _ = writeln!(out, "  - {}", summarize_lint_finding(item, idx + 1));
+    }
+    if findings.len() > shown {
+        let _ = writeln!(
+            out,
+            "- {} more lint finding(s) omitted from this comment; see `lint.json` or the full lint log.",
+            findings.len() - shown
+        );
+    }
+    if let Some(autofix) = object_value_opt(data, "autofix") {
+        let files_modified = autofix
+            .get("files_modified")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "- Autofix applied: **{}** ({} file(s) modified)",
+            if files_modified > 0 { "yes" } else { "no" },
+            files_modified
+        );
+    }
+}
+
+fn summarize_lint_finding(item: &Value, idx: usize) -> String {
+    let Some(obj) = item.as_object() else {
+        return format!(
+            "{}. {}",
+            idx,
+            item.as_str().unwrap_or("unknown lint finding")
+        );
+    };
+
+    let file = string_value(obj, "file").unwrap_or_else(|| "unknown file".to_string());
+    let location = obj
+        .get("line")
+        .and_then(Value::as_i64)
+        .map(|line| format!("{}:{}", file, line))
+        .unwrap_or(file);
+    let severity = string_value(obj, "severity").unwrap_or_else(|| "unknown severity".to_string());
+    let tool = string_value(obj, "tool").unwrap_or_else(|| "lint".to_string());
+    let rule = string_value(obj, "rule").unwrap_or_else(|| "unknown rule".to_string());
+    let message = string_value(obj, "message").unwrap_or_else(|| "No message provided".to_string());
+
+    format!(
+        "{}. `{}` [{}] {}/{}: {}",
+        idx, location, severity, tool, rule, message
+    )
+}
+
 fn string_value(map: &Map<String, Value>, key: &str) -> Option<String> {
     match map.get(key)? {
         Value::String(s) if !s.is_empty() => Some(s.clone()),
@@ -438,6 +499,10 @@ fn object_value(map: &Map<String, Value>, key: &str) -> Map<String, Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default()
+}
+
+fn object_value_opt<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a Map<String, Value>> {
+    map.get(key).and_then(Value::as_object)
 }
 
 fn array_value<'a>(map: &'a Map<String, Value>, key: &str) -> Vec<&'a Value> {

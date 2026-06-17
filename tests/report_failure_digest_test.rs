@@ -67,6 +67,28 @@ fn trace_json(status: &str, summary: &str) -> String {
     )
 }
 
+fn lint_json_with_findings(count: usize) -> String {
+    let findings = (1..=count)
+        .map(|idx| {
+            format!(
+                r#"{{"tool":"eslint","rule":"no-debugger","severity":"error","file":"src/file{idx}.js","line":{idx},"message":"Unexpected debugger statement"}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        r#"{{
+            "success": false,
+            "data": {{
+                "passed": false,
+                "summary": "{count} lint finding(s)",
+                "findings": [{findings}]
+            }}
+        }}"#
+    )
+}
+
 fn trace_json_with_span_summaries() -> &'static str {
     r#"{
         "success": false,
@@ -248,10 +270,35 @@ fn renders_lint_failure_digest_from_fixture() {
     assert!(markdown.contains("## Failure Digest"));
     assert!(markdown.contains("### Lint Failure Digest"));
     assert!(markdown.contains("- Lint summary: **3 lint finding(s)**"));
+    assert!(markdown.contains("- Actionable lint findings (3 shown):"));
+    assert!(markdown.contains(
+        "1. `src/widget.php:12` [error] phpcs/Squiz.Commenting.FunctionComment.Missing: Missing function doc comment"
+    ));
+    assert!(markdown.contains("- Autofix applied: **yes** (1 file(s) modified)"));
     assert!(markdown.contains("<details><summary>Top lint violations</summary>"));
     assert!(markdown
         .contains("- Full lint log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
     assert!(!markdown.contains("### Test Failure Digest"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn caps_lint_findings_in_failure_digest() {
+    let dir = tmp_dir("lint-cap");
+    fs::create_dir_all(&dir).expect("temp dir should exist");
+    write_file(&dir, "lint.json", &lint_json_with_findings(12));
+
+    let markdown = render(&dir, r#"{"lint":"fail"}"#, false, false);
+
+    assert!(markdown.contains("- Actionable lint findings (10 shown):"));
+    assert!(markdown.contains(
+        "10. `src/file10.js:10` [error] eslint/no-debugger: Unexpected debugger statement"
+    ));
+    assert!(markdown.contains(
+        "- 2 more lint finding(s) omitted from this comment; see `lint.json` or the full lint log."
+    ));
+    assert!(!markdown.contains("src/file11.js"));
 
     let _ = fs::remove_dir_all(&dir);
 }
