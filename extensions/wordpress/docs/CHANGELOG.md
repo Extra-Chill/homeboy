@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.3] - 2026-06-17
+
+### Fixed
+- preflight defaulted codex provider plugins
+
 ## [3.2.2] - 2026-06-17
 
 ### Fixed
