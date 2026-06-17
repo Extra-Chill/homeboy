@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.2] - 2026-06-17
+
+### Fixed
+- fix(wp-codebox): project Homeboy tool policy
+- Fix PHPStan partial config ruleset handling
+
 ## [3.4.1] - 2026-06-17
 
 ### Changed
