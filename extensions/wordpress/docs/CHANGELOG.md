@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.4] - 2026-06-17
+
+### Fixed
+- remap lab validation runtime paths
+
 ## [3.3.3] - 2026-06-17
 
 ### Changed
