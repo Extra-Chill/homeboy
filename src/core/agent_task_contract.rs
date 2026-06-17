@@ -63,6 +63,8 @@ pub struct AgentTaskCoreProviderCapabilityContract {
     pub outcome_schema: String,
     pub provider_capability_fields: Vec<String>,
     pub executor_provider_fields: Vec<String>,
+    pub workspace_materialization_fields: Vec<String>,
+    pub workspace_mount_spec_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -142,6 +144,25 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "extension_path",
                 "runtime_id",
                 "runtime_path",
+                "extra",
+            ]),
+            workspace_materialization_fields: string_vec(&[
+                "cwd",
+                "requires_git",
+                "write_scope",
+                "artifact_paths",
+                "spec",
+                "mounts",
+                "extra",
+            ]),
+            workspace_mount_spec_fields: string_vec(&[
+                "handle",
+                "repo",
+                "host_path",
+                "target_path",
+                "mode",
+                "materialization",
+                "metadata",
                 "extra",
             ]),
         },
@@ -264,5 +285,13 @@ mod tests {
             .provider_capability
             .executor_provider_fields
             .contains(&"timeout_artifact_discovery".to_string()));
+        assert!(contract
+            .provider_capability
+            .workspace_materialization_fields
+            .contains(&"mounts".to_string()));
+        assert!(contract
+            .provider_capability
+            .workspace_mount_spec_fields
+            .contains(&"target_path".to_string()));
     }
 }
