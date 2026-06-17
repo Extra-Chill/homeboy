@@ -55,6 +55,17 @@ try {
 					id: 'small-catalog',
 					label: 'Small catalog',
 					metadata: { dimensions: { shape: 'small' } },
+					artifacts: {
+						'blueprint.after': {
+							kind: 'wordpress-playground-blueprint',
+							path: 'artifacts/blueprint.after.json',
+							viewer: {
+								kind: 'wordpress-playground-blueprint',
+								url: 'https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fexample.test%2Fartifacts%2Fblueprint.after.json',
+								public_artifact_url: 'https://example.test/artifacts/blueprint.after.json',
+							},
+						},
+					},
 					metrics: { duration_ms: 120, queries: 60, items: 10, guardrail_failures: 1 },
 				},
 				{
@@ -99,12 +110,21 @@ try {
 	const summary = summarizeBenchmarkMatrixReport(metricRows, { rankMetrics: ['queries', 'duration_ms'] });
 	assert.equal(summary.schema, 'homeboy/wordpress-benchmark-slow-path-matrix/v1');
 	assert.equal(summary.ranked_cells[0].run_url, 'https://example.test/runs/candidate-run');
+	assert.deepEqual(summary.ranked_cells[0].viewers, [
+		{
+			name: 'blueprint.after',
+			kind: 'wordpress-playground-blueprint',
+			url: 'https://playground.wordpress.net/?blueprint-url=https%3A%2F%2Fexample.test%2Fartifacts%2Fblueprint.after.json',
+			public_artifact_url: 'https://example.test/artifacts/blueprint.after.json',
+		},
+	]);
 
 	const markdown = renderBenchmarkMatrixMarkdownReport(summary);
 	assert.match(markdown, /# WordPress Benchmark Slow-Path Matrix/);
 	assert.match(markdown, /Small catalog/);
 	assert.match(markdown, /Queries\/item: 6/);
 	assert.match(markdown, /\[candidate-run\]\(https:\/\/example\.test\/runs\/candidate-run\)/);
+	assert.match(markdown, /\[blueprint\.after\]\(https:\/\/playground\.wordpress\.net\/\?blueprint-url=https%3A%2F%2Fexample\.test%2Fartifacts%2Fblueprint\.after\.json\)/);
 
 	console.log('WordPress benchmark matrix report smoke passed.');
 } finally {
