@@ -15,9 +15,11 @@ use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 use crate::core::agent_task_secrets::{
-    resolve_secret_env_with_fallbacks, AgentTaskSecretResolutionError,
+    resolve_secret_env_with_fallbacks, secret_env_status_with_fallbacks,
+    AgentTaskSecretResolutionError,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
+use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
@@ -543,11 +545,8 @@ fn apply_provider_runner_secret_env_contracts_with_providers(
         let Some(provider) = select_provider(providers, request) else {
             continue;
         };
-        for name in provider_secret_env(provider, Some(request)) {
-            if !request.executor.secret_env.contains(&name) {
-                request.executor.secret_env.push(name);
-            }
-        }
+        request.executor.secret_env =
+            provider_secret_env_plan(provider, request).secret_env_names();
     }
 }
 
@@ -560,7 +559,7 @@ pub(crate) fn provider_runner_secret_env_for_plan_with_providers(
         let Some(provider) = select_provider(providers, request) else {
             continue;
         };
-        names.extend(provider_secret_env(provider, Some(request)));
+        names.extend(provider_secret_env_plan(provider, request).secret_env_names());
     }
     names.sort();
     names.dedup();
@@ -618,6 +617,35 @@ fn provider_secret_env(
     names.sort();
     names.dedup();
     names
+}
+
+fn provider_secret_env_plan(
+    provider: &AgentTaskExecutorProvider,
+    request: &AgentTaskRequest,
+) -> SecretEnvPlan {
+    let provider_names = provider_secret_env(provider, Some(request));
+    let mut plan = SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
+    plan.extend_secret_env_names(provider_names.clone());
+    plan.map_env_names(provider.id.clone(), provider_names);
+    plan
+}
+
+fn provider_secret_env_plan_with_status(
+    provider: &AgentTaskExecutorProvider,
+    request: &AgentTaskRequest,
+) -> SecretEnvPlan {
+    let plan = provider_secret_env_plan(provider, request);
+    let status = secret_env_status_with_fallbacks(
+        &plan.secret_env_names(),
+        &provider_secret_sources(provider, Some(request)),
+    )
+    .into_iter()
+    .map(|status| SecretEnvStatus {
+        name: status.name,
+        configured: status.configured,
+        source: status.source,
+    });
+    plan.with_status(status).redacted()
 }
 
 fn provider_secret_sources(
@@ -1411,6 +1439,11 @@ fn provider_command_env(
         (
             "HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON".to_string(),
             serde_json::to_string(&request.executor.config).unwrap_or_else(|_| "null".to_string()),
+        ),
+        (
+            "HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON".to_string(),
+            serde_json::to_string(&provider_secret_env_plan_with_status(provider, request))
+                .unwrap_or_else(|_| "null".to_string()),
         ),
         (
             "HOMEBOY_EXTENSION_ID".to_string(),
@@ -2779,6 +2812,42 @@ process.stdout.write(JSON.stringify({
         let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env", vec![request]));
 
         assert_eq!(aggregate.totals.succeeded, 1);
+        std::env::remove_var(secret_name);
+    }
+
+    #[test]
+    fn provider_command_receives_canonical_secret_env_plan_without_values() {
+        let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_PLAN_SECRET_{}", std::process::id());
+        std::env::set_var(&secret_name, "hydrated-secret");
+        let command = format!(
+            "node {}",
+            script(&format!(
+                "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let plan=JSON.parse(process.env.HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON); let mapped=(plan.env_name_mapping['test.provider']||[]).includes('{secret_name}'); let configured=(plan.status||[]).some((item)=>item.name==='{secret_name}'&&item.configured===true&&item.source==='env'); let leaked=JSON.stringify(plan).includes('hydrated-secret'); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:mapped&&configured&&!leaked?'succeeded':'failed',summary:JSON.stringify(plan)}}));"
+            ))
+        );
+        let (mut request, mut provider) = request("task-secret-env-plan", command);
+        provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "test.provider.auth".to_string(),
+            label: "Test provider auth".to_string(),
+            secret_env: vec![secret_name.clone()],
+            env_path: None,
+            remediation: None,
+            extra: BTreeMap::new(),
+        }];
+        request.executor.secret_env = vec![secret_name.clone()];
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env-plan", vec![request]));
+
+        assert_eq!(aggregate.totals.succeeded, 1);
+        assert!(!aggregate.outcomes[0]
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("hydrated-secret"));
         std::env::remove_var(secret_name);
     }
 
