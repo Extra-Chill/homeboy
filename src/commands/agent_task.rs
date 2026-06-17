@@ -694,12 +694,34 @@ fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> CmdResult<Valu
 }
 
 fn apply_from_spec_dispatch_defaults(spec: &mut AgentTaskRepoLoopSpec, spec_arg: &str) {
+    apply_from_spec_dispatch_defaults_with_cwd(spec, spec_arg, || std::env::current_dir().ok());
+}
+
+fn apply_from_spec_dispatch_defaults_with_cwd(
+    spec: &mut AgentTaskRepoLoopSpec,
+    spec_arg: &str,
+    current_dir: impl FnOnce() -> Option<PathBuf>,
+) {
+    let Some(root) = dispatch_root_for_spec(spec_arg, current_dir) else {
+        return;
+    };
+    apply_dispatch_defaults_for_root(spec, root);
+}
+
+fn dispatch_root_for_spec(
+    spec_arg: &str,
+    current_dir: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
     let Some(spec_path) = spec_file_path(spec_arg) else {
-        return;
+        return current_dir().and_then(|path| git_root_for_path(&path));
     };
-    let Some(root) = git_root_for_spec(&spec_path) else {
-        return;
-    };
+    if let Some(root) = git_root_for_spec(&spec_path) {
+        return Some(root);
+    }
+    current_dir().and_then(|path| git_root_for_path(&path))
+}
+
+fn apply_dispatch_defaults_for_root(spec: &mut AgentTaskRepoLoopSpec, root: PathBuf) {
     let repo = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -741,9 +763,13 @@ fn spec_file_path(spec_arg: &str) -> Option<PathBuf> {
 
 fn git_root_for_spec(spec_path: &Path) -> Option<PathBuf> {
     let dir = spec_path.parent()?;
+    git_root_for_path(dir)
+}
+
+fn git_root_for_path(path: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(dir)
+        .arg(path)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;
@@ -1291,6 +1317,94 @@ mod tests {
                 .to_string_lossy()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn from_spec_dispatch_defaults_fall_back_to_current_git_checkout() {
+        let repo = tempfile::tempdir().expect("repo dir");
+        let git_status = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .arg("init")
+            .status()
+            .expect("git init runs");
+        assert!(git_status.success());
+        let mut spec = AgentTaskRepoLoopSpec {
+            schema: None,
+            loop_id: "repo-loop-cli-cwd-defaults".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+            metadata: Value::Null,
+            entities: Vec::new(),
+            agents: Vec::new(),
+            tools: Vec::new(),
+            abilities: Vec::new(),
+            workflows: Vec::new(),
+            artifacts: Vec::new(),
+            dependencies: Vec::new(),
+            gates: Vec::new(),
+            metrics: Vec::new(),
+            gate_bundles: Vec::new(),
+            policy: None,
+            phases: Vec::new(),
+            actions: Vec::new(),
+            initial_event: None,
+        };
+        spec.workflows.push(
+            homeboy::core::agent_tasks::controller_service::AgentTaskRepoLoopSpecWorkflow {
+                workflow_id: "store-idea".to_string(),
+                agent_id: None,
+                prompt: Some("cook the next workflow".to_string()),
+                tasks: Vec::new(),
+                entity_ids: Vec::new(),
+                tools: Vec::new(),
+                abilities: Vec::new(),
+                artifacts: Vec::new(),
+                consumes: Vec::new(),
+                emits: Vec::new(),
+                dependencies: Vec::new(),
+                gates: Vec::new(),
+                metrics: Vec::new(),
+                inputs: Value::Null,
+            },
+        );
+
+        apply_from_spec_dispatch_defaults_with_cwd(&mut spec, "-", || {
+            Some(repo.path().to_path_buf())
+        });
+        let expected_root = std::fs::canonicalize(repo.path()).expect("canonical repo path");
+        let expected_repo = repo
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        assert_eq!(
+            spec.metadata["dispatch_defaults"]["cwd"],
+            expected_root.display().to_string()
+        );
+        assert_eq!(spec.metadata["dispatch_defaults"]["repo"], expected_repo);
+
+        with_isolated_home(|_| {
+            let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest {
+                spec: spec.clone(),
+            })
+            .expect("from-spec initialized");
+            match &report.actions[0].action {
+                AgentTaskLoopPolicyAction::SpawnTask { request, .. } => {
+                    assert_eq!(
+                        request["dispatch"]["cwd"].as_str(),
+                        Some(expected_root.display().to_string().as_str())
+                    );
+                    assert_eq!(
+                        request["dispatch"]["repo"].as_str(),
+                        Some(expected_repo.as_str())
+                    );
+                }
+                other => panic!("expected compiled spawn task, got {other:?}"),
+            }
+        });
     }
 
     #[test]
