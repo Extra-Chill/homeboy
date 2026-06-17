@@ -104,6 +104,24 @@ function extractArtifactReferences(source) {
 	return artifacts;
 }
 
+function extractArtifactViewerReferences(artifacts) {
+	return asArray(artifacts)
+		.map((artifact) => {
+			const viewer = artifact?.viewer;
+			const url = viewer?.url || artifact?.viewer_url || artifact?.viewerUrl;
+			if (typeof url !== 'string' || url.trim() === '') {
+				return null;
+			}
+			return {
+				name: artifact.name || artifact.label || artifact.kind || 'viewer',
+				kind: viewer?.kind || artifact.kind || null,
+				url,
+				public_artifact_url: viewer?.public_artifact_url || viewer?.['public-artifact-url'] || artifact.url || null,
+			};
+		})
+		.filter(Boolean);
+}
+
 function stableJson(value) {
 	return JSON.stringify(value || {});
 }
@@ -336,6 +354,7 @@ function rankSlowPathCells(rows, options = {}) {
 				run_url: row.run_url,
 				artifact_path: row.artifact_path,
 				artifacts: row.artifacts || [],
+				viewers: extractArtifactViewerReferences(row.artifacts || []),
 				metric_values: {},
 				metrics: [],
 				status: 'ok',
@@ -390,8 +409,8 @@ function renderBenchmarkMatrixMarkdownReport(summaryOrRows, options = {}) {
 		'',
 		`Cells ranked: **${summary.cell_count}**`,
 		'',
-		'| Rank | Status | Scenario | Dimensions | Top metrics | Run | Artifact |',
-		'|---:|---|---|---|---|---|---|',
+		'| Rank | Status | Scenario | Dimensions | Top metrics | Run | Viewer | Artifact |',
+		'|---:|---|---|---|---|---|---|---|',
 	];
 	for (const cell of summary.ranked_cells) {
 		const metrics = cell.metrics
@@ -401,10 +420,13 @@ function renderBenchmarkMatrixMarkdownReport(summaryOrRows, options = {}) {
 			.map((row) => `${row.per_unit_value === null ? row.metric_label : row.per_unit_label}: ${formatValue(row.per_unit_value ?? row.value)}${row.percent_delta === null ? '' : ` (${formatValue(row.percent_delta, '%')})`}`)
 			.join('<br>');
 		const run = cell.run_url ? `[${cell.run_id || 'run'}](${cell.run_url})` : (cell.run_id || '');
-		lines.push(`| ${cell.rank} | ${cell.status} | ${markdownEscape(cell.label || cell.scenario_id)} | ${markdownEscape(formatDimensions(cell.dimensions))} | ${markdownEscape(metrics)} | ${run} | ${markdownEscape(cell.artifact_path || '')} |`);
+		const viewers = asArray(cell.viewers)
+			.map((viewer) => `[${markdownEscape(viewer.name || viewer.kind || 'viewer')}](${viewer.url})`)
+			.join('<br>');
+		lines.push(`| ${cell.rank} | ${cell.status} | ${markdownEscape(cell.label || cell.scenario_id)} | ${markdownEscape(formatDimensions(cell.dimensions))} | ${markdownEscape(metrics)} | ${run} | ${viewers} | ${markdownEscape(cell.artifact_path || '')} |`);
 	}
 	if (summary.ranked_cells.length === 0) {
-		lines.push('| n/a | ok | n/a | n/a | n/a | n/a | n/a |');
+		lines.push('| n/a | ok | n/a | n/a | n/a | n/a | n/a | n/a |');
 	}
 	return `${lines.join('\n')}\n`;
 }
