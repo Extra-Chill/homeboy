@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.2.8] - 2026-06-17
+
+### Changed
+- Add WordPress workload profile helper
+
+### Fixed
+- fix(wp-codebox): use OpenCode auth for Claude Code
+
 ## [3.2.7] - 2026-06-17
 
 ### Changed
