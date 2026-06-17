@@ -301,6 +301,20 @@ function buildBrowserBenchResult(input = {}) {
 	});
 }
 
+function normalizeBrowserBenchWorkloadResult(input = {}) {
+	const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+	return isBrowserBenchWorkloadResult(source) ? buildBrowserBenchResult(source) : source;
+}
+
+function isBrowserBenchWorkloadResult(source) {
+	return Boolean(
+		source.browserResult
+		|| source.browserMetrics
+		|| source.browserArtifacts
+		|| source.rawResultArtifact
+	);
+}
+
 function normalizeBenchMetrics(metrics = {}) {
 	if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return {};
 	const normalized = {};
@@ -494,7 +508,10 @@ module.exports = {
 	buildBenchScenarioResult,
 	buildBrowserBenchResult,
 	collectBrowserPhases,
+	normalizeBenchArtifact,
+	normalizeBenchArtifacts,
 	normalizeBrowserArtifact,
+	normalizeBrowserBenchWorkloadResult,
 	normalizeBrowserBottleneck,
 	normalizeBrowserNetworkRequest,
 	normalizeBrowserPerformanceProfile,
