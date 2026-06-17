@@ -2,11 +2,12 @@ use std::path::Path;
 
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
+use homeboy::core::review::{
+    artifact_command, ReviewArtifactFindings, ReviewCommandOutput, ReviewStage,
+};
 use homeboy::core::ObservationOutputMetadata;
 
-use super::{
-    artifact_command, ReviewArgs, ReviewArtifactFindings, ReviewCommandOutput, ReviewStage,
-};
+use super::ReviewArgs;
 
 pub(super) struct ReviewObservation(ActiveObservation);
 
@@ -182,6 +183,7 @@ mod tests {
     use crate::commands::utils::args::{
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs,
     };
+    use homeboy::core::review::{build_artifact, ReviewSummary};
 
     fn review_args() -> ReviewArgs {
         ReviewArgs {
@@ -256,14 +258,14 @@ mod tests {
             skipped_reason: Some("no tests".to_string()),
             output: None::<TestCommandOutput>,
         };
-        let artifact = super::super::build_artifact(
+        let artifact = build_artifact(
             "homeboy",
             "origin/main",
             "abc123",
             vec![
-                super::super::artifact_command(&audit),
-                super::super::artifact_command(&lint),
-                super::super::artifact_command(&test),
+                artifact_command(&audit),
+                artifact_command(&lint),
+                artifact_command(&test),
             ],
         );
         let output = ReviewCommandOutput {
@@ -273,7 +275,7 @@ mod tests {
             ),
             observation: None,
             artifact,
-            summary: super::super::ReviewSummary {
+            summary: ReviewSummary {
                 passed: false,
                 status: "failed".to_string(),
                 component: "homeboy".to_string(),

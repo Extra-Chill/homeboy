@@ -86,6 +86,7 @@ pub mod quality;
 pub mod redaction;
 pub mod refactor;
 pub mod release;
+pub mod review;
 pub mod rig;
 pub mod run_lifecycle_record;
 pub mod runner;
