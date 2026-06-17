@@ -30,10 +30,14 @@ The `php-ai-client` checkout must include bearer-token auth support (`RequestAut
 ## WP Codebox Artifact Lookup
 
 WordPress helpers that consume WP Codebox browser or recipe artifacts should use
-`wordpress/lib/wp-codebox-artifacts.js` instead of parsing bundle directory
-layouts directly. The helper resolves artifact references from returned runtime
-metadata (`artifacts`, `files`, nested `artifact.files`, or fallback paths) to
-absolute files under the artifact bundle directory.
+the exported `homeboy-extension-wordpress/wp-codebox-artifacts` module instead
+of parsing bundle directory layouts directly. The helper resolves artifact
+references from returned runtime metadata (`artifacts`, `files`,
+`artifactFiles`, nested `artifact.files`, summary file maps, or fallback paths)
+to absolute files under the artifact bundle directory. It accepts canonical
+directory aliases including `artifacts.directory`, `artifacts.path`,
+`artifactsDirectory`, `artifacts_directory`, `artifactDirectory`, and
+`artifact_directory`.
 
 This keeps extension helpers product-neutral: workloads and probes can name the
 artifact they need, while runtime-specific bundle layouts remain behind one
