@@ -8,7 +8,7 @@ source "${DEPENDENCY_HELPER}"
 # Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
 # fall back to the co-located direct-invocation copy so the sidecar writer is
 # available outside a release run (homeboy-extensions#1415).
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-${SCRIPT_DIR}/../lib/sidecar-writer.sh}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:?HOMEBOY_RUNTIME_SIDECAR_WRITER is required}"
 # shellcheck source=/dev/null
 if [ -n "$SIDECAR_WRITER_HELPER" ] && [ -f "$SIDECAR_WRITER_HELPER" ]; then
     source "$SIDECAR_WRITER_HELPER"
@@ -96,8 +96,8 @@ if [[ "${HOMEBOY_SKIP_PHPSTAN:-}" == "1" ]]; then
 fi
 
 # Resolve execution context (shared helper)
-RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${SCRIPT_DIR}/../lib/resolve-context.sh}"
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:?HOMEBOY_RUNTIME_SIDECAR_WRITER is required}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH

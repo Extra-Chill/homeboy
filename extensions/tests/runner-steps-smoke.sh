@@ -2,9 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${ROOT}/.." && pwd)/homeboy}"
+RUNNER_STEPS_CORE_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${HOMEBOY_CORE_DIR}/src/core/extension/runtime/runner-steps.sh}"
 
 # shellcheck source=/dev/null
-source "$ROOT/scripts/lib/runner-steps.sh"
+source "$RUNNER_STEPS_CORE_HELPER"
 
 assert_runs() {
     local label="$1"
@@ -47,6 +49,7 @@ HOMEBOY_SKIP="eslint,phpstan"
 assert_runs "step not in skiplist" "phpcs"
 assert_skips "skiplisted step without allowlist" "phpstan"
 
-bash -c 'source "$1"; type should_run_step >/dev/null' _ "$ROOT/wordpress/scripts/lib/runner-steps.sh"
+HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_CORE_HELPER" \
+    bash -c 'source "$1"; type should_run_step >/dev/null' _ "$ROOT/wordpress/scripts/lib/runner-steps.sh"
 
 echo "runner-steps smoke ok"

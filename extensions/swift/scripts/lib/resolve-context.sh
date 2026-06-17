@@ -5,7 +5,6 @@ if [ -n "$HELPER" ] && [ "$HELPER" != "${BASH_SOURCE[0]}" ]; then
     # shellcheck source=/dev/null
     source "$HELPER"
 else
-    COMMON_RESOLVE_CONTEXT_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/resolve-context.sh"
-    # shellcheck source=/dev/null
-    source "$COMMON_RESOLVE_CONTEXT_HELPER"
+    echo "resolve-context wrapper requires HOMEBOY_RUNTIME_RESOLVE_CONTEXT" >&2
+    return 2 2>/dev/null || exit 2
 fi
