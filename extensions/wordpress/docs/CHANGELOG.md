@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.10] - 2026-06-17
+
+### Changed
+- Add Data Machine runtime profile for Codebox
+- Add WP Codebox artifact manifest resolver
+
 ## [3.3.9] - 2026-06-17
 
 ### Changed
