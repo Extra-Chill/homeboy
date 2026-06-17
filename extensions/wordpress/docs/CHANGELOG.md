@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.0] - 2026-06-17
+
+### Added
+- feat(wp-codebox): declare executable readiness
+
 ## [3.3.12] - 2026-06-17
 
 ### Changed
