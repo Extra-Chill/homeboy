@@ -16,6 +16,10 @@ use crate::core::{config, Error, Result};
 use super::super::Runner;
 use super::args_util::{non_empty_arg, subcommand_index};
 
+/// Provenance key used when a missing runner secret_env name is contributed by
+/// the plan's provider runner requirements rather than an individual task.
+const PLAN_PROVIDER_PROVENANCE: &str = "plan:provider";
+
 pub(super) fn hydrate_agent_task_secret_env(
     args: &[String],
     env: &mut HashMap<String, String>,
@@ -111,20 +115,42 @@ pub(super) fn preflight_agent_task_runner_secret_env(
     args: &[String],
     env: &HashMap<String, String>,
 ) -> Result<()> {
-    let names = declared_agent_task_run_plan_secret_env(args);
-    if names.is_empty() {
+    let tasks = declared_agent_task_run_plan_secret_env_by_task(args);
+    if tasks.is_empty() {
         return Ok(());
     }
 
-    let missing: Vec<String> = names
-        .into_iter()
-        .filter(|name| !env.contains_key(name.as_str()) && !runner.secret_env.contains_key(name))
-        .collect();
+    let is_missing = |name: &str| !env.contains_key(name) && !runner.secret_env.contains_key(name);
+
+    // Dedupe missing env names while preserving first-seen order so the
+    // operator-facing message lists each name exactly once, even when several
+    // plan tasks declare the same requirement.
+    let mut missing: Vec<String> = Vec::new();
+    let mut required_by_tasks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for task in &tasks {
+        for name in &task.secret_env {
+            if !is_missing(name) {
+                continue;
+            }
+            if !missing.iter().any(|seen| seen == name) {
+                missing.push(name.clone());
+            }
+            let entry = required_by_tasks
+                .entry(name.clone())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let serde_json::Value::Array(task_ids) = entry {
+                let task_id = serde_json::Value::String(task.task_id.clone());
+                if !task_ids.contains(&task_id) {
+                    task_ids.push(task_id);
+                }
+            }
+        }
+    }
     if missing.is_empty() {
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "secret-env",
         format!(
             "missing required agent-task runner secret env on runner `{}`: {}",
@@ -136,7 +162,14 @@ pub(super) fn preflight_agent_task_runner_secret_env(
             "Configure the selected runner secret_env references for the declared names before Lab dispatch.".to_string(),
             "Use `homeboy runner env <runner>` to inspect redacted runner secret_env refs without printing values.".to_string(),
         ]),
-    ))
+    );
+    if let serde_json::Value::Object(details) = &mut error.details {
+        details.insert(
+            "required_by_tasks".to_string(),
+            serde_json::Value::Object(required_by_tasks),
+        );
+    }
+    Err(error)
 }
 
 fn declared_agent_task_controller_secret_env(args: &[String]) -> Vec<String> {
@@ -326,6 +359,21 @@ fn declared_provider_config_secret_env(spec: &str) -> Vec<String> {
 }
 
 fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
+    declared_agent_task_run_plan_secret_env_by_task(args)
+        .into_iter()
+        .flat_map(|task| task.secret_env)
+        .collect()
+}
+
+/// A single plan task's declared runner secret_env names, retaining the task
+/// identity so preflight can report per-task provenance without repeating the
+/// same env names across tasks in operator-facing prose.
+struct PlanTaskSecretEnv {
+    task_id: String,
+    secret_env: Vec<String>,
+}
+
+fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanTaskSecretEnv> {
     let Some(plan_spec) = agent_task_run_plan_plan_spec(args) else {
         return Vec::new();
     };
@@ -341,9 +389,16 @@ fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let mut names = Vec::new();
-    names.extend(provider_runner_secret_env_for_plan(&plan));
+    let mut tasks = Vec::new();
+    let provider_names = provider_runner_secret_env_for_plan(&plan);
+    if !provider_names.is_empty() {
+        tasks.push(PlanTaskSecretEnv {
+            task_id: PLAN_PROVIDER_PROVENANCE.to_string(),
+            secret_env: provider_names,
+        });
+    }
     for request in plan.tasks {
+        let mut names = Vec::new();
         names.extend(request.executor.secret_env);
         names.extend(
             request
@@ -356,8 +411,12 @@ fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
                 .filter_map(serde_json::Value::as_str)
                 .map(str::to_string),
         );
+        tasks.push(PlanTaskSecretEnv {
+            task_id: request.task_id,
+            secret_env: names,
+        });
     }
-    names
+    tasks
 }
 
 fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
@@ -905,6 +964,113 @@ mod tests {
 
         preflight_agent_task_runner_secret_env("lab-a", &runner, &run_plan_args(&plan_path), &env)
             .expect("request-injected secret env should pass");
+    }
+
+    #[test]
+    fn preflight_agent_task_runner_secret_env_dedupes_shared_missing_names_across_tasks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan_path = temp.path().join("plan.json");
+        std::fs::write(
+            &plan_path,
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "shared-missing-secret-plan",
+                "tasks": [
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "idea",
+                        "executor": {
+                            "backend": "example",
+                            "secret_env": [
+                                "HOMEBOY_SHARED_MISSING_SECRET_TEST",
+                                "HOMEBOY_OTHER_MISSING_SECRET_TEST"
+                            ]
+                        },
+                        "instructions": "Generate an idea."
+                    },
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "design",
+                        "executor": {
+                            "backend": "example",
+                            "secret_env": [
+                                "HOMEBOY_SHARED_MISSING_SECRET_TEST",
+                                "HOMEBOY_OTHER_MISSING_SECRET_TEST"
+                            ]
+                        },
+                        "instructions": "Design the idea."
+                    },
+                    {
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "build",
+                        "executor": {
+                            "backend": "example",
+                            "secret_env": [
+                                "HOMEBOY_SHARED_MISSING_SECRET_TEST",
+                                "HOMEBOY_OTHER_MISSING_SECRET_TEST"
+                            ]
+                        },
+                        "instructions": "Build the idea."
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write plan");
+
+        let runner = fixture_runner(HashMap::new());
+        let err = preflight_agent_task_runner_secret_env(
+            "lab-a",
+            &runner,
+            &run_plan_args(&plan_path),
+            &HashMap::new(),
+        )
+        .expect_err("missing runner secret refs should fail before dispatch");
+
+        // The operator-facing message must list each missing name exactly once,
+        // preserving first-seen order, even though three tasks declare them.
+        let problem = err.details["problem"]
+            .as_str()
+            .expect("problem detail string");
+        assert!(err.message.ends_with(
+            "missing required agent-task runner secret env on runner `lab-a`: \
+HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
+        ));
+        assert_eq!(
+            problem,
+            "missing required agent-task runner secret env on runner `lab-a`: \
+HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
+        );
+        // No repeats in either prose field.
+        assert_eq!(
+            err.message
+                .matches("HOMEBOY_SHARED_MISSING_SECRET_TEST")
+                .count(),
+            1
+        );
+        assert_eq!(
+            problem
+                .matches("HOMEBOY_SHARED_MISSING_SECRET_TEST")
+                .count(),
+            1
+        );
+
+        // Per-task provenance is reported in a separate structured field.
+        let required_by_tasks = err.details["required_by_tasks"]
+            .as_object()
+            .expect("required_by_tasks object");
+        let shared_tasks = required_by_tasks["HOMEBOY_SHARED_MISSING_SECRET_TEST"]
+            .as_array()
+            .expect("shared name task list");
+        let shared_task_ids: Vec<&str> = shared_tasks.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(shared_task_ids, vec!["idea", "design", "build"]);
+        let other_task_ids: Vec<&str> = required_by_tasks["HOMEBOY_OTHER_MISSING_SECRET_TEST"]
+            .as_array()
+            .expect("other name task list")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(other_task_ids, vec!["idea", "design", "build"]);
     }
 
     fn run_plan_args(plan_path: &std::path::Path) -> Vec<String> {
