@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 
+HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-}"
 COMMON_RESOLVE_CONTEXT_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/scripts/lib/resolve-context.sh"
-if [ -f "$COMMON_RESOLVE_CONTEXT_HELPER" ]; then
+if [ -n "$HELPER" ] && [ "$HELPER" != "${BASH_SOURCE[0]}" ]; then
+    # shellcheck source=/dev/null
+    source "$HELPER"
+elif [ -f "$COMMON_RESOLVE_CONTEXT_HELPER" ]; then
     # shellcheck source=/dev/null
     source "$COMMON_RESOLVE_CONTEXT_HELPER"
 else

@@ -13,6 +13,18 @@ RUNNER_PRELUDE_HELPERS=(
     "${ROOT_DIR}/rust/scripts/lib/runner-prelude.sh"
     "${ROOT_DIR}/wordpress/scripts/lib/runner-prelude.sh"
 )
+RESOLVE_CONTEXT_HELPERS=(
+    "${ROOT_DIR}/nodejs/scripts/lib/resolve-context.sh"
+    "${ROOT_DIR}/rust/scripts/lib/resolve-context.sh"
+    "${ROOT_DIR}/wordpress/scripts/lib/resolve-context.sh"
+    "${ROOT_DIR}/swift/scripts/lib/resolve-context.sh"
+)
+RUNNER_STEPS_HELPERS=(
+    "${ROOT_DIR}/wordpress/scripts/lib/runner-steps.sh"
+)
+SIDECAR_WRITER_HELPERS=(
+    "${ROOT_DIR}/wordpress/scripts/lib/sidecar-writer.sh"
+)
 FIX_RESULTS_HELPERS=(
     "${ROOT_DIR}/nodejs/scripts/lib/fix-results.sh"
     "${ROOT_DIR}/rust/scripts/lib/fix-results.sh"
@@ -116,6 +128,24 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+RUNTIME_STUB="$TMP_DIR/runtime-stub.sh"
+printf 'HOMEBOY_WRAPPER_USED=runtime\n' > "$RUNTIME_STUB"
+for runner_prelude_helper in "${RUNNER_PRELUDE_HELPERS[@]}"; do
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$runner_prelude_helper"
+done
+for resolve_context_helper in "${RESOLVE_CONTEXT_HELPERS[@]}"; do
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$resolve_context_helper"
+done
+for runner_steps_helper in "${RUNNER_STEPS_HELPERS[@]}"; do
+    HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$runner_steps_helper"
+done
+for command_capture_helper in "${COMMAND_CAPTURE_HELPERS[@]:1}"; do
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$command_capture_helper"
+done
+for sidecar_writer_helper in "${SIDECAR_WRITER_HELPERS[@]}"; do
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$RUNTIME_STUB" bash -c 'source "$1"; [ "$HOMEBOY_WRAPPER_USED" = runtime ]' _ "$sidecar_writer_helper"
+done
 
 ANNOTATIONS_DIR="$TMP_DIR/annotations"
 ANNOTATIONS_SOURCE="$TMP_DIR/extra-annotations.json"
