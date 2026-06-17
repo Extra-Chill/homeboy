@@ -18,8 +18,7 @@ Install the standard Homeboy extension set on the local machine or an SSH
 reachable remote runner.
 
 Options:
-  --target <ssh-host>         SSH target such as homeboy-lab or user@host.
-                             Omit for local bootstrap.
+  --target <runner-id>        Runner ID such as homeboy-lab. Omit for local bootstrap.
   --extensions "<ids>"       Space-separated extension IDs to install.
                              Default: nodejs rust wordpress go swift.
   --repo <url-or-path>        Extension monorepo URL or path.
@@ -34,10 +33,6 @@ Examples:
   scripts/bootstrap-standard-extensions.sh --target chubes@homeboy-lab --extensions "nodejs rust wordpress"
   scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy-extensions --extensions "rust" --dry-run
 USAGE
-}
-
-shell_quote() {
-    printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -89,38 +84,31 @@ if [ -z "$HOMEBOY_BIN" ]; then
     exit 2
 fi
 
-REMOTE_SCRIPT="set -euo pipefail
-HOMEBOY_BIN=$(shell_quote "$HOMEBOY_BIN")
-REPO=$(shell_quote "$REPO")
-EXTENSIONS=$(shell_quote "$EXTENSIONS")
+RUNNER_ID="${TARGET:-local}"
+RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "HOMEBOY_BIN=$HOMEBOY_BIN" --env "REPO=$REPO" --env "EXTENSIONS=$EXTENSIONS")
 
-command -v \"\$HOMEBOY_BIN\" >/dev/null 2>&1 || {
-    echo \"Homeboy executable not found on target: \$HOMEBOY_BIN\" >&2
+if [ -n "$TARGET" ]; then
+    RUNNER_ARGS+=(--ssh)
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    RUNNER_ARGS+=(--dry-run)
+fi
+
+"$HOMEBOY_BIN" "${RUNNER_ARGS[@]}" <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+command -v "$HOMEBOY_BIN" >/dev/null 2>&1 || {
+    echo "Homeboy executable not found on target: $HOMEBOY_BIN" >&2
     exit 127
 }
 
-for EXTENSION_ID in \$EXTENSIONS; do
-    echo \"Installing Homeboy extension: \$EXTENSION_ID\"
-    \"\$HOMEBOY_BIN\" extension install \"\$REPO\" --id \"\$EXTENSION_ID\"
-    \"\$HOMEBOY_BIN\" extension show \"\$EXTENSION_ID\" >/dev/null
+for EXTENSION_ID in $EXTENSIONS; do
+    echo "Installing Homeboy extension: $EXTENSION_ID"
+    "$HOMEBOY_BIN" extension install "$REPO" --id "$EXTENSION_ID"
+    "$HOMEBOY_BIN" extension show "$EXTENSION_ID" >/dev/null
 done
 
-echo \"Installed Homeboy extensions:\"
-\"\$HOMEBOY_BIN\" extension list
-"
-
-if [ "$DRY_RUN" -eq 1 ]; then
-    if [ -n "$TARGET" ]; then
-        echo "# Target: $TARGET"
-    else
-        echo "# Target: local"
-    fi
-    printf "%s" "$REMOTE_SCRIPT"
-    exit 0
-fi
-
-if [ -n "$TARGET" ]; then
-    printf "%s" "$REMOTE_SCRIPT" | ssh "$TARGET" 'bash -s'
-else
-    bash -s <<<"$REMOTE_SCRIPT"
-fi
+echo "Installed Homeboy extensions:"
+"$HOMEBOY_BIN" extension list
+REMOTE_SCRIPT
