@@ -7,8 +7,10 @@ use homeboy::core::plan::HomeboyPlan;
 use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
-use super::{CmdResult, DynamicSetArgs};
-use crate::command_contract::{CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract};
+use super::{adapter, CmdResult, DynamicSetArgs};
+use crate::command_contract::{
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode, LabCommandContract,
+};
 
 const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
@@ -19,18 +21,6 @@ pub struct FleetArgs {
 }
 
 impl FleetArgs {
-    pub(crate) fn output_descriptor(
-        &self,
-        output_file_mode: CommandOutputFileMode,
-    ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor {
-            response_mode: crate::command_contract::CommandResponseMode::Json,
-            output_file_mode,
-            json_family: crate::command_contract::CommandJsonFamily::Ops,
-            output_contract: crate::command_contract::CommandOutputContractKind::JsonEnvelope,
-        }
-    }
-
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         self.is_hot_resource_command().then(|| {
             LabCommandContract::local_only("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
@@ -196,6 +186,21 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
             user,
         } => exec(&id, command, check, user),
     }
+}
+
+pub(crate) fn adapter(
+    output_file_mode: CommandOutputFileMode,
+) -> adapter::TypedCommandAdapter<FleetArgs> {
+    adapter::TypedCommandAdapter::json_only(
+        CommandJsonFamily::Ops,
+        output_file_mode,
+        CommandOutputContractKind::JsonEnvelope,
+        run_json,
+    )
+}
+
+fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonCommandRun {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
 }
 
 fn create(

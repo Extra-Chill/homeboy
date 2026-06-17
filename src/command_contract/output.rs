@@ -12,7 +12,7 @@
 //! returned from [`Commands::descriptor`].
 
 use crate::cli_surface::Commands;
-use crate::commands::{changelog, file, logs, report, review, runtime, trace, version};
+use crate::commands::{changelog, file, fleet, logs, report, review, runtime, trace, version};
 
 use super::lab::apply_lab_contract_to_descriptor;
 
@@ -245,7 +245,9 @@ impl Commands {
             | Commands::Http(_)
             | Commands::Upgrade(_)
             | Commands::Ssh(_) => ops_json_descriptor(output_file_mode),
-            Commands::Fleet(args) => args.output_descriptor(output_file_mode),
+            Commands::Fleet(_) => fleet::adapter(output_file_mode)
+                .contract
+                .to_output_descriptor(),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode),
         }
     }
@@ -376,6 +378,14 @@ mod tests {
         assert_eq!(runs_descriptor.response_mode, CommandResponseMode::Json);
         assert_eq!(
             runs_descriptor.output_contract,
+            CommandOutputContractKind::JsonEnvelope
+        );
+
+        let fleet_descriptor = parsed_command(&["homeboy", "fleet", "list"]).descriptor(false);
+        assert_eq!(fleet_descriptor.json_family, CommandJsonFamily::Ops);
+        assert_eq!(fleet_descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(
+            fleet_descriptor.output_contract,
             CommandOutputContractKind::JsonEnvelope
         );
 
