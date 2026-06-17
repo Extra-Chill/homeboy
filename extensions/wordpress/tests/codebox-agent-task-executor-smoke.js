@@ -2168,6 +2168,36 @@ try {
   assert.deepEqual(missingCodexProviderPathOutcome.diagnostics[0].data.provider_plugin_paths, []);
   assert.match(missingCodexProviderPathOutcome.summary, /Codex-capable provider plugin checkout/);
 
+  fs.rmSync(capture, { force: true });
+  const defaultedCodexMissingProviderPathResult = spawnSync(process.execPath, [
+    wpCodeboxRuntimeExecutor,
+    '--task-runner',
+    fixture,
+  ], {
+    encoding: 'utf8',
+    env: fixtureEnv({
+      HOME: fakeCodexHome,
+      HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_default_provider: 'codex' }),
+    }),
+    input: JSON.stringify({
+      ...request,
+      task_id: 'defaulted-codex-missing-provider-path-cli-task-123',
+      executor: {
+        backend: 'codebox',
+        model: 'gpt-5.5',
+        config: { secret_env: codexSecretEnv },
+      },
+    }),
+  });
+  assert.equal(defaultedCodexMissingProviderPathResult.status, 1, defaultedCodexMissingProviderPathResult.stderr || defaultedCodexMissingProviderPathResult.stdout);
+  assert.equal(fs.existsSync(capture), false, 'task runner should not be invoked when defaulted Codex has no provider plugin paths');
+  const defaultedCodexMissingProviderPathOutcome = JSON.parse(defaultedCodexMissingProviderPathResult.stdout);
+  assert.equal(defaultedCodexMissingProviderPathOutcome.status, 'failed');
+  assert.equal(defaultedCodexMissingProviderPathOutcome.failure_classification, 'provider');
+  assert.equal(defaultedCodexMissingProviderPathOutcome.diagnostics[0].class, 'codebox.preflight.codex_provider_plugin_path');
+  assert.equal(defaultedCodexMissingProviderPathOutcome.diagnostics[0].data.provider, 'codex');
+  assert.deepEqual(defaultedCodexMissingProviderPathOutcome.diagnostics[0].data.provider_plugin_paths, []);
+
   const wrongCodexProviderPathResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
     '--task-runner',

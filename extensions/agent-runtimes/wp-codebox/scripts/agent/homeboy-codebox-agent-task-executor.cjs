@@ -491,8 +491,7 @@ function codexProviderPluginInspection(providerPath) {
 }
 
 function codexProviderPluginPreflightPayload(request, taskInput) {
-  const explicitProvider = request.executor?.config?.provider;
-  if (explicitProvider !== 'codex' || taskInput?.provider !== 'codex') {
+  if (taskInput?.provider !== 'codex') {
     return null;
   }
 
