@@ -44,6 +44,9 @@ use homeboy::core::agent_tasks::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
+use super::contract;
+use super::{ContractArgs, ContractFormat};
+
 #[test]
 fn providers_output_includes_core_capability_contract() {
     with_isolated_home(|_| {
@@ -70,6 +73,38 @@ fn providers_output_includes_core_capability_contract() {
             AGENT_TASK_OUTCOME_SCHEMA
         );
     });
+}
+
+#[test]
+fn contract_output_exports_core_agent_task_metadata() {
+    let (value, status) = contract::contract(ContractArgs {
+        format: ContractFormat::Json,
+    })
+    .expect("contract output");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["schema"], "homeboy/agent-task-core-contract/v1");
+    assert_eq!(value["schemas"]["request"], AGENT_TASK_REQUEST_SCHEMA);
+    assert_eq!(
+        value["schemas"]["provider"],
+        AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
+    );
+    assert_eq!(
+        value["provider_capability"]["schema"],
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+    );
+    assert!(value["enums"]["outcome_status"]
+        .as_array()
+        .expect("outcome statuses")
+        .contains(&json!("provider_error")));
+    assert!(value["enums"]["failure_classification"]
+        .as_array()
+        .expect("failure classifications")
+        .contains(&json!("capability_missing")));
+    assert!(value["redaction_defaults"]["sensitive_keys"]
+        .as_array()
+        .expect("sensitive keys")
+        .contains(&json!("refresh_token")));
 }
 
 #[test]

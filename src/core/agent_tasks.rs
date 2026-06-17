@@ -55,6 +55,12 @@ pub use super::agent_task_aggregate::{
     AgentTaskReconciliationItem, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 
+pub use super::agent_task_contract::{
+    agent_task_core_contract, AgentTaskCoreContract, AgentTaskCoreContractEnums,
+    AgentTaskCoreContractSchemas, AgentTaskCoreProviderCapabilityContract,
+    AgentTaskCoreRedactionDefaults, AGENT_TASK_CORE_CONTRACT_SCHEMA,
+};
+
 pub use super::agent_task_fanout::{
     AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
     AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,

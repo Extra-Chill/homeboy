@@ -41,6 +41,7 @@ fn includes_first_level_subcommands() {
     assert!(surface.contains_path(&["file", "sync"]));
     assert!(surface.contains_path(&["runner", "job"]));
     assert!(surface.contains_path(&["agent-task", "loop"]));
+    assert!(surface.contains_path(&["agent-task", "contract"]));
     assert!(surface.contains_path(&["version", "show"]));
     assert!(surface.contains_path(&["worktree", "create"]));
     assert!(surface.contains_path(&["worktree", "remove"]));

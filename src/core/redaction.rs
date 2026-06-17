@@ -76,6 +76,14 @@ impl RedactionPolicy {
         &self.replacement
     }
 
+    pub fn sensitive_keys(&self) -> &[String] {
+        &self.sensitive_keys
+    }
+
+    pub fn sensitive_headers(&self) -> &[String] {
+        &self.sensitive_headers
+    }
+
     pub fn is_sensitive_key(&self, key: &str) -> bool {
         let key = normalize_key(key);
         self.sensitive_keys

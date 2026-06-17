@@ -11,6 +11,7 @@ use super::{CmdResult, GlobalArgs};
 
 pub mod args;
 pub mod auth;
+pub mod contract;
 pub mod controller;
 pub mod review;
 pub mod run;
@@ -22,8 +23,8 @@ pub use args::{
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerRunArgs,
     AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs, AgentTaskLoopArgs, CancelArgs,
-    FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs,
-    RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs,
+    RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -60,6 +61,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
+        AgentTaskCommand::Contract(contract_args) => contract::contract(contract_args),
         AgentTaskCommand::Auth(auth_args) => auth::auth(auth_args),
         AgentTaskCommand::Controller(controller_args) => controller::controller(controller_args),
     }
