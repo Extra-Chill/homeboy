@@ -18,6 +18,7 @@
 
 use std::path::Path;
 
+use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_provider::provider_available_for_backend;
 use crate::core::agent_tasks::provider::{
@@ -298,7 +299,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start".to_string(),
+                lab_runner_unsupported_message(),
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -311,7 +312,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                || "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start".to_string(),
+                lab_runner_unsupported_message,
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
@@ -477,7 +478,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
 }
 
 fn unsupported_runner_hints(runner_id: &str, normalized_args: &[String]) -> Vec<String> {
-    let mut hints = vec!["Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start.".to_string()];
+    let mut hints = vec![lab_runner_unsupported_hint()];
 
     if let Some(service_command) = tunnel_service_command(normalized_args) {
         hints.push(format!(
