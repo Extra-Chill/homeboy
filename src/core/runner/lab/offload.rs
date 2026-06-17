@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_provider::provider_available_for_backend;
 use crate::core::agent_tasks::provider::{
-    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
+    default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use crate::core::engine::shell;
 use crate::core::observation::{PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV};
@@ -216,7 +216,7 @@ fn preflight_patch_provider_git_checkout(source_path: &Path) -> Result<()> {
         return Err(unsupported(
             "Lab offload for patch-producing agent-task providers requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
             vec![
-                "Use a Homeboy/Data Machine Code worktree or another existing git checkout for --cwd.".to_string(),
+                "Use a Homeboy worktree or another existing git checkout for --cwd.".to_string(),
                 "Initialize the target as a git checkout before using Lab offload with a patch-producing provider.".to_string(),
                 "Use a provider without a git-checkout materialization requirement only if it has an explicit non-git apply-back artifact contract.".to_string(),
             ],
@@ -231,7 +231,7 @@ fn preflight_patch_provider_git_checkout(source_path: &Path) -> Result<()> {
             "Lab offload for patch-producing agent-task providers requires --cwd to have remote.origin.url so the runner can materialize a real git checkout",
             vec![
                 "Set remote.origin.url on the source checkout before retrying Lab offload.".to_string(),
-                "Use a Homeboy/Data Machine Code worktree or another checkout cloned from the canonical remote.".to_string(),
+                "Use a Homeboy worktree or another checkout cloned from the canonical remote.".to_string(),
             ],
         ));
     }
@@ -1619,7 +1619,7 @@ fn preflight_agent_task_provider_on_runner(
     runner_homeboy: &serde_json::Value,
     runner_status: &RunnerStatusReport,
 ) -> Result<()> {
-    let Some(selection) = agent_task_provider_selection_from_args(args) else {
+    let Some(selection) = agent_task_provider_selection_from_args(args)? else {
         return Ok(());
     };
 
@@ -1791,16 +1791,21 @@ fn refresh_runner_provider_session_if_still_safe(
     }
 }
 
-fn agent_task_provider_selection_from_args(args: &[String]) -> Option<AgentTaskProviderSelection> {
-    let action_index =
-        super::args_util::subcommand_index(args, "agent-task").and_then(|index| {
-            args.get(index + 1)
-                .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-                .map(|_| index + 1)
-        })?;
+fn agent_task_provider_selection_from_args(
+    args: &[String],
+) -> Result<Option<AgentTaskProviderSelection>> {
+    let action_index = super::args_util::subcommand_index(args, "agent-task").and_then(|index| {
+        args.get(index + 1)
+            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
+            .map(|_| index + 1)
+    });
+    let Some(action_index) = action_index else {
+        return Ok(None);
+    };
 
     let mut backend = None;
     let mut selector = None;
+    let mut repo = None;
     let mut iter = args.iter().skip(action_index + 1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
@@ -1809,19 +1814,25 @@ fn agent_task_provider_selection_from_args(args: &[String]) -> Option<AgentTaskP
         match arg.as_str() {
             "--backend" => backend = iter.next().cloned(),
             "--selector" => selector = iter.next().cloned(),
+            "--repo" => repo = iter.next().cloned(),
             _ => {
                 if let Some(value) = arg.strip_prefix("--backend=") {
                     backend = Some(value.to_string());
                 } else if let Some(value) = arg.strip_prefix("--selector=") {
                     selector = Some(value.to_string());
+                } else if let Some(value) = arg.strip_prefix("--repo=") {
+                    repo = Some(value.to_string());
                 }
             }
         }
     }
 
-    backend
-        .filter(|backend| !backend.trim().is_empty())
-        .map(|backend| AgentTaskProviderSelection { backend, selector })
+    let backend = match backend.filter(|backend| !backend.trim().is_empty()) {
+        Some(backend) => Some(backend),
+        None => default_backend_for_component(repo.as_deref())?,
+    };
+
+    Ok(backend.map(|backend| AgentTaskProviderSelection { backend, selector }))
 }
 
 fn parse_agent_task_providers_output(
@@ -2387,7 +2398,7 @@ mod tests {
             .iter()
             .any(|hint| hint
                 .as_str()
-                .is_some_and(|hint| hint.contains("Data Machine Code worktree"))));
+                .is_some_and(|hint| hint.contains("Homeboy worktree"))));
     }
 
     #[test]
@@ -2913,7 +2924,9 @@ mod tests {
             "fix it".to_string(),
         ];
 
-        let selection = agent_task_provider_selection_from_args(&args).expect("selection");
+        let selection = agent_task_provider_selection_from_args(&args)
+            .expect("selection resolves")
+            .expect("selection");
 
         assert_eq!(selection.backend, "primary");
         assert_eq!(selection.selector.as_deref(), Some("variant-a"));
@@ -2929,7 +2942,9 @@ mod tests {
             "primary".to_string(),
         ];
 
-        assert!(agent_task_provider_selection_from_args(&args).is_none());
+        assert!(agent_task_provider_selection_from_args(&args)
+            .expect("selection resolves")
+            .is_none());
     }
 
     #[test]

@@ -1491,11 +1491,11 @@ mod tests {
     }
 
     #[test]
-    fn discovers_agent_task_providers_from_ai_runtime_manifests() {
+    fn discovers_agent_task_providers_from_agent_runtime_manifests() {
         crate::test_support::with_isolated_home(|home| {
             let runtime_dir = home
                 .path()
-                .join(".config/homeboy/ai-runtimes/custom-runtime");
+                .join(".config/homeboy/agent-runtimes/custom-runtime");
             fs::create_dir_all(&runtime_dir).expect("runtime dir");
             fs::write(
                 runtime_dir.join("custom-runtime.json"),
@@ -1534,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_command_env_includes_ai_runtime_identity() {
+    fn provider_command_env_includes_runtime_identity() {
         let (request, mut provider) =
             request("task-a", "node {{runtime_path}}/provider.js".to_string());
         provider.runtime_id = Some("custom-runtime".to_string());

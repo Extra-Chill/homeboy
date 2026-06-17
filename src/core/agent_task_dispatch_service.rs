@@ -300,21 +300,24 @@ fn validate_dispatch_workspace_target(
     let Some(workspace) = workspace else {
         return Ok(());
     };
-    if workspace.kind.as_deref() != Some("cwd")
-        || !provider_requires_cwd_git_checkout(backend, selector)
-    {
+    if !provider_requires_cwd_git_checkout(backend, selector) {
         return Ok(());
     }
     if is_git_checkout(&workspace.root) {
         return Ok(());
     }
+    let argument = if workspace.kind.as_deref() == Some("cwd") {
+        "cwd"
+    } else {
+        "workspace"
+    };
 
     Err(Error::validation_invalid_argument(
-        "cwd",
-        "selected agent-task provider requires --cwd to be a git checkout so generated files can be returned as a patch artifact",
+        argument,
+        "selected agent-task provider requires the dispatch workspace to be a git checkout so generated files can be returned as a patch artifact",
         Some(workspace.root.display().to_string()),
         Some(vec![
-            "Use a Homeboy/Data Machine Code worktree for write-capable agent tasks.".to_string(),
+            "Use a Homeboy worktree or another git checkout for write-capable agent tasks.".to_string(),
             "Initialize the target as a git checkout before dispatching.".to_string(),
             "Use a provider without a git-checkout materialization requirement only if it has an explicit non-git apply-back artifact contract.".to_string(),
         ]),
@@ -1068,6 +1071,25 @@ mod tests {
             plan.tasks[0].metadata["workspace"]["kind"],
             "workspace-path"
         );
+    }
+
+    #[test]
+    fn patch_provider_requires_workspace_path_to_be_git_checkout() {
+        let worktree = tempfile::tempdir().expect("workspace");
+
+        let err = build_dispatch_plan_with_provider_requirements(
+            &dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook generic workspace.".to_string()),
+                workspace: Some(worktree.path().display().to_string()),
+                backend: Some("patch-provider".to_string()),
+                ..DispatchRequestOverrides::default()
+            }),
+            |backend, _| backend == "patch-provider",
+        )
+        .expect_err("workspace path should require git checkout");
+
+        assert_eq!(err.details["field"], "workspace");
+        assert!(err.message.contains("dispatch workspace"));
     }
 
     struct NoopExecutor;
