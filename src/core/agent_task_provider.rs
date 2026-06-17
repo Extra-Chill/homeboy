@@ -19,8 +19,8 @@ use crate::core::agent_task_secrets::{
     AgentTaskSecretResolutionError,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
-use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::command_invocation::CommandInvocation;
+use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
