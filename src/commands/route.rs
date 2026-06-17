@@ -795,9 +795,46 @@ mod tests {
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "retry", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             assert!(lab_offload_command(&cli.command).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn agent_task_retry_run_supports_explicit_runner() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "retry",
+                "agent-task-123",
+                "--run",
+            ],
+            [
+                "homeboy",
+                "agent-task",
+                "retry",
+                "agent-task-123",
+                "--run",
+                "--runner",
+                "homeboy-lab",
+            ],
+        ] {
+            let cli = Cli::parse_from(args);
+
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                command.hot_label,
+                "agent-task dispatch/cook/loop/run-plan/retry --run"
+            );
+            assert!(command.portable);
+            assert!(command.default_lab_offload);
         }
     }
 
