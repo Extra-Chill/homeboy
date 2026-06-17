@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.3.1] - 2026-06-17
+
+### Changed
+- Add static visual parity helper
+
 ## [3.3.0] - 2026-06-17
 
 ### Added
