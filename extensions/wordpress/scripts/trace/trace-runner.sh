@@ -68,19 +68,7 @@ homeboy_wordpress_export_context() {
 }
 
 homeboy_wordpress_resolve_wp_codebox_bin() {
-    local bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
-
-    if [ -z "$bin" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-        bin=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-    fi
-
-    bin="${bin:-wp-codebox}"
-    if [ "$bin" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-        echo "Error: wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox." >&2
-        return 1
-    fi
-
-    printf '%s\n' "$bin"
+    homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}"
 }
 
 homeboy_wordpress_trace_wp_version() {
@@ -195,24 +183,17 @@ homeboy_trace_run_php_scenario_wp_codebox() {
             workflow: {steps: [{command: "wordpress.run-php", args: ["code-file=" + $codeFile]}]}
         }' > "$recipe_file"
 
-    wp_codebox_command=("$codebox_bin")
-    case "$codebox_bin" in
-        *.js|*.cjs)
-            wp_codebox_command=(node "$codebox_bin")
-            ;;
-    esac
-
     set +e
-    "${wp_codebox_command[@]}" recipe-run --recipe "$recipe_file" --artifacts "$codebox_artifacts_dir" --json > "$output_file" 2>"$stderr_file"
+    homeboy_wp_codebox_run_recipe "$recipe_file" "$codebox_artifacts_dir" "$output_file" "$stderr_file" "$codebox_bin"
     status=$?
     set -e
 
-    jq -r '(.executions // [])[-1].stdout // empty' "$output_file" > "$stdout_file" 2>/dev/null || true
+    homeboy_wp_codebox_recipe_last_stdout "$output_file" > "$stdout_file" || true
     if [ ! -s "$stderr_file" ]; then
-        jq -r '(.executions // [])[-1].stderr // empty' "$output_file" > "$stderr_file" 2>/dev/null || true
+        homeboy_wp_codebox_recipe_last_stderr "$output_file" > "$stderr_file" || true
     fi
 
-    if [ "$status" -eq 0 ] && ! jq -e '.success == true' "$output_file" >/dev/null 2>&1; then
+    if [ "$status" -eq 0 ] && ! homeboy_wp_codebox_recipe_succeeded "$output_file"; then
         status=1
     fi
 

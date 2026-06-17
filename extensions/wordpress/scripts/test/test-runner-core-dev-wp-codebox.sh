@@ -36,14 +36,7 @@ ensure_core_dev_checkout() {
     fi
 }
 
-WP_CODEBOX_BIN="${HOMEBOY_WP_CODEBOX_BIN:-}"
-if [ -z "$WP_CODEBOX_BIN" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-    WP_CODEBOX_BIN=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
-fi
-WP_CODEBOX_BIN="${WP_CODEBOX_BIN:-wp-codebox}"
-if [ "$WP_CODEBOX_BIN" = "wp-codebox" ] && ! command -v wp-codebox >/dev/null 2>&1; then
-    fail "wp-codebox not found; set HOMEBOY_WP_CODEBOX_BIN, settings wp_codebox_bin, or install wp-codebox"
-fi
+WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")" || exit 1
 
 SELECTED_TEST_FILE="${HOMEBOY_WORDPRESS_CORE_PHPUNIT_TEST_FILE:-}"
 PASSTHROUGH_ARGS=()
@@ -144,12 +137,6 @@ echo "  Backend: wp-codebox"
 WP_CODEBOX_TMPFILE=$(mktemp)
 PHPUNIT_STDOUT_TMPFILE=$(mktemp)
 RECIPE_FILE=$(mktemp "${TMPDIR:-/tmp}/homeboy-core-wp-codebox-test-recipe.XXXXXX")
-wp_codebox_command=("$WP_CODEBOX_BIN")
-case "$WP_CODEBOX_BIN" in
-    *.js)
-        wp_codebox_command=(node "$WP_CODEBOX_BIN")
-        ;;
-esac
 
 jq -n \
     --arg wp "$WP_CODEBOX_WORDPRESS_VERSION" \
@@ -175,11 +162,7 @@ jq -n \
     }' > "$RECIPE_FILE"
 
 set +e
-"${wp_codebox_command[@]}" recipe-run \
-    --recipe "$RECIPE_FILE" \
-    --artifacts "$ARTIFACTS_DIR" \
-    --json \
-    > "$WP_CODEBOX_TMPFILE" 2>&1
+homeboy_wp_codebox_run_recipe "$RECIPE_FILE" "$ARTIFACTS_DIR" "$WP_CODEBOX_TMPFILE" "" "$WP_CODEBOX_BIN"
 wp_codebox_exit=$?
 set -e
 
@@ -187,14 +170,14 @@ rm -f "$RECIPE_FILE"
 
 WP_CODEBOX_OUTPUT=$(cat "$WP_CODEBOX_TMPFILE")
 if [ -n "$WP_CODEBOX_OUTPUT" ]; then
-    jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || cat "$WP_CODEBOX_TMPFILE"
+    homeboy_wp_codebox_recipe_last_stdout "$WP_CODEBOX_TMPFILE" || cat "$WP_CODEBOX_TMPFILE"
 fi
 
 PHPUNIT_OUTPUT=""
 if [ -f "$RESULT_FILE" ]; then
     PHPUNIT_OUTPUT=$(cat "$RESULT_FILE")
 fi
-PHPUNIT_STDOUT=$(jq -r '(.executions // [])[-1].stdout // empty' "$WP_CODEBOX_TMPFILE" 2>/dev/null || true)
+PHPUNIT_STDOUT=$(homeboy_wp_codebox_recipe_last_stdout "$WP_CODEBOX_TMPFILE" || true)
 printf '%s\n' "$PHPUNIT_STDOUT" > "$PHPUNIT_STDOUT_TMPFILE"
 
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/test/parse-test-results.sh"
