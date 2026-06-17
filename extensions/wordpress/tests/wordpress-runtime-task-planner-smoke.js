@@ -1,0 +1,91 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const {
+	wordpressRuntimeTaskPlan,
+	wordpressRuntimeTaskRequest,
+} = require('../lib/wordpress-runtime-task-planner');
+
+const contract = JSON.parse(fs.readFileSync(path.join(
+	__dirname,
+	'..',
+	'..',
+	'agent-runtimes',
+	'fixtures',
+	'homeboy-agent-task-core-contract.json'
+), 'utf8'));
+
+const plan = wordpressRuntimeTaskPlan({
+	planId: 'runtime-task-plan-smoke',
+	ability: 'datamachine/run-runtime-task',
+	abilityInput: { operation: 'extract' },
+	dlaUrl: 'dla://runtime/import/demo-site',
+	provider: 'codex',
+	model: 'openai/gpt-5.5',
+	runtimeId: 'wp-codebox',
+	concurrency: 2,
+	timeoutSeconds: 900,
+	expectedArtifacts: ['runtime-task-result'],
+	providerPluginPaths: ['/workspace/components/ai-provider-for-openai'],
+	secretEnv: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
+	fanout: [
+		{ taskId: 'runtime-task-plan-smoke-import', input: { site: 'import' }, matrix: { scenario: 'import' } },
+		{ taskId: 'runtime-task-plan-smoke-verify', input: { site: 'verify' }, matrix: { scenario: 'verify' } },
+	],
+});
+
+assert.equal(plan.schema, contract.schemas.plan);
+assert.equal(plan.plan_id, 'runtime-task-plan-smoke');
+assert.equal(plan.options.concurrency, 2);
+assert.equal(plan.tasks.length, 2);
+for (const task of plan.tasks) {
+	assert.equal(task.schema, contract.schemas.request);
+	assert.equal(task.executor.backend, 'codebox');
+	assert.equal(task.executor.config.runtime_id, 'wp-codebox');
+	assert.equal(task.executor.config.runtime_task.ability, 'datamachine/run-runtime-task');
+	assert.equal(task.executor.config.runtime_task.input.operation, 'extract');
+	assert.equal(task.executor.config.runtime_task.input.dla_url, 'dla://runtime/import/demo-site');
+	assert.equal(task.executor.config.runtime_task.input.provider, 'codex');
+	assert.equal(task.executor.config.runtime_task.input.model, 'openai/gpt-5.5');
+	assert.deepEqual(task.expected_artifacts, ['runtime-task-result']);
+	assert.equal(task.limits.task_timeout_seconds, 900);
+	assert.equal(task.parent_plan_id, 'runtime-task-plan-smoke');
+	assert.deepEqual(task.policy, { read: 'sandbox', write: 'sandbox', apply: 'review' });
+}
+assert.deepEqual(plan.tasks.map((task) => task.metadata.fanout.scenario), ['import', 'verify']);
+assert(!JSON.stringify(plan).includes('/Users/'), 'planner must not inject local user paths');
+
+const request = wordpressRuntimeTaskRequest({
+	taskId: 'single-runtime-task-smoke',
+	ability: 'example/materialize-artifact',
+	abilityInput: { slug: 'example' },
+	backend: 'codebox',
+});
+assert.equal(request.schema, contract.schemas.request);
+assert.equal(request.task_id, 'single-runtime-task-smoke');
+assert.equal(request.instructions, 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.');
+assert.deepEqual(request.inputs.ability_input, { slug: 'example' });
+
+const script = path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wordpress-runtime-task-plan.cjs');
+const result = spawnSync(process.execPath, [
+	script,
+	'--plan-id', 'cli-runtime-task-plan-smoke',
+	'--ability', 'example/validate-artifact',
+	'--ability-input', '{"artifact":"report.json"}',
+	'--dla-url', 'https://dla.example/export/123',
+	'--expected-artifact', 'validation-report',
+	'--timeout-seconds', '60',
+], { encoding: 'utf8' });
+assert.equal(result.status, 0, result.stderr || result.stdout);
+const cliPlan = JSON.parse(result.stdout);
+assert.equal(cliPlan.schema, contract.schemas.plan);
+assert.equal(cliPlan.tasks[0].schema, contract.schemas.request);
+assert.equal(cliPlan.tasks[0].executor.config.runtime_task.input.dla_url, 'https://dla.example/export/123');
+assert.deepEqual(cliPlan.tasks[0].expected_artifacts, ['validation-report']);
+assert.equal(cliPlan.tasks[0].limits.task_timeout_seconds, 60);
+
+process.stdout.write('WordPress runtime task planner smoke passed\n');

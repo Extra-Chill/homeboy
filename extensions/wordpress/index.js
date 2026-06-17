@@ -25,4 +25,5 @@ module.exports = {
 	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wordpress-workload-profile'),
 	...require('./lib/static-visual-parity'),
+	...require('./lib/wordpress-runtime-task-planner'),
 };

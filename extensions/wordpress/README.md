@@ -576,6 +576,16 @@ WordPress assumptions to Homeboy core.
 `homeboy/agent-task-outcome/v1` outcome with normalized status, artifacts,
 evidence refs, diagnostics, and failure classification.
 
+### WordPress runtime task planner
+
+`lib/wordpress-runtime-task-planner.js` and
+`scripts/agent/homeboy-wordpress-runtime-task-plan.cjs` keep WordPress/Codebox/DLA
+orchestration in this extension by projecting runtime-task intent into Homeboy's
+generic `homeboy/agent-task-plan/v1` and `homeboy/agent-task-request/v1` contract.
+Callers provide the ability, ability input, backend/provider/runtime selection,
+fanout/concurrency metadata, expected artifacts, timeout, and optional DLA URL
+shorthand; Homeboy core only sees generic durable agent-task plans.
+
 `../agent-runtimes/wp-codebox` is the runtime package surface for imports
 and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
 and installed extension layouts use the same implementation.
