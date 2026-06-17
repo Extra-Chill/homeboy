@@ -422,6 +422,7 @@ fn build_agent_task_matrix_summary(
             executor: AgentTaskExecutor {
                 backend: "homeboy.bench".to_string(),
                 selector: None,
+                runtime_selection: None,
                 required_capabilities: vec!["bench".to_string()],
                 secret_env: Vec::new(),
                 model: None,

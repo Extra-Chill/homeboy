@@ -637,6 +637,7 @@ mod tests {
             executor: AgentTaskExecutor {
                 backend: "runner".to_string(),
                 selector: Some("homeboy-lab".to_string()),
+                runtime_selection: None,
                 required_capabilities: vec!["bench".to_string()],
                 secret_env: Vec::new(),
                 model: None,

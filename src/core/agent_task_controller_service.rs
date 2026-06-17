@@ -3033,6 +3033,7 @@ mod tests {
                 executor: AgentTaskExecutor {
                     backend: "test".to_string(),
                     selector: Some("fixture".to_string()),
+                    runtime_selection: None,
                     required_capabilities: Vec::new(),
                     secret_env: Vec::new(),
                     model: None,

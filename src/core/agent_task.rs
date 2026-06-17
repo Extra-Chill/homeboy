@@ -179,6 +179,8 @@ pub struct AgentTaskExecutor {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
+    #[serde(default, alias = "runtime", skip_serializing_if = "Option::is_none")]
+    pub runtime_selection: Option<AgentTaskRuntimeSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -187,6 +189,95 @@ pub struct AgentTaskExecutor {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub config: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, alias = "backend", skip_serializing_if = "Option::is_none")]
+    pub executor_backend: Option<String>,
+    #[serde(
+        default,
+        alias = "selector",
+        alias = "executor_provider_selector",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub executor_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate_ref: Option<String>,
+}
+
+impl AgentTaskExecutor {
+    pub fn runtime_selection(&self) -> AgentTaskRuntimeSelection {
+        let explicit = self.runtime_selection.clone().unwrap_or_default();
+        AgentTaskRuntimeSelection {
+            runtime_id: explicit.runtime_id,
+            executor_backend: explicit
+                .executor_backend
+                .or_else(|| Some(self.backend.clone())),
+            executor_provider_id: explicit
+                .executor_provider_id
+                .or_else(|| self.selector.clone()),
+            provider: explicit
+                .provider
+                .or_else(|| config_string(&self.config, "provider")),
+            model: explicit.model.or_else(|| self.model.clone()),
+            substrate_ref: explicit.substrate_ref,
+        }
+    }
+
+    pub fn runtime_id(&self) -> Option<&str> {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.runtime_id.as_deref())
+    }
+
+    pub fn executor_backend(&self) -> &str {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.executor_backend.as_deref())
+            .unwrap_or(&self.backend)
+    }
+
+    pub fn executor_provider_id(&self) -> Option<&str> {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.executor_provider_id.as_deref())
+            .or(self.selector.as_deref())
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.provider.as_deref())
+            .or_else(|| config_str(&self.config, "provider"))
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.model.as_deref())
+            .or(self.model.as_deref())
+    }
+
+    pub fn substrate_ref(&self) -> Option<&str> {
+        self.runtime_selection
+            .as_ref()
+            .and_then(|selection| selection.substrate_ref.as_deref())
+    }
+}
+
+fn config_str<'a>(config: &'a Value, key: &str) -> Option<&'a str> {
+    config.get(key).and_then(Value::as_str)
+}
+
+fn config_string(config: &Value, key: &str) -> Option<String> {
+    config_str(config, key).map(str::to_string)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +660,7 @@ mod tests {
             executor: AgentTaskExecutor {
                 backend: "browser_sandbox".to_string(),
                 selector: Some("lab-a".to_string()),
+                runtime_selection: None,
                 required_capabilities: vec!["structured_output".to_string()],
                 secret_env: Vec::new(),
                 model: Some("quality-model".to_string()),
@@ -613,6 +705,79 @@ mod tests {
 
         assert_eq!(decoded, request);
         assert_eq!(decoded.schema, AGENT_TASK_REQUEST_SCHEMA);
+    }
+
+    #[test]
+    fn executor_runtime_selection_synthesizes_legacy_fields() {
+        let executor = AgentTaskExecutor {
+            backend: "codebox".to_string(),
+            selector: Some("claude-code".to_string()),
+            runtime_selection: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            model: Some("opus-4.7".to_string()),
+            config: json!({ "provider": "claude-code" }),
+        };
+
+        let selection = executor.runtime_selection();
+
+        assert_eq!(selection.runtime_id, None);
+        assert_eq!(selection.executor_backend.as_deref(), Some("codebox"));
+        assert_eq!(
+            selection.executor_provider_id.as_deref(),
+            Some("claude-code")
+        );
+        assert_eq!(selection.provider.as_deref(), Some("claude-code"));
+        assert_eq!(selection.model.as_deref(), Some("opus-4.7"));
+        assert_eq!(selection.substrate_ref, None);
+        assert_eq!(executor.executor_backend(), "codebox");
+        assert_eq!(executor.executor_provider_id(), Some("claude-code"));
+        assert_eq!(executor.provider(), Some("claude-code"));
+        assert_eq!(executor.model(), Some("opus-4.7"));
+    }
+
+    #[test]
+    fn executor_runtime_selection_round_trips_aliases() {
+        let value = json!({
+            "backend": "legacy-backend",
+            "selector": "legacy-selector",
+            "runtime": {
+                "runtime_id": "runtime-a",
+                "backend": "runtime-backend",
+                "selector": "runtime-selector",
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "substrate_ref": "wp-codebox://sandbox/123"
+            }
+        });
+
+        let executor: AgentTaskExecutor = serde_json::from_value(value).expect("decode executor");
+        let selection = executor.runtime_selection();
+        let serialized = serde_json::to_value(&executor).expect("serialize executor");
+
+        assert_eq!(executor.runtime_id(), Some("runtime-a"));
+        assert_eq!(executor.executor_backend(), "runtime-backend");
+        assert_eq!(executor.executor_provider_id(), Some("runtime-selector"));
+        assert_eq!(executor.provider(), Some("codex"));
+        assert_eq!(executor.model(), Some("gpt-5.5"));
+        assert_eq!(executor.substrate_ref(), Some("wp-codebox://sandbox/123"));
+        assert_eq!(
+            selection.executor_backend.as_deref(),
+            Some("runtime-backend")
+        );
+        assert_eq!(
+            selection.executor_provider_id.as_deref(),
+            Some("runtime-selector")
+        );
+        assert_eq!(
+            serialized["runtime_selection"]["executor_backend"],
+            "runtime-backend"
+        );
+        assert_eq!(
+            serialized["runtime_selection"]["executor_provider_id"],
+            "runtime-selector"
+        );
+        assert!(serialized.get("runtime").is_none());
     }
 
     #[test]
@@ -786,6 +951,7 @@ mod tests {
             executor: AgentTaskExecutor {
                 backend: "cli_agent".to_string(),
                 selector: None,
+                runtime_selection: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 model: None,

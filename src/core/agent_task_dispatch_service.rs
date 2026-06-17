@@ -212,6 +212,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             executor: AgentTaskExecutor {
                 backend: request.backend.clone(),
                 selector: request.selector.clone(),
+                runtime_selection: None,
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
                 model: request.model.clone(),
