@@ -26,6 +26,7 @@
     "./wordpress-workload-profile": "./lib/wordpress-workload-profile.js",
     "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
     "./wp-codebox-visual-compare": "./lib/wp-codebox-visual-compare.js",
+    "./static-visual-parity": "./lib/static-visual-parity.js",
     "./webperf-evidence-summary": "./lib/webperf-evidence-summary.js",
     "./benchmark-matrix-report": "./lib/benchmark-matrix-report.js",
     "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js"
@@ -54,6 +55,7 @@
     "test:wordpress-workload-profile": "node tests/wordpress-workload-profile-smoke.js",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:wp-codebox-visual-compare": "node tests/wp-codebox-visual-compare-smoke.js",
+    "test:static-visual-parity": "node tests/static-visual-parity-smoke.js",
     "test:webperf-evidence-summary": "node tests/webperf-evidence-summary-smoke.js",
     "test:benchmark-matrix-report": "node tests/benchmark-matrix-report-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",
