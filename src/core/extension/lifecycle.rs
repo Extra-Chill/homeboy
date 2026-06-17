@@ -514,7 +514,7 @@ pub fn update(extension_id: &str, force: bool) -> Result<UpdateResult> {
         return update_linked_extension(extension_id, &extension_dir, force);
     }
 
-    if !force && !git::is_workdir_clean_or_not_git(&extension_dir) {
+    if !force && !is_extension_update_workdir_clean(&extension_dir, &extension_dir) {
         return Err(Error::validation_invalid_argument(
             "extension_id",
             "Extension has uncommitted changes; update may overwrite them. Use --force to proceed.",
@@ -623,6 +623,53 @@ pub(crate) fn write_source_metadata(
     let _ = std::fs::write(extension_dir.join(".source-url"), source_url);
 }
 
+fn is_extension_update_workdir_clean(git_root: &Path, extension_dir: &Path) -> bool {
+    if !git::is_git_repo(&git_root.to_string_lossy()) {
+        return true;
+    }
+
+    let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(git_root)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    let extension_rel = extension_dir
+        .strip_prefix(git_root)
+        .ok()
+        .map(|path| path.to_string_lossy().replace('\\', "/"));
+    let status = String::from_utf8_lossy(&output.stdout);
+
+    status.lines().all(|line| {
+        dirty_path_from_status_line(line).is_some_and(|path| {
+            is_generated_extension_metadata_path(&path, extension_rel.as_deref())
+        })
+    })
+}
+
+fn dirty_path_from_status_line(line: &str) -> Option<String> {
+    let path = line.get(3..)?.trim();
+    let path = path
+        .rsplit_once(" -> ")
+        .map(|(_, new_path)| new_path)
+        .unwrap_or(path);
+    Some(path.trim_matches('"').replace('\\', "/"))
+}
+
+fn is_generated_extension_metadata_path(path: &str, extension_rel: Option<&str>) -> bool {
+    [".source-url", ".source-revision"].iter().any(|name| {
+        path == *name
+            || extension_rel
+                .filter(|rel| !rel.is_empty())
+                .is_some_and(|rel| path == format!("{rel}/{name}"))
+    })
+}
+
 pub(crate) fn run_setup_if_configured(extension_id: &str) {
     if let Ok(extension) = load_extension(extension_id) {
         if extension
@@ -678,7 +725,7 @@ fn update_linked_extension(
         )),
         None => {
             let result = (|| {
-                if !force && !git::is_workdir_clean_or_not_git(&git_root) {
+                if !force && !is_extension_update_workdir_clean(&git_root, &source_dir) {
                     return Err(Error::validation_invalid_argument(
                         "extension_id",
                         format!(
@@ -836,8 +883,8 @@ pub fn read_source_revision(extension_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        install, install_for_component, install_with_revision, load_extension,
-        read_source_revision, source_metadata, update,
+        install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
+        load_extension, read_source_revision, source_metadata, update,
     };
     use crate::core::component;
     use crate::core::extension::update_all;
@@ -1158,6 +1205,53 @@ exec '{}' "$@"
                 "linked extensions should resolve revisions through git discovery"
             );
         });
+    }
+
+    #[test]
+    fn extension_update_allows_generated_source_metadata_dirty_in_linked_subdir() {
+        let temp = TempDir::new().expect("create tempdir");
+        let repo = temp.path();
+        let extension_dir = repo.join("wordpress");
+        write_extension_fixture(repo, "wordpress");
+        if !run_git(repo, &["init", "--quiet"]) || !commit_all(repo, "init") {
+            return;
+        }
+
+        fs::write(
+            extension_dir.join(".source-url"),
+            "https://example.com/ext.git",
+        )
+        .expect("source url metadata");
+        fs::write(extension_dir.join(".source-revision"), "abc123")
+            .expect("source revision metadata");
+
+        assert!(
+            is_extension_update_workdir_clean(repo, &extension_dir),
+            "generated extension metadata should not block update"
+        );
+    }
+
+    #[test]
+    fn extension_update_blocks_user_dirty_file_next_to_generated_metadata() {
+        let temp = TempDir::new().expect("create tempdir");
+        let repo = temp.path();
+        let extension_dir = repo.join("wordpress");
+        write_extension_fixture(repo, "wordpress");
+        if !run_git(repo, &["init", "--quiet"]) || !commit_all(repo, "init") {
+            return;
+        }
+
+        fs::write(
+            extension_dir.join(".source-url"),
+            "https://example.com/ext.git",
+        )
+        .expect("source url metadata");
+        fs::write(extension_dir.join("notes.txt"), "user work").expect("user-authored dirty file");
+
+        assert!(
+            !is_extension_update_workdir_clean(repo, &extension_dir),
+            "user-authored dirt should still block update"
+        );
     }
 
     #[test]
