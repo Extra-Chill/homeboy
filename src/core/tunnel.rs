@@ -784,9 +784,10 @@ pub fn local_url(id: &str) -> Result<String> {
 }
 
 fn service_tunnel_status(tunnel: &ServiceTunnel) -> Result<ServiceTunnelStatus> {
-    let state = refresh_runtime_state(&tunnel.id)?;
-    let running = state.as_ref().is_some_and(runtime_state_is_running);
-    let backend_running = state.as_ref().is_some_and(backend_state_is_running);
+    let live = refresh_runtime_state(&tunnel.id)?;
+    let running = live.as_ref().is_some_and(|live| live.running);
+    let backend_running = live.as_ref().is_some_and(|live| live.backend_running);
+    let state = live.map(|live| live.state);
     let degraded_reason = if !running && backend_running {
         Some("local-origin-process-exited".to_string())
     } else {
@@ -1468,16 +1469,31 @@ fn remove_runtime_state(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn refresh_runtime_state(id: &str) -> Result<Option<ServiceTunnelRuntimeState>> {
+/// A runtime state paired with the liveness observation that was made when it
+/// was refreshed. Both `running` and `backend_running` are captured in a single
+/// pass so that downstream status derivation is internally consistent: the
+/// process can exit between OS liveness checks, so re-querying liveness while
+/// building the status report can otherwise produce a state that reports
+/// `running == false` yet still surfaces readiness/process details. Capturing
+/// the snapshot once removes that race.
+struct LiveRuntimeState {
+    state: ServiceTunnelRuntimeState,
+    running: bool,
+    backend_running: bool,
+}
+
+fn refresh_runtime_state(id: &str) -> Result<Option<LiveRuntimeState>> {
     let Some(state) = load_runtime_state(id)? else {
         return Ok(None);
     };
-    if runtime_state_is_running(&state) {
-        return Ok(Some(state));
-    }
-
-    if backend_state_is_running(&state) {
-        return Ok(Some(state));
+    let running = runtime_state_is_running(&state);
+    let backend_running = backend_state_is_running(&state);
+    if running || backend_running {
+        return Ok(Some(LiveRuntimeState {
+            state,
+            running,
+            backend_running,
+        }));
     }
 
     terminate_backend_state(&state)?;
