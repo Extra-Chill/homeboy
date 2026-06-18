@@ -608,7 +608,7 @@ function homeboyPolicyHasParentTools(taskInput) {
   ));
 }
 
-function homeboyRuntimeToolBridgePluginSource() {
+function homeboyRuntimeToolBridgePluginSource(endpoint = '') {
   return `<?php
 /**
  * Homeboy parent runtime-tool bridge for Data Machine client tools.
@@ -623,7 +623,8 @@ add_filter(
 			return $result;
 		}
 
-		$endpoint = getenv( 'HOMEBOY_AGENT_TOOL_BRIDGE_URL' );
+		$configured_endpoint = ${JSON.stringify(endpoint)};
+		$endpoint            = '' !== $configured_endpoint ? $configured_endpoint : getenv( 'HOMEBOY_AGENT_TOOL_BRIDGE_URL' );
 		if ( ! is_string( $endpoint ) || '' === $endpoint ) {
 			return null;
 		}
@@ -691,6 +692,10 @@ add_filter(
 	3
 );
 `;
+}
+
+function writeHomeboyRuntimeToolBridgePlugin(pluginDir, endpoint = '') {
+  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-tool-bridge.php'), homeboyRuntimeToolBridgePluginSource(endpoint));
 }
 
 function homeboyRuntimeToolBridgeServerSource() {
@@ -797,7 +802,7 @@ function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
   const pluginRoot = fs.mkdtempSync(path.join(artifacts, 'homeboy-runtime-tool-bridge-'));
   const pluginDir = path.join(pluginRoot, 'homeboy-runtime-tool-bridge');
   fs.mkdirSync(pluginDir, { recursive: true });
-  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-tool-bridge.php'), homeboyRuntimeToolBridgePluginSource());
+  writeHomeboyRuntimeToolBridgePlugin(pluginDir);
 
   return {
     input: {
@@ -2065,6 +2070,9 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
 
   const bridgedInput = injectHomeboyRuntimeToolBridge(stableTaskInput(input), artifacts);
   const bridgeServer = startHomeboyRuntimeToolBridge(bridgedInput.bridge);
+  if (bridgeServer && bridgedInput.bridge?.plugin_dir) {
+    writeHomeboyRuntimeToolBridgePlugin(bridgedInput.bridge.plugin_dir, bridgeServer.url);
+  }
   const preparedInput = prepareStableTaskInput({
     ...bridgedInput.input,
     runtime_env: {
