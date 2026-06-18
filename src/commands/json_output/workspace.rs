@@ -7,6 +7,34 @@ use crate::commands::{
     version, worktree, GlobalArgs,
 };
 
+#[cfg(test)]
+pub(super) const COMMANDS: &[&str] = &[
+    "agent-task",
+    "build",
+    "changelog",
+    "changes",
+    "cleanup",
+    "component",
+    "config",
+    "docs",
+    "extension",
+    "lab",
+    "project",
+    "refactor",
+    "refs",
+    "release",
+    "report",
+    "rig",
+    "runner",
+    "runs",
+    "runtime",
+    "stack",
+    "tunnel",
+    "undo",
+    "version",
+    "worktree",
+];
+
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
     match command {
         Commands::AgentTask(args) => map(agent_task::run(args, global)),

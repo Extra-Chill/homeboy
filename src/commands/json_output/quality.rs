@@ -5,6 +5,18 @@ use crate::commands::{
     audit, audit_baseline, bench, lint, observe, review, test, trace, GlobalArgs,
 };
 
+#[cfg(test)]
+pub(super) const COMMANDS: &[&str] = &[
+    "audit",
+    "audit-baseline",
+    "bench",
+    "lint",
+    "observe",
+    "review",
+    "test",
+    "trace",
+];
+
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
     match command {
         Commands::Test(args) => map(test::run(args, global)),

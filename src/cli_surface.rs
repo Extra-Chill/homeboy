@@ -208,6 +208,66 @@ impl CommandSurfaceEntry {
     }
 }
 
+impl Commands {
+    pub fn top_level_name(&self) -> &'static str {
+        match self {
+            Commands::AgentTask(_) => "agent-task",
+            Commands::Project(_) => "project",
+            Commands::Ssh(_) => "ssh",
+            Commands::Server(_) => "server",
+            Commands::Test(_) => "test",
+            Commands::Bench(_) => "bench",
+            Commands::Trace(_) => "trace",
+            Commands::Observe(_) => "observe",
+            Commands::Lint(_) => "lint",
+            Commands::Db(_) => "db",
+            Commands::Deps(_) => "deps",
+            Commands::Ci(_) => "ci",
+            Commands::Doctor(_) => "doctor",
+            Commands::File(_) => "file",
+            Commands::Fleet(_) => "fleet",
+            Commands::Logs(_) => "logs",
+            Commands::Triage(_) => "triage",
+            Commands::Deploy(_) => "deploy",
+            Commands::Component(_) => "component",
+            Commands::Config(_) => "config",
+            Commands::Daemon(_) => "daemon",
+            Commands::Extension(_) => "extension",
+            Commands::Status(_) => "status",
+            Commands::Docs(_) => "docs",
+            Commands::Changelog(_) => "changelog",
+            Commands::Cleanup(_) => "cleanup",
+            Commands::Git(_) => "git",
+            Commands::Issues(_) => "issues",
+            Commands::Version(_) => "version",
+            Commands::Build(_) => "build",
+            Commands::Changes(_) => "changes",
+            Commands::Release(_) => "release",
+            Commands::Report(_) => "report",
+            Commands::Review(_) => "review",
+            Commands::Audit(_) => "audit",
+            Commands::AuditBaseline(_) => "audit-baseline",
+            Commands::Refactor(_) => "refactor",
+            Commands::Refs(_) => "refs",
+            Commands::Rig(_) => "rig",
+            Commands::Runner(_) => "runner",
+            Commands::Lab(_) => "lab",
+            Commands::Runtime(_) => "runtime",
+            Commands::Worktree(_) => "worktree",
+            Commands::Tunnel(_) => "tunnel",
+            Commands::Runs(_) => "runs",
+            Commands::SelfCmd(_) => "self",
+            Commands::Stack(_) => "stack",
+            Commands::Undo(_) => "undo",
+            Commands::Auth(_) => "auth",
+            Commands::Api(_) => "api",
+            Commands::Http(_) => "http",
+            Commands::Upgrade(_) => "upgrade",
+            Commands::List => "list",
+        }
+    }
+}
+
 pub fn current_command_surface() -> CommandSurface {
     command_surface_from(Cli::command())
 }

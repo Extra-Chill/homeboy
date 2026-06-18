@@ -87,7 +87,9 @@ fn unsupported_raw_command(message: &'static str) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_contract::{CommandJsonFamily, COMMAND_REGISTRY};
     use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand, StatusArgs};
+    use std::collections::BTreeMap;
 
     #[test]
     fn list_json_dispatch_reports_raw_output_mode() {
@@ -111,5 +113,45 @@ mod tests {
 
         assert!(agent_task_summary_kind_for_output_mode(&args, false).is_some());
         assert!(agent_task_summary_kind_for_output_mode(&args, true).is_none());
+    }
+
+    #[test]
+    fn json_dispatch_modules_match_command_registry_families() {
+        let mut registered: BTreeMap<&str, CommandJsonFamily> = COMMAND_REGISTRY
+            .iter()
+            .map(|entry| (entry.name, entry.json_family))
+            .collect();
+        assert_eq!(registered.remove("list"), Some(CommandJsonFamily::RawOnly));
+
+        assert_family_commands(
+            &mut registered,
+            CommandJsonFamily::Quality,
+            quality::COMMANDS,
+        );
+        assert_family_commands(
+            &mut registered,
+            CommandJsonFamily::Workspace,
+            workspace::COMMANDS,
+        );
+        assert_family_commands(&mut registered, CommandJsonFamily::Ops, ops::COMMANDS);
+
+        assert!(
+            registered.is_empty(),
+            "unclaimed JSON commands: {registered:?}"
+        );
+    }
+
+    fn assert_family_commands(
+        registered: &mut BTreeMap<&'static str, CommandJsonFamily>,
+        expected_family: CommandJsonFamily,
+        commands: &[&'static str],
+    ) {
+        for command in commands {
+            assert_eq!(
+                registered.remove(command),
+                Some(expected_family),
+                "{command} JSON dispatch family drifted from command registry"
+            );
+        }
     }
 }
