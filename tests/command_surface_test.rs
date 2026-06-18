@@ -1,5 +1,5 @@
 use clap::{CommandFactory, Parser};
-use homeboy::cli_surface::{current_command_surface, Cli};
+use homeboy::cli_surface::{command_surface_from_with_depth, current_command_surface, Cli};
 use std::collections::BTreeSet;
 
 #[test]
@@ -50,6 +50,26 @@ fn includes_first_level_subcommands() {
 }
 
 #[test]
+fn includes_second_level_subcommands() {
+    let surface = current_command_surface();
+
+    assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+    assert!(surface.contains_path(&["agent-task", "auth", "status"]));
+    assert!(surface.contains_path(&["runner", "job", "logs"]));
+    assert!(surface.contains_path(&["tunnel", "preview-ingress", "route"]));
+    assert!(surface.contains_path(&["tunnel", "preview-ingress", "list"]));
+    assert!(surface.contains_path(&["tunnel", "preview-ingress", "status"]));
+}
+
+#[test]
+fn command_surface_depth_is_configurable() {
+    let surface = command_surface_from_with_depth(Cli::command(), 1);
+
+    assert!(surface.contains_path(&["runner", "job"]));
+    assert!(!surface.contains_path(&["runner", "job", "logs"]));
+}
+
+#[test]
 fn excludes_removed_cli_aliases() {
     let surface = current_command_surface();
 
@@ -60,7 +80,7 @@ fn excludes_removed_cli_aliases() {
 }
 
 #[test]
-fn rejects_stale_or_deeper_paths() {
+fn rejects_stale_or_unrepresented_paths() {
     let surface = current_command_surface();
 
     assert!(!surface.contains_path(&["supports"]));
@@ -68,6 +88,7 @@ fn rejects_stale_or_deeper_paths() {
     assert!(!surface.contains_path(&["audit", "docs"]));
     assert!(!surface.contains_path(&["audit", "structure"]));
     assert!(!surface.contains_path(&["stack", "inspect", "extra"]));
+    assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
 #[test]
