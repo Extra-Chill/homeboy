@@ -154,6 +154,10 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
+        if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
+
         run_startup_update_checks(&cli.command);
 
         if matches!(cli.command, Commands::List) {
@@ -185,6 +189,22 @@ impl CliRuntime {
 
     fn try_parse_extension_cli_command(&self, matches: &ArgMatches) -> Option<ExtensionCliCommand> {
         try_parse_extension_cli_command(matches, &self.extension_info)
+    }
+}
+
+fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
+    let Commands::AgentTask(args) = command else {
+        return None;
+    };
+    let crate::commands::agent_task::AgentTaskCommand::Tool(tool_args) = &args.command else {
+        return None;
+    };
+    match &tool_args.command {
+        crate::commands::agent_task::tool::AgentTaskToolCommand::Dispatch(_args) => {
+            Some(crate::commands::agent_task::tool::dispatch_raw(
+                crate::commands::agent_task::tool::AgentTaskToolDispatchArgs {},
+            ))
+        }
     }
 }
 

@@ -9,6 +9,7 @@ use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOpti
 
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::review;
+use super::tool::AgentTaskToolArgs;
 
 mod auth;
 mod controller;
@@ -83,6 +84,9 @@ pub enum AgentTaskCommand {
     Auth(AgentTaskAuthArgs),
     /// Create, inspect, and resume durable multi-agent loop controller state.
     Controller(AgentTaskControllerArgs),
+    /// Internal bridge for provider-runtime agent tool requests.
+    #[command(hide = true)]
+    Tool(AgentTaskToolArgs),
 }
 
 /// Shared deterministic verification gate flags. Flattened into every

@@ -17,6 +17,7 @@ pub mod loop_definition;
 pub mod review;
 pub mod run;
 pub mod status;
+pub mod tool;
 
 pub use args::{
     AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
@@ -66,6 +67,16 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::CompileLoop(compile_args) => loop_definition::compile_loop(compile_args),
         AgentTaskCommand::Auth(auth_args) => auth::auth(auth_args),
         AgentTaskCommand::Controller(controller_args) => controller::controller(controller_args),
+        AgentTaskCommand::Tool(tool_args) => match tool_args.command {
+            tool::AgentTaskToolCommand::Dispatch(_) => {
+                Err(homeboy::core::Error::validation_invalid_argument(
+                    "agent-task tool dispatch",
+                    "this internal bridge command is handled by the raw CLI runtime",
+                    None,
+                    None,
+                ))
+            }
+        },
     }
 }
 
