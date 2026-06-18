@@ -16,10 +16,11 @@ const { spawnSync } = require('node:child_process');
 const {
   datamachineAgentCiCodeboxExecutorConfig,
 } = require('../../lib/datamachine-agent-ci-codebox-adapter');
+const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 const SCRIPT_DIR = __dirname;
 const EXTENSION_PATH = path.resolve(SCRIPT_DIR, '..', '..');
-const EXECUTOR = path.resolve(SCRIPT_DIR, '..', '..', '..', 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs');
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..');
 
 function readConfigPath() {
   const configPath = process.argv[2] || process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH || '';
@@ -176,8 +177,9 @@ function writeOutcome(outcome) {
 try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
+  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.AGENT_RUNTIME || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
   const request = buildAgentTaskRequest(config, configPath);
-  const result = spawnSync(process.execPath, [EXECUTOR], {
+  const result = spawnSync(process.execPath, [runtime.executor.path], {
     encoding: 'utf8',
     input: JSON.stringify(request),
     env: process.env,

@@ -13,6 +13,7 @@ const {
   splitCsv,
   writeGithubOutput,
 } = require('./lib/common.cjs');
+const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const config = buildConfig(process.env);
@@ -34,14 +35,11 @@ function buildConfig(env) {
   const runtimeId = env.AGENT_RUNTIME || 'wp-codebox';
   const runtimeProfile = env.RUNTIME_PROFILE || 'datamachine-agent-ci';
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
-
-  if (runtimeId !== 'wp-codebox') {
-    throw new Error(`Unsupported agent_runtime: ${runtimeId}. Only wp-codebox is currently supported.`);
-  }
+  const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
 
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || 'openai');
-  const runtimeBin = path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js');
+  const runtimeBin = runtime.paths.runtime_bin;
   if (!fs.existsSync(runtimeBin)) {
     throw new Error(`Runtime CLI build missing at ${runtimeBin}`);
   }
@@ -138,7 +136,7 @@ function buildConfig(env) {
     provider_credentials: providerCredentials,
     runtime_bin: runtimeBin,
     runtime_components: {
-      runtime: path.join(workspace, '.ci/wp-codebox/packages/wordpress-plugin'),
+      runtime: runtime.paths.runtime_component,
       agents_api: path.join(workspace, '.ci/agents-api'),
       data_machine: path.join(workspace, '.ci/data-machine'),
       data_machine_code: path.join(workspace, '.ci/data-machine-code'),

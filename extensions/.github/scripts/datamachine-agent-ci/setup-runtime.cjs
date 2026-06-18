@@ -4,13 +4,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { normalizeProviderPlugin, run } = require('./lib/common.cjs');
+const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 try {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+  const runtime = resolveRuntimeProvider(process.env.AGENT_RUNTIME || 'wp-codebox', { workspace });
   run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
   run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
-  run('npm', ['install'], { cwd: path.join(workspace, '.ci/wp-codebox') });
-  run('npm', ['run', 'build'], { cwd: path.join(workspace, '.ci/wp-codebox') });
+  for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {
+    run(command.command, command.args, { cwd: path.join(workspace, command.cwd) });
+  }
   installCheckedOutPhpDependencies(workspace);
 } catch (error) {
   process.stderr.write(`${error.message}\n`);

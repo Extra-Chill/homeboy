@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { capture, normalizeProviderPlugin, requireRepo, run, splitCsv } = require('./lib/common.cjs');
+const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const printPlan = process.argv.includes('--print-plan');
@@ -24,10 +25,8 @@ function main() {
 
 function dependencyEntries(env) {
   const runtimeId = env.AGENT_RUNTIME || 'wp-codebox';
-  if (runtimeId !== 'wp-codebox') {
-    throw new Error(`Unsupported agent_runtime: ${runtimeId}. Only wp-codebox is currently supported.`);
-  }
-  const entries = [`Automattic/wp-codebox@${env.AGENT_RUNTIME_REF || 'main'}`];
+  const runtime = resolveRuntimeProvider(runtimeId, { env });
+  const entries = [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }];
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);
   if (env.INCLUDE_AGENT_RUNTIME_DEPENDENCIES === 'true') {
     entries.push(`Automattic/agents-api@${env.AGENTS_API_REF || 'main'}`);
@@ -48,17 +47,13 @@ function resolvePlan(entries, offline) {
   const seen = new Set();
   const plan = [];
   for (const rawEntry of entries) {
-    const entry = rawEntry.trim();
-    if (!entry) {
+    const entry = normalizeDependencyEntry(rawEntry);
+    if (!entry.repo) {
       continue;
     }
-    const atIndex = entry.lastIndexOf('@');
-    const repo = atIndex === -1 ? entry : entry.slice(0, atIndex);
-    let ref = atIndex === -1 ? '' : entry.slice(atIndex + 1);
+    const { repo, target } = entry;
+    let { ref } = entry;
     requireRepo(repo, 'validation_dependencies entries');
-    if (atIndex !== -1 && !ref) {
-      throw new Error(`validation_dependencies entries must include a non-empty ref after @: ${entry}`);
-    }
     if (!ref) {
       if (offline) {
         ref = '<default-branch>';
@@ -74,9 +69,30 @@ function resolvePlan(entries, offline) {
       continue;
     }
     seen.add(key);
-    plan.push({ repo, ref, target: path.join('.ci', repo.split('/')[1]) });
+    plan.push({ repo, ref, target: target || path.join('.ci', repo.split('/')[1]) });
   }
   return plan;
+}
+
+function normalizeDependencyEntry(rawEntry) {
+  if (rawEntry && !Array.isArray(rawEntry) && typeof rawEntry === 'object') {
+    return {
+      repo: rawEntry.repo || '',
+      ref: rawEntry.ref || '',
+      target: rawEntry.target || '',
+    };
+  }
+  const entry = String(rawEntry || '').trim();
+  if (!entry) {
+    return { repo: '', ref: '', target: '' };
+  }
+  const atIndex = entry.lastIndexOf('@');
+  const repo = atIndex === -1 ? entry : entry.slice(0, atIndex);
+  const ref = atIndex === -1 ? '' : entry.slice(atIndex + 1);
+  if (atIndex !== -1 && !ref) {
+    throw new Error(`validation_dependencies entries must include a non-empty ref after @: ${entry}`);
+  }
+  return { repo, ref, target: '' };
 }
 
 try {

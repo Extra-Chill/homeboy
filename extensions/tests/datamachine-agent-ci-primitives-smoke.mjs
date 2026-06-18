@@ -56,6 +56,10 @@ const dependencyPlan = JSON.parse(run('materialize-dependencies.cjs', ['--print-
   PROVIDER_PLUGIN: '{}',
 }));
 assert.equal(dependencyPlan.filter((entry) => entry.repo === 'Extra-Chill/example').length, 1);
+assert.deepEqual(
+  dependencyPlan.find((entry) => entry.repo === 'Automattic/wp-codebox'),
+  { repo: 'Automattic/wp-codebox', ref: 'main', target: path.join('.ci', 'wp-codebox') }
+);
 assert.ok(dependencyPlan.some((entry) => entry.repo === 'WordPress/ai-provider-for-openai'));
 
 fs.writeFileSync(githubOutput, '');
@@ -118,6 +122,8 @@ assert.equal(config.runner_workspace.checkout_path, '/workspace/homeboy-extensio
 assert.deepEqual(config.writable_paths, ['src', 'tests']);
 assert.equal(config.provider_credentials.connectors_ai_openai_api_key, 'OPENAI_API_KEY');
 assert.equal(config.runtime_profile, 'datamachine-agent-ci');
+assert.equal(config.runtime_bin, path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js'));
+assert.equal(config.runtime_components.runtime, path.join(workspace, '.ci/wp-codebox/packages/wordpress-plugin'));
 assert.equal(config.runtime_components.data_machine, path.join(workspace, '.ci/data-machine'));
 assert.deepEqual(config.required_abilities, ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job']);
 

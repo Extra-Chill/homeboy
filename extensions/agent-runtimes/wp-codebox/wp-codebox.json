@@ -4,6 +4,34 @@
   "name": "WP Codebox",
   "version": "1.1.0",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
+  "ci_materialization": {
+    "checkout": {
+      "repo": "Automattic/wp-codebox",
+      "target": ".ci/wp-codebox",
+      "ref_env": "AGENT_RUNTIME_REF",
+      "default_ref": "main"
+    },
+    "setup_commands": [
+      {
+        "command": "npm",
+        "args": ["install"],
+        "cwd": ".ci/wp-codebox"
+      }
+    ],
+    "build_commands": [
+      {
+        "command": "npm",
+        "args": ["run", "build"],
+        "cwd": ".ci/wp-codebox"
+      }
+    ],
+    "paths": {
+      "checkout": ".ci/wp-codebox",
+      "runtime_bin": ".ci/wp-codebox/packages/cli/dist/index.js",
+      "runtime_component": ".ci/wp-codebox/packages/wordpress-plugin",
+      "runtime_core_module": ".ci/wp-codebox/packages/runtime-core/dist/index.js"
+    }
+  },
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
