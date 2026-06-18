@@ -241,9 +241,19 @@ fn collect_timeline(args: &ObserveArgs) -> homeboy::core::Result<Vec<TraceEvent>
         for tail in &mut tail_logs {
             timeline.extend(poll_tail_log(tail, t_ms)?);
         }
+        let mut process_snapshot = None;
         for watch in &mut process_watches {
             if watch_process_is_due(watch, start, args.watch_process_interval) {
-                timeline.extend(poll_process_watch(watch, t_ms)?);
+                if process_snapshot.is_none() {
+                    process_snapshot = Some(capture_process_snapshot()?);
+                }
+                timeline.extend(poll_process_watch_from_snapshot(
+                    watch,
+                    t_ms,
+                    process_snapshot
+                        .as_deref()
+                        .expect("process snapshot should be captured before polling watches"),
+                ));
             }
         }
 
@@ -409,10 +419,7 @@ fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<V
     Ok(events)
 }
 
-fn poll_process_watch(
-    state: &mut ProcessWatchState,
-    t_ms: u64,
-) -> homeboy::core::Result<Vec<TraceEvent>> {
+fn capture_process_snapshot() -> homeboy::core::Result<String> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,ppid=,command="])
         .output()
@@ -424,8 +431,7 @@ fn poll_process_watch(
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(poll_process_watch_from_snapshot(state, t_ms, &stdout))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn poll_process_watch_from_snapshot(
@@ -722,6 +728,45 @@ mod tests {
                 .get("was_command")
                 .and_then(|value| value.as_str()),
             Some("/bin/sleep 5")
+        );
+    }
+
+    #[test]
+    fn process_watchers_share_a_single_snapshot() {
+        let snapshot = " 10 1 sleep 30\n 11 1 node server.js\n";
+        let mut sleep = ProcessWatchState {
+            pattern: "sleep".to_string(),
+            regex: Regex::new("sleep").unwrap(),
+            seen: BTreeMap::new(),
+            initialized: false,
+            last_poll: None,
+        };
+        let mut node = ProcessWatchState {
+            pattern: "node".to_string(),
+            regex: Regex::new("node").unwrap(),
+            seen: BTreeMap::new(),
+            initialized: false,
+            last_poll: None,
+        };
+
+        let sleep_events = poll_process_watch_from_snapshot(&mut sleep, 0, snapshot);
+        let node_events = poll_process_watch_from_snapshot(&mut node, 0, snapshot);
+
+        assert_eq!(sleep_events.len(), 1);
+        assert_eq!(node_events.len(), 1);
+        assert_eq!(
+            sleep_events[0]
+                .data
+                .get("pid")
+                .and_then(|value| value.as_str()),
+            Some("10")
+        );
+        assert_eq!(
+            node_events[0]
+                .data
+                .get("pid")
+                .and_then(|value| value.as_str()),
+            Some("11")
         );
     }
 
