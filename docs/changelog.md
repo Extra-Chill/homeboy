@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.241.2] - 2026-06-18
+
+### Changed
+- split god files + dedupe field patterns
+- purge org-specific literals — keep proxied-git support org-agnostic
+- expose adapter output descriptors
+- cover nested command surface
+- batch artifact lookup
+- reduce walker metadata overhead
+- cache resource metric constants
+- reuse entities on load misses
+
+### Fixed
+- reuse process snapshots across watchers
+
 ## [0.241.1] - 2026-06-18
 
 ### Changed
