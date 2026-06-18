@@ -32,6 +32,10 @@ routine lifecycle work:
 - `homeboy runs latest-run --kind bench` resolves the latest benchmark run id.
 - `homeboy runs artifacts <run-id>` lists recorded run artifacts through
   Homeboy.
+- `homeboy runs evidence <run-id>` shows the stable evidence summary and
+  reviewer-facing commands for one persisted run.
+- `homeboy runs refs --kind bench --limit 10` lists recent benchmark run and
+  artifact refs when you need shareable evidence handles.
 - `homeboy runner doctor <runner>` probes runner tools, workspace writability,
   artifact storage, and browser readiness.
 - `homeboy runner env <runner>` prints the redacted runner job environment.

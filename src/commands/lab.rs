@@ -521,6 +521,16 @@ fn lab_followups(runner_id: Option<&str>, current_workspace: Option<&str>) -> Ve
             command: "homeboy runs artifacts <run-id>".to_string(),
             purpose: "List recorded artifacts for a run through Homeboy instead of spelunking runner paths.",
         },
+        LabFollowup {
+            label: "run_evidence",
+            command: "homeboy runs evidence <run-id>".to_string(),
+            purpose: "Show the stable evidence summary and reviewer-facing commands for one persisted run.",
+        },
+        LabFollowup {
+            label: "bench_refs",
+            command: "homeboy runs refs --kind bench --limit 10".to_string(),
+            purpose: "List recent benchmark run and artifact refs when you need shareable evidence handles.",
+        },
     ];
 
     let Some(runner_id) = runner_id else {
@@ -784,6 +794,8 @@ Installing declared dependencies...
         assert!(commands.contains(&"homeboy runs list --limit 5"));
         assert!(commands.contains(&"homeboy runs latest-run --kind bench"));
         assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
+        assert!(commands.contains(&"homeboy runs evidence <run-id>"));
+        assert!(commands.contains(&"homeboy runs refs --kind bench --limit 10"));
         assert!(commands.contains(&"homeboy runner doctor homeboy-lab"));
         assert!(commands.contains(&"homeboy runner env homeboy-lab"));
         assert!(commands.contains(
@@ -804,6 +816,8 @@ Installing declared dependencies...
         assert!(commands.contains(&"homeboy runs list --limit 5"));
         assert!(commands.contains(&"homeboy runs latest-run --kind bench"));
         assert!(commands.contains(&"homeboy runs artifacts <run-id>"));
+        assert!(commands.contains(&"homeboy runs evidence <run-id>"));
+        assert!(commands.contains(&"homeboy runs refs --kind bench --limit 10"));
         assert!(!commands
             .iter()
             .any(|command| command.starts_with("homeboy runner ")));
