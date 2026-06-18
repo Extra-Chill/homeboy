@@ -241,21 +241,13 @@ fn collect_timeline(args: &ObserveArgs) -> homeboy::core::Result<Vec<TraceEvent>
         for tail in &mut tail_logs {
             timeline.extend(poll_tail_log(tail, t_ms)?);
         }
-        let mut process_snapshot = None;
-        for watch in &mut process_watches {
-            if watch_process_is_due(watch, start, args.watch_process_interval) {
-                if process_snapshot.is_none() {
-                    process_snapshot = Some(capture_process_snapshot()?);
-                }
-                timeline.extend(poll_process_watch_from_snapshot(
-                    watch,
-                    t_ms,
-                    process_snapshot
-                        .as_deref()
-                        .expect("process snapshot should be captured before polling watches"),
-                ));
-            }
-        }
+        timeline.extend(poll_due_process_watches(
+            &mut process_watches,
+            start,
+            args.watch_process_interval,
+            t_ms,
+            capture_process_snapshot,
+        )?);
 
         if start.elapsed() >= args.duration {
             break;
@@ -337,6 +329,37 @@ fn watch_process_is_due(state: &mut ProcessWatchState, start: Instant, interval:
         return true;
     }
     false
+}
+
+fn poll_due_process_watches<F>(
+    process_watches: &mut [ProcessWatchState],
+    start: Instant,
+    interval: Duration,
+    t_ms: u64,
+    mut capture_snapshot: F,
+) -> homeboy::core::Result<Vec<TraceEvent>>
+where
+    F: FnMut() -> homeboy::core::Result<String>,
+{
+    let mut process_snapshot = None;
+    let mut events = Vec::new();
+
+    for watch in process_watches {
+        if watch_process_is_due(watch, start, interval) {
+            if process_snapshot.is_none() {
+                process_snapshot = Some(capture_snapshot()?);
+            }
+            events.extend(poll_process_watch_from_snapshot(
+                watch,
+                t_ms,
+                process_snapshot
+                    .as_deref()
+                    .expect("process snapshot should be captured before polling watches"),
+            ));
+        }
+    }
+
+    Ok(events)
 }
 
 fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<Vec<TraceEvent>> {
@@ -732,40 +755,46 @@ mod tests {
     }
 
     #[test]
-    fn process_watchers_share_a_single_snapshot() {
+    fn due_process_watchers_share_a_single_snapshot() {
         let snapshot = " 10 1 sleep 30\n 11 1 node server.js\n";
-        let mut sleep = ProcessWatchState {
-            pattern: "sleep".to_string(),
-            regex: Regex::new("sleep").unwrap(),
-            seen: BTreeMap::new(),
-            initialized: false,
-            last_poll: None,
-        };
-        let mut node = ProcessWatchState {
-            pattern: "node".to_string(),
-            regex: Regex::new("node").unwrap(),
-            seen: BTreeMap::new(),
-            initialized: false,
-            last_poll: None,
-        };
+        let mut watches = vec![
+            ProcessWatchState {
+                pattern: "sleep".to_string(),
+                regex: Regex::new("sleep").unwrap(),
+                seen: BTreeMap::new(),
+                initialized: false,
+                last_poll: None,
+            },
+            ProcessWatchState {
+                pattern: "node".to_string(),
+                regex: Regex::new("node").unwrap(),
+                seen: BTreeMap::new(),
+                initialized: false,
+                last_poll: None,
+            },
+        ];
+        let mut captures = 0;
 
-        let sleep_events = poll_process_watch_from_snapshot(&mut sleep, 0, snapshot);
-        let node_events = poll_process_watch_from_snapshot(&mut node, 0, snapshot);
+        let events = poll_due_process_watches(
+            &mut watches,
+            Instant::now(),
+            Duration::from_secs(1),
+            0,
+            || {
+                captures += 1;
+                Ok(snapshot.to_string())
+            },
+        )
+        .unwrap();
 
-        assert_eq!(sleep_events.len(), 1);
-        assert_eq!(node_events.len(), 1);
+        assert_eq!(captures, 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(
-            sleep_events[0]
-                .data
-                .get("pid")
-                .and_then(|value| value.as_str()),
+            events[0].data.get("pid").and_then(|value| value.as_str()),
             Some("10")
         );
         assert_eq!(
-            node_events[0]
-                .data
-                .get("pid")
-                .and_then(|value| value.as_str()),
+            events[1].data.get("pid").and_then(|value| value.as_str()),
             Some("11")
         );
     }
