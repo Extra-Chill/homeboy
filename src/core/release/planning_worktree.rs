@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn unexpected_files_skip_homeboy_build_dir() {
-        let changes = uncommitted(&[], &[], &[".homeboy-build/data-machine-0.70.1.zip"]);
+        let changes = uncommitted(&[], &[], &[".homeboy-build/sample-plugin-0.70.1.zip"]);
         let unexpected = get_unexpected_uncommitted_files(&changes, &[]);
         assert!(
             unexpected.is_empty(),

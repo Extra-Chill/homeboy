@@ -1191,7 +1191,7 @@ mod tests {
         let vars = deploy_override_template_vars(
             "artifact.zip",
             "/tmp/homeboy-staging/artifact.zip",
-            "/srv/htdocs/wp-content/plugins/wp-codebox",
+            "/srv/htdocs/wp-content/plugins/sample-plugin",
             Some("/srv/htdocs"),
             "wp",
             Some("example.com"),
@@ -1209,14 +1209,14 @@ mod tests {
         );
         assert_eq!(
             vars.get(TemplateVars::TARGET_BASENAME).map(String::as_str),
-            Some("wp-codebox")
+            Some("sample-plugin")
         );
         assert_eq!(
             render_map(
                 "mktemp -d {{targetAdjacentTempPattern}} && cp {{stagingArtifact}} {{targetDir}}/installed.zip",
                 &vars,
             ),
-            "mktemp -d /srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX && cp /tmp/homeboy-staging/artifact.zip /srv/htdocs/wp-content/plugins/wp-codebox/installed.zip"
+            "mktemp -d /srv/htdocs/wp-content/plugins/.homeboy-install.XXXXXX && cp /tmp/homeboy-staging/artifact.zip /srv/htdocs/wp-content/plugins/sample-plugin/installed.zip"
         );
     }
 }

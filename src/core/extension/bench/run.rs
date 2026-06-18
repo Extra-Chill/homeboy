@@ -2072,7 +2072,7 @@ mod tests {
             settings: Vec::new(),
             settings_json: vec![(
                 "workflow_bench_env".to_string(),
-                serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-data-machine" }),
+                serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-sample-plugin" }),
             )],
             passthrough_args: Vec::new(),
             scenario_ids: Vec::new(),
@@ -2090,7 +2090,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(settings).expect("settings json");
         assert_eq!(
             parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
-            "plain-site-data-machine"
+            "plain-site-sample-plugin"
         );
     }
 

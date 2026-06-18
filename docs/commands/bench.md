@@ -86,7 +86,7 @@ the other capabilities.
   normal child bench per cell, and aggregates child statuses, run IDs, and
   numeric metric samples.
 - `--runner-pool <BACKEND>`: Executor backend string for matrix cells. Core keeps
-  this as data so concrete backends such as Codebox remain extension-owned.
+  this as data so concrete backends such as Sample Runtime remain extension-owned.
   Omit to use the local no-op executor for plan/scheduler smoke checks.
 - `--max-tasks <N>` / `--max-queue-depth <N>`: Scheduler backpressure limits for
   matrix cells.
@@ -140,7 +140,7 @@ homeboy bench studio-web \
   --rig studio-web-evals \
   --matrix model=gpt-5.5,kimi,claude \
   --matrix prompt=site-a,site-b,site-c \
-  --runner-pool codebox \
+  --runner-pool sample-runtime \
   --concurrency 8 \
   --max-queue-depth 16 \
   --expect-artifact bench-results \
@@ -304,7 +304,7 @@ The common shape is:
   "actual": 4378195,
   "expected": 250000,
   "unit": "bytes",
-  "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
+  "subject": "/wp-json/sampleplugin/v1/pipelines?per_page=100",
   "passed": false
 }
 ```

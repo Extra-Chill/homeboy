@@ -1085,7 +1085,7 @@ class EmailCommand extends RuntimeCommand {
             vec![],
         );
         command_fp.language = Language::Php;
-        command_fp.namespace = Some("DataMachine\\Cli\\Commands".to_string());
+        command_fp.namespace = Some("SamplePlugin\\Cli\\Commands".to_string());
         command_fp.type_name = Some("EmailCommand".to_string());
 
         let findings = analyze_dead_code(&[&bootstrap_fp, &command_fp], &[]);
@@ -1155,7 +1155,7 @@ class EmailCommand extends WP_CLI_Command {
     /**
      * ## EXAMPLES
      *
-     *     wp datamachine email test-connection
+     *     wp sampleplugin email test-connection
      *
      * @subcommand test-connection
      */

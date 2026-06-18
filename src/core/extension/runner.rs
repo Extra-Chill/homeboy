@@ -464,18 +464,18 @@ mod tests {
 
     #[test]
     fn detects_stale_validation_dependency_warning() {
-        let stderr = "Resolved validation dependency 'data-machine' to local checkout '/tmp/data-machine', but it is behind origin/main by 3 commit(s). Update the checkout or pass an explicit dependency path.";
+        let stderr = "Resolved validation dependency 'sample-plugin' to local checkout '/tmp/sample-plugin', but it is behind origin/main by 3 commit(s). Update the checkout or pass an explicit dependency path.";
 
         let message = stale_validation_dependency_message("", stderr).expect("stale dependency");
 
-        assert!(message.contains("data-machine"));
+        assert!(message.contains("sample-plugin"));
         assert!(message.contains("behind origin/main by 3 commit(s)"));
     }
 
     #[test]
     fn ignores_non_stale_validation_dependency_output() {
         let stderr =
-            "Resolved validation dependency 'data-machine' to local checkout '/tmp/data-machine'.";
+            "Resolved validation dependency 'sample-plugin' to local checkout '/tmp/sample-plugin'.";
 
         assert!(stale_validation_dependency_message("", stderr).is_none());
     }

@@ -566,7 +566,7 @@ fn extract_types(symbols: &[Symbol]) -> (Option<String>, Vec<String>) {
 
 /// Extract namespace from symbols or derive from grammar-owned path metadata.
 fn extract_namespace(symbols: &[Symbol], relative_path: &str, grammar: &Grammar) -> Option<String> {
-    // Direct namespace symbol (PHP: namespace DataMachine\Abilities;)
+    // Direct namespace symbol (PHP: namespace SamplePlugin\Abilities;)
     for s in symbols.iter().filter(|s| s.concept == "namespace") {
         if let Some(name) = s.name() {
             return Some(name.to_string());
@@ -1064,7 +1064,7 @@ mod tests {
 
     fn rust_grammar() -> Grammar {
         let grammar_path = std::path::Path::new(
-            "/var/lib/datamachine/workspace/homeboy-extensions/rust/grammar.toml",
+            "/var/lib/sampleplugin/workspace/homeboy-extensions/rust/grammar.toml",
         );
         if grammar_path.exists() {
             grammar::load_grammar(grammar_path).expect("Failed to load Rust grammar")
@@ -1688,7 +1688,7 @@ fn helper() {}
     /// alongside this repo via the standard workspace layout.
     fn php_grammar() -> Option<Grammar> {
         let grammar_path = std::path::Path::new(
-            "/var/lib/datamachine/workspace/homeboy-extensions/wordpress/grammar.toml",
+            "/var/lib/sampleplugin/workspace/homeboy-extensions/wordpress/grammar.toml",
         );
         if !grammar_path.exists() {
             return None;
@@ -1708,7 +1708,7 @@ fn helper() {}
             return;
         };
 
-        let content = "<?php\nnamespace DataMachine\\Engine\\AI\\Tools\\Global;\n\nclass WebFetch {\n    public function handle() {}\n}\n";
+        let content = "<?php\nnamespace SamplePlugin\\Engine\\AI\\Tools\\Global;\n\nclass WebFetch {\n    public function handle() {}\n}\n";
 
         let fp =
             fingerprint_from_grammar(content, &grammar, "inc/Engine/AI/Tools/Global/WebFetch.php")
@@ -1716,7 +1716,7 @@ fn helper() {}
 
         assert_eq!(
             fp.namespace.as_deref(),
-            Some("DataMachine\\Engine\\AI\\Tools\\Global"),
+            Some("SamplePlugin\\Engine\\AI\\Tools\\Global"),
             "Namespace with reserved word segment 'Global' should be extracted. Got: {:?}",
             fp.namespace
         );
@@ -1726,7 +1726,7 @@ fn helper() {}
     fn namespace_with_leading_whitespace_is_extracted() {
         // Regression test for #1134 (real-world case).
         //
-        // data-machine has files like Engine/AI/Tools/Global/AgentMemory.php
+        // sample-plugin has files like Engine/AI/Tools/Global/AgentMemory.php
         // where the namespace line has a leading tab/indent (stylistic choice
         // after a docblock). The grammar regex is anchored to `^namespace`,
         // which fails when the line has leading whitespace.
@@ -1739,7 +1739,7 @@ fn helper() {}
             return;
         };
 
-        let content = "<?php\n/**\n * Docblock.\n */\n\n\tnamespace DataMachine\\Engine\\AI\\Tools\\Global;\n\nclass AgentMemory {}\n";
+        let content = "<?php\n/**\n * Docblock.\n */\n\n\tnamespace SamplePlugin\\Engine\\AI\\Tools\\Global;\n\nclass AgentMemory {}\n";
 
         let fp = fingerprint_from_grammar(
             content,
@@ -1750,7 +1750,7 @@ fn helper() {}
 
         assert_eq!(
             fp.namespace.as_deref(),
-            Some("DataMachine\\Engine\\AI\\Tools\\Global"),
+            Some("SamplePlugin\\Engine\\AI\\Tools\\Global"),
             "Namespace with leading whitespace (valid PHP) should be extracted. Got: {:?}",
             fp.namespace
         );

@@ -172,12 +172,12 @@ fn verify_directory_path(
 
 /// Verify a namespaced class reference by searching for the class definition in source files.
 ///
-/// Converts namespace path to directory structure (e.g., `DataMachine\Services\CacheManager`
+/// Converts namespace path to directory structure (e.g., `SamplePlugin\Services\CacheManager`
 /// becomes a search for `class CacheManager` in files under a path matching the namespace).
 fn verify_class_name(claim: &Claim, source_path: &Path) -> VerifyResult {
     let class_ref = &claim.value;
 
-    // Split into segments: DataMachine\Services\CacheManager -> ["DataMachine", "Services", "CacheManager"]
+    // Split into segments: SamplePlugin\Services\CacheManager -> ["SamplePlugin", "Services", "CacheManager"]
     let segments: Vec<&str> = class_ref.split('\\').collect();
     if segments.len() < 2 {
         return VerifyResult::NeedsVerification {

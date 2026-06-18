@@ -145,7 +145,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
             "agent-task dispatch requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
             None,
             Some(vec![
-                "Example: homeboy agent-task dispatch --repo data-machine --cwd /path/to/worktree --prompt @task.txt".to_string(),
+                "Example: homeboy agent-task dispatch --repo sample-plugin --cwd /path/to/worktree --prompt @task.txt".to_string(),
                 "Wave input: homeboy agent-task dispatch --tasks @tasks.json --concurrency 8".to_string(),
             ]),
         ));
@@ -958,7 +958,7 @@ mod tests {
         let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
             prompt: Some(format!("@{}", prompt.path().display())),
             cwd: Some(workspace.path().display().to_string()),
-            repo: Some("data-machine".to_string()),
+            repo: Some("sample-plugin".to_string()),
             client_context: Some(
                 r#"{"surface":"chat","conversation_id":"opaque-123"}"#.to_string(),
             ),
@@ -967,8 +967,8 @@ mod tests {
         .expect("dispatch plan");
 
         assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.group_key.as_deref(), Some("data-machine"));
-        assert_eq!(plan.tasks[0].task_id, "cook-data-machine");
+        assert_eq!(plan.group_key.as_deref(), Some("sample-plugin"));
+        assert_eq!(plan.tasks[0].task_id, "cook-sample-plugin");
         assert_eq!(plan.tasks[0].instructions, "Cook the issue cleanly.");
         assert_eq!(
             plan.tasks[0].workspace.mode,

@@ -1320,16 +1320,16 @@ mod tests {
         let component = component("/repo");
         let runs = build_changed_lint_runs_with_routes(
             &component,
-            &["data-machine.php".to_string(), "inc/Foo.php".to_string()],
+            &["sample-plugin.php".to_string(), "inc/Foo.php".to_string()],
             &split_lint_routes(),
         );
 
         assert_eq!(
             runs,
             vec![ScopedLintRun {
-                glob: "{/repo/data-machine.php,/repo/inc/Foo.php}".to_string(),
+                glob: "{/repo/sample-plugin.php,/repo/inc/Foo.php}".to_string(),
                 step: Some("phpcs,phpstan".to_string()),
-                changed_files: vec!["data-machine.php".to_string(), "inc/Foo.php".to_string()],
+                changed_files: vec!["sample-plugin.php".to_string(), "inc/Foo.php".to_string()],
             }]
         );
     }

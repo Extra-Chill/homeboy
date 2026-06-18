@@ -514,17 +514,17 @@ mod tests {
         let vars = std::collections::HashMap::from([
             (
                 "artifact".to_string(),
-                ".homeboy-data-machine-events.zip".to_string(),
+                ".homeboy-sample-plugin-events.zip".to_string(),
             ),
             (
                 "targetDir".to_string(),
-                "/srv/site/wp-content/plugins/data-machine-events".to_string(),
+                "/srv/site/wp-content/plugins/sample-plugin-events".to_string(),
             ),
         ]);
 
         assert_eq!(
             render_extract_command("unzip -o {{artifact}} && rm {{artifact}}", &vars),
-            "unzip -o .homeboy-data-machine-events.zip && rm .homeboy-data-machine-events.zip"
+            "unzip -o .homeboy-sample-plugin-events.zip && rm .homeboy-sample-plugin-events.zip"
         );
     }
 
@@ -823,11 +823,11 @@ mod tests {
             .prefix("homeboy-relative-flatten-")
             .tempdir_in(&current_dir)
             .expect("temp dir in cwd");
-        let plugin = "data-machine";
+        let plugin = "sample-plugin";
         let target = temp.path().join("wp-content/plugins").join(plugin);
         let nested = target.join(plugin);
         fs::create_dir_all(&nested).expect("nested dir");
-        fs::write(nested.join("data-machine.php"), "<?php").expect("plugin main");
+        fs::write(nested.join("sample-plugin.php"), "<?php").expect("plugin main");
 
         let relative_target = target
             .strip_prefix(&current_dir)
@@ -838,7 +838,7 @@ mod tests {
         let result = flatten_double_nested_dir(&local_client(), relative_target).expect("ok");
 
         assert!(result.is_none(), "flatten should not fail");
-        assert!(target.join("data-machine.php").is_file());
+        assert!(target.join("sample-plugin.php").is_file());
         assert!(!target.join(plugin).exists());
         assert!(!target.join(".artifact-flatten-staging").exists());
     }

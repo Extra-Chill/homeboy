@@ -454,7 +454,7 @@ fn is_only_in_attribute_string(line: &str, name: &str) -> bool {
 /// (e.g., global-namespace `ClassName`).
 ///
 /// Examples:
-/// - `DataMachine\Abilities\PermissionHelper` → `DataMachine\Abilities`
+/// - `SamplePlugin\Abilities\PermissionHelper` → `SamplePlugin\Abilities`
 /// - `crate::commands::CmdResult` → `crate::commands`
 /// - `PermissionHelper` → `` (no namespace)
 pub(crate) fn namespace_of(path: &str) -> String {
@@ -702,7 +702,7 @@ fn production(values: BTreeMap<String, f64>) {}
     #[test]
     fn content_references_name_skips_php_namespace_declarations() {
         assert!(!content_references_name(
-            "namespace DataMachine\\Core\\Agents;\n\nclass AgentIdentity { public function __construct() {} }",
+            "namespace SamplePlugin\\Core\\Agents;\n\nclass AgentIdentity { public function __construct() {} }",
             "Agents"
         ));
     }
@@ -710,7 +710,7 @@ fn production(values: BTreeMap<String, f64>) {}
     #[test]
     fn content_references_name_skips_comment_only_references() {
         assert!(!content_references_name(
-            "<?php\n/**\n * @package DataMachine\\Core\\Agents\n */\nnamespace DataMachine\\Core;\nclass AgentIdentity {}",
+            "<?php\n/**\n * @package SamplePlugin\\Core\\Agents\n */\nnamespace SamplePlugin\\Core;\nclass AgentIdentity {}",
             "Agents"
         ));
     }
@@ -793,8 +793,8 @@ type AgentIdentity {}
     #[test]
     fn namespace_of_splits_php_style() {
         assert_eq!(
-            namespace_of("DataMachine\\Abilities\\PermissionHelper"),
-            "DataMachine\\Abilities"
+            namespace_of("SamplePlugin\\Abilities\\PermissionHelper"),
+            "SamplePlugin\\Abilities"
         );
     }
 
@@ -817,10 +817,10 @@ type AgentIdentity {}
         let imports = vec![];
         let content = "class PermissionHelper {}";
         assert!(has_import_with_context(
-            "DataMachine\\Abilities\\PermissionHelper",
+            "SamplePlugin\\Abilities\\PermissionHelper",
             &imports,
             content,
-            Some("DataMachine\\Abilities"),
+            Some("SamplePlugin\\Abilities"),
             Some("PermissionHelper"),
             &["PermissionHelper".to_string()],
         ));
@@ -828,15 +828,15 @@ type AgentIdentity {}
 
     #[test]
     fn has_import_same_namespace_satisfied() {
-        // A class in DataMachine\Abilities can reference another class in
-        // DataMachine\Abilities without a `use` statement.
+        // A class in SamplePlugin\Abilities can reference another class in
+        // SamplePlugin\Abilities without a `use` statement.
         let imports = vec![];
         let content = "class AgentTokenAbilities { function r() { PermissionHelper::x(); } }";
         assert!(has_import_with_context(
-            "DataMachine\\Abilities\\PermissionHelper",
+            "SamplePlugin\\Abilities\\PermissionHelper",
             &imports,
             content,
-            Some("DataMachine\\Abilities"),
+            Some("SamplePlugin\\Abilities"),
             Some("AgentTokenAbilities"),
             &["AgentTokenAbilities".to_string()],
         ));
@@ -844,15 +844,15 @@ type AgentIdentity {}
 
     #[test]
     fn has_import_cross_namespace_still_flagged() {
-        // A class in DataMachine\Core that uses DataMachine\Abilities\Foo
+        // A class in SamplePlugin\Core that uses SamplePlugin\Abilities\Foo
         // still needs an import.
         let imports = vec![];
         let content = "class Something { function r() { Foo::x(); } }";
         assert!(!has_import_with_context(
-            "DataMachine\\Abilities\\Foo",
+            "SamplePlugin\\Abilities\\Foo",
             &imports,
             content,
-            Some("DataMachine\\Core"),
+            Some("SamplePlugin\\Core"),
             Some("Something"),
             &["Something".to_string()],
         ));

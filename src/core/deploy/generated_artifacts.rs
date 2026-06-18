@@ -190,14 +190,14 @@ mod tests {
     #[test]
     fn deploy_target_debris_matches_relative_remote_path_and_collapsed_untracked_dir() {
         let component = Component {
-            remote_path: "wp-content/plugins/data-machine".to_string(),
-            build_artifact: Some("dist/data-machine.zip".to_string()),
+            remote_path: "wp-content/plugins/sample-plugin".to_string(),
+            build_artifact: Some("dist/sample-plugin.zip".to_string()),
             ..Component::default()
         };
 
         assert!(is_deploy_target_debris_path(
             &component,
-            "wp-content/plugins/data-machine/data-machine"
+            "wp-content/plugins/sample-plugin/sample-plugin"
         ));
         assert!(is_deploy_target_debris_path(&component, "wp-content/"));
         assert!(!is_deploy_target_debris_path(&component, "src/lib.rs"));

@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn test_trace_calls_basic() {
         let content = r#"
-            $result = wp_get_ability('datamachine/create-pipeline');
+            $result = wp_get_ability('sampleplugin/create-pipeline');
             $other = doSomething();
         "#;
         let regex = Regex::new(r"wp_get_ability\('([^']+)'\)").unwrap();
@@ -272,7 +272,7 @@ mod tests {
 
         let matches = trace_calls(content, &patterns);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].captured, "datamachine/create-pipeline");
+        assert_eq!(matches[0].captured, "sampleplugin/create-pipeline");
     }
 
     #[test]
@@ -303,16 +303,16 @@ mod tests {
     #[test]
     fn test_build_suggestion_single_target() {
         let rule = make_rule("test", "*", "ability", &[]);
-        let suggestion = build_suggestion(&rule, &["datamachine/search".to_string()]);
-        assert_eq!(suggestion, "Add 'ability' => 'datamachine/search'");
+        let suggestion = build_suggestion(&rule, &["sampleplugin/search".to_string()]);
+        assert_eq!(suggestion, "Add 'ability' => 'sampleplugin/search'");
     }
 
     #[test]
     fn test_build_suggestion_with_format() {
         let mut rule = make_rule("test", "*", "ability", &[]);
         rule.field_format = Some("'ability' => '{inferred}'".to_string());
-        let suggestion = build_suggestion(&rule, &["datamachine/search".to_string()]);
-        assert_eq!(suggestion, "'ability' => 'datamachine/search'");
+        let suggestion = build_suggestion(&rule, &["sampleplugin/search".to_string()]);
+        assert_eq!(suggestion, "'ability' => 'sampleplugin/search'");
     }
 
     #[test]
@@ -321,18 +321,18 @@ mod tests {
         let suggestion = build_suggestion(
             &rule,
             &[
-                "datamachine/search".to_string(),
-                "datamachine/fetch".to_string(),
+                "sampleplugin/search".to_string(),
+                "sampleplugin/fetch".to_string(),
             ],
         );
         assert!(suggestion.contains("Multiple implementations"));
-        assert!(suggestion.contains("datamachine/search"));
-        assert!(suggestion.contains("datamachine/fetch"));
+        assert!(suggestion.contains("sampleplugin/search"));
+        assert!(suggestion.contains("sampleplugin/fetch"));
     }
 
     #[test]
     fn test_analyze_wrappers_skips_files_with_field() {
-        let content_with_field = "'ability' => 'datamachine/search'\nSearchAbilities::run();";
+        let content_with_field = "'ability' => 'sampleplugin/search'\nSearchAbilities::run();";
         let fp = make_fingerprint("tools/Search.php", content_with_field);
         let _fps: Vec<&FileFingerprint> = vec![&fp];
 

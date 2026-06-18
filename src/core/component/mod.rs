@@ -742,9 +742,9 @@ mod tests {
     #[test]
     fn component_priority_labels_serialization_roundtrip() {
         let mut component = Component::new(
-            "data-machine".to_string(),
-            "/tmp/data-machine".to_string(),
-            "wp-content/plugins/data-machine".to_string(),
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
+            "wp-content/plugins/sample-plugin".to_string(),
             None,
         );
         component.priority_labels = Some(vec!["urgent".to_string()]);
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn validate_supported_build_config_rejects_legacy_build_command() {
         let component = Component {
-            id: "sample-codebox".to_string(),
+            id: "sample-extension".to_string(),
             build_command: Some("npm run package:browser-extension".to_string()),
             ..Default::default()
         };
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn discover_from_portable_with_baselines_and_extensions() {
-        // Mirrors data-machine's real homeboy.json — includes subsystem-owned
+        // Mirrors a real homeboy.json — includes subsystem-owned
         // baselines and component-owned extensions. This must not silently fail.
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
@@ -1171,7 +1171,7 @@ mod tests {
             "auto_cleanup": false,
             "baselines": {
                 "lint": {
-                    "context_id": "data-machine",
+                    "context_id": "sample-plugin",
                     "created_at": "2026-03-06T04:47:29Z",
                     "item_count": 0,
                     "known_fingerprints": [],
@@ -1184,9 +1184,9 @@ mod tests {
             "extensions": {
                 "wordpress": {}
             },
-            "id": "data-machine",
+            "id": "sample-plugin",
             "version_targets": [
-                {"file": "data-machine.php", "pattern": "(?m)^\\s*\\*?\\s*Version:\\s*([0-9.]+)"}
+                {"file": "sample-plugin.php", "pattern": "(?m)^\\s*\\*?\\s*Version:\\s*([0-9.]+)"}
             ]
         });
         std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
@@ -1199,7 +1199,7 @@ mod tests {
 
         let comp = result.unwrap();
         // id comes from portable JSON
-        assert_eq!(comp.id, "data-machine");
+        assert_eq!(comp.id, "sample-plugin");
         assert_eq!(comp.local_path, dir.to_string_lossy());
         // extensions must be present
         assert!(

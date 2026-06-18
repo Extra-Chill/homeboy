@@ -484,7 +484,7 @@ mod tests {
         let fp = make_fp(
             "src/Api/WebhookSignatureVerifier.php",
             Language::Php,
-            "<?php\n/**\n * Kept only as a transitional shim for older callers.\n *\n * @see https://github.com/Extra-Chill/data-machine/issues/1179\n * @deprecated\n */\nclass Verifier {}\n",
+            "<?php\n/**\n * Kept only as a transitional shim for older callers.\n *\n * @see https://github.com/Extra-Chill/sample-plugin/issues/1179\n * @deprecated\n */\nclass Verifier {}\n",
         );
         let findings = run(&[&fp], &default_config());
         assert_eq!(findings.len(), 1);
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0]
             .suggestion
-            .contains("github.com/Extra-Chill/data-machine/issues/1179"));
+            .contains("github.com/Extra-Chill/sample-plugin/issues/1179"));
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         let fp = make_fp(
             "src/Api/WebhookAuthResolver.php",
             Language::Php,
-            "<?php\n/**\n * Webhook auth config resolver.\n *\n * Produces a canonical verifier config for an HMAC flow.\n *\n * @see https://github.com/Extra-Chill/data-machine/issues/1179\n */\nclass WebhookAuthResolver {}\n",
+            "<?php\n/**\n * Webhook auth config resolver.\n *\n * Produces a canonical verifier config for an HMAC flow.\n *\n * @see https://github.com/Extra-Chill/sample-plugin/issues/1179\n */\nclass WebhookAuthResolver {}\n",
         );
 
         let findings = run(&[&fp], &default_config());

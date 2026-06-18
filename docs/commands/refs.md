@@ -24,8 +24,8 @@ homeboy refs <symbol> [--scope code|config|all] [--context key|variable|paramete
 
 ```sh
 homeboy refs DependencyStackEdge --path /tmp/homeboy
-homeboy refs package_name --component data-machine --component homeboy --scope code
-homeboy refs old_config_key --components data-machine,homeboy --context key
+homeboy refs package_name --component sample-plugin --component homeboy --scope code
+homeboy refs old_config_key --components sample-plugin,homeboy --context key
 ```
 
 The command exits with status `1` when no references are found, so scripts can treat an empty result as a failed lookup.

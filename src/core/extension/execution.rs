@@ -949,7 +949,7 @@ mod tests {
         let extension_settings: Vec<(String, serde_json::Value)> = vec![
             (
                 "validation_dependencies".to_string(),
-                serde_json::json!(["data-machine"]),
+                serde_json::json!(["sample-plugin"]),
             ),
             (
                 "plain_string".to_string(),
@@ -972,7 +972,7 @@ mod tests {
         // Array from extension settings is preserved
         assert_eq!(
             parsed["validation_dependencies"],
-            serde_json::json!(["data-machine"]),
+            serde_json::json!(["sample-plugin"]),
             "Array setting should be preserved, not flattened to empty string"
         );
 

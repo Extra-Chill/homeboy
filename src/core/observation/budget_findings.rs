@@ -53,7 +53,7 @@ mod tests {
             4378195.0,
             250000.0,
             "bytes",
-            Some("/wp-json/datamachine/v1/pipelines?per_page=100".to_string()),
+            Some("/wp-json/sampleplugin/v1/pipelines?per_page=100".to_string()),
         );
 
         let record = finding_record_from_budget("run-1", &finding);
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(record.metadata_json["actual"], 4378195.0);
         assert_eq!(
             record.fingerprint.as_deref(),
-            Some("rest.max_response_bytes:/wp-json/datamachine/v1/pipelines?per_page=100")
+            Some("rest.max_response_bytes:/wp-json/sampleplugin/v1/pipelines?per_page=100")
         );
     }
 

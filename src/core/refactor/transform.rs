@@ -1144,19 +1144,19 @@ mod tests {
         let content = "let x = new BlueskyDeleteAbility();\nlet y = new FacebookPostAbility();\n";
         let (new, matches, _) = apply_line_context(
             &regex,
-            "wp_get_ability('datamachine/$1:kebab')",
+            "wp_get_ability('sampleplugin/$1:kebab')",
             content,
             "test.rs",
             None,
         );
         assert_eq!(matches.len(), 2);
         assert!(
-            new.contains("wp_get_ability('datamachine/bluesky-delete')"),
+            new.contains("wp_get_ability('sampleplugin/bluesky-delete')"),
             "got: {}",
             new
         );
         assert!(
-            new.contains("wp_get_ability('datamachine/facebook-post')"),
+            new.contains("wp_get_ability('sampleplugin/facebook-post')"),
             "got: {}",
             new
         );
@@ -1168,13 +1168,13 @@ mod tests {
         let content = "$ability = new BlueskyDeleteAbility();\n";
         let (new, _, _) = apply_line_context(
             &regex,
-            "$$ability = wp_get_ability('datamachine/$1:kebab')",
+            "$$ability = wp_get_ability('sampleplugin/$1:kebab')",
             content,
             "test.php",
             None,
         );
         assert!(
-            new.contains("$ability = wp_get_ability('datamachine/bluesky-delete')"),
+            new.contains("$ability = wp_get_ability('sampleplugin/bluesky-delete')"),
             "got: {}",
             new
         );

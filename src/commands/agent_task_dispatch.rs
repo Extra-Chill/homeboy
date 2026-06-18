@@ -28,7 +28,7 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "ID_OR_PATH")]
     pub workspace: Option<String>,
 
-    /// Repo/component slug for metadata and task grouping, e.g. data-machine.
+    /// Repo/component slug for metadata and task grouping, e.g. sample-plugin.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 

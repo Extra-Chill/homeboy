@@ -96,7 +96,7 @@ homeboy refactor my-component --from all --write
 
 ```sh
 # Audit a registered component
-homeboy audit data-machine
+homeboy audit sample-plugin
 
 # Audit a raw filesystem path
 homeboy audit /path/to/project
@@ -118,7 +118,7 @@ homeboy audit my-plugin --ratchet
 homeboy audit-baseline refresh my-plugin --changed-since origin/main
 
 # Audit a workspace clone instead of local_path
-homeboy audit my-plugin --path /var/lib/datamachine/workspace/my-plugin
+homeboy audit my-plugin --path /var/lib/sampleplugin/workspace/my-plugin
 
 # Force a one-shot extension when the checkout has no registered component
 homeboy audit --path /path/to/worktree --extension rust

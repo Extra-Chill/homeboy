@@ -253,15 +253,15 @@ mod tests {
             },
         ];
         let status = derive_overall_status(&results);
-        let summary = build_summary("wp-codebox", &results, &status);
+        let summary = build_summary("sample-plugin", &results, &status);
 
         assert_eq!(status, ReleaseStepStatus::Success);
         assert!(summary.next_actions.iter().any(|action| action.contains(
-            "homeboy release wp-codebox --head --skip-publish --from-artifacts <artifact-dir>"
+            "homeboy release sample-plugin --head --skip-publish --from-artifacts <artifact-dir>"
         )));
         assert!(summary
             .next_actions
             .iter()
-            .any(|action| action.contains("homeboy release wp-codebox --head")));
+            .any(|action| action.contains("homeboy release sample-plugin --head")));
     }
 }

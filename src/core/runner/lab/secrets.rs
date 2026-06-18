@@ -836,7 +836,7 @@ mod tests {
             "agent-task".to_string(),
             "cook".to_string(),
             "--backend".to_string(),
-            "codebox".to_string(),
+            "sample-runtime".to_string(),
             "--provider-config".to_string(),
             serde_json::json!({ "provider": "codex" }).to_string(),
         ];
@@ -894,7 +894,7 @@ mod tests {
                         "schema": "homeboy/agent-task-request/v1",
                         "task_id": "idea",
                         "executor": {
-                            "backend": "codebox",
+                            "backend": "sample-runtime",
                             "secret_env": ["OPENAI_API_KEY"],
                             "config": {
                                 "secret_env": ["GITHUB_TOKEN"]
@@ -906,7 +906,7 @@ mod tests {
                         "schema": "homeboy/agent-task-request/v1",
                         "task_id": "design",
                         "executor": {
-                            "backend": "codebox",
+                            "backend": "sample-runtime",
                             "secret_env": ["OPENAI_API_KEY"]
                         },
                         "instructions": "Design the idea."
@@ -947,7 +947,7 @@ mod tests {
                         "schema": "homeboy/agent-task-request/v1",
                         "task_id": "idea",
                         "executor": {
-                            "backend": "codebox",
+                            "backend": "sample-runtime",
                             "secret_env": ["GITHUB_TOKEN"]
                         },
                         "instructions": "Generate an idea."
@@ -1289,11 +1289,11 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
 
         AgentTaskExecutorProvider {
             schema: "homeboy/agent-task-executor-provider/v1".to_string(),
-            id: "wp-codebox.codex".to_string(),
+            id: "sample-runtime.codex".to_string(),
             label: None,
-            backend: "codebox".to_string(),
+            backend: "sample-runtime".to_string(),
             default_backend: true,
-            command: "wp-codebox agent".to_string(),
+            command: "sample-runtime agent".to_string(),
             command_argv: Vec::new(),
             invocation: CommandInvocation::default(),
             request_schema: "homeboy/agent-task-request/v1".to_string(),

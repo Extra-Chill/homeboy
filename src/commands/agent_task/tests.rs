@@ -423,7 +423,7 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
         "repo": "wp-site-generator@canonical-loop-main-20260616",
         "dispatch": {
             "prompt": "cook the next workflow",
-            "backend": "codebox"
+            "backend": "sample-runtime"
         }
     });
 
@@ -792,13 +792,13 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
     let mut plan = test_plan();
     plan.tasks[0].workspace.kind = Some("component-worktree".to_string());
     plan.tasks[0].workspace.component_id = Some("wp-coding-agents".to_string());
-    plan.tasks[0].workspace.branch = Some("fix/179-homeboy-codebox-guidance".to_string());
+    plan.tasks[0].workspace.branch = Some("fix/179-runtime-guidance".to_string());
     plan.tasks[0].workspace.base_ref = Some("origin/main".to_string());
     plan.tasks[0].workspace.task_url =
         Some("https://github.com/Extra-Chill/wp-coding-agents/issues/179".to_string());
     plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
     plan.tasks[0].workspace.materialization = json!({
-        "root": "/tmp/homeboy-worktrees/wp-coding-agents@fix-179-homeboy-codebox-guidance"
+        "root": "/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance"
     });
 
     let (_value, exit_code) = run_loaded_plan(plan, None, executor).expect("run-plan completed");
@@ -815,7 +815,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
     );
     assert_eq!(
         observed.workspace.root.as_deref(),
-        Some("/tmp/homeboy-worktrees/wp-coding-agents@fix-179-homeboy-codebox-guidance")
+        Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
     );
     assert_eq!(observed.workspace.slug.as_deref(), Some("wp-coding-agents"));
     assert!(observed.workspace.kind.is_none());

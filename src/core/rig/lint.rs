@@ -12,7 +12,7 @@ use crate::core::error::{Error, Result};
 const IGNORED_DIRECTORIES: &[&str] = &[
     ".git",
     ".claude",
-    ".datamachine",
+    ".sampleplugin",
     ".opencode",
     "node_modules",
     "vendor",

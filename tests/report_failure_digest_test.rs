@@ -146,10 +146,10 @@ fn trace_json_with_toolchain() -> &'static str {
             "toolchain": {
                 "canonical": false,
                 "mode": "development",
-                "reasons": ["HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"],
+                "reasons": ["HOMEBOY_SAMPLE_RUNTIME_BIN selected a local sample runtime path"],
                 "homeboy": {"path":"/repo/homeboy","sha":"abc123","branch":"main","dirty":false},
                 "toolchains": {
-                    "WP Codebox": {"path":"/repo/wp-codebox","sha":"def456","branch":"main","dirty":true}
+                    "Sample Runtime": {"path":"/repo/sample-runtime","sha":"def456","branch":"main","dirty":true}
                 },
                 "node": "v24.0.0"
             },
@@ -170,7 +170,7 @@ fn trace_json_with_toolchain() -> &'static str {
     }"#
 }
 
-fn trace_json_with_wp_codebox_partial_manifest() -> &'static str {
+fn trace_json_with_sample_runtime_partial_manifest() -> &'static str {
     r#"{
         "success": false,
         "data": {
@@ -179,11 +179,11 @@ fn trace_json_with_wp_codebox_partial_manifest() -> &'static str {
             "component": "studio",
             "exit_code": 2,
             "runtime_diagnostics": {
-                "manifest_path": "wp-codebox-artifacts/runtime-123/manifest.json",
-                "runtime_metadata_path": "wp-codebox-artifacts/runtime-123/runtime.json",
-                "commands_log_path": "wp-codebox-artifacts/runtime-123/commands.jsonl",
-                "events_log_path": "wp-codebox-artifacts/runtime-123/events.jsonl",
-                "browser_summary_path": "wp-codebox-artifacts/runtime-123/browser-summary.json",
+                "manifest_path": "sample-runtime-artifacts/runtime-123/manifest.json",
+                "runtime_metadata_path": "sample-runtime-artifacts/runtime-123/runtime.json",
+                "commands_log_path": "sample-runtime-artifacts/runtime-123/commands.jsonl",
+                "events_log_path": "sample-runtime-artifacts/runtime-123/events.jsonl",
+                "browser_summary_path": "sample-runtime-artifacts/runtime-123/browser-summary.json",
                 "current_phase": "browser.probe.wait_for_ready",
                 "current_command": "browser probe /wp-admin/",
                 "last_command": "runtime setup"
@@ -214,7 +214,7 @@ fn bench_json() -> &'static str {
                     "category": "budget",
                     "severity": "error",
                     "message": "REST response exceeded 250 KB budget",
-                    "fingerprint": "rest.max_response_bytes:/wp-json/datamachine/v1/pipelines?per_page=100",
+                    "fingerprint": "rest.max_response_bytes:/wp-json/sample/v1/items?per_page=100",
                     "source": { "kind": "budget", "label": "profile:wordpress-rest" },
                     "metadata": {
                         "code": "rest.max_response_bytes",
@@ -222,7 +222,7 @@ fn bench_json() -> &'static str {
                         "actual": 4378195,
                         "expected": 250000,
                         "unit": "bytes",
-                        "subject": "/wp-json/datamachine/v1/pipelines?per_page=100",
+                        "subject": "/wp-json/sample/v1/items?per_page=100",
                         "passed": false
                     },
                     "raw": { "category": "budget" }
@@ -458,7 +458,7 @@ fn renders_trace_pass_status_and_artifact_paths() {
     assert!(markdown.contains("- Window stayed closed."));
     assert!(markdown.contains("- main log: artifacts/main.log"));
     assert!(markdown.contains("- process tree: artifacts/process-tree.txt"));
-    assert!(!markdown.contains("**WP Codebox runtime diagnostics**"));
+    assert!(!markdown.contains("**Sample Runtime runtime diagnostics**"));
     assert!(!markdown.contains("raw log body that should never appear"));
 }
 
@@ -474,7 +474,7 @@ fn renders_bench_status_and_artifact_paths() {
     assert!(markdown.contains("**Status:** PASSED"));
     assert!(markdown.contains("**Budget findings**"));
     assert!(markdown.contains(
-        "| `rest.max_response_bytes` | /wp-json/datamachine/v1/pipelines?per_page=100 | 4378195 | 250000 | bytes | REST response exceeded 250 KB budget |"
+        "| `rest.max_response_bytes` | /wp-json/sample/v1/items?per_page=100 | 4378195 | 250000 | bytes | REST response exceeded 250 KB budget |"
     ));
     assert!(markdown.contains(
         "- scenario `wp-admin-load` / run 0 — Playwright trace (playwright-trace): bench-artifacts/wp-admin-load/trace.zip"
@@ -529,22 +529,23 @@ fn renders_trace_toolchain_provenance() {
     assert!(
         markdown.contains("- Homeboy: `/repo/homeboy` @ `abc123` (branch `main`, dirty `false`)")
     );
-    assert!(markdown
-        .contains("- WP Codebox: `/repo/wp-codebox` @ `def456` (branch `main`, dirty `true`)"));
+    assert!(markdown.contains(
+        "- Sample Runtime: `/repo/sample-runtime` @ `def456` (branch `main`, dirty `true`)"
+    ));
     assert!(
         markdown.contains("- Target: `/repo/studio` @ `789abc` (branch `trunk`, dirty `false`)")
     );
-    assert!(markdown.contains("HOMEBOY_WP_CODEBOX_BIN selected a local WP Codebox runner path"));
+    assert!(markdown.contains("HOMEBOY_SAMPLE_RUNTIME_BIN selected a local sample runtime path"));
 }
 
 #[test]
-fn renders_wp_codebox_partial_manifest_and_failure_phase() {
-    let guard = tmp_dir("trace-codebox-manifest");
+fn renders_sample_runtime_partial_manifest_and_failure_phase() {
+    let guard = tmp_dir("trace-runtime-manifest");
     let dir = guard.path();
     write_file(
         dir,
         "trace.json",
-        trace_json_with_wp_codebox_partial_manifest(),
+        trace_json_with_sample_runtime_partial_manifest(),
     );
 
     let markdown = render(dir, r#"{"trace":"error"}"#, false, false);
@@ -554,14 +555,17 @@ fn renders_wp_codebox_partial_manifest_and_failure_phase() {
     assert!(markdown.contains("- Current/last phase: `browser.probe.wait_for_ready`"));
     assert!(markdown.contains("- Current command: `browser probe /wp-admin/`"));
     assert!(markdown.contains("- Last command: `runtime setup`"));
-    assert!(
-        markdown.contains("- Artifact manifest: wp-codebox-artifacts/runtime-123/manifest.json")
-    );
-    assert!(markdown.contains("- Runtime metadata: wp-codebox-artifacts/runtime-123/runtime.json"));
-    assert!(markdown.contains("- Commands log: wp-codebox-artifacts/runtime-123/commands.jsonl"));
-    assert!(markdown.contains("- Events log: wp-codebox-artifacts/runtime-123/events.jsonl"));
     assert!(markdown
-        .contains("- Browser summary: wp-codebox-artifacts/runtime-123/browser-summary.json"));
+        .contains("- Artifact manifest: sample-runtime-artifacts/runtime-123/manifest.json"));
+    assert!(
+        markdown.contains("- Runtime metadata: sample-runtime-artifacts/runtime-123/runtime.json")
+    );
+    assert!(
+        markdown.contains("- Commands log: sample-runtime-artifacts/runtime-123/commands.jsonl")
+    );
+    assert!(markdown.contains("- Events log: sample-runtime-artifacts/runtime-123/events.jsonl"));
+    assert!(markdown
+        .contains("- Browser summary: sample-runtime-artifacts/runtime-123/browser-summary.json"));
 }
 
 #[test]

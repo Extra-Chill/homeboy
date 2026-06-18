@@ -2603,18 +2603,18 @@ mod tests {
             "schema": AGENT_TASK_OUTCOME_SCHEMA,
             "task_id": "task-runtime-failed",
             "status": "succeeded",
-            "outputs": { "codebox": { "state": "failed" } }
+            "outputs": { "sample_runtime": { "state": "failed" } }
         });
         let script = script(&format!(
             "process.stdout.write(JSON.stringify({}));",
             provider_output
         ));
         let (request, mut provider) = request("task-runtime-failed", format!("node {script}"));
-        provider.backend = "codebox".to_string();
+        provider.backend = "sample-runtime".to_string();
         provider.runtime_contract.lifecycle_states.outcome_statuses =
             BTreeMap::from([("failed".to_string(), AgentTaskOutcomeStatus::Failed)]);
         provider.runtime_contract.normalization.status_path =
-            Some("outputs.codebox.state".to_string());
+            Some("outputs.sample_runtime.state".to_string());
 
         let outcome = run_provider_command(&request, &provider);
 
@@ -3922,7 +3922,7 @@ process.stdout.write(JSON.stringify({
     fn provider_preserves_structured_outcome_from_stderr_when_stdout_empty() {
         let command = format!(
             "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stderr.write('diagnostic prefix\\n' + JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'captured provider evidence',failure_classification:'provider',diagnostics:[{class:'codebox.empty_data_packet_returned',message:'empty data packet returned',data:{typed_artifacts:{}}}]}));")
+            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stderr.write('diagnostic prefix\\n' + JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'failed',summary:'captured provider evidence',failure_classification:'provider',diagnostics:[{class:'sample_runtime.empty_data_packet_returned',message:'empty data packet returned',data:{typed_artifacts:{}}}]}));")
         );
         let (request, provider) = request("task-stderr-outcome", command);
 
@@ -3935,7 +3935,7 @@ process.stdout.write(JSON.stringify({
         );
         assert_eq!(
             outcome.diagnostics[0].class,
-            "codebox.empty_data_packet_returned"
+            "sample_runtime.empty_data_packet_returned"
         );
         assert_eq!(outcome.diagnostics[0].data["typed_artifacts"], json!({}));
     }

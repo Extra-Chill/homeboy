@@ -109,13 +109,13 @@ This is useful for compound renames where inserting characters breaks boundary r
 
 ```sh
 # Rename a hyphenated slug
-homeboy refactor rename --literal --from datamachine-events --to data-machine-events --path . --write
+homeboy refactor rename --literal --from sampleplugin-events --to sample-plugin-events --path . --write
 
 # Rename an underscored prefix
-homeboy refactor rename --literal --from datamachine_events --to data_machine_events --path . --write
+homeboy refactor rename --literal --from sampleplugin_events --to sample_plugin_events --path . --write
 
 # Rename constants
-homeboy refactor rename --literal --from DATAMACHINE_EVENTS --to DATA_MACHINE_EVENTS --path . --write
+homeboy refactor rename --literal --from SAMPLEPLUGIN_EVENTS --to SAMPLE_PLUGIN_EVENTS --path . --write
 ```
 
 Since literal mode has no case-variant generation, run multiple passes for different casings (UPPER, snake, hyphen).

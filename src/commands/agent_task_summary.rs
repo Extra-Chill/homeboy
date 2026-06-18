@@ -716,19 +716,19 @@ mod tests {
                     "failed": 0
                 },
                 "apply_candidates": [
-                    { "task_id": "cell-1", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["codebox-patch-1"] },
-                    { "task_id": "cell-2", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["codebox-patch-2"] },
-                    { "task_id": "cell-3", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["codebox-patch-3"] }
+                    { "task_id": "cell-1", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["sample-patch-1"] },
+                    { "task_id": "cell-2", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["sample-patch-2"] },
+                    { "task_id": "cell-3", "decision": "apply_candidate", "reason": "succeeded with reviewable patch/artifact output", "artifact_ids": ["sample-patch-3"] }
                 ],
                 "artifact_inventory": [
-                    { "task_id": "cell-1", "artifact_id": "codebox-patch-1", "kind": "patch", "path": "/tmp/patch-1.diff", "size_bytes": 0 },
-                    { "task_id": "cell-2", "artifact_id": "codebox-patch-2", "kind": "patch", "path": "/tmp/patch-2.diff", "size_bytes": 0 },
-                    { "task_id": "cell-3", "artifact_id": "codebox-patch-3", "kind": "patch", "path": "/tmp/patch-3.diff", "size_bytes": 0 }
+                    { "task_id": "cell-1", "artifact_id": "sample-patch-1", "kind": "patch", "path": "/tmp/patch-1.diff", "size_bytes": 0 },
+                    { "task_id": "cell-2", "artifact_id": "sample-patch-2", "kind": "patch", "path": "/tmp/patch-2.diff", "size_bytes": 0 },
+                    { "task_id": "cell-3", "artifact_id": "sample-patch-3", "kind": "patch", "path": "/tmp/patch-3.diff", "size_bytes": 0 }
                 ]
             },
             "promotion_candidates": [{
-                "artifact_id": "codebox-patch-1",
-                "command": ["homeboy", "agent-task", "promote", "homeboy-4345", "--artifact-id", "codebox-patch-1"]
+                "artifact_id": "sample-patch-1",
+                "command": ["homeboy", "agent-task", "promote", "homeboy-4345", "--artifact-id", "sample-patch-1"]
             }],
             "next_actions": ["inspect task summaries before retrying or reporting"]
         });

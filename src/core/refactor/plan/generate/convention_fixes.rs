@@ -54,7 +54,7 @@ pub(crate) fn generate_type_conformance_declaration(
 pub(crate) fn generate_registration_stub(hook_name: &str) -> String {
     let callback = hook_name
         .strip_prefix("wp_")
-        .or_else(|| hook_name.strip_prefix("datamachine_"))
+        .or_else(|| hook_name.strip_prefix("sampleplugin_"))
         .unwrap_or(hook_name);
 
     format!(

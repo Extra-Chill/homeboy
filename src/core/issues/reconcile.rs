@@ -450,7 +450,7 @@ mod tests {
     fn group(category: &str, count: usize) -> IssueGroup {
         IssueGroup {
             command: "audit".into(),
-            component_id: "data-machine".into(),
+            component_id: "sample-plugin".into(),
             category: category.into(),
             count,
             label: String::new(),
@@ -467,7 +467,7 @@ mod tests {
     ) -> TrackedIssue {
         TrackedIssue {
             number,
-            title: format!("audit: {} in data-machine ({})", category_label, count),
+            title: format!("audit: {} in sample-plugin ({})", category_label, count),
             body: String::new(),
             url: format!("https://github.com/o/r/issues/{}", number),
             state,
@@ -508,7 +508,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*count, 12);
-                assert_eq!(title, "audit: unreferenced export in data-machine (12)");
+                assert_eq!(title, "audit: unreferenced export in sample-plugin (12)");
                 assert_eq!(labels, &vec!["audit".to_string()]);
             }
             other => panic!("expected FileNew, got {:?}", other),
@@ -532,7 +532,7 @@ mod tests {
             } => {
                 assert_eq!(*number, 675);
                 assert_eq!(*count, 23);
-                assert_eq!(title, "audit: god file in data-machine (23)");
+                assert_eq!(title, "audit: god file in sample-plugin (23)");
             }
             other => panic!("expected Update, got {:?}", other),
         }
@@ -816,10 +816,10 @@ mod tests {
 
     #[test]
     fn parse_category_key_round_trips() {
-        let title = "audit: unreferenced export in data-machine (57)";
+        let title = "audit: unreferenced export in sample-plugin (57)";
         let (cmd, comp, cat) = parse_category_key(title).unwrap();
         assert_eq!(cmd, "audit");
-        assert_eq!(comp, "data-machine");
+        assert_eq!(comp, "sample-plugin");
         assert_eq!(cat, "unreferenced_export");
     }
 
@@ -952,7 +952,7 @@ mod tests {
             issue(30, "closed thing", TrackedIssueState::ClosedCompleted, 0),
         ];
 
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "data-machine");
+        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
 
         assert_eq!(plan.actions.len(), 2);
         assert!(matches!(
@@ -981,7 +981,7 @@ mod tests {
             issue(20, "unreferenced export", TrackedIssueState::Open, 9),
         ];
 
-        let plan = reconcile_scoped(&groups, &existing, &cfg(), "audit", "data-machine");
+        let plan = reconcile_scoped(&groups, &existing, &cfg(), "audit", "sample-plugin");
 
         assert_eq!(plan.actions.len(), 2);
         assert!(matches!(
@@ -1005,7 +1005,7 @@ mod tests {
             issue(10, "dead guard", TrackedIssueState::Open, 4),
         ];
 
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "data-machine");
+        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
 
         assert_eq!(plan.actions.len(), 2);
         assert!(matches!(
@@ -1031,7 +1031,7 @@ mod tests {
             issue(20, "god file", TrackedIssueState::Open, 9),
             issue(30, "unreferenced export", TrackedIssueState::Open, 2),
         ];
-        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "data-machine");
+        let plan = reconcile_scoped(&[], &existing, &cfg(), "audit", "sample-plugin");
 
         assert_eq!(plan.actions.len(), 2);
         assert!(matches!(

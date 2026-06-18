@@ -845,7 +845,7 @@ mod tests {
     fn ready_to_deploy_note_clarifies_git_state_only_when_components_are_clean() {
         let output = StatusOutput {
             total: 1,
-            ready_to_deploy: vec!["data-machine".to_string()],
+            ready_to_deploy: vec!["sample-plugin".to_string()],
             ready_to_deploy_note: Some(READY_TO_DEPLOY_NOTE),
             ..empty_status_output()
         };

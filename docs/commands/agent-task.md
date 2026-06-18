@@ -77,7 +77,7 @@ without requiring hand-authored provider JSON:
 
 ```bash
 homeboy agent-task dispatch \
-  --repo data-machine \
+  --repo sample-plugin \
   --cwd /path/to/worktree \
   --provider-config @provider-config.json \
   --client-context @client-context.json \

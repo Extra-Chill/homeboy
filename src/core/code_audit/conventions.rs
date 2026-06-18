@@ -2037,7 +2037,7 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
                 type_name: Some("CreateFlow".to_string()),
-                namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
+                namespace: Some("SamplePlugin\\Abilities\\Flow".to_string()),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2045,7 +2045,7 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
                 type_name: Some("UpdateFlow".to_string()),
-                namespace: Some("DataMachine\\Abilities\\Flow".to_string()),
+                namespace: Some("SamplePlugin\\Abilities\\Flow".to_string()),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2053,7 +2053,7 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
                 type_name: Some("DeleteFlow".to_string()),
-                namespace: Some("DataMachine\\Flow".to_string()), // WRONG namespace
+                namespace: Some("SamplePlugin\\Flow".to_string()), // WRONG namespace
                 ..Default::default()
             },
         ];
@@ -2062,7 +2062,7 @@ mod tests {
 
         assert_eq!(
             convention.expected_namespace,
-            Some("DataMachine\\Abilities\\Flow".to_string())
+            Some("SamplePlugin\\Abilities\\Flow".to_string())
         );
         assert_eq!(convention.conforming.len(), 2);
         assert_eq!(convention.outliers.len(), 1);
@@ -2086,11 +2086,11 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["register".to_string()],
                 type_name: Some("AgentTokenAbilities".to_string()),
-                namespace: Some("DataMachine\\Abilities".to_string()),
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
                 // Imports PermissionHelper via fully-qualified name in the import list
                 // in most files, but THIS file relies on same-namespace resolution.
                 imports: vec![],
-                content: "namespace DataMachine\\Abilities;\n\nclass AgentTokenAbilities {\n    public function register() { PermissionHelper::can_manage(); }\n}".to_string(),
+                content: "namespace SamplePlugin\\Abilities;\n\nclass AgentTokenAbilities {\n    public function register() { PermissionHelper::can_manage(); }\n}".to_string(),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2098,8 +2098,8 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["register".to_string()],
                 type_name: Some("FlowAbilities".to_string()),
-                namespace: Some("DataMachine\\Abilities".to_string()),
-                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
+                imports: vec!["SamplePlugin\\Abilities\\PermissionHelper".to_string()],
                 ..Default::default()
             },
             FileFingerprint {
@@ -2107,8 +2107,8 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["register".to_string()],
                 type_name: Some("JobAbilities".to_string()),
-                namespace: Some("DataMachine\\Abilities".to_string()),
-                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
+                imports: vec!["SamplePlugin\\Abilities\\PermissionHelper".to_string()],
                 ..Default::default()
             },
         ];
@@ -2117,7 +2117,7 @@ mod tests {
 
         assert!(convention
             .expected_imports
-            .contains(&"DataMachine\\Abilities\\PermissionHelper".to_string()));
+            .contains(&"SamplePlugin\\Abilities\\PermissionHelper".to_string()));
 
         // AgentTokenAbilities references PermissionHelper (same namespace) —
         // it should NOT be flagged as a missing import.
@@ -2151,11 +2151,11 @@ mod tests {
                 methods: vec!["can_manage".to_string()],
                 type_name: Some("PermissionHelper".to_string()),
                 type_names: vec!["PermissionHelper".to_string()],
-                namespace: Some("DataMachine\\Abilities".to_string()),
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
                 // File defines the class; its convention peers might import it,
                 // but self-import is nonsensical.
                 imports: vec![],
-                content: "namespace DataMachine\\Abilities;\n\nclass PermissionHelper { public function can_manage() {} }".to_string(),
+                content: "namespace SamplePlugin\\Abilities;\n\nclass PermissionHelper { public function can_manage() {} }".to_string(),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2163,9 +2163,9 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["can_manage".to_string()],
                 type_name: Some("FlowAbilities".to_string()),
-                namespace: Some("DataMachine\\Abilities".to_string()),
-                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
-                content: "use DataMachine\\Abilities\\PermissionHelper;".to_string(),
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
+                imports: vec!["SamplePlugin\\Abilities\\PermissionHelper".to_string()],
+                content: "use SamplePlugin\\Abilities\\PermissionHelper;".to_string(),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2173,9 +2173,9 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["can_manage".to_string()],
                 type_name: Some("JobAbilities".to_string()),
-                namespace: Some("DataMachine\\Abilities".to_string()),
-                imports: vec!["DataMachine\\Abilities\\PermissionHelper".to_string()],
-                content: "use DataMachine\\Abilities\\PermissionHelper;".to_string(),
+                namespace: Some("SamplePlugin\\Abilities".to_string()),
+                imports: vec!["SamplePlugin\\Abilities\\PermissionHelper".to_string()],
+                content: "use SamplePlugin\\Abilities\\PermissionHelper;".to_string(),
                 ..Default::default()
             },
         ];
@@ -2207,9 +2207,9 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["__construct".to_string()],
                 type_name: Some("AgentBundler".to_string()),
-                namespace: Some("DataMachine\\Core\\Agents".to_string()),
-                imports: vec!["DataMachine\\Core\\Database\\Agents\\Agents".to_string()],
-                content: "namespace DataMachine\\Core\\Agents;\nuse DataMachine\\Core\\Database\\Agents\\Agents;\nclass AgentBundler { public function __construct() { new Agents(); } }".to_string(),
+                namespace: Some("SamplePlugin\\Core\\Agents".to_string()),
+                imports: vec!["SamplePlugin\\Core\\Database\\Agents\\Agents".to_string()],
+                content: "namespace SamplePlugin\\Core\\Agents;\nuse SamplePlugin\\Core\\Database\\Agents\\Agents;\nclass AgentBundler { public function __construct() { new Agents(); } }".to_string(),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2217,9 +2217,9 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["__construct".to_string()],
                 type_name: Some("AgentIdentityResolver".to_string()),
-                namespace: Some("DataMachine\\Core\\Agents".to_string()),
-                imports: vec!["DataMachine\\Core\\Database\\Agents\\Agents".to_string()],
-                content: "namespace DataMachine\\Core\\Agents;\nuse DataMachine\\Core\\Database\\Agents\\Agents;\nclass AgentIdentityResolver { public function __construct() { new Agents(); } }".to_string(),
+                namespace: Some("SamplePlugin\\Core\\Agents".to_string()),
+                imports: vec!["SamplePlugin\\Core\\Database\\Agents\\Agents".to_string()],
+                content: "namespace SamplePlugin\\Core\\Agents;\nuse SamplePlugin\\Core\\Database\\Agents\\Agents;\nclass AgentIdentityResolver { public function __construct() { new Agents(); } }".to_string(),
                 ..Default::default()
             },
             FileFingerprint {
@@ -2227,9 +2227,9 @@ mod tests {
                 language: Language::Php,
                 methods: vec!["__construct".to_string()],
                 type_name: Some("AgentIdentity".to_string()),
-                namespace: Some("DataMachine\\Core\\Agents".to_string()),
+                namespace: Some("SamplePlugin\\Core\\Agents".to_string()),
                 imports: vec![],
-                content: "namespace DataMachine\\Core\\Agents;\nclass AgentIdentity { public function __construct() {} }".to_string(),
+                content: "namespace SamplePlugin\\Core\\Agents;\nclass AgentIdentity { public function __construct() {} }".to_string(),
                 ..Default::default()
             },
         ];
@@ -2238,7 +2238,7 @@ mod tests {
 
         assert!(convention
             .expected_imports
-            .contains(&"DataMachine\\Core\\Database\\Agents\\Agents".to_string()));
+            .contains(&"SamplePlugin\\Core\\Database\\Agents\\Agents".to_string()));
 
         let identity_outlier = convention
             .outliers
@@ -2263,14 +2263,14 @@ mod tests {
                 relative_path: "abilities/A.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                imports: vec!["DataMachine\\Core\\Base".to_string()],
+                imports: vec!["SamplePlugin\\Core\\Base".to_string()],
                 ..Default::default()
             },
             FileFingerprint {
                 relative_path: "abilities/B.php".to_string(),
                 language: Language::Php,
                 methods: vec!["execute".to_string()],
-                imports: vec!["DataMachine\\Core\\Base".to_string()],
+                imports: vec!["SamplePlugin\\Core\\Base".to_string()],
                 ..Default::default()
             },
             FileFingerprint {
@@ -2287,7 +2287,7 @@ mod tests {
 
         assert!(convention
             .expected_imports
-            .contains(&"DataMachine\\Core\\Base".to_string()));
+            .contains(&"SamplePlugin\\Core\\Base".to_string()));
         assert_eq!(convention.outliers.len(), 1);
         assert!(convention.outliers[0]
             .deviations

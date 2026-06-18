@@ -523,35 +523,35 @@ mod tests {
     }
 
     #[test]
-    fn wp_codebox_runtime_materialization_fixture_is_plain_data() {
+    fn sample_runtime_materialization_fixture_is_plain_data() {
         let manifest: AgentRuntimeManifest = serde_json::from_str(include_str!(
-            "../../tests/fixtures/wp_codebox_runtime_materialization_manifest.json"
+            "../../tests/fixtures/sample_runtime_materialization_manifest.json"
         ))
-        .expect("wp-codebox fixture parses");
+        .expect("sample runtime fixture parses");
 
         let materialization_plan = runtime_materialization_plan(&manifest);
 
-        assert_eq!(manifest.id, "wp-codebox");
-        assert_eq!(materialization_plan.runtime_id, "wp-codebox");
-        assert_eq!(materialization_plan.source_roots[0].id, "wp-codebox");
+        assert_eq!(manifest.id, "sample-runtime");
+        assert_eq!(materialization_plan.runtime_id, "sample-runtime");
+        assert_eq!(materialization_plan.source_roots[0].id, "sample-runtime");
         assert_eq!(
             materialization_plan.source_roots[0].remote_url.as_deref(),
-            Some("https://github.com/example-org/wp-codebox.git")
+            Some("https://github.com/example-org/sample-runtime.git")
         );
         assert_eq!(
             materialization_plan.executable_requirements[0].env,
-            vec!["WP_CODEBOX_BIN".to_string()]
+            vec!["SAMPLE_RUNTIME_BIN".to_string()]
         );
         assert_eq!(
             materialization_plan.readiness_checks[0].label,
-            "WP Codebox runtime available"
+            "Sample Runtime available"
         );
         assert_eq!(
             materialization_plan.env_passthrough,
             vec![
                 "AI_PROVIDER_OPENAI_CODEX_API_KEY".to_string(),
-                "WP_CODEBOX_BIN".to_string(),
-                "WP_CODEBOX_HOME".to_string()
+                "SAMPLE_RUNTIME_BIN".to_string(),
+                "SAMPLE_RUNTIME_HOME".to_string()
             ]
         );
     }

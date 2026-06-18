@@ -635,13 +635,13 @@ mod tests {
                 "FooTest::testA",
                 "tests/FooTest.php",
                 "Fatal",
-                "Cannot redeclare datamachine_get_monolog_instance()",
+                "Cannot redeclare sampleplugin_get_monolog_instance()",
             ),
             failure(
                 "BarTest::testB",
                 "tests/BarTest.php",
                 "Fatal",
-                "Cannot redeclare datamachine_get_monolog_instance()",
+                "Cannot redeclare sampleplugin_get_monolog_instance()",
             ),
         ];
 

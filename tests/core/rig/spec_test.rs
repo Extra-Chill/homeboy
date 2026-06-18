@@ -451,7 +451,7 @@ fn test_trace_variants() {
                 }
             ],
             "runner_capabilities": [
-                "wp-codebox.recipe-run",
+                "sample-runtime.recipe-run",
                 "wordpress.browser-probe.capture.network"
             ]
         }"#,
@@ -471,7 +471,7 @@ fn test_trace_variants() {
     assert_eq!(
         workload.runner_capabilities(),
         &[
-            "wp-codebox.recipe-run".to_string(),
+            "sample-runtime.recipe-run".to_string(),
             "wordpress.browser-probe.capture.network".to_string()
         ]
     );

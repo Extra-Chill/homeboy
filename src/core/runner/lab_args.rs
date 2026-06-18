@@ -973,19 +973,19 @@ mod tests {
     fn remap_inlines_and_rewrites_provider_config_local_paths() {
         let mappings = vec![
             LabPathRemap {
-                local: "/Users/user/Developer/data-machine@cook".to_string(),
-                remote: "/home/user/_lab_workspaces/data-machine@cook-abc".to_string(),
+                local: "/Users/user/Developer/sample-plugin@cook".to_string(),
+                remote: "/home/user/_lab_workspaces/sample-plugin@cook-abc".to_string(),
             },
             LabPathRemap {
-                local: "/Users/user/Developer/data-machine-code".to_string(),
-                remote: "/home/user/_lab_workspaces/data-machine-code-def".to_string(),
+                local: "/Users/user/Developer/sample-plugin-code".to_string(),
+                remote: "/home/user/_lab_workspaces/sample-plugin-code-def".to_string(),
             },
         ];
         let config = serde_json::json!({
-            "workspace_root": "/Users/user/Developer/data-machine@cook",
-            "mounts": [{ "source": "/Users/user/Developer/data-machine@cook", "target": "/workspace/data-machine" }],
-            "runtime_component_paths": { "agent_runtime_tools": "/Users/user/Developer/data-machine-code" },
-            "provider_plugin_paths": ["/Users/user/Developer/data-machine@cook/vendor/provider"],
+            "workspace_root": "/Users/user/Developer/sample-plugin@cook",
+            "mounts": [{ "source": "/Users/user/Developer/sample-plugin@cook", "target": "/workspace/sample-plugin" }],
+            "runtime_component_paths": { "agent_runtime_tools": "/Users/user/Developer/sample-plugin-code" },
+            "provider_plugin_paths": ["/Users/user/Developer/sample-plugin@cook/vendor/provider"],
             "model": "claude-opus-4-8"
         })
         .to_string();
@@ -1005,20 +1005,20 @@ mod tests {
 
         assert_eq!(
             remapped["workspace_root"],
-            "/home/user/_lab_workspaces/data-machine@cook-abc"
+            "/home/user/_lab_workspaces/sample-plugin@cook-abc"
         );
         assert_eq!(
             remapped["mounts"][0]["source"],
-            "/home/user/_lab_workspaces/data-machine@cook-abc"
+            "/home/user/_lab_workspaces/sample-plugin@cook-abc"
         );
-        assert_eq!(remapped["mounts"][0]["target"], "/workspace/data-machine");
+        assert_eq!(remapped["mounts"][0]["target"], "/workspace/sample-plugin");
         assert_eq!(
             remapped["runtime_component_paths"]["agent_runtime_tools"],
-            "/home/user/_lab_workspaces/data-machine-code-def"
+            "/home/user/_lab_workspaces/sample-plugin-code-def"
         );
         assert_eq!(
             remapped["provider_plugin_paths"][0],
-            "/home/user/_lab_workspaces/data-machine@cook-abc/vendor/provider"
+            "/home/user/_lab_workspaces/sample-plugin@cook-abc/vendor/provider"
         );
         assert_eq!(remapped["model"], "claude-opus-4-8");
         // unrelated args preserved
@@ -1168,8 +1168,11 @@ mod tests {
         // "failed to read agent-task dispatch provider-config input: IO error".
         let temp = tempfile::tempdir().expect("tempdir");
         let cfg = temp.path().join("cfg.json");
-        std::fs::write(&cfg, r#"{"model":"claude-opus-4-8","backend":"codebox"}"#)
-            .expect("write provider config");
+        std::fs::write(
+            &cfg,
+            r#"{"model":"claude-opus-4-8","backend":"sample-runtime"}"#,
+        )
+        .expect("write provider config");
 
         let args = vec![
             "homeboy".to_string(),
@@ -1193,7 +1196,7 @@ mod tests {
         );
         let inlined: serde_json::Value = serde_json::from_str(spec).expect("inline json");
         assert_eq!(inlined["model"], "claude-opus-4-8");
-        assert_eq!(inlined["backend"], "codebox");
+        assert_eq!(inlined["backend"], "sample-runtime");
         // Unrelated args preserved.
         assert!(out.iter().any(|a| a == "--prompt"));
         assert!(out.iter().any(|a| a == "fix it"));
@@ -1513,7 +1516,7 @@ mod tests {
             "cook".to_string(),
             "--prompt".to_string(),
             format!("@{}", prompt.display()),
-            "--backend=codebox".to_string(),
+            "--backend=sample-runtime".to_string(),
         ];
 
         let out =
@@ -1521,7 +1524,7 @@ mod tests {
 
         assert_eq!(out[4], "Cook this repo\nwith care");
         assert!(out.iter().all(|arg| !arg.starts_with('@')));
-        assert_eq!(out[5], "--backend=codebox");
+        assert_eq!(out[5], "--backend=sample-runtime");
     }
 
     #[test]

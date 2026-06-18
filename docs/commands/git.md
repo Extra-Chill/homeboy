@@ -47,7 +47,7 @@ Shows git status for one checkout. `component_id` is optional when Homeboy can d
 Bulk status is available through `--json`:
 
 ```sh
-homeboy git status --json '{"component_ids":["homeboy","data-machine"]}'
+homeboy git status --json '{"component_ids":["homeboy","sample-plugin"]}'
 ```
 
 ### Commit
@@ -88,7 +88,7 @@ homeboy git push --force-with-lease
 Bulk push is available through `--json`:
 
 ```sh
-homeboy git push --json '{"component_ids":["homeboy","data-machine"],"tags":true}'
+homeboy git push --json '{"component_ids":["homeboy","sample-plugin"],"tags":true}'
 ```
 
 ### Pull
@@ -225,7 +225,7 @@ Notes:
 {
   "components": [
     { "id": "homeboy", "message": "Update git docs" },
-    { "id": "data-machine", "message": "Update workflow docs" }
+    { "id": "sample-plugin", "message": "Update workflow docs" }
   ]
 }
 ```
@@ -234,7 +234,7 @@ Notes:
 
 ```json
 {
-  "component_ids": ["homeboy", "data-machine"],
+  "component_ids": ["homeboy", "sample-plugin"],
   "tags": true,
   "force_with_lease": false
 }

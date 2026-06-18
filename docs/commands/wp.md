@@ -15,7 +15,7 @@ For multisite projects, use `project:subtarget` as the project ID.
 ```sh
 homeboy wp my-site plugin list
 homeboy wp my-site option get blogname
-homeboy wp extra-chill:events datamachine pipelines list
+homeboy wp extra-chill:events sampleplugin pipelines list
 ```
 
 ## Related

@@ -1572,7 +1572,7 @@ mod integration_tests {
     fn load_and_use_rust_grammar() {
         // Try to find the Rust grammar in the extensions workspace
         let grammar_path = std::path::Path::new(
-            "/var/lib/datamachine/workspace/homeboy-modules/rust/grammar.toml",
+            "/var/lib/sampleplugin/workspace/homeboy-modules/rust/grammar.toml",
         );
         if !grammar_path.exists() {
             // Skip if not in development environment
@@ -1663,7 +1663,7 @@ mod tests {
     #[test]
     fn load_and_use_php_grammar() {
         let grammar_path = std::path::Path::new(
-            "/var/lib/datamachine/workspace/homeboy-modules/wordpress/grammar.toml",
+            "/var/lib/sampleplugin/workspace/homeboy-modules/wordpress/grammar.toml",
         );
         if !grammar_path.exists() {
             eprintln!("Skipping: PHP grammar not found at {:?}", grammar_path);
@@ -1677,10 +1677,10 @@ mod tests {
         assert!(grammar.patterns.contains_key("namespace"));
 
         let sample = r#"<?php
-namespace DataMachine\Abilities;
+namespace SamplePlugin\Abilities;
 
 use WP_UnitTestCase;
-use DataMachine\Core\Pipeline;
+use SamplePlugin\Core\Pipeline;
 
 class PipelineAbilities extends BaseAbilities {
     public function register() {
@@ -1707,7 +1707,7 @@ class PipelineAbilities extends BaseAbilities {
 
         // Should find namespace
         let ns = namespace(&symbols);
-        assert_eq!(ns, Some("DataMachine\\Abilities".to_string()));
+        assert_eq!(ns, Some("SamplePlugin\\Abilities".to_string()));
 
         // Should find class
         let classes: Vec<_> = symbols.iter().filter(|s| s.concept == "class").collect();

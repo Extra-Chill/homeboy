@@ -164,7 +164,7 @@ fn test_command_step_exposes_pipeline_settings_env() {
             "pipeline": {{
                 "bench_prepare": [{{
                     "kind": "command",
-                    "command": "printf '%s' \"$HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_ROOT\" > {}"
+                    "command": "printf '%s' \"$HOMEBOY_SETTINGS_SAMPLE_RUNTIME_SOURCE_ROOT\" > {}"
                 }}]
             }}
         }}"#,
@@ -173,7 +173,7 @@ fn test_command_step_exposes_pipeline_settings_env() {
     .expect("parse rig");
 
     let settings = vec![(
-        "wp_codebox_source_root".to_string(),
+        "wp_sample-runtime_source_root".to_string(),
         "/tmp/woocommerce".to_string(),
     )];
     let out =

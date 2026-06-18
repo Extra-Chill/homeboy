@@ -321,7 +321,7 @@ mod tests {
             "--matrix",
             "prompt=site-a,site-b",
             "--runner-pool",
-            "codebox",
+            "sample-runtime",
             "--concurrency",
             "8",
             "--max-queue-depth",
@@ -334,7 +334,7 @@ mod tests {
         .expect("bench matrix fan-out should parse");
 
         assert_eq!(cli.bench.run.matrix.len(), 2);
-        assert_eq!(cli.bench.run.runner_pool.as_deref(), Some("codebox"));
+        assert_eq!(cli.bench.run.runner_pool.as_deref(), Some("sample-runtime"));
         assert_eq!(cli.bench.run.concurrency, 8);
         assert_eq!(cli.bench.run.matrix_max_queue_depth, Some(3));
         assert_eq!(cli.bench.run.expected_artifact, vec!["bench-results"]);
@@ -368,7 +368,8 @@ mod tests {
         let mut args = run_args(Some("studio-web"));
         args.expected_artifact = vec!["bench-results".to_string()];
 
-        let request = matrix_template_request("bench/studio-web", "studio-web", "codebox", &args);
+        let request =
+            matrix_template_request("bench/studio-web", "studio-web", "sample-runtime", &args);
 
         assert_eq!(request.expected_artifacts, vec!["bench-results"]);
         assert_eq!(request.artifact_declarations.len(), 1);

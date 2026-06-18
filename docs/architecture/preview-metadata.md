@@ -152,7 +152,7 @@ fields in the same report so reviewer artifacts can distinguish browser/client
 errors from tunnel ingress or origin delivery gaps.
 
 Use this core gate for generic HTTP asset fanout proof. Product-specific proofs,
-such as WP Codebox or WooCommerce asset lists for Extra-Chill/homeboy#4062,
+such as Sample Runtime or WooCommerce asset lists for Extra-Chill/homeboy#4062,
 should live in the owning rig or extension and consume this generic
 `asset_fanout` contract.
 

@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn executor_runtime_selection_synthesizes_legacy_fields() {
         let executor = AgentTaskExecutor {
-            backend: "codebox".to_string(),
+            backend: "sample-runtime".to_string(),
             selector: Some("claude-code".to_string()),
             runtime_selection: None,
             required_capabilities: Vec::new(),
@@ -1133,7 +1133,10 @@ mod tests {
         let selection = executor.runtime_selection();
 
         assert_eq!(selection.runtime_id, None);
-        assert_eq!(selection.executor_backend.as_deref(), Some("codebox"));
+        assert_eq!(
+            selection.executor_backend.as_deref(),
+            Some("sample-runtime")
+        );
         assert_eq!(
             selection.executor_provider_id.as_deref(),
             Some("claude-code")
@@ -1141,7 +1144,7 @@ mod tests {
         assert_eq!(selection.provider.as_deref(), Some("claude-code"));
         assert_eq!(selection.model.as_deref(), Some("opus-4.7"));
         assert_eq!(selection.substrate_ref, None);
-        assert_eq!(executor.executor_backend(), "codebox");
+        assert_eq!(executor.executor_backend(), "sample-runtime");
         assert_eq!(executor.executor_provider_id(), Some("claude-code"));
         assert_eq!(executor.provider(), Some("claude-code"));
         assert_eq!(executor.model(), Some("opus-4.7"));
@@ -1158,7 +1161,7 @@ mod tests {
                 "selector": "runtime-selector",
                 "provider": "codex",
                 "model": "gpt-5.5",
-                "substrate_ref": "wp-codebox://sandbox/123"
+                "substrate_ref": "sample-runtime://sandbox/123"
             }
         });
 
@@ -1171,7 +1174,10 @@ mod tests {
         assert_eq!(executor.executor_provider_id(), Some("runtime-selector"));
         assert_eq!(executor.provider(), Some("codex"));
         assert_eq!(executor.model(), Some("gpt-5.5"));
-        assert_eq!(executor.substrate_ref(), Some("wp-codebox://sandbox/123"));
+        assert_eq!(
+            executor.substrate_ref(),
+            Some("sample-runtime://sandbox/123")
+        );
         assert_eq!(
             selection.executor_backend.as_deref(),
             Some("runtime-backend")
@@ -1196,7 +1202,7 @@ mod tests {
         let request: AgentTaskRequest = serde_json::from_value(json!({
             "schema": AGENT_TASK_REQUEST_SCHEMA,
             "task_id": "task-typed-artifacts",
-            "executor": { "backend": "codebox" },
+            "executor": { "backend": "sample-runtime" },
             "instructions": "Return the declared typed report.",
             "expected_artifacts": ["legacy-report.json"],
             "artifactDeclarations": [{
@@ -1224,7 +1230,7 @@ mod tests {
         let mut request: AgentTaskRequest = serde_json::from_value(json!({
             "schema": AGENT_TASK_REQUEST_SCHEMA,
             "task_id": "task-artifact-normalization",
-            "executor": { "backend": "codebox" },
+            "executor": { "backend": "sample-runtime" },
             "instructions": "Return artifacts.",
             "expected_artifacts": [" patch ", "analysis_report", ""],
             "artifact_declarations": [{

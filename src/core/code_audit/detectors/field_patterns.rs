@@ -895,7 +895,7 @@ class AIStep {
             class_name: self::class,
             label: 'AI',
         );
-        add_filter('datamachine_handlers', [self::class, 'register']);
+        add_filter('sampleplugin_handlers', [self::class, 'register']);
     }
 }
 "#;

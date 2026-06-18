@@ -134,7 +134,7 @@ fn load_standalone_components() -> Result<Vec<Component>> {
             continue;
         }
 
-        // Derive component ID from filename (e.g., "data-machine.json" -> "data-machine")
+        // Derive component ID from filename (e.g., "sample-plugin.json" -> "sample-plugin")
         let id = match path.file_stem().and_then(|s| s.to_str()) {
             Some(stem) => stem.to_string(),
             None => continue,

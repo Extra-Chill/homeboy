@@ -182,7 +182,7 @@ pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> 
 
     // When the inferred ID doesn't match any existing project component, check
     // whether a directory-name fallback produced a version-stamped ID (e.g.
-    // "data-machine-v0402-clean" from a clone path). If an existing component
+    // "sample-plugin-v0402-clean" from a clone path). If an existing component
     // whose ID is a prefix of the inferred ID exists, prefer the existing ID.
     // This prevents component identity mutation from clone directory names. (#932)
     let project = load(project_id)?;
@@ -198,8 +198,8 @@ pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> 
 
 /// Find an existing project component whose ID is a prefix of the inferred ID.
 ///
-/// When a clean clone directory name like "data-machine-v0.40.2-clean" gets slugified
-/// to "data-machine-v0402-clean", the real component ID "data-machine" is a prefix.
+/// When a clean clone directory name like "sample-plugin-v0.40.2-clean" gets slugified
+/// to "sample-plugin-v0402-clean", the real component ID "sample-plugin" is a prefix.
 /// This function detects that pattern and returns the existing component's ID.
 ///
 /// Only matches if:
@@ -259,45 +259,45 @@ mod tests {
 
     #[test]
     fn find_prefix_match_version_suffix() {
-        let project = project_with_components(&["data-machine", "example-theme"]);
-        // Clone dir "data-machine-v0402-clean" → slugified inferred ID
+        let project = project_with_components(&["sample-plugin", "example-theme"]);
+        // Clone dir "sample-plugin-v0402-clean" → slugified inferred ID
         assert_eq!(
-            find_prefix_match(&project, "data-machine-v0402-clean"),
-            Some("data-machine".to_string()),
+            find_prefix_match(&project, "sample-plugin-v0402-clean"),
+            Some("sample-plugin".to_string()),
         );
     }
 
     #[test]
     fn find_prefix_match_numeric_suffix() {
-        let project = project_with_components(&["data-machine"]);
-        // Clone dir "data-machine-0402" → numeric version suffix
+        let project = project_with_components(&["sample-plugin"]);
+        // Clone dir "sample-plugin-0402" → numeric version suffix
         assert_eq!(
-            find_prefix_match(&project, "data-machine-0402"),
-            Some("data-machine".to_string()),
+            find_prefix_match(&project, "sample-plugin-0402"),
+            Some("sample-plugin".to_string()),
         );
     }
 
     #[test]
     fn find_prefix_match_no_match_non_version_suffix() {
-        let project = project_with_components(&["data-machine"]);
-        // "data-machine-socials" is NOT a version suffix, it's a different component
-        assert_eq!(find_prefix_match(&project, "data-machine-socials"), None);
+        let project = project_with_components(&["sample-plugin"]);
+        // "sample-plugin-socials" is NOT a version suffix, it's a different component
+        assert_eq!(find_prefix_match(&project, "sample-plugin-socials"), None);
     }
 
     #[test]
     fn find_prefix_match_exact_match_not_prefix() {
-        let project = project_with_components(&["data-machine"]);
+        let project = project_with_components(&["sample-plugin"]);
         // Exact match — not a prefix scenario
-        assert_eq!(find_prefix_match(&project, "data-machine"), None);
+        assert_eq!(find_prefix_match(&project, "sample-plugin"), None);
     }
 
     #[test]
     fn find_prefix_match_prefers_longest() {
-        let project = project_with_components(&["data", "data-machine"]);
-        // Both "data" and "data-machine" are prefixes, but "data-machine" is longer
+        let project = project_with_components(&["data", "sample-plugin"]);
+        // Both "data" and "sample-plugin" are prefixes, but "sample-plugin" is longer
         assert_eq!(
-            find_prefix_match(&project, "data-machine-v1"),
-            Some("data-machine".to_string()),
+            find_prefix_match(&project, "sample-plugin-v1"),
+            Some("sample-plugin".to_string()),
         );
     }
 

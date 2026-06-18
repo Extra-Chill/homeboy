@@ -30,11 +30,11 @@ The component `id` field is required and must be a non-empty string. All other f
 
 ```json
 {
-  "id": "data-machine",
-  "remote_path": "wp-content/plugins/data-machine",
+  "id": "sample-plugin",
+  "remote_path": "wp-content/plugins/sample-plugin",
   "version_targets": [
     {
-      "file": "data-machine.php",
+      "file": "sample-plugin.php",
       "pattern": "Version:\\s*([0-9.]+)"
     }
   ],

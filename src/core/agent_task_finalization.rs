@@ -773,13 +773,13 @@ mod tests {
             },
             provider_runtime: vec![ProviderRuntimeLifecycle {
                 task_id: "task-a".to_string(),
-                backend: "codebox".to_string(),
+                backend: "sample-runtime".to_string(),
                 state: ProviderRuntimeState::Succeeded,
                 stream_uri: None,
                 external_runtime_ids: vec![ExternalRuntimeId {
                     kind: "provider_run_id".to_string(),
                     value: "provider-run-123".to_string(),
-                    provider: Some("codebox".to_string()),
+                    provider: Some("sample-runtime".to_string()),
                     url: None,
                 }],
                 metadata: serde_json::Value::Null,
@@ -787,7 +787,7 @@ mod tests {
             external_runtime_ids: vec![ExternalRuntimeId {
                 kind: "provider_run_id".to_string(),
                 value: "provider-run-123".to_string(),
-                provider: Some("codebox".to_string()),
+                provider: Some("sample-runtime".to_string()),
                 url: None,
             }],
             cleanup: CleanupLifecycle {
