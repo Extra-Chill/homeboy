@@ -66,6 +66,82 @@ pub struct CommandOutputDescriptor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandRegistryEntry {
+    pub name: &'static str,
+    pub json_family: CommandJsonFamily,
+}
+
+const fn command_registry_entry(
+    name: &'static str,
+    json_family: CommandJsonFamily,
+) -> CommandRegistryEntry {
+    CommandRegistryEntry { name, json_family }
+}
+
+pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
+    command_registry_entry("agent-task", CommandJsonFamily::Workspace),
+    command_registry_entry("project", CommandJsonFamily::Workspace),
+    command_registry_entry("ssh", CommandJsonFamily::Ops),
+    command_registry_entry("server", CommandJsonFamily::Ops),
+    command_registry_entry("test", CommandJsonFamily::Quality),
+    command_registry_entry("bench", CommandJsonFamily::Quality),
+    command_registry_entry("trace", CommandJsonFamily::Quality),
+    command_registry_entry("observe", CommandJsonFamily::Quality),
+    command_registry_entry("lint", CommandJsonFamily::Quality),
+    command_registry_entry("db", CommandJsonFamily::Ops),
+    command_registry_entry("deps", CommandJsonFamily::Ops),
+    command_registry_entry("ci", CommandJsonFamily::Ops),
+    command_registry_entry("doctor", CommandJsonFamily::Ops),
+    command_registry_entry("file", CommandJsonFamily::Ops),
+    command_registry_entry("fleet", CommandJsonFamily::Ops),
+    command_registry_entry("logs", CommandJsonFamily::Ops),
+    command_registry_entry("triage", CommandJsonFamily::Ops),
+    command_registry_entry("deploy", CommandJsonFamily::Ops),
+    command_registry_entry("component", CommandJsonFamily::Workspace),
+    command_registry_entry("config", CommandJsonFamily::Workspace),
+    command_registry_entry("daemon", CommandJsonFamily::Ops),
+    command_registry_entry("extension", CommandJsonFamily::Workspace),
+    command_registry_entry("status", CommandJsonFamily::Ops),
+    command_registry_entry("docs", CommandJsonFamily::Workspace),
+    command_registry_entry("changelog", CommandJsonFamily::Workspace),
+    command_registry_entry("cleanup", CommandJsonFamily::Workspace),
+    command_registry_entry("git", CommandJsonFamily::Ops),
+    command_registry_entry("issues", CommandJsonFamily::Ops),
+    command_registry_entry("version", CommandJsonFamily::Workspace),
+    command_registry_entry("build", CommandJsonFamily::Workspace),
+    command_registry_entry("changes", CommandJsonFamily::Workspace),
+    command_registry_entry("release", CommandJsonFamily::Workspace),
+    command_registry_entry("report", CommandJsonFamily::Workspace),
+    command_registry_entry("review", CommandJsonFamily::Quality),
+    command_registry_entry("audit", CommandJsonFamily::Quality),
+    command_registry_entry("audit-baseline", CommandJsonFamily::Quality),
+    command_registry_entry("refactor", CommandJsonFamily::Workspace),
+    command_registry_entry("refs", CommandJsonFamily::Workspace),
+    command_registry_entry("rig", CommandJsonFamily::Workspace),
+    command_registry_entry("runner", CommandJsonFamily::Workspace),
+    command_registry_entry("lab", CommandJsonFamily::Workspace),
+    command_registry_entry("runtime", CommandJsonFamily::Workspace),
+    command_registry_entry("worktree", CommandJsonFamily::Workspace),
+    command_registry_entry("tunnel", CommandJsonFamily::Workspace),
+    command_registry_entry("runs", CommandJsonFamily::Workspace),
+    command_registry_entry("self", CommandJsonFamily::Ops),
+    command_registry_entry("stack", CommandJsonFamily::Workspace),
+    command_registry_entry("undo", CommandJsonFamily::Workspace),
+    command_registry_entry("auth", CommandJsonFamily::Ops),
+    command_registry_entry("api", CommandJsonFamily::Ops),
+    command_registry_entry("http", CommandJsonFamily::Ops),
+    command_registry_entry("upgrade", CommandJsonFamily::Ops),
+    command_registry_entry("list", CommandJsonFamily::RawOnly),
+];
+
+pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
+    COMMAND_REGISTRY
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.json_family)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandDescriptor {
     pub response_mode: CommandResponseMode,
     pub output_file_mode: CommandOutputFileMode,
@@ -187,14 +263,8 @@ impl Commands {
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Lint(args) => args.output_descriptor(output_file_mode),
             Commands::Audit(args) => args.output_descriptor(output_file_mode),
-            Commands::Observe(_) => {
-                json_envelope_descriptor(CommandJsonFamily::Quality, output_file_mode)
-            }
-            Commands::AuditBaseline(_) => {
-                json_envelope_descriptor(CommandJsonFamily::Quality, output_file_mode)
-            }
-            Commands::Refactor(_) => {
-                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
+            Commands::Observe(_) | Commands::AuditBaseline(_) | Commands::Refactor(_) => {
+                registered_json_envelope_descriptor(self, output_file_mode)
             }
             Commands::Refs(_) => workspace_descriptor(
                 CommandResponseMode::Json,
@@ -219,12 +289,8 @@ impl Commands {
             | Commands::Worktree(_)
             | Commands::Tunnel(_)
             | Commands::Stack(_)
-            | Commands::Undo(_) => {
-                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
-            }
-            Commands::Rig(_) => {
-                json_envelope_descriptor(CommandJsonFamily::Workspace, output_file_mode)
-            }
+            | Commands::Undo(_) => registered_json_envelope_descriptor(self, output_file_mode),
+            Commands::Rig(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Status(_)
             | Commands::Ci(_)
             | Commands::Server(_)
@@ -242,9 +308,9 @@ impl Commands {
             | Commands::Api(_)
             | Commands::Http(_)
             | Commands::Upgrade(_)
-            | Commands::Ssh(_) => ops_json_descriptor(output_file_mode),
+            | Commands::Ssh(_) => registered_json_envelope_descriptor(self, output_file_mode),
             Commands::Fleet(_) => fleet::adapter(output_file_mode).output_descriptor(),
-            Commands::Triage(_) => ops_json_descriptor(output_file_mode),
+            Commands::Triage(_) => registered_json_envelope_descriptor(self, output_file_mode),
         }
     }
 
@@ -321,15 +387,21 @@ fn json_envelope_descriptor(
     }
 }
 
-fn ops_json_descriptor(output_file_mode: CommandOutputFileMode) -> CommandOutputDescriptor {
-    json_envelope_descriptor(CommandJsonFamily::Ops, output_file_mode)
+fn registered_json_envelope_descriptor(
+    command: &Commands,
+    output_file_mode: CommandOutputFileMode,
+) -> CommandOutputDescriptor {
+    let json_family = registered_command_json_family(command.top_level_name())
+        .expect("top-level command should be registered");
+    json_envelope_descriptor(json_family, output_file_mode)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::{Cli, Commands};
+    use crate::cli_surface::{current_command_surface, Cli, Commands};
     use clap::Parser;
+    use std::collections::BTreeSet;
 
     fn parsed_command(args: &[&str]) -> Commands {
         Cli::try_parse_from(args)
@@ -391,6 +463,21 @@ mod tests {
             list_descriptor.response_mode,
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
+    }
+
+    #[test]
+    fn command_registry_covers_visible_top_level_surface() {
+        let surface_names = current_command_surface()
+            .commands
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<BTreeSet<_>>();
+        let registry_names = COMMAND_REGISTRY
+            .iter()
+            .map(|entry| entry.name.to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(registry_names, surface_names);
     }
 
     #[test]
