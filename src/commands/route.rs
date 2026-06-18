@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(command.hot_label, "lint");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -659,11 +659,11 @@ mod tests {
 
         assert_eq!(command.hot_label, "extension update");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
         assert!(command.unsupported_reason.is_none());
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
         assert!(cli.command.supports_lab_runner());
     }
 
@@ -807,7 +807,7 @@ mod tests {
                 command.workspace_mode_policy,
                 runners::LabOffloadWorkspaceModePolicy::RunnerResident
             );
-            assert!(!command.default_lab_offload);
+            assert!(!command.routing_policy.default_lab_offload);
         }
     }
 
@@ -843,7 +843,7 @@ mod tests {
                 "agent-task dispatch/cook/loop/run-plan/retry --run"
             );
             assert!(command.portable);
-            assert!(command.default_lab_offload);
+            assert!(command.routing_policy.default_lab_offload);
         }
     }
 
@@ -862,10 +862,10 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "agent-task providers");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]
@@ -889,7 +889,7 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "tunnel service start");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
         assert_eq!(
             command.source_path_mode,
             runners::LabOffloadSourcePathMode::RunnerResident
@@ -898,9 +898,9 @@ mod tests {
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::RunnerResident
         );
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]
@@ -922,7 +922,7 @@ mod tests {
 
         assert_eq!(command.hot_label, "tunnel preview-consumer run");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
     }
 
     #[test]
@@ -934,7 +934,7 @@ mod tests {
         assert_eq!(command.hot_label, "audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
         assert_eq!(command.hot_label, "audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -958,6 +958,6 @@ mod tests {
         assert_eq!(command.hot_label, "rig up");
         assert!(!command.portable);
         assert!(command.unsupported_reason.is_some());
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
     }
 }

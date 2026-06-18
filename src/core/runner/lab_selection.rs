@@ -320,12 +320,14 @@ pub(super) fn resolve_lab_runner_selection(
     let deny_local_bench = config.bench.local_execution.is_denied();
     let release_gate_local_hot_allowed =
         crate::core::defaults::resolve_release_gate_local_hot_policy_from(&config).is_allowed();
-    let default_runner =
-        if explicit_runner.is_none() && command.portable && command.default_lab_offload {
-            super::resolve_default_lab_runner()?
-        } else {
-            None
-        };
+    let default_runner = if explicit_runner.is_none()
+        && command.portable
+        && command.routing_policy.default_lab_offload
+    {
+        super::resolve_default_lab_runner()?
+    } else {
+        None
+    };
 
     resolve_lab_runner_selection_from_default(
         command,
@@ -385,7 +387,7 @@ pub(super) fn resolve_lab_runner_selection_from_default(
         ));
     }
 
-    if !command.default_lab_offload {
+    if !command.routing_policy.default_lab_offload {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }
@@ -416,7 +418,7 @@ pub(super) fn resolve_lab_runner_selection_from_default(
     // closed with a clear diagnostic unless the operator explicitly opts back
     // into local-hot via config/env, in which case the override is recorded by
     // the offload metadata (`force_hot_local_override`).
-    if command.release_gate && force_hot && allow_local_hot {
+    if command.routing_policy.release_gate && force_hot && allow_local_hot {
         if let Some(runner_id) = default_runner.as_ref() {
             if !release_gate_local_hot_allowed {
                 return Err(release_gate_local_hot_denied_error(

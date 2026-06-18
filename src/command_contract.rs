@@ -21,8 +21,8 @@ mod public_variants;
 
 pub use lab::{
     lab_runner_supported_labels, lab_runner_unsupported_hint, lab_runner_unsupported_message,
-    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
-    LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
+    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabRoutingPolicy,
+    LabSourcePathMode, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
 };
 pub use output::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,

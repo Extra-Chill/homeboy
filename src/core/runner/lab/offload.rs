@@ -98,17 +98,15 @@ pub struct LabOffloadRequest<'a> {
 pub struct LabOffloadCommand {
     pub hot_label: &'static str,
     pub portable: bool,
-    pub default_lab_offload: bool,
     pub unsupported_reason: Option<&'static str>,
     pub source_path_mode: LabOffloadSourcePathMode,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
-    pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
-    pub infer_source_path_tools: bool,
-    /// Whether this is a release-gate command (lint/test/audit) subject to the
-    /// `/release_gate/local_hot` fail-closed routing policy.
-    pub release_gate: bool,
+    /// Routing-policy flags shared across the Lab command layers
+    /// (`default_lab_offload`, `infer_source_path_tools`, `release_gate`,
+    /// `requires_extension_parity`).
+    pub routing_policy: crate::command_contract::LabRoutingPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,7 +432,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         return Ok(skipped_automatic_run_local(plan, reason));
     }
 
-    if request.explicit_runner.is_none() && !contract.default_lab_offload {
+    if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
             metadata: None,
@@ -521,7 +519,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             // diagnostic that surfaces the underlying runner reason, rather
             // than letting a stale launcher route the gate to the controller.
             // The operator-only override is `/release_gate/local_hot: allowed`.
-            if contract.release_gate
+            if contract.routing_policy.release_gate
                 && matches!(selection.source, LabRunnerSelectionSource::Default)
                 && !crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed()
             {
@@ -1103,7 +1101,7 @@ fn run_lab_offload_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
-    if contract.requires_extension_parity {
+    if contract.routing_policy.requires_extension_parity {
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -2363,15 +2361,17 @@ mod tests {
         LabOffloadCommand {
             hot_label: label,
             portable: true,
-            default_lab_offload: true,
             unsupported_reason: None,
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-            requires_extension_parity: true,
             required_extensions: Vec::new(),
             requires_playwright: false,
-            infer_source_path_tools: true,
-            release_gate: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy {
+                default_lab_offload: true,
+                infer_source_path_tools: true,
+                release_gate: false,
+                requires_extension_parity: true,
+            },
         }
     }
 
@@ -2379,15 +2379,12 @@ mod tests {
         LabOffloadCommand {
             hot_label: "rig up",
             portable: false,
-            default_lab_offload: false,
             unsupported_reason: Some(reason),
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-            requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
-            infer_source_path_tools: false,
-            release_gate: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
     }
 
@@ -2767,7 +2764,7 @@ mod tests {
         std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
             .expect("docker signal");
         let mut command = portable_lab_command("trace");
-        command.infer_source_path_tools = false;
+        command.routing_policy.infer_source_path_tools = false;
 
         let contract =
             lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::Homeboy])
@@ -3214,7 +3211,7 @@ mod tests {
     #[test]
     fn lab_runner_selection_ignores_default_when_auto_offload_is_disabled() {
         let mut command = portable_lab_command("extension update");
-        command.default_lab_offload = false;
+        command.routing_policy.default_lab_offload = false;
 
         let selection = resolve_lab_runner_selection_from_default(
             &command,
@@ -3233,7 +3230,7 @@ mod tests {
     #[test]
     fn lab_runner_selection_honors_explicit_runner_when_auto_offload_is_disabled() {
         let mut command = portable_lab_command("extension update");
-        command.default_lab_offload = false;
+        command.routing_policy.default_lab_offload = false;
 
         let selection = resolve_lab_runner_selection_from_default(
             &command,
@@ -3378,7 +3375,7 @@ mod tests {
 
     fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
         let mut command = portable_lab_command(label);
-        command.release_gate = true;
+        command.routing_policy.release_gate = true;
         command
     }
 
