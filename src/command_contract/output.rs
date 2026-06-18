@@ -176,7 +176,7 @@ pub struct CommandDescriptor {
 }
 
 impl CommandOutputDescriptor {
-    pub fn with_lab_contract(
+    fn with_lab_contract(
         self,
         contract: Option<super::lab::LabCommandContract>,
     ) -> CommandDescriptor {
