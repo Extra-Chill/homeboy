@@ -25,9 +25,9 @@ pub use lab::{
     LabSourcePathMode, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
 };
 pub use output::{
-    registered_command_json_family, CommandDescriptor, CommandJsonFamily,
-    CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
-    CommandRawOutputMode, CommandRegistryEntry, CommandResponseMode, CommandResponsePlan,
-    CommandStdoutMode, COMMAND_REGISTRY,
+    registered_command_dispatch_family, registered_command_json_family, CommandDescriptor,
+    CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
+    CommandOutputFileMode, CommandRawOutputMode, CommandRegistryEntry, CommandResponseMode,
+    CommandResponsePlan, CommandStdoutMode, COMMAND_REGISTRY,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
