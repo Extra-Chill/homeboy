@@ -2149,6 +2149,65 @@ assert.equal(canaryRunOutcome.metadata.decision_evidence.no_op_reason, 'no_file_
 assert.equal(canaryRunOutcome.metadata.decision_evidence.patch_bytes, 0);
 assert.deepEqual(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers, []);
 
+const canaryTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  artifact_declarations: [{
+    name: 'datamachine-transcript',
+    type: 'transcript',
+    required: true,
+  }],
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  run: {
+    runId: 'run-canary-transcript-required',
+    status: 'succeeded',
+    agentResult: {
+      changedFiles: { count: 0, paths: [], artifact: 'files/changed-files.json' },
+      patch: { bytes: 0, sha256: 'empty-patch-sha', artifact: 'files/patch.diff' },
+      transcript: { artifact: 'files/transcript.json', executionCount: 1 },
+      artifacts: { directory: '/tmp/canary/runtime' },
+      noOpReason: 'no_file_changes',
+    },
+  },
+});
+assert.equal(canaryTranscriptRequiredOutcome.status, 'no_op');
+assert.equal(canaryTranscriptRequiredOutcome.outputs.typed_artifacts['datamachine-transcript'].file_refs[0].path, '/tmp/canary/runtime/files/transcript.json');
+assert.equal(canaryTranscriptRequiredOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+
+const labArtifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-lab-artifacts-'));
+const labRuntimeRoot = path.join(labArtifactRoot, 'runtime-fixture-123');
+fs.mkdirSync(path.join(labRuntimeRoot, 'files'), { recursive: true });
+fs.writeFileSync(path.join(labRuntimeRoot, 'files', 'transcript.json'), '{"schema":"wp-codebox/agent-transcript/v1"}\n');
+const labTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  artifact_declarations: [{
+    name: 'datamachine-transcript',
+    type: 'transcript',
+    required: true,
+  }],
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  session: {
+    id: 'lab-session-transcript-required',
+    status: 'completed',
+    artifacts: {
+      bundle_id: 'lab-artifact-bundle',
+      directory: labRuntimeRoot,
+    },
+  },
+  artifacts: [{
+    id: 'lab-codebox-transcript',
+    kind: 'codebox-transcript',
+    path: path.join(labRuntimeRoot, 'files', 'transcript.json'),
+    mime: 'application/json',
+  }],
+  outputs: {},
+});
+assert.equal(labTranscriptRequiredOutcome.outputs.typed_artifacts['datamachine-transcript'].file_refs[0].path, path.join(labRuntimeRoot, 'files', 'transcript.json'));
+assert.equal(labTranscriptRequiredOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+
 const codexOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   summary: 'Codex task completed.',

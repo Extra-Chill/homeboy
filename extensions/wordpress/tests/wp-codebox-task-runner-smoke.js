@@ -373,7 +373,9 @@ try {
   assert.equal(captured.input.provider_plugin_paths[0], preparedProviderPluginPath);
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'example-provider').source, preparedProviderPluginPath);
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'example-provider').activate, true);
-  assert.deepEqual(captured.input.runtime_env, request.runtime_env);
+  assert.equal(captured.input.runtime_env.GENERIC_PROVIDER_CONFIG, request.runtime_env.GENERIC_PROVIDER_CONFIG);
+  assert.equal(captured.input.runtime_env.XDG_DATA_HOME, request.runtime_env.XDG_DATA_HOME);
+  assert.match(captured.input.runtime_env.HOMEBOY_CALLBACK_DATA_PATH, /homeboy-runtime-callback-data\.json$/);
   assert.deepEqual(captured.input.ability_tools, request.ability_tools);
   assert.deepEqual(captured.input.runtime_state_mounts, request.runtime_state_mounts);
   assert.deepEqual(captured.input.runtime_config_mounts, request.runtime_config_mounts);

@@ -2159,6 +2159,98 @@ function typedArtifactsFromResult(result) {
   return Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
 }
 
+function codeboxAgentResultFromResult(result) {
+  return result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || {};
+}
+
+function codeboxBundleDirectoryFromResult(result) {
+  const completionOutcome = result.completionOutcome || result.completion_outcome || {};
+  const agentResult = codeboxAgentResultFromResult(result);
+  return agentResult.artifacts?.directory
+    || completionOutcome?.provenance?.artifactDirectory
+    || result.session?.artifacts?.path
+    || result.session?.artifacts?.directory
+    || (typeof result.artifacts === 'string' ? result.artifacts : '')
+    || '';
+}
+
+function firstTranscriptArtifactRefFromResult(result) {
+  const agentResult = codeboxAgentResultFromResult(result);
+  const directPath = artifactPath(codeboxBundleDirectoryFromResult(result), agentResult.transcript?.artifact || '');
+  if (directPath) {
+    return {
+      kind: 'codebox-transcript',
+      path: directPath,
+      mime: 'application/json',
+      metadata: agentResult.transcript || {},
+      schema: agentResult.transcript?.schema,
+    };
+  }
+
+  const candidates = [
+    ...(Array.isArray(result.artifacts) ? result.artifacts : Object.values(result.artifacts || {}).filter((value) => value && typeof value === 'object')),
+    ...agentRuntimeBundleArtifacts(result),
+  ];
+  const transcriptArtifact = candidates
+    .map((artifact) => artifactFromCodeboxArtifact(artifact))
+    .find((artifact) => artifact?.path && /transcript|conversation|messages/i.test(`${artifact.kind || ''} ${artifact.name || ''} ${artifact.path || ''}`));
+  if (transcriptArtifact) {
+    return {
+      kind: transcriptArtifact.kind || 'codebox-transcript',
+      path: transcriptArtifact.path,
+      url: transcriptArtifact.url,
+      mime: transcriptArtifact.mime || 'application/json',
+      metadata: transcriptArtifact.metadata || {},
+      schema: transcriptArtifact.metadata?.schema || transcriptArtifact.metadata?.artifact_schema,
+    };
+  }
+
+  const bundleDirectory = codeboxBundleDirectoryFromResult(result);
+  const fallbackPath = artifactPath(bundleDirectory, 'files/transcript.json');
+  if (fallbackPath && fs.existsSync(fallbackPath)) {
+    return {
+      kind: 'codebox-transcript',
+      path: fallbackPath,
+      mime: 'application/json',
+      metadata: { source: 'codebox_artifact_directory' },
+    };
+  }
+
+  return null;
+}
+
+function isTranscriptArtifactDeclaration(declaration) {
+  const name = typedArtifactNameFromDeclaration(declaration);
+  const type = declaration?.type || declaration?.kind || declaration?.artifact_type || declaration?.artifactType || '';
+  const schema = declaration?.artifact_schema || declaration?.artifactSchema || declaration?.schema || '';
+  return /transcript|conversation|messages/i.test(`${name} ${type} ${schema}`);
+}
+
+function transcriptTypedArtifactsFromCodeboxResult(request, result, existingTypedArtifacts = {}) {
+  if (!request) {
+    return {};
+  }
+  const requiredTranscriptArtifacts = requiredArtifactDeclarationsFromRequest(request).filter(isTranscriptArtifactDeclaration);
+  if (requiredTranscriptArtifacts.length === 0) {
+    return {};
+  }
+  const transcriptRef = firstTranscriptArtifactRefFromResult(result);
+  if (!transcriptRef?.path && !transcriptRef?.url) {
+    return {};
+  }
+  return Object.fromEntries(requiredTranscriptArtifacts
+    .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+    .filter((name) => name && !existingTypedArtifacts[name])
+    .map((name) => [name, normalizeTypedArtifactEntry(name, {
+      name,
+      type: 'transcript',
+      artifact_schema: transcriptRef.schema || 'wp-codebox/agent-transcript/v1',
+      file_refs: [{ kind: transcriptRef.kind || 'codebox-transcript', path: transcriptRef.path, url: transcriptRef.url, mime: transcriptRef.mime || 'application/json' }],
+      metadata: transcriptRef.metadata || {},
+    })])
+    .filter(([, artifact]) => artifact));
+}
+
 function typedArtifactProjectionFromOutputPath(outputPath, value, typedArtifacts) {
   const match = String(outputPath || '').match(/(?:^|\.)typed_?artifacts\.([^.]+)\.payload$/i);
   if (!match) {
@@ -2272,9 +2364,10 @@ function firstPlainObject(...candidates) {
   return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
 }
 
-function normalizeOutputs(result) {
+function normalizeOutputs(result, request = null) {
   const workload = agentRuntimeWorkload(result) || {};
   const typedArtifacts = typedArtifactsFromResult(result);
+  Object.assign(typedArtifacts, transcriptTypedArtifactsFromCodeboxResult(request, result, typedArtifacts));
   const appendTypedArtifacts = (outputs) => Object.keys(typedArtifacts).length > 0
     ? {
         ...outputs,
@@ -2691,7 +2784,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     status = localStatus;
   }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
-  const outputs = normalizeOutputs(result);
+  const outputs = normalizeOutputs(result, request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
   if (status === 'succeeded' && missingRequiredTypedArtifacts) {
     status = 'failed';

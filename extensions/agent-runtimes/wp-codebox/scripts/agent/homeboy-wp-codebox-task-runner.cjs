@@ -1606,6 +1606,42 @@ function mergeTypedArtifactOutputs(outputs, ...candidates) {
   };
 }
 
+function isTranscriptArtifactDeclaration(declaration) {
+  const name = artifactDeclarationName(declaration);
+  const type = declaration?.type || declaration?.kind || declaration?.artifact_type || declaration?.artifactType || '';
+  const schema = declaration?.artifact_schema || declaration?.artifactSchema || declaration?.schema || '';
+  return /transcript|conversation|messages/i.test(`${name} ${type} ${schema}`);
+}
+
+function artifactPath(root, relativePath) {
+  if (!root || !relativePath) {
+    return '';
+  }
+  return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
+}
+
+function transcriptTypedArtifactsFromAgentResult(input, agentResult, config = {}) {
+  const requiredTranscriptArtifacts = requiredArtifactDeclarations(input, config).filter(isTranscriptArtifactDeclaration);
+  if (requiredTranscriptArtifacts.length === 0) {
+    return {};
+  }
+  const transcriptPath = artifactPath(agentResult?.artifacts?.directory, agentResult?.transcript?.artifact || '');
+  if (!transcriptPath) {
+    return {};
+  }
+  return Object.fromEntries(requiredTranscriptArtifacts
+    .map((declaration) => artifactDeclarationName(declaration))
+    .filter(Boolean)
+    .map((name) => [name, normalizeTypedArtifactEntry(name, {
+      name,
+      type: 'transcript',
+      artifact_schema: agentResult?.transcript?.schema || 'wp-codebox/agent-transcript/v1',
+      file_refs: [{ kind: 'codebox-transcript', path: transcriptPath, mime: 'application/json' }],
+      metadata: agentResult?.transcript || {},
+    })])
+    .filter(([, artifact]) => artifact));
+}
+
 function sandboxToolPolicy(input, allowedTools) {
   const explicit = input.parent_request?.sandbox_tool_policy
     || input.parent_request?.sandboxToolPolicy
@@ -1715,7 +1751,16 @@ function normalizeAgentTaskRun(input, result) {
   const config = isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : parentAgentTaskConfig(input);
   const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, config);
   const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
-  const agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
+  let agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
+  if (plainObject(agentResult)) {
+    agentResult = {
+      ...agentResult,
+      outputs: mergeTypedArtifactOutputs(
+        plainObject(agentResult.outputs) ? agentResult.outputs : {},
+        transcriptTypedArtifactsFromAgentResult(input, agentResult, config),
+      ),
+    };
+  }
   const bundleValidation = isAgentBundle(input) ? validateAgentRuntimeWorkload(agentResult, config) : validateRuntimeTaskWorkload(agentResult, config);
   const artifactValidation = missingRequiredTypedArtifactDiagnostic(input, agentResult, config);
   const runtimeFailure = agentRuntimeFailureDiagnostic(agentResult);
