@@ -91,6 +91,10 @@ name: Data Machine Agent CI (reusable)
         description: "Include the standard WordPress agent runtime stack: Agents API, Data Machine, and Data Machine Code."
         type: boolean
         default: true
+      runtime_dependencies:
+        description: JSON array or comma-separated OWNER/REPO@REF entries checked out under .ci when include_agent_runtime_dependencies is true. Empty uses this adapter's Data Machine stack defaults.
+        type: string
+        default: ""
       agent_runtime:
         description: Runtime substrate id. Currently only wp-codebox is supported.
         type: string
@@ -143,6 +147,10 @@ name: Data Machine Agent CI (reusable)
         description: JSON array of runtime component contracts forwarded to WP Codebox.
         type: string
         default: "[]"
+      runtime_components:
+        description: JSON object of runtime component paths forwarded to WP Codebox. Values override adapter defaults such as agents_api, data_machine, and data_machine_code.
+        type: string
+        default: "{}"
       success_requires_pr:
         type: boolean
         default: true
@@ -475,6 +483,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
           INCLUDE_AGENT_RUNTIME_DEPENDENCIES: ${{ inputs.include_agent_runtime_dependencies }}
+          RUNTIME_DEPENDENCIES: ${{ inputs.runtime_dependencies }}
           AGENT_RUNTIME: ${{ inputs.agent_runtime }}
           AGENT_RUNTIME_REF: ${{ inputs.agent_runtime_ref }}
           AGENTS_API_REF: ${{ inputs.agents_api_ref }}
@@ -556,6 +565,7 @@ jobs:
           ABILITY_INPUT: ${{ inputs.ability_input }}
           OUTPUT_MAPPINGS: ${{ inputs.output_mappings }}
           COMPONENT_CONTRACTS: ${{ inputs.component_contracts }}
+          RUNTIME_COMPONENTS: ${{ inputs.runtime_components }}
           SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
           SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
           MAX_TURNS: ${{ inputs.max_turns }}

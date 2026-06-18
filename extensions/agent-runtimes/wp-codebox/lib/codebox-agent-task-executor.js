@@ -459,7 +459,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_env: {
       ...firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
       ...homeboyAgentToolContractEnv(),
-      ...datamachineHostToolPolicyEnv(),
+      ...runtimeEnvAliasesFromSourceEnv(runtimeOptions.runtimeEnvAliases),
     },
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
     runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeOptions.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
@@ -514,6 +514,7 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
     providerPluginPaths: providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
     runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, options.runtimeOverlays),
     runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, options.runtime_env),
+    runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, options.runtimeEnvAliases, options.runtime_env_aliases),
     runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, options.runtime_state_mounts),
     runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, options.runtime_config_mounts),
     callbackData: firstDefined(runtimeRequirements.callback_data, runtimeRequirements.callbackData, runtimeProfile.callback_data, runtimeProfile.callbackData, options.callbackData, options.callback_data),
@@ -877,14 +878,23 @@ function homeboyAgentToolContractEnv() {
   ].map((name) => [name, process.env[name]]).filter(([, value]) => typeof value === 'string' && value !== ''));
 }
 
-function datamachineHostToolPolicyEnv() {
-  const policyJson = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
-  if (typeof policyJson !== 'string' || policyJson === '') {
+function runtimeEnvAliasesFromSourceEnv(aliases = {}) {
+  if (!aliases || typeof aliases !== 'object' || Array.isArray(aliases)) {
     return {};
   }
-  return {
-    DATAMACHINE_HOST_TOOL_POLICY_JSON: policyJson,
-  };
+  const env = {};
+  for (const [sourceName, targetNames] of Object.entries(aliases)) {
+    const value = process.env[sourceName];
+    if (typeof value !== 'string' || value === '') {
+      continue;
+    }
+    for (const targetName of normalizeArray(targetNames)) {
+      if (typeof targetName === 'string' && targetName !== '') {
+        env[targetName] = value;
+      }
+    }
+  }
+  return env;
 }
 
 function sandboxToolPolicyFromHomeboyAgentToolPolicy(policy) {
@@ -1117,11 +1127,11 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const discovery = runtimeComponentDiscovery(options);
   const workspaceRoot = resolveWorkspaceRoot(request, config, inputs, settings, options);
   const workspaceBase = workspaceRoot ? path.dirname(workspaceRoot) : process.cwd();
-  const dataMachinePath = firstExistingPath(
+  const agentRuntimePath = firstExistingPath(
     options.agentRuntime,
     ...componentDiscoveryCandidates('agent_runtime', discovery, settings, workspaceBase),
   );
-  const dataMachineCodePath = firstExistingPath(
+  const agentRuntimeToolsPath = firstExistingPath(
     options.agentRuntimeTools,
     ...componentDiscoveryCandidates('agent_runtime_tools', discovery, settings, workspaceBase),
   );
@@ -1135,14 +1145,16 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const agentsApiPath = firstExistingPath(
     options.agentsApi,
-    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase, { agent_runtime: dataMachinePath }),
+    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase, { agent_runtime: agentRuntimePath }),
   );
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
 
   return {
     agentsApi: agentsApiPath,
-    legacyRuntime: dataMachinePath,
-    legacyRuntimeTools: dataMachineCodePath,
+    agentRuntime: agentRuntimePath,
+    agentRuntimeTools: agentRuntimeToolsPath,
+    legacyRuntime: agentRuntimePath,
+    legacyRuntimeTools: agentRuntimeToolsPath,
     providerPluginPaths: defaultProviderPluginPaths(provider, config, options, settings, providerConfig, providerPluginPath),
     provider,
     model,

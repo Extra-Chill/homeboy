@@ -175,5 +175,9 @@ assert.deepEqual(
   adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].ability_requirements,
   datamachineAgentCi.DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS
 );
+assert.deepEqual(
+  adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].runtime_env_aliases,
+  datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_ENV_ALIASES
+);
 
 console.log('runtime agent CI contract smoke passed');

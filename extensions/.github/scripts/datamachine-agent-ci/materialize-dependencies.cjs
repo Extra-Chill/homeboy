@@ -3,7 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { capture, normalizeProviderPlugin, requireRepo, run, splitCsv } = require('./lib/common.cjs');
+const { capture, normalizeProviderPlugin, parseJsonInput, requireRepo, run, splitCsv } = require('./lib/common.cjs');
 const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 function main() {
@@ -28,10 +28,13 @@ function dependencyEntries(env) {
   const runtime = resolveRuntimeProvider(runtimeId, { env });
   const entries = [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }];
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);
+  const runtimeDependencies = runtimeDependencyEntries(env.RUNTIME_DEPENDENCIES || '');
   if (env.INCLUDE_AGENT_RUNTIME_DEPENDENCIES === 'true') {
-    entries.push(`Automattic/agents-api@${env.AGENTS_API_REF || 'main'}`);
-    entries.push(`Extra-Chill/data-machine@${env.DATA_MACHINE_REF || 'main'}`);
-    entries.push(`Extra-Chill/data-machine-code@${env.DATA_MACHINE_CODE_REF || 'main'}`);
+    entries.push(...(runtimeDependencies.length > 0 ? runtimeDependencies : [
+      `Automattic/agents-api@${env.AGENTS_API_REF || 'main'}`,
+      `Extra-Chill/data-machine@${env.DATA_MACHINE_REF || 'main'}`,
+      `Extra-Chill/data-machine-code@${env.DATA_MACHINE_CODE_REF || 'main'}`,
+    ]));
     if ((env.PROVIDER || 'openai') === 'openai' && !providerPlugin.repo) {
       entries.push(`WordPress/ai-provider-for-openai@${env.OPENAI_PROVIDER_REF || 'trunk'}`);
     }
@@ -41,6 +44,16 @@ function dependencyEntries(env) {
   }
   entries.push(...splitCsv(env.VALIDATION_DEPENDENCIES || ''));
   return entries;
+}
+
+function runtimeDependencyEntries(value) {
+  if (!value || String(value).trim() === '') {
+    return [];
+  }
+  if (String(value).trim().startsWith('[')) {
+    return parseJsonInput('runtime_dependencies', value, 'array', []);
+  }
+  return splitCsv(value);
 }
 
 function resolvePlan(entries, offline) {

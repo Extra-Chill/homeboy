@@ -43,6 +43,7 @@ const DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS = {
       'config_path:agent_runtime',
       'config:data_machine',
       'config_path:data_machine',
+      'option:agentRuntime',
       'option:legacyRuntime',
     ],
     agent_runtime_tools: [
@@ -54,6 +55,7 @@ const DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS = {
       'config_path:agent_runtime_tools',
       'config:data_machine_code',
       'config_path:data_machine_code',
+      'option:agentRuntimeTools',
       'option:legacyRuntimeTools',
     ],
   },
@@ -118,6 +120,10 @@ const DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS = [
   'comment_github_pull_request',
 ];
 
+const DATAMACHINE_AGENT_CI_RUNTIME_ENV_ALIASES = {
+  HOMEBOY_AGENT_TOOL_POLICY_JSON: ['DATAMACHINE_HOST_TOOL_POLICY_JSON'],
+};
+
 const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE = {
   schema: 'homeboy/runtime-profile/v1',
   id: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
@@ -127,6 +133,7 @@ const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE = {
   workspace_tools: DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
   capabilities: DATAMACHINE_AGENT_CI_CAPABILITIES,
   ability_requirements: DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS,
+  runtime_env_aliases: DATAMACHINE_AGENT_CI_RUNTIME_ENV_ALIASES,
 };
 
 const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESETS = {
@@ -251,6 +258,7 @@ module.exports = {
   DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS,
   DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  DATAMACHINE_AGENT_CI_RUNTIME_ENV_ALIASES,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESET,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESETS,

@@ -62,6 +62,18 @@ assert.deepEqual(
 );
 assert.ok(dependencyPlan.some((entry) => entry.repo === 'WordPress/ai-provider-for-openai'));
 
+const customRuntimeDependencyPlan = JSON.parse(run('materialize-dependencies.cjs', ['--print-plan'], {
+  VALIDATION_DEPENDENCIES: '',
+  INCLUDE_AGENT_RUNTIME_DEPENDENCIES: 'true',
+  RUNTIME_DEPENDENCIES: '[{"repo":"Example/runtime-core","ref":"stable","target":".ci/runtime-core"}]',
+  AGENT_RUNTIME: 'wp-codebox',
+  AGENT_RUNTIME_REF: 'main',
+  PROVIDER: 'codex',
+  PROVIDER_PLUGIN: '{}',
+}));
+assert.ok(customRuntimeDependencyPlan.some((entry) => entry.repo === 'Example/runtime-core' && entry.target === '.ci/runtime-core'));
+assert.equal(customRuntimeDependencyPlan.some((entry) => entry.repo === 'Extra-Chill/data-machine'), false);
+
 fs.writeFileSync(githubOutput, '');
 run('build-runner-config.cjs', [], {
   GITHUB_OUTPUT: githubOutput,
