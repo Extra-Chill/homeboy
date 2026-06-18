@@ -118,6 +118,7 @@
       ]
     },
     "convention_exception_globs": [
+      "src/commands/adapter.rs",
       "src/core/code_audit/detectors/test_coverage.rs",
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"

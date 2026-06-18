@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
-    CommandRawOutputMode, CommandResponseMode,
+    CommandResponseMode,
 };
 
 use super::GlobalArgs;
@@ -35,7 +35,7 @@ pub(crate) struct CommandAdapterContract {
 }
 
 impl CommandAdapterContract {
-    pub fn to_output_descriptor(self) -> CommandOutputDescriptor {
+    fn to_output_descriptor(self) -> CommandOutputDescriptor {
         CommandOutputDescriptor {
             response_mode: self.response_mode,
             output_file_mode: self.output_file_mode,
@@ -72,25 +72,6 @@ impl<Args> TypedCommandAdapter<Args> {
             execute_json: Some(execute_json),
         }
     }
-
-    #[allow(dead_code)]
-    pub fn raw_only(
-        raw_mode: CommandRawOutputMode,
-        json_family: CommandJsonFamily,
-        output_file_mode: CommandOutputFileMode,
-        output_contract: CommandOutputContractKind,
-    ) -> Self {
-        Self {
-            contract: CommandAdapterContract {
-                response_mode: CommandResponseMode::Raw(raw_mode),
-                output_file_mode,
-                json_family,
-                output_contract,
-                lab_runner: CommandLabRunnerPolicy::LOCAL,
-            },
-            execute_json: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -115,27 +96,5 @@ mod tests {
         );
         assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
         assert!(adapter.execute_json.is_some());
-    }
-
-    #[test]
-    fn raw_contract_can_express_supported_raw_modes() {
-        for raw_mode in [
-            CommandRawOutputMode::Markdown,
-            CommandRawOutputMode::PlainText,
-            CommandRawOutputMode::InteractivePassthrough,
-        ] {
-            let adapter = TypedCommandAdapter::<()>::raw_only(
-                raw_mode,
-                CommandJsonFamily::RawOnly,
-                CommandOutputFileMode::None,
-                CommandOutputContractKind::RawOnly,
-            );
-
-            assert_eq!(
-                adapter.output_descriptor().response_mode,
-                CommandResponseMode::Raw(raw_mode)
-            );
-            assert!(adapter.execute_json.is_none());
-        }
     }
 }
