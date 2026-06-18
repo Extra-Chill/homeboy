@@ -14,7 +14,11 @@ use super::planning_semver::{
     validate_current_version_tag_reachable, validate_release_version_floor,
 };
 use super::planning_worktree::validate_release_worktree;
-use super::types::{ReleaseOptions, ReleasePlan};
+use super::types::{
+    ReleaseChangelogPlan, ReleaseOptions, ReleasePlan, ReleaseSemverRecommendation,
+};
+
+const OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD: usize = 50;
 
 /// Plan a release: run all preflight validations, then return a description
 /// of the steps the executor will run. Used by `--dry-run` to preview work
@@ -149,6 +153,11 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     let mut warnings = Vec::new();
     let mut hints = Vec::new();
     let changelog_plan = build_changelog_plan(&component, options, pending_entries)?;
+    if let Some(warning) =
+        oversized_patch_release_warning(semver_recommendation.as_ref(), &changelog_plan)
+    {
+        warnings.push(warning);
+    }
 
     let mut steps = build_preflight_steps(options, semver_recommendation.as_ref(), &extensions);
     steps.extend(build_release_steps(
@@ -177,10 +186,36 @@ pub fn plan(component_id: &str, options: &ReleaseOptions) -> Result<ReleasePlan>
     ))
 }
 
+fn oversized_patch_release_warning(
+    semver_recommendation: Option<&ReleaseSemverRecommendation>,
+    changelog_plan: &ReleaseChangelogPlan,
+) -> Option<String> {
+    let semver_recommendation = semver_recommendation?;
+    if semver_recommendation.requested_bump != "patch" {
+        return None;
+    }
+
+    let commit_count = semver_recommendation.commits.len();
+    let changelog_entry_count = changelog_plan.entry_count;
+    if commit_count < OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD
+        && changelog_entry_count < OVERSIZED_PATCH_RELEASE_ITEM_THRESHOLD
+    {
+        return None;
+    }
+
+    Some(format!(
+        "Patch release range is large ({} commits, {} changelog entries). Consider `--bump minor` for release-train-sized changes, or confirm the patch scope before releasing.",
+        commit_count, changelog_entry_count
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::plan;
-    use crate::core::release::types::ReleaseOptions;
+    use super::{oversized_patch_release_warning, plan};
+    use crate::core::release::types::{
+        ReleaseChangelogPlan, ReleaseOptions, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn test_plan() {
@@ -242,5 +277,69 @@ mod tests {
             joined.contains("Cargo.lock"),
             "dirty file list must reach the JSON envelope, got: {joined}"
         );
+    }
+
+    #[test]
+    fn oversized_patch_release_warning_reports_large_patch_scope() {
+        let warning = oversized_patch_release_warning(
+            Some(&semver_recommendation("patch", 206)),
+            &changelog_plan(206),
+        )
+        .expect("large patch release should warn");
+
+        assert!(warning.contains("Patch release range is large"));
+        assert!(warning.contains("206 commits"));
+        assert!(warning.contains("206 changelog entries"));
+        assert!(warning.contains("--bump minor"));
+    }
+
+    #[test]
+    fn oversized_patch_release_warning_is_quiet_for_small_patch_scope() {
+        let warning = oversized_patch_release_warning(
+            Some(&semver_recommendation("patch", 3)),
+            &changelog_plan(3),
+        );
+
+        assert!(warning.is_none());
+    }
+
+    fn semver_recommendation(
+        requested_bump: &str,
+        commit_count: usize,
+    ) -> ReleaseSemverRecommendation {
+        ReleaseSemverRecommendation {
+            latest_tag: Some("v1.2.3".to_string()),
+            range: "v1.2.3..HEAD".to_string(),
+            commits: (0..commit_count)
+                .map(|index| ReleaseSemverCommit {
+                    sha: format!("{index:08x}"),
+                    subject: format!("fix: change {index}"),
+                    commit_type: "fix".to_string(),
+                    breaking: false,
+                })
+                .collect(),
+            recommended_bump: Some("patch".to_string()),
+            requested_bump: requested_bump.to_string(),
+            is_underbump: false,
+            reasons: Vec::new(),
+        }
+    }
+
+    fn changelog_plan(entry_count: usize) -> ReleaseChangelogPlan {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "fixed".to_string(),
+            (0..entry_count)
+                .map(|index| format!("change {index}"))
+                .collect(),
+        );
+
+        ReleaseChangelogPlan {
+            policy: "generated".to_string(),
+            path: "CHANGELOG.md".to_string(),
+            dry_run: true,
+            entries,
+            entry_count,
+        }
     }
 }
