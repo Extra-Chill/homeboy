@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -665,19 +667,66 @@ pub struct AgentTaskResourceBudgetStatus {
     pub per_model_task_units: HashMap<String, u32>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct AgentTaskCancellationToken {
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    inner: Arc<AgentTaskCancellationInner>,
+}
+
+struct AgentTaskCancellationInner {
+    cancelled: AtomicBool,
+    callbacks: Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl Default for AgentTaskCancellationToken {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(AgentTaskCancellationInner {
+                cancelled: AtomicBool::new(false),
+                callbacks: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for AgentTaskCancellationToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentTaskCancellationToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentTaskCancellationToken {
     pub fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.inner.cancelled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let callbacks = self
+            .inner
+            .callbacks
+            .lock()
+            .expect("cancellation callbacks")
+            .clone();
+        for callback in callbacks {
+            callback();
+        }
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn on_cancel(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        let mut callbacks = self.inner.callbacks.lock().expect("cancellation callbacks");
+        if self.is_cancelled() {
+            drop(callbacks);
+            callback();
+            return;
+        }
+
+        callbacks.push(callback);
     }
 }
 
