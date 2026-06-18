@@ -106,8 +106,9 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
 
 function resolveRuntimeAgentCiRuntimeProfile(options = {}) {
   const runtimeProfiles = options.runtimeProfiles || options.runtime_profiles || options.config?.runtime_profiles || options.config?.runtimeProfiles || {};
+  const runtimeProfilePresets = options.runtimeProfilePresets || options.runtime_profile_presets || options.config?.runtime_profile_presets || options.config?.runtimeProfilePresets || {};
   const requestedProfile = options.runtimeProfile || options.runtime_profile || options.config?.runtime_profile || options.config?.runtimeProfile || RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID;
-  const profile = runtimeProfiles[requestedProfile] || options.runtimeProfileConfig || options.runtime_profile_config;
+  const profile = runtimeProfiles[requestedProfile] || runtimeProfilePresets[requestedProfile] || options.runtimeProfileConfig || options.runtime_profile_config;
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
     throw new Error(`runtime profile ${requestedProfile} is not configured.`);
   }
@@ -123,13 +124,15 @@ function resolveRuntimeAgentCiRuntimeProfile(options = {}) {
   };
 }
 
-function runtimeProfilesForOptions(options, runtimeProfile) {
+function runtimeAgentCiRuntimeProfilesForOptions(options, runtimeProfile) {
   return {
     ...(options.config?.runtime_profiles || options.config?.runtimeProfiles || {}),
     ...(options.runtimeProfiles || options.runtime_profiles || {}),
     [runtimeProfile.id]: runtimeProfile,
   };
 }
+
+const runtimeProfilesForOptions = runtimeAgentCiRuntimeProfilesForOptions;
 
 function runtimeAgentCiPlan(options = {}) {
   const planId = requiredString(options.planId || options.plan_id, 'planId');
@@ -176,6 +179,7 @@ module.exports = {
   runtimeAgentCiPlan,
   runtimeAgentCiRunnerSpec,
   runtimeAgentCiRuntimeTaskRequest,
+  runtimeAgentCiRuntimeProfilesForOptions,
   runtimeAgentCiTaskExecutorConfig,
   resolveRuntimeAgentCiRuntimeProfile,
   validateAgentTaskRunnerSpec,

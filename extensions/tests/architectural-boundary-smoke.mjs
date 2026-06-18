@@ -23,7 +23,6 @@ const scannedFiles = [
 const allowedTransitionalAdapters = [
   /^datamachine-agent-ci\//,
   /^wordpress\/lib\/datamachine-agent-ci(?:-|$)/,
-  /^agent-runtimes\/wp-codebox\//,
 ];
 
 function isAllowedTransitionalAdapter(relativePath) {
