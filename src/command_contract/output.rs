@@ -422,7 +422,8 @@ fn registered_json_envelope_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_surface::{current_command_surface, Cli, Commands};
+    use crate::cli_surface::{Cli, Commands};
+    use clap::CommandFactory;
     use clap::Parser;
     use std::collections::BTreeSet;
 
@@ -489,18 +490,17 @@ mod tests {
     }
 
     #[test]
-    fn command_registry_covers_visible_top_level_surface() {
-        let surface_names = current_command_surface()
-            .commands
-            .into_iter()
-            .map(|entry| entry.name)
+    fn command_registry_covers_top_level_parser_surface() {
+        let parser_names = Cli::command()
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
             .collect::<BTreeSet<_>>();
         let registry_names = COMMAND_REGISTRY
             .iter()
             .map(|entry| entry.name.to_string())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(registry_names, surface_names);
+        assert_eq!(registry_names, parser_names);
     }
 
     #[test]
