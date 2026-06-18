@@ -17,7 +17,7 @@ pub(super) fn lab_runner_capability_contract(
         push_unique(&mut required_tools, *tool);
     }
 
-    if command.infer_source_path_tools {
+    if command.routing_policy.infer_source_path_tools {
         if source_path.join(concat!("package", ".json")).is_file() {
             push_node_package_tool(&mut required_tools, RunnerRequiredTool::Npm);
         }

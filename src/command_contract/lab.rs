@@ -16,16 +16,18 @@ use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LabCommandContract {
-    pub hot_label: &'static str,
-    pub portability: LabCommandPortability,
+/// Routing-policy flags shared by every Lab command representation
+/// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
+/// booleans travel together as one cohesive policy as a command is resolved
+/// from its contract into a route plan and finally an offload command, so they
+/// live in a single embedded struct rather than being duplicated field-by-field
+/// across the three layers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabRoutingPolicy {
+    /// Whether the command offloads to a default Lab runner without an explicit
+    /// `--runner` selection.
     pub default_lab_offload: bool,
-    pub source_path_mode: LabSourcePathMode,
-    pub workspace_mode_policy: LabWorkspaceModePolicy,
-    pub mutation_flag: Option<&'static str>,
-    pub requires_extension_parity: bool,
-    pub extra_required_tools: &'static [LabCommandRequiredTool],
+    /// Whether source-path tool inference applies to this command.
     pub infer_source_path_tools: bool,
     /// Whether this command is a release gate whose routing fidelity matters
     /// for validating a release (lint/test/audit). When true, force-local
@@ -33,6 +35,21 @@ pub struct LabCommandContract {
     /// `/release_gate/local_hot` policy if a default Lab runner is configured.
     /// See issues #4603 / #4605.
     pub release_gate: bool,
+    /// Whether the command requires extension parity between controller and
+    /// runner before offloading.
+    pub requires_extension_parity: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabCommandContract {
+    pub hot_label: &'static str,
+    pub portability: LabCommandPortability,
+    pub source_path_mode: LabSourcePathMode,
+    pub workspace_mode_policy: LabWorkspaceModePolicy,
+    pub mutation_flag: Option<&'static str>,
+    pub extra_required_tools: &'static [LabCommandRequiredTool],
+    /// Routing-policy flags shared across the Lab command layers.
+    pub routing_policy: LabRoutingPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,14 +342,16 @@ impl LabCommandContract {
         Self {
             hot_label,
             portability: LabCommandPortability::Portable,
-            default_lab_offload: true,
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             mutation_flag,
-            requires_extension_parity,
             extra_required_tools,
-            infer_source_path_tools: true,
-            release_gate: false,
+            routing_policy: LabRoutingPolicy {
+                default_lab_offload: true,
+                infer_source_path_tools: true,
+                release_gate: false,
+                requires_extension_parity,
+            },
         }
     }
 
@@ -342,14 +361,18 @@ impl LabCommandContract {
         requires_extension_parity: bool,
         extra_required_tools: &'static [LabCommandRequiredTool],
     ) -> Self {
+        let base = Self::portable(
+            hot_label,
+            mutation_flag,
+            requires_extension_parity,
+            extra_required_tools,
+        );
         Self {
-            infer_source_path_tools: false,
-            ..Self::portable(
-                hot_label,
-                mutation_flag,
-                requires_extension_parity,
-                extra_required_tools,
-            )
+            routing_policy: LabRoutingPolicy {
+                infer_source_path_tools: false,
+                ..base.routing_policy
+            },
+            ..base
         }
     }
 
@@ -359,14 +382,18 @@ impl LabCommandContract {
         requires_extension_parity: bool,
         extra_required_tools: &'static [LabCommandRequiredTool],
     ) -> Self {
+        let base = Self::portable_workload(
+            hot_label,
+            mutation_flag,
+            requires_extension_parity,
+            extra_required_tools,
+        );
         Self {
-            default_lab_offload: false,
-            ..Self::portable_workload(
-                hot_label,
-                mutation_flag,
-                requires_extension_parity,
-                extra_required_tools,
-            )
+            routing_policy: LabRoutingPolicy {
+                default_lab_offload: false,
+                ..base.routing_policy
+            },
+            ..base
         }
     }
 
@@ -374,14 +401,16 @@ impl LabCommandContract {
         Self {
             hot_label,
             portability: LabCommandPortability::LocalOnly(reason),
-            default_lab_offload: false,
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
             mutation_flag: None,
-            requires_extension_parity: false,
             extra_required_tools: LAB_NO_EXTRA_TOOLS,
-            infer_source_path_tools: false,
-            release_gate: false,
+            routing_policy: LabRoutingPolicy {
+                default_lab_offload: false,
+                infer_source_path_tools: false,
+                release_gate: false,
+                requires_extension_parity: false,
+            },
         }
     }
 
@@ -389,7 +418,7 @@ impl LabCommandContract {
     /// `/release_gate/local_hot` policy applies to force-local bypass and
     /// stale-runner local fallback when a default Lab runner is configured.
     pub(crate) const fn release_gate(mut self) -> Self {
-        self.release_gate = true;
+        self.routing_policy.release_gate = true;
         self
     }
 }
@@ -417,7 +446,7 @@ impl Commands {
         let Some(contract) = self.lab_contract() else {
             return Ok(Vec::new());
         };
-        if !contract.requires_extension_parity {
+        if !contract.routing_policy.requires_extension_parity {
             return Ok(Vec::new());
         }
 
@@ -782,8 +811,8 @@ mod tests {
             .lab_contract()
             .expect("trace contract");
         assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
-        assert!(!trace.requires_extension_parity);
-        assert!(!trace.infer_source_path_tools);
+        assert!(!trace.routing_policy.requires_extension_parity);
+        assert!(!trace.routing_policy.infer_source_path_tools);
         assert_eq!(
             trace.workspace_mode_policy,
             LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
@@ -810,19 +839,19 @@ mod tests {
         let lint = parsed_command(&["homeboy", "lint"])
             .lab_contract()
             .expect("lint contract");
-        assert!(lint.requires_extension_parity);
-        assert!(lint.infer_source_path_tools);
-        assert!(lint.release_gate);
+        assert!(lint.routing_policy.requires_extension_parity);
+        assert!(lint.routing_policy.infer_source_path_tools);
+        assert!(lint.routing_policy.release_gate);
 
         let test_full = parsed_command(&["homeboy", "test"])
             .lab_contract()
             .expect("test contract");
-        assert!(test_full.release_gate);
+        assert!(test_full.routing_policy.release_gate);
 
         let audit_full = parsed_command(&["homeboy", "audit"])
             .lab_contract()
             .expect("audit contract");
-        assert!(audit_full.release_gate);
+        assert!(audit_full.routing_policy.release_gate);
 
         // Changed-scope/local-only variants and non-gate commands are NOT
         // release gates.
@@ -830,24 +859,28 @@ mod tests {
             !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
                 .lab_contract()
                 .expect("changed-scope lint contract")
+                .routing_policy
                 .release_gate
         );
         assert!(
             !parsed_command(&["homeboy", "bench"])
                 .lab_contract()
                 .expect("bench contract")
+                .routing_policy
                 .release_gate
         );
         assert!(
             !parsed_command(&["homeboy", "trace"])
                 .lab_contract()
                 .expect("trace contract")
+                .routing_policy
                 .release_gate
         );
         assert!(
             !parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
                 .lab_contract()
                 .expect("agent-task contract")
+                .routing_policy
                 .release_gate
         );
 
@@ -865,7 +898,7 @@ mod tests {
                 contract.workspace_mode_policy,
                 LabWorkspaceModePolicy::RunnerResident
             );
-            assert!(!contract.default_lab_offload);
+            assert!(!contract.routing_policy.default_lab_offload);
         }
 
         let auth_status = parsed_command(&[
@@ -878,9 +911,9 @@ mod tests {
         ])
         .lab_contract()
         .expect("agent-task auth status contract");
-        assert!(!auth_status.default_lab_offload);
-        assert!(!auth_status.requires_extension_parity);
-        assert!(!auth_status.infer_source_path_tools);
+        assert!(!auth_status.routing_policy.default_lab_offload);
+        assert!(!auth_status.routing_policy.requires_extension_parity);
+        assert!(!auth_status.routing_policy.infer_source_path_tools);
 
         let tunnel_service_start = parsed_command(&[
             "homeboy",
@@ -903,8 +936,8 @@ mod tests {
             tunnel_service_start.workspace_mode_policy,
             LabWorkspaceModePolicy::RunnerResident
         );
-        assert!(!tunnel_service_start.default_lab_offload);
-        assert!(!tunnel_service_start.infer_source_path_tools);
+        assert!(!tunnel_service_start.routing_policy.default_lab_offload);
+        assert!(!tunnel_service_start.routing_policy.infer_source_path_tools);
 
         let tunnel_service_expose = parsed_command(&[
             "homeboy",
@@ -931,8 +964,8 @@ mod tests {
             tunnel_service_expose.workspace_mode_policy,
             LabWorkspaceModePolicy::RunnerResident
         );
-        assert!(!tunnel_service_expose.default_lab_offload);
-        assert!(!tunnel_service_expose.infer_source_path_tools);
+        assert!(!tunnel_service_expose.routing_policy.default_lab_offload);
+        assert!(!tunnel_service_expose.routing_policy.infer_source_path_tools);
 
         let rig = parsed_command(&["homeboy", "rig", "up", "studio"])
             .lab_contract()

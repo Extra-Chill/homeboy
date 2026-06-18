@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.239.1] - 2026-06-18
+
+### Changed
+- resolve audit findings — dedup + remote-exec preflight (#5089, #5091, #5092, #5093)
+- dedupe repeated field patterns + fix runs corpus test (#5090, #5088)
+
+### Fixed
+- expose bench settings to prepare commands
+- exclude agnostic-registry files from core-agnostic-source policy (#5095)
+
 ## [0.239.0] - 2026-06-18
 
 ### Added

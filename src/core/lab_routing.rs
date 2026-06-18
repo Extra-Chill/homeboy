@@ -56,7 +56,6 @@ pub fn lab_offload_command_from_contract(
     runners::LabOffloadCommand {
         hot_label: contract.hot_label,
         portable: matches!(plan.portability, CommandPortability::Portable),
-        default_lab_offload: plan.default_lab_offload,
         unsupported_reason: match contract.portability {
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
@@ -85,11 +84,9 @@ pub fn lab_offload_command_from_contract(
                 runners::LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot
             }
         },
-        requires_extension_parity: plan.requires_extension_parity,
         required_extensions: plan.required_extensions,
         requires_playwright: plan.requires_playwright,
-        infer_source_path_tools: plan.infer_source_path_tools,
-        release_gate: plan.release_gate,
+        routing_policy: plan.routing_policy,
     }
 }
 
@@ -103,7 +100,7 @@ pub fn lab_route_plan_from_contract(
             LabRoutePlan::local_only(contract.hot_label, reason)
         }
     };
-    plan.default_lab_offload = contract.default_lab_offload;
+    plan.routing_policy = contract.routing_policy;
     plan.source_policy = match contract.source_path_mode {
         LabSourcePathMode::CwdOrPathFlag => CommandSourcePolicy::ControllerCwdOrExplicitPath,
         LabSourcePathMode::RunnerResident => CommandSourcePolicy::RunnerResident,
@@ -116,14 +113,11 @@ pub fn lab_route_plan_from_contract(
         LabWorkspaceModePolicy::GitCheckoutRequired => CommandWorkspacePolicy::GitCheckoutRequired,
         LabWorkspaceModePolicy::RunnerResident => CommandWorkspacePolicy::RunnerResident,
     };
-    plan.requires_extension_parity = contract.requires_extension_parity;
     plan.required_extensions = required_extensions;
     plan.requires_playwright = contract
         .extra_required_tools
         .iter()
         .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright));
-    plan.infer_source_path_tools = contract.infer_source_path_tools;
-    plan.release_gate = contract.release_gate;
     plan
 }
 
@@ -199,7 +193,8 @@ fn execute_lab_offload_with_timeout(
 mod tests {
     use super::*;
     use crate::command_contract::{
-        LabCommandContract, LabCommandPortability, LabSourcePathMode, LAB_TRACE_EXTRA_TOOLS,
+        LabCommandContract, LabCommandPortability, LabRoutingPolicy, LabSourcePathMode,
+        LAB_TRACE_EXTRA_TOOLS,
     };
     use crate::core::command_execution_plan::{
         CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
@@ -241,14 +236,16 @@ mod tests {
         LabCommandContract {
             hot_label: "trace",
             portability: LabCommandPortability::Portable,
-            default_lab_offload: true,
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::GitCheckoutRequired,
             mutation_flag: Some("--keep-overlay"),
-            requires_extension_parity: true,
             extra_required_tools: LAB_TRACE_EXTRA_TOOLS,
-            infer_source_path_tools: false,
-            release_gate: false,
+            routing_policy: LabRoutingPolicy {
+                default_lab_offload: true,
+                infer_source_path_tools: false,
+                release_gate: false,
+                requires_extension_parity: true,
+            },
         }
     }
 
@@ -261,16 +258,16 @@ mod tests {
 
         assert_eq!(command.hot_label, "trace");
         assert!(command.portable);
-        assert!(command.default_lab_offload);
+        assert!(command.routing_policy.default_lab_offload);
         assert_eq!(command.unsupported_reason, None);
         assert_eq!(
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
         );
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
         assert_eq!(command.required_extensions, vec!["wordpress", "playwright"]);
         assert!(command.requires_playwright);
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]
@@ -291,8 +288,8 @@ mod tests {
             plan.workspace_policy,
             CommandWorkspacePolicy::GitCheckoutRequired
         );
-        assert!(plan.default_lab_offload);
-        assert!(plan.requires_extension_parity);
+        assert!(plan.routing_policy.default_lab_offload);
+        assert!(plan.routing_policy.requires_extension_parity);
         assert_eq!(plan.required_extensions, vec!["wordpress", "playwright"]);
         assert!(plan.requires_playwright);
     }

@@ -12,7 +12,7 @@ use crate::core::execution_contract::{
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
 
-use super::execution::{canonical_daemon_body, daemon_api_get};
+use super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
 use super::{load, Runner};
 
 pub fn is_remote_runner_artifact_path(path: &str) -> bool {
@@ -300,14 +300,6 @@ fn fetch_daemon_events(runner_id: &str, job_id: &str) -> Result<Vec<JobEvent>> {
     serde_json::from_value(body["events"].clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
     })
-}
-
-fn result_event_data(events: &[JobEvent]) -> Option<Value> {
-    events
-        .iter()
-        .rev()
-        .find(|event| matches!(event.kind, crate::core::api_jobs::JobEventKind::Result))
-        .and_then(|event| event.data.clone())
 }
 
 fn mirrored_patch_result(
