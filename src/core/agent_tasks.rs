@@ -107,8 +107,8 @@ pub use super::agent_task_loop_controller::{
     AgentTaskLoopControllerState, AgentTaskLoopTaskLineage,
 };
 pub use super::agent_task_loop_definition::{
-    compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
-    AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+    compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
+    AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
 };
 
 // Secret-env status type is referenced from review/dispatch commands.
@@ -235,8 +235,8 @@ pub mod loop_controller {
 /// Declarative loop definitions compiled into scheduler plans.
 pub mod loop_definition {
     pub use super::super::agent_task_loop_definition::{
-        compile_loop_definition, AgentTaskLoopDefinition, AgentTaskLoopDefinitionTask,
-        AGENT_TASK_LOOP_DEFINITION_SCHEMA,
+        compile_loop_definition, compile_loop_spec_value, AgentTaskLoopDefinition,
+        AgentTaskLoopDefinitionTask, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
     };
 }
 
