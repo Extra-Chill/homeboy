@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.6] - 2026-06-18
+
+### Fixed
+- aggregate host-smoke failures instead of failing one per run (#4682)
+
 ## [3.7.5] - 2026-06-18
 
 ### Fixed
