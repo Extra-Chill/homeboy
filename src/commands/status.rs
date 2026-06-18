@@ -305,7 +305,8 @@ fn summarize_components(
             fetch_origin_tags(&comp.local_path);
 
             if include_upstream_drift {
-                if let Some(drift) = get_upstream_drift_for(&comp.local_path, &comp.id) {
+                if let Some(mut drift) = get_upstream_drift(&comp.local_path) {
+                    drift.component_id = comp.id.clone();
                     if drift.is_behind() {
                         behind_upstream.push(comp.id.clone());
                     }
@@ -642,12 +643,6 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
 /// Like `fetch_upstream_drift` but sets the component ID in the result.
 fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
     let mut drift = fetch_upstream_drift(path)?;
-    drift.component_id = id.to_string();
-    Some(drift)
-}
-
-fn get_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
-    let mut drift = get_upstream_drift(path)?;
     drift.component_id = id.to_string();
     Some(drift)
 }
