@@ -68,6 +68,9 @@ pub enum Commands {
     /// Run performance benchmarks for a component
     Bench(bench::BenchArgs),
     /// Capture black-box behavioral traces for a component
+    #[command(
+        after_help = "Command-shaped trace modes:\n  homeboy trace list --profiles\n  homeboy trace <component> list\n  homeboy trace compare before.json after.json\n  homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>\n  homeboy trace matrix <component> <scenario> --axis name=value1,value2\n  homeboy trace compare-variant --rig <rig-id> --scenario <scenario>\n  homeboy trace compare-bundle --component <component> --scenario <scenario>\n  homeboy trace overlay-locks --stale"
+    )]
     Trace(trace::TraceArgs),
     /// Passively observe a running system and persist timeline evidence
     Observe(observe::ObserveArgs),
@@ -161,7 +164,8 @@ pub enum Commands {
     Http(http::HttpArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
-    /// List available commands (alias for --help)
+    /// List available commands (deprecated alias for --help)
+    #[command(hide = true)]
     List,
 }
 
