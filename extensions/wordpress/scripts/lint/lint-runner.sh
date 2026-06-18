@@ -117,8 +117,14 @@ merge_findings_into_sidecar() {
         return $?
     fi
 
-    echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write lint findings" >&2
-    return 1
+    # The findings sidecar is Homeboy observability output, not a lint result.
+    # If the sidecar writer is unavailable (e.g. a standalone run that did not
+    # export HOMEBOY_RUNTIME_SIDECAR_WRITER), skip writing it rather than
+    # failing the lint step — a missing writer must never masquerade as a lint
+    # finding (homeboy-extensions#1402). The real pass/fail signal comes from
+    # phpcs/eslint/phpstan exit codes below.
+    echo "Warning: sidecar writer unavailable (HOMEBOY_RUNTIME_SIDECAR_WRITER unset); skipping lint findings sidecar" >&2
+    return 0
 }
 
 write_lint_producers_sidecar() {
@@ -796,12 +802,12 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         echo "============================================"
     fi
 
-    # Write annotations sidecar JSON for CI inline comments
-    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ]; then
-        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
-            exit 1
-        fi
+    # Write annotations sidecar JSON for CI inline comments. Annotations are
+    # Homeboy observability output, not a lint result — if the sidecar writer is
+    # unavailable (standalone run without HOMEBOY_RUNTIME_SIDECAR_WRITER), skip
+    # writing them rather than failing the lint step. A missing writer must
+    # never masquerade as a lint finding (homeboy-extensions#1402).
+    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && type homeboy_sidecar_merge >/dev/null 2>&1; then
         _PHPCS_ANNOTATIONS_TMPFILE=$(homeboy_mktemp 'phpcs-annotations.XXXXXX')
         echo "$json_output" | php -r '
             ini_set("memory_limit", "-1");
@@ -916,7 +922,9 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
         ' "$PLUGIN_PATH" "$_PHPCS_FINDINGS_TMPFILE" 2>/dev/null || true
-        merge_findings_into_sidecar "$_PHPCS_FINDINGS_TMPFILE" || exit 1
+        # Writing the findings sidecar is best-effort observability; never let a
+        # sidecar-writer failure fail the lint gate (homeboy-extensions#1402).
+        merge_findings_into_sidecar "$_PHPCS_FINDINGS_TMPFILE" || true
         rm -f "$_PHPCS_FINDINGS_TMPFILE"
     fi
 fi

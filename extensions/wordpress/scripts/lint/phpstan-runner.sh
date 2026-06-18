@@ -187,8 +187,11 @@ write_phpstan_findings_sidecar() {
     [ ! -s "$source" ] && return 0
 
     if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write PHPStan lint findings" >&2
-        return 1
+        # The findings sidecar is Homeboy observability output, not a result.
+        # Skip writing it when the writer is unavailable rather than failing the
+        # static-analysis step (homeboy-extensions#1402).
+        echo "Warning: sidecar writer unavailable; skipping PHPStan lint findings sidecar" >&2
+        return 0
     fi
 
     rm -f "$target"
@@ -999,12 +1002,12 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         fi
     fi
 
-    # Write annotations sidecar JSON for CI inline comments
-    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && [ -n "$json_output" ]; then
-        if ! type homeboy_sidecar_merge >/dev/null 2>&1; then
-            echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write annotations" >&2
-            exit 1
-        fi
+    # Write annotations sidecar JSON for CI inline comments. Annotations are
+    # Homeboy observability output, not a lint result — if the sidecar writer is
+    # unavailable, skip writing them rather than failing the static-analysis
+    # step. A missing writer must never masquerade as a finding
+    # (homeboy-extensions#1402).
+    if [ -n "${HOMEBOY_ANNOTATIONS_DIR:-}" ] && [ -d "${HOMEBOY_ANNOTATIONS_DIR}" ] && [ -n "$json_output" ] && type homeboy_sidecar_merge >/dev/null 2>&1; then
         _PHPSTAN_ANNOTATIONS_TMPFILE=$(homeboy_mktemp 'phpstan-annotations.XXXXXX')
         echo "$json_output" | php -r '
             $json = json_decode(file_get_contents("php://stdin"), true);
@@ -1088,7 +1091,8 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
             }
             file_put_contents($argv[2], json_encode($findings, JSON_UNESCAPED_SLASHES) . "\n");
         ' "$PLUGIN_PATH" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" 2>/dev/null || true
-        write_phpstan_findings_sidecar "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" || exit 1
+        # Best-effort observability; never fail the gate on a sidecar write.
+        write_phpstan_findings_sidecar "${_HOMEBOY_PHPSTAN_FINDINGS_FILE}" "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}" || true
         rm -f "${_PHPSTAN_FINDINGS_OUTPUT_TMPFILE}"
     fi
 

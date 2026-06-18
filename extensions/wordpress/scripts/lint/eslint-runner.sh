@@ -22,10 +22,11 @@ fi
 # Resolve execution context (shared helper)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"
-# Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
-# fall back to the co-located direct-invocation copy so the sidecar writer is
-# available outside a release run (homeboy-extensions#1415).
-SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:?HOMEBOY_RUNTIME_SIDECAR_WRITER is required}"
+# Homeboy core provides the sidecar writer via HOMEBOY_RUNTIME_SIDECAR_WRITER.
+# When it is genuinely unavailable, the findings/annotation sidecar writes
+# below degrade to no-ops — they are observability output, not lint results, so
+# they must never fail the lint gate (homeboy-extensions#1402).
+SIDECAR_WRITER_HELPER="${HOMEBOY_RUNTIME_SIDECAR_WRITER:-}"
 # shellcheck source=../lib/resolve-context.sh
 source "${RESOLVE_CONTEXT_HELPER}"
 homeboy_resolve_context --component-alias PLUGIN_PATH
@@ -42,8 +43,11 @@ write_eslint_findings_sidecar() {
     [ ! -s "$source" ] && return 0
 
     if ! type homeboy_sidecar_merge_json_array >/dev/null 2>&1; then
-        echo "Error: HOMEBOY_RUNTIME_SIDECAR_WRITER is required to write ESLint lint findings" >&2
-        return 1
+        # The findings sidecar is Homeboy observability output, not a result.
+        # Skip writing it when the writer is unavailable rather than failing the
+        # lint step (homeboy-extensions#1402).
+        echo "Warning: sidecar writer unavailable; skipping ESLint lint findings sidecar" >&2
+        return 0
     fi
 
     rm -f "$target"
@@ -255,7 +259,8 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
         }
         fs.writeFileSync(outputFile, JSON.stringify(findings) + "\n");
     ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_TMPFILE" 2>/dev/null || true
-    write_eslint_findings_sidecar "$ESLINT_FINDINGS_FILE" "$ESLINT_FINDINGS_TMPFILE" || exit 1
+    # Best-effort observability; never fail the gate on a sidecar write.
+    write_eslint_findings_sidecar "$ESLINT_FINDINGS_FILE" "$ESLINT_FINDINGS_TMPFILE" || true
     rm -f "$ESLINT_FINDINGS_TMPFILE"
 fi
 
