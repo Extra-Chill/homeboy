@@ -56,6 +56,7 @@ mod types {
         pub unpushed_commits: u32,
         pub primary_checkout: bool,
         pub path_contained: bool,
+        pub worktree_missing: bool,
         pub safe: bool,
         pub reasons: Vec<String>,
     }
@@ -133,8 +134,12 @@ pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
 
 pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
+    cleanup_with_store(force, &store)
+}
+
+fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
     let mut candidates = Vec::new();
-    for record in list_with_store(&store)?.worktrees {
+    for record in list_with_store(store)?.worktrees {
         if record.state != TaskWorktreeState::Active {
             continue;
         }
@@ -146,7 +151,7 @@ pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
                 id: record.id,
                 force,
             },
-            &store,
+            store,
         )?);
     }
     Ok(WorktreeCleanupOutput { candidates })
@@ -285,11 +290,13 @@ fn remove_with_store(
         ));
     }
 
-    git::run_git(
-        Path::new(&record.source_checkout),
-        &["worktree", "remove", &record.worktree_path],
-        "git worktree remove",
-    )?;
+    if !safety.worktree_missing {
+        git::run_git(
+            Path::new(&record.source_checkout),
+            &["worktree", "remove", &record.worktree_path],
+            "git worktree remove",
+        )?;
+    }
     record.state = TaskWorktreeState::Removed;
     write_record(store_dir, &record)?;
     Ok(WorktreeRemoveOutput {
@@ -301,17 +308,34 @@ fn remove_with_store(
 
 fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
     let source = canonical_existing_path(&record.source_checkout)?;
-    let worktree = canonical_existing_path(&record.worktree_path)?;
     let parent = source.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
             "source checkout has no parent: {}",
             source.display()
         ))
     })?;
+    let raw_worktree = Path::new(&record.worktree_path);
+    let worktree = match raw_worktree.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            normalize_missing_path(raw_worktree)
+        }
+        Err(err) => {
+            return Err(Error::internal_io(
+                err.to_string(),
+                Some(record.worktree_path.clone()),
+            ))
+        }
+    };
+    let worktree_missing = !raw_worktree.exists();
     let primary_checkout = source == worktree;
     let path_contained = worktree.starts_with(parent) && worktree != source;
-    let dirty = is_dirty(&worktree)?;
-    let unpushed_commits = unpushed_commit_count(&worktree, &record.base_ref)?;
+    let dirty = !worktree_missing && is_dirty(&worktree)?;
+    let unpushed_commits = if worktree_missing {
+        0
+    } else {
+        unpushed_commit_count(&worktree, &record.base_ref)?
+    };
     let mut reasons = Vec::new();
     if dirty {
         reasons.push("dirty worktree".to_string());
@@ -331,6 +355,7 @@ fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
         unpushed_commits,
         primary_checkout,
         path_contained,
+        worktree_missing,
         safe,
         reasons,
     })
@@ -364,6 +389,19 @@ fn canonical_existing_path(path: &str) -> Result<PathBuf> {
     Path::new(path)
         .canonicalize()
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.to_string())))
+}
+
+fn normalize_missing_path(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(file_name))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn metadata_dir() -> Result<PathBuf> {
@@ -520,7 +558,41 @@ mod tests {
 
         assert!(report.primary_checkout);
         assert!(!report.path_contained);
+        assert!(!report.worktree_missing);
         assert!(!report.safe);
+    }
+
+    #[test]
+    fn safety_report_allows_missing_contained_worktree() {
+        let source = git_repo();
+        let worktree = sibling_worktree_path(source.path(), "missing");
+
+        let report = safety_report(&fixture_record(source.path(), &worktree)).unwrap();
+
+        assert!(report.worktree_missing);
+        assert!(report.path_contained);
+        assert!(!report.primary_checkout);
+        assert!(!report.dirty);
+        assert_eq!(report.unpushed_commits, 0);
+        assert!(report.safe);
+    }
+
+    #[test]
+    fn cleanup_marks_missing_worktree_record_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let worktree = sibling_worktree_path(source.path(), "missing-cleanup");
+        let store = dir.path().join("store");
+        let record = fixture_record(source.path(), &worktree);
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(false, &store).unwrap();
+        let updated = read_record(&store, &record.id).unwrap();
+
+        assert_eq!(output.candidates.len(), 1);
+        assert!(output.candidates[0].removed);
+        assert!(output.candidates[0].safety.worktree_missing);
+        assert_eq!(updated.state, TaskWorktreeState::Removed);
     }
 
     #[test]
