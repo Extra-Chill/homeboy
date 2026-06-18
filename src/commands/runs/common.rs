@@ -188,8 +188,10 @@ pub fn load_artifact_rows(
 
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
+    let run_ids = runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
+    let mut artifacts_by_run = store.list_artifacts_for_runs(&run_ids)?;
     for run in runs {
-        let artifacts = store.list_artifacts(&run.id)?;
+        let artifacts = artifacts_by_run.remove(&run.id).unwrap_or_default();
         for artifact in artifacts {
             if artifact.artifact_type != "file" {
                 if artifact.artifact_type == "metadata-only" {

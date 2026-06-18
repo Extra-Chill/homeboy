@@ -860,6 +860,45 @@ fn test_list_artifacts() {
 }
 
 #[test]
+fn test_list_artifacts_for_runs() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("init store");
+        let first_run = store
+            .start_run(sample_run("trace", "homeboy"))
+            .expect("start first run");
+        let second_run = store
+            .start_run(sample_run("bench", "homeboy"))
+            .expect("start second run");
+        let empty_run = store
+            .start_run(sample_run("lint", "homeboy"))
+            .expect("start empty run");
+        let first_path = home.path().join("first.json");
+        let second_path = home.path().join("second.log");
+        std::fs::write(&first_path, b"first").expect("write first");
+        std::fs::write(&second_path, b"second").expect("write second");
+
+        let first = store
+            .record_artifact(&first_run.id, "first", &first_path)
+            .expect("record first");
+        let second = store
+            .record_artifact(&second_run.id, "second", &second_path)
+            .expect("record second");
+
+        let artifacts = store
+            .list_artifacts_for_runs(&[
+                first_run.id.clone(),
+                second_run.id.clone(),
+                empty_run.id.clone(),
+            ])
+            .expect("list artifacts for runs");
+        assert_eq!(artifacts[&first_run.id], vec![first]);
+        assert_eq!(artifacts[&second_run.id], vec![second]);
+        assert!(artifacts[&empty_run.id].is_empty());
+    });
+}
+
+#[test]
 fn missing_artifact_file_returns_clear_error() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();
