@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.5] - 2026-06-18
+
+### Fixed
+- neutralize runtime version setting
+
 ## [3.7.4] - 2026-06-18
 
 ### Fixed
