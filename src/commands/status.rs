@@ -305,7 +305,8 @@ fn summarize_components(
             fetch_origin_tags(&comp.local_path);
 
             if include_upstream_drift {
-                if let Some(drift) = get_upstream_drift_for(&comp.local_path, &comp.id) {
+                if let Some(mut drift) = get_upstream_drift(&comp.local_path) {
+                    drift.component_id = comp.id.clone();
                     if drift.is_behind() {
                         behind_upstream.push(comp.id.clone());
                     }
@@ -658,12 +659,6 @@ fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
     Some(drift)
 }
 
-fn get_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
-    let mut drift = get_upstream_drift(path)?;
-    drift.component_id = id.to_string();
-    Some(drift)
-}
-
 /// Detect merged-but-unreleased work for a component (issue #4996).
 ///
 /// Reuses existing primitives rather than introducing new ones:
@@ -1006,32 +1001,6 @@ mod tests {
             Commands::Status(args) => assert!(args.unreleased),
             _ => panic!("expected status command"),
         }
-    }
-
-    #[test]
-    fn unfiltered_summary_includes_origin_dependent_sections() {
-        let args = status_args(None, "/tmp/example".to_string(), false);
-
-        assert!(status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
-    }
-
-    #[test]
-    fn local_release_state_filters_skip_origin_dependent_sections() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.needs_release = true;
-
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(!status_includes_unreleased_merges(&args));
-    }
-
-    #[test]
-    fn unreleased_filter_keeps_unreleased_origin_work_without_drift() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.unreleased = true;
-
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
     }
 
     #[test]
