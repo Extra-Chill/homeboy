@@ -10,6 +10,7 @@ use crate::commands::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 2;
 
 #[derive(Parser)]
 #[command(name = "homeboy")]
@@ -179,11 +180,7 @@ impl CommandSurface {
             return false;
         };
 
-        match rest {
-            [] => true,
-            [second] => entry.subcommands.iter().any(|sub| sub.matches(second)),
-            _ => false,
-        }
+        entry.contains_rest(rest)
     }
 }
 
@@ -198,6 +195,17 @@ impl CommandSurfaceEntry {
     fn matches(&self, name: &str) -> bool {
         self.name == name || self.visible_aliases.iter().any(|alias| alias == name)
     }
+
+    fn contains_rest(&self, path: &[&str]) -> bool {
+        let Some((first, rest)) = path.split_first() else {
+            return true;
+        };
+
+        self.subcommands
+            .iter()
+            .find(|entry| entry.matches(first))
+            .is_some_and(|entry| entry.contains_rest(rest))
+    }
 }
 
 pub fn current_command_surface() -> CommandSurface {
@@ -205,8 +213,12 @@ pub fn current_command_surface() -> CommandSurface {
 }
 
 pub fn command_surface_from(command: Command) -> CommandSurface {
+    command_surface_from_with_depth(command, DEFAULT_COMMAND_SURFACE_DEPTH)
+}
+
+pub fn command_surface_from_with_depth(command: Command, depth: usize) -> CommandSurface {
     CommandSurface {
-        commands: visible_subcommands(&command, 1),
+        commands: visible_subcommands(&command, depth),
     }
 }
 
