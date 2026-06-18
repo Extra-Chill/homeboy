@@ -27,8 +27,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HOMEBOY_CORE_DIR="${HOMEBOY_CORE_DIR:-$(cd "${EXTENSION_PATH}/../.." && pwd)/homeboy}"
+CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR}/src/core/extension/runtime"
+# The test runner chain (test-runner.sh -> test-runner-wp-codebox.sh) sources the
+# core runtime helpers and hard-requires their HOMEBOY_RUNTIME_* env vars. The
+# shared-core fallbacks were removed in homeboy-extensions e0f604a4, so direct
+# (non-`homeboy test`) invocations must point those vars at the core helpers,
+# matching the bench/build smokes. `homeboy test` exports these automatically.
+RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${CORE_RUNTIME_DIR}/runner-prelude.sh}"
+RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${CORE_RUNTIME_DIR}/resolve-context.sh}"
+RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${CORE_RUNTIME_DIR}/runner-steps.sh}"
 HOST_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/test-db-activation-host"
 DEP_FIXTURE_DIR="${EXTENSION_PATH}/tests/fixtures/bench-db-activation-dep"
+
+for core_helper in "$RUNNER_PRELUDE_HELPER" "$RESOLVE_CONTEXT_HELPER" "$RUNNER_STEPS_HELPER"; do
+    if [ ! -f "$core_helper" ]; then
+        echo "ERROR: core runtime helper not found at $core_helper" >&2
+        echo "Set the HOMEBOY_RUNTIME_* helper vars or check out homeboy core at $HOMEBOY_CORE_DIR" >&2
+        exit 1
+    fi
+done
 
 if [ ! -d "$HOST_FIXTURE_DIR" ]; then
     echo "ERROR: host fixture not found at $HOST_FIXTURE_DIR" >&2
@@ -63,6 +81,9 @@ echo ""
 HOMEBOY_COMPONENT_ID=test-db-activation-host \
 HOMEBOY_COMPONENT_PATH="$HOST_FIXTURE_DIR" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+HOMEBOY_RUNTIME_RUNNER_STEPS="$RUNNER_STEPS_HELPER" \
 HOMEBOY_SETTINGS_JSON="$SETTINGS_JSON" \
     bash "${SCRIPT_DIR}/test-runner.sh"
 

@@ -29,6 +29,13 @@ jobs:
           ref: main
           path: .ci/wp-codebox
 
+      - name: Checkout Homeboy core
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy
+          ref: main
+          path: .ci/homeboy
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -52,6 +59,7 @@ jobs:
         env:
           HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
           HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
         run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
 
       - name: Run raw extra_plugins Composer autoload canary
