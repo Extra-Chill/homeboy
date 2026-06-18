@@ -1387,7 +1387,6 @@ assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-director
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
 
 const failedUpstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
-  success: false,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'failed',
   session: { id: 'sandbox-session-1', status: 'failed' },
@@ -1402,6 +1401,26 @@ assert.equal(
   failedUpstreamRunnerOutcome.evidence_refs.some((ref) => ref.kind === 'codebox-command-evidence' && ref.uri === '/tmp/wp-codebox-artifacts/wp-codebox-command-evidence.json'),
   true
 );
+
+const failedStatusBeatsSuccessfulNormalizerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'failed',
+  summary: 'WP Codebox reported failure without success false.',
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'succeeded',
+    success: true,
+    summary: 'Misleading normalizer success.',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {},
+    refs: {},
+  }),
+  exitStatus: 0,
+});
+assert.equal(failedStatusBeatsSuccessfulNormalizerOutcome.status, 'failed');
+assert.equal(failedStatusBeatsSuccessfulNormalizerOutcome.failure_classification, 'execution_failed');
 
 const emptyRunSummaryOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,

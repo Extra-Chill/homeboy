@@ -2,15 +2,17 @@
 
 const DEFAULT_OUTCOME_SCHEMA = 'homeboy/agent-task-outcome/v1';
 
-function normalizeProviderTaskOutcome(request, result = {}, options = {}) {
+const TERMINAL_FAILURE_STATUSES = ['failed', 'provider_error', 'timeout', 'unable_to_remediate'];
+
+function normalizeAgentTaskOutcome(request, result = {}, options = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    throw new TypeError('normalizeProviderTaskOutcome requires a request object.');
+    throw new TypeError('normalizeAgentTaskOutcome requires a request object.');
   }
   if (!request.task_id) {
-    throw new Error('normalizeProviderTaskOutcome requires request.task_id.');
+    throw new Error('normalizeAgentTaskOutcome requires request.task_id.');
   }
 
-  const status = options.status || normalizeProviderStatus(result, options.exitStatus ?? 0);
+  const status = normalizeAgentTaskStatus(result, options);
   const output = {
     schema: options.schema || DEFAULT_OUTCOME_SCHEMA,
     task_id: request.task_id,
@@ -33,8 +35,41 @@ function normalizeProviderTaskOutcome(request, result = {}, options = {}) {
   return output;
 }
 
+function normalizeProviderTaskOutcome(request, result = {}, options = {}) {
+  return normalizeAgentTaskOutcome(request, result, options);
+}
+
+function normalizeAgentTaskStatus(result = {}, options = {}) {
+  const exitStatus = options.exitStatus ?? 0;
+  const explicitStatus = options.status;
+  const resultStatus = result && typeof result === 'object' ? result.status : undefined;
+
+  if (TERMINAL_FAILURE_STATUSES.includes(resultStatus)) {
+    return resultStatus;
+  }
+  if (result?.provider_error) {
+    return 'provider_error';
+  }
+  if (result?.timeout) {
+    return 'timeout';
+  }
+  if (result?.unable_to_remediate) {
+    return 'unable_to_remediate';
+  }
+  if (result?.success === false || exitStatus !== 0) {
+    return 'failed';
+  }
+  if (TERMINAL_FAILURE_STATUSES.includes(explicitStatus)) {
+    return explicitStatus;
+  }
+  if (explicitStatus) {
+    return explicitStatus;
+  }
+  return normalizeProviderStatus(result, exitStatus);
+}
+
 function normalizeProviderStatus(result = {}, exitStatus = 0) {
-  if (result.status === 'failed' || result.status === 'provider_error' || result.status === 'timeout' || result.status === 'unable_to_remediate') {
+  if (TERMINAL_FAILURE_STATUSES.includes(result.status)) {
     return result.status;
   }
   if (result.provider_error) {
@@ -61,7 +96,7 @@ function normalizeProviderStatus(result = {}, exitStatus = 0) {
   if (result.success === true) {
     return 'succeeded';
   }
-  return 'succeeded';
+  return Object.keys(result || {}).length > 0 ? 'succeeded' : 'failed';
 }
 
 function providerFailureClassification(classification, status) {
@@ -151,6 +186,8 @@ function plainObject(value) {
 }
 
 module.exports = {
+  normalizeAgentTaskOutcome,
+  normalizeAgentTaskStatus,
   normalizeProviderTaskOutcome,
   normalizeProviderStatus,
   providerFailureClassification,

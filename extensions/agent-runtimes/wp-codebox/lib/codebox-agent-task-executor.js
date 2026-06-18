@@ -23,7 +23,7 @@ const {
   providerDefaultsContract,
 } = require('../../lib/agent-task-provider-contract');
 const {
-  normalizeProviderTaskOutcome,
+  normalizeAgentTaskOutcome,
   providerFailureClassification,
 } = require('./provider-outcome-normalizer');
 
@@ -2442,7 +2442,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   const providerDiagnostic = providerNotRegisteredDiagnostic(request, result);
-  const outcome = normalizeProviderTaskOutcome(request, result, {
+  const outcome = normalizeAgentTaskOutcome(request, result, {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     provider: 'wordpress.codebox-agent-task-executor',
     providerLabel: 'WP Codebox agent',

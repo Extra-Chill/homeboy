@@ -3,6 +3,8 @@
 const assert = require('node:assert/strict');
 
 const {
+  normalizeAgentTaskOutcome,
+  normalizeAgentTaskStatus,
   normalizeProviderTaskOutcome,
   normalizeProviderStatus,
   providerFailureClassification,
@@ -57,6 +59,38 @@ const normalizedRuntimeFailure = normalizeProviderTaskOutcome(request, {
 assert.equal(normalizedRuntimeFailure.status, 'failed');
 assert.equal(normalizedRuntimeFailure.failure_classification, 'execution_failed');
 assert.equal(normalizedRuntimeFailure.diagnostics[0].class, 'runtime.no_session');
+
+const failedStatusWithoutSuccess = normalizeAgentTaskOutcome(request, {
+  status: 'failed',
+  summary: 'Provider reported a terminal failure without success false.',
+}, { status: 'succeeded' });
+assert.equal(failedStatusWithoutSuccess.status, 'failed');
+assert.equal(failedStatusWithoutSuccess.failure_classification, 'execution_failed');
+
+const providerErrorWithoutSuccess = normalizeAgentTaskOutcome(request, {
+  status: 'provider_error',
+  summary: 'Provider failed before runtime startup.',
+});
+assert.equal(providerErrorWithoutSuccess.status, 'provider_error');
+assert.equal(providerErrorWithoutSuccess.failure_classification, 'provider');
+
+const timeoutWithoutSuccess = normalizeAgentTaskOutcome(request, {
+  timeout: true,
+  summary: 'Timed out.',
+});
+assert.equal(timeoutWithoutSuccess.status, 'timeout');
+assert.equal(timeoutWithoutSuccess.failure_classification, 'timeout');
+
+const emptyJsonOutcome = normalizeAgentTaskOutcome(request, {});
+assert.equal(emptyJsonOutcome.status, 'failed');
+assert.equal(emptyJsonOutcome.failure_classification, 'execution_failed');
+
+const noOpOutcome = normalizeAgentTaskOutcome(request, { success: true, outcome: 'no_op' });
+assert.equal(noOpOutcome.status, 'no_op');
+assert.equal(noOpOutcome.failure_classification, undefined);
+
+assert.equal(normalizeAgentTaskStatus({ status: 'completed' }), 'succeeded');
+assert.equal(normalizeAgentTaskStatus({ success: false }), 'failed');
 
 assert.equal(normalizeProviderStatus({ success: true, outcome: 'no_op' }), 'no_op');
 assert.equal(providerFailureClassification('task', 'failed'), 'execution_failed');
