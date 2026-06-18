@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.9] - 2026-06-18
+
+### Changed
+- Add runtime execution descriptors to agent CI
+
 ## [3.7.8] - 2026-06-18
 
 ### Changed
