@@ -56,6 +56,10 @@ Runtime-specific fields are allowed, but they should be additive. A runtime
 should not require Homeboy core to understand backend-private settings just to
 invoke the provider.
 
+Generic runner specs must declare `executor.backend` explicitly. Runtime-specific
+planners may provide their own defaults, but the shared contract does not assume
+WP Codebox or any other backend.
+
 ## `runtime_path` Interpolation
 
 Provider commands should reference runtime-local files with `{{runtime_path}}`:

@@ -87,6 +87,10 @@ const runnerSpec = agentTaskRunnerSpec({
 	expectedArtifacts: ['patch'],
 });
 assert.equal(runnerSpec.schema, AGENT_TASK_RUNNER_SPEC_SCHEMA);
+assert.throws(
+	() => agentTaskRunnerSpec({ config: { provider: 'codex' } }),
+	/backend is required/,
+);
 assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec }), {
 	executor: {
 		backend: 'codebox',
