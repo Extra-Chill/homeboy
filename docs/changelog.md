@@ -4,6 +4,75 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.239.0] - 2026-06-18
+
+### Added
+- include temp homeboy checkout targets
+- include detached self temp artifacts
+- add self artifact cleanup
+- feat(agent-task): record patch promotion status
+- detect merged-but-not-live code (merged → released gap)
+- feat(agent-task): add generic tool control-plane contract
+- feat(agent-task): resolve provider executable readiness
+- feat(agent-task): export provider contract metadata
+- feat(agent-task): add workspace materialization specs
+- feat(agent-task): pass canonical secret env plans to providers
+- resolve executable env aliases
+- add declarative capability requirements
+- add generic command execution plans
+- feat(agent-task): materialize component worktree requests
+- define artifact manifest descriptors
+- add detector profile config
+- centralize target resolution policy
+- support runner-side service declaration for Lab offload
+- add reusable phase templates
+- add executable requirements
+- materialize package template variants
+- clarify apply change contract
+- feat(agent-task): export core contract metadata
+- feat(agent-task): expose provider capability contract
+- add process path containment primitives
+- add artifact evidence contract primitives
+- feat(agent-task): declare timeout artifact contracts
+- feat(agent-task): plan controller specs
+
+### Changed
+- refactor(agent-task,runner,lab): resolve audit findings — dedup, field patterns, preflight, thin adapters (#5069, #5068, #5067, #5071, #5077, #5078)
+- test(core-agnostic): neutralize wordpress-plugin fixture kind to keep test-content baseline at 81 (#5075)
+- refactor(agent-task,lab): resolve audit findings — dedup, dead code, field patterns, preflight (#5050, #5040, #5048, #5049, #5052, #5011)
+- make git_sync private-remote test hermetic (#4980)
+- extract module to reduce top-level item count (#4965)
+- Add generic agent runtime contract mapping
+- Formalize argv command invocations
+- purge ecosystem literals from core detectors via config (#2842)
+- add generic arg transform spec
+- centralize runner support labels
+- route text presentation explicitly
+- generalize artifact input writing
+- route fleet output through typed adapter
+- remove dead code flagged by audit
+- neutralize rig fixture names
+- share runner config spec
+- add secret env contract resolver
+- refactor(agent-task): split god file and add compact status summary
+
+### Fixed
+- provision provider file secret sources
+- fix(agent-task): normalize runtime typed artifacts
+- improve rig dependency offload recovery
+- omit xattrs from runner snapshots
+- fix(agent-task): support provider command argv
+- make source snapshot policy configurable
+- Fix lab cook provider secret hydration
+- fix(agent-task): preserve provider manifest metadata
+- fall back when direct invocation cannot spawn
+- repair runner-upgrade test regressions after #4956
+- fix(agent-task): honor provider fallback secrets in lab
+- fix(agent-task): use provider sources for readiness
+- bound reviewer-facing artifact evidence
+- fix(agent-task): read provider json secret sources
+- realign source-built runner binaries by identity
+
 ## [0.238.0] - 2026-06-17
 
 ### Added
