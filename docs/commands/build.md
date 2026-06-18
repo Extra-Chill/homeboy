@@ -39,7 +39,7 @@ Use `--changed-since <ref>` to ask the build provider whether the changed files 
 
 ```sh
 homeboy build data-machine --changed-since origin/main
-homeboy build intelligence-chubes4 --all --changed-since origin/main
+homeboy build intelligence-example --all --changed-since origin/main
 ```
 
 Homeboy core stays language-agnostic. If the linked build provider declares `build.changed_scope_script`, Homeboy runs that script with `HOMEBOY_CHANGED_SINCE` set and expects JSON on stdout:

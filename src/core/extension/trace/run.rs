@@ -1028,7 +1028,7 @@ fn trace_probes_with_fswatch_attachments(
 /// is co-located with the project's `homeboy.json` in the component checkout.
 /// Rig-owned traces store baselines in the rig state directory so that
 /// `homeboy trace --rig <id>` against an unrelated component checkout (e.g.
-/// `Automattic/studio`) never creates or mutates a `homeboy.json` inside that
+/// `example-org/studio`) never creates or mutates a `homeboy.json` inside that
 /// repo. See Extra-Chill/homeboy#2329.
 fn resolve_trace_baseline_root(component_path: &str, rig_id: Option<&str>) -> Result<PathBuf> {
     match rig_id {

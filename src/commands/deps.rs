@@ -30,7 +30,7 @@ enum DepsCommand {
     },
     /// Update one package through its dependency provider
     Update {
-        /// Package name, e.g. chubes4/block-format-bridge.
+        /// Package name, e.g. example-org/block-format-bridge.
         package: String,
 
         /// Component ID. When omitted, auto-detected from CWD.

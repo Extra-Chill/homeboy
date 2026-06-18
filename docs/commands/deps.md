@@ -24,17 +24,17 @@ Components can declare deterministic downstream propagation edges in `homeboy.js
 {
   "dependency_stack": [
     {
-      "upstream": "chubes4/html-to-blocks-converter",
+      "upstream": "example-org/html-to-blocks-converter",
       "downstream": "block-format-bridge",
-      "package": "chubes4/html-to-blocks-converter",
+      "package": "example-org/html-to-blocks-converter",
       "post_update": ["composer build"],
       "test": ["homeboy test --path . --extension wordpress"]
     },
     {
       "upstream": "block-format-bridge",
       "downstream": "static-site-importer",
-      "package": "chubes4/block-format-bridge",
-      "update": "composer update chubes4/block-format-bridge --with-dependencies --no-interaction",
+      "package": "example-org/block-format-bridge",
+      "update": "composer update example-org/block-format-bridge --with-dependencies --no-interaction",
       "test": ["homeboy test --path . --extension wordpress"]
     }
   ]

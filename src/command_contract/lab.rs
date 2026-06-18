@@ -922,7 +922,7 @@ mod tests {
             "start",
             "preview",
             "--cwd",
-            "/home/chubes/Developer/_lab_workspaces/site",
+            "/home/user/Developer/_lab_workspaces/site",
             "--command",
             "npm run dev",
         ])

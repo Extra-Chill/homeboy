@@ -435,7 +435,7 @@ mod tests {
             "--id".to_string(),
             "wordpress".to_string(),
             "--ref".to_string(),
-            "44426b5874df018a7bdb9742098f936f53a8c0ff".to_string(),
+            "44426b5874df018a7bdb9742098f936f53b1c0ff".to_string(),
             "--force-hot".to_string(),
         ];
         let cli = Cli::parse_from(&normalized);
@@ -746,7 +746,7 @@ mod tests {
             "start",
             "preview",
             "--cwd",
-            "/home/chubes/Developer/_lab_workspaces/site",
+            "/home/user/Developer/_lab_workspaces/site",
             "--command",
             "npm run dev",
         ]);

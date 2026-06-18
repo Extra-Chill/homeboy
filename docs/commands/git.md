@@ -30,7 +30,7 @@ Homeboy resolves the target checkout in this order:
 Use `--path` for worktrees, CI runners, ad-hoc clones, or headless scripts where the process CWD is not already the checkout you want:
 
 ```sh
-homeboy git status --path /Users/chubes/Developer/homeboy@docs-refresh-git-command
+homeboy git status --path /Users/user/Developer/homeboy@docs-refresh-git-command
 homeboy git push --path /tmp/homeboy-ci-checkout
 ```
 
@@ -251,7 +251,7 @@ Notes:
 ```json
 {
   "component_id": "homeboy",
-  "path": "/Users/chubes/Developer/homeboy@docs-refresh-git-command",
+  "path": "/Users/user/Developer/homeboy@docs-refresh-git-command",
   "action": "status|commit|push|pull|tag|rebase|cherry-pick",
   "success": true,
   "exit_code": 0,
@@ -304,8 +304,8 @@ homeboy git commit -m "Update docs"
 homeboy git push
 
 # Operate on a worktree or CI checkout without changing CWD
-homeboy git status --path /Users/chubes/Developer/homeboy@docs-refresh-git-command
-homeboy git commit --path /Users/chubes/Developer/homeboy@docs-refresh-git-command -m "Update docs"
+homeboy git status --path /Users/user/Developer/homeboy@docs-refresh-git-command
+homeboy git commit --path /Users/user/Developer/homeboy@docs-refresh-git-command -m "Update docs"
 
 # Use explicit component IDs when operating outside a component checkout
 homeboy git status homeboy

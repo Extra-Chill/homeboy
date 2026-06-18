@@ -10,8 +10,8 @@ const STUDIO_FIXTURE: &str = r#"{
     "base":   { "remote": "origin", "branch": "trunk" },
     "target": { "remote": "fork",   "branch": "dev/combined-fixes" },
     "prs": [
-        { "repo": "Automattic/studio", "number": 3057, "note": "native spawn" },
-        { "repo": "Automattic/studio", "number": 3095 }
+        { "repo": "example-org/studio", "number": 3057, "note": "native spawn" },
+        { "repo": "example-org/studio", "number": 3095 }
     ]
 }"#;
 
@@ -26,7 +26,7 @@ fn parses_canonical_studio_fixture() {
     // Multi-segment branch survives intact (no remote-side splitting).
     assert_eq!(spec.target.branch, "dev/combined-fixes");
     assert_eq!(spec.prs.len(), 2);
-    assert_eq!(spec.prs[0].repo, "Automattic/studio");
+    assert_eq!(spec.prs[0].repo, "example-org/studio");
     assert_eq!(spec.prs[0].number, 3057);
     assert_eq!(spec.prs[0].note.as_deref(), Some("native spawn"));
     assert!(spec.prs[1].note.is_none());
@@ -171,7 +171,7 @@ fn expand_path_unset_env_var_becomes_empty() {
 #[test]
 fn pr_entry_serializes_without_optional_fields() {
     let entry = StackPrEntry {
-        repo: "Automattic/studio".into(),
+        repo: "example-org/studio".into(),
         number: 1,
         note: None,
     };

@@ -18,7 +18,7 @@ multi-rig-package/
 Install with:
 
 ```sh
-homeboy rig install https://github.com/chubes4/homeboy-rigs.git//packages/studio --id studio
+homeboy rig install https://github.com/example-org/homeboy-rigs.git//packages/studio --id studio
 homeboy rig install ./packages/studio
 homeboy rig install ./packages --all
 ```
@@ -165,7 +165,7 @@ Managed services are detached, tracked by PID in rig state, and logged under `~/
 {
   "resources": {
     "exclusive": ["studio-dev:${env.STUDIO_BENCH_NAMESPACE}"],
-    "paths": ["~/Studio/intelligence-chubes4/wp-content/plugins"],
+    "paths": ["~/Studio/intelligence-example/wp-content/plugins"],
     "ports": [9724],
     "process_patterns": ["wordpress-server-child.mjs"]
   }

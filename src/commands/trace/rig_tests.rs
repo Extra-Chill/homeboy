@@ -140,7 +140,7 @@ fn rig_component_path_and_trace_env_are_threaded() {
         ComponentSpec {
             path: component_dir.path().to_string_lossy().to_string(),
             checkout_root: None,
-            remote_url: Some("https://github.com/Automattic/studio".to_string()),
+            remote_url: Some("https://github.com/example-org/studio".to_string()),
             triage_remote_url: None,
             stack: None,
             branch: None,

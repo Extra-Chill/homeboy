@@ -26,14 +26,14 @@ HOMEBOY_ARTIFACT_ROOT/workflow-bench/<bundle>/report.html
 Inspect the configured root and URL mapping without starting or restarting the origin:
 
 ```sh
-HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
   homeboy tunnel artifact-origin status
 ```
 
 Check one published Workflow Bench path locally before sharing a public URL:
 
 ```sh
-HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
   homeboy tunnel artifact-origin inspect \
   workflow-bench/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export/report.html \
   --fail-on-missing
@@ -42,7 +42,7 @@ HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net
 Serve the artifact root behind an operator-managed TLS/proxy/tunnel:
 
 ```sh
-HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net \
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
   homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
 ```
 
@@ -50,13 +50,13 @@ For Lab-generated Workflow Bench artifacts, publish the bundle under the configu
 
 ```sh
 # 1. Keep Lab output under the configured artifact root.
-export HOMEBOY_ARTIFACT_ROOT=/home/chubes/Developer/.tmp/homeboy-artifacts
-export HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.chubes.net
+export HOMEBOY_ARTIFACT_ROOT=/home/user/Developer/.tmp/homeboy-artifacts
+export HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com
 
 # 2. Publish/copy the Lab-generated replay bundle preserving its workflow-bench path.
 mkdir -p "$HOMEBOY_ARTIFACT_ROOT/workflow-bench"
 cp -R \
-  /home/chubes/Developer/studio-web-eval-runs/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export \
+  /home/user/Developer/studio-web-eval-runs/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export \
   "$HOMEBOY_ARTIFACT_ROOT/workflow-bench/"
 
 # 3. Smoke-check the exact public path before handing it to reviewers.
@@ -107,7 +107,7 @@ homeboy tunnel service start site-preview \
 Expose the managed service through a provider-neutral backend command:
 
 ```sh
-homeboy tunnel service start context-a8c \
+homeboy tunnel service start context-example \
   --command 'npm run dev -- --host 127.0.0.1 --port 7331' \
   --cwd /path/to/workspace \
   --host 127.0.0.1 \
@@ -229,9 +229,9 @@ Render a non-destructive operator install plan for a wildcard preview ingress do
 
 ```sh
 homeboy tunnel preview-ingress install \
-  --server chubes-net \
-  --domain chubes.net \
-  --public-host-pattern '*-tunnel.chubes.net' \
+  --server example-server \
+  --domain example.com \
+  --public-host-pattern '*-tunnel.example.com' \
   --service-name homeboy-preview-ingress
 ```
 
@@ -248,9 +248,9 @@ Render the install status contract without probing the live VPS:
 
 ```sh
 homeboy tunnel preview-ingress install-status \
-  --server chubes-net \
-  --domain chubes.net \
-  --public-host-pattern '*-tunnel.chubes.net'
+  --server example-server \
+  --domain example.com \
+  --public-host-pattern '*-tunnel.example.com'
 ```
 
 Install status output records planned checks so operators and future apply/probe flows can share one output shape. It includes `systemctl is-active`, `systemctl status`, loopback ingress status, wildcard DNS, and public ingress status commands.

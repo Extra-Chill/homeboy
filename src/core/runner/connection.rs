@@ -986,8 +986,7 @@ mod tests {
 
     #[test]
     fn remote_daemon_binary_probe_detects_deleted_or_replaced_executables() {
-        let command =
-            remote_daemon_binary_probe_command("/home/chubes/.cargo/bin/homeboy", 3790534);
+        let command = remote_daemon_binary_probe_command("/home/user/.cargo/bin/homeboy", 3790534);
 
         assert!(command.contains("/proc/$pid/exe"));
         assert!(command.contains("*\" (deleted)\")"));
@@ -1073,7 +1072,7 @@ mod tests {
     fn records_reverse_runner_session_without_marking_transport_live() {
         test_support::with_isolated_home(|_| {
             crate::core::runner::create(
-                r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/chubes/Developer"}"#,
+                r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/user/Developer"}"#,
                 false,
             )
             .expect("create runner");

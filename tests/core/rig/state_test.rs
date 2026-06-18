@@ -119,22 +119,22 @@ fn snapshot_with_component(component_id: &str, path: &str) -> RigStateSnapshot {
 
 #[test]
 fn set_effective_component_path_records_override_and_preserves_declared() {
-    let mut snapshot = snapshot_with_component("studio", "/Users/chubes/Developer/studio");
+    let mut snapshot = snapshot_with_component("studio", "/Users/user/Developer/studio");
 
     snapshot.set_effective_component_path(
         "studio",
-        "/Users/chubes/Developer/studio@worktree",
+        "/Users/user/Developer/studio@worktree",
         |path| {
-            assert_eq!(path, "/Users/chubes/Developer/studio@worktree");
+            assert_eq!(path, "/Users/user/Developer/studio@worktree");
             (Some("bbbbbbbb".to_string()), Some("feature".to_string()))
         },
     );
 
     let component = snapshot.components.get("studio").expect("component");
-    assert_eq!(component.path, "/Users/chubes/Developer/studio@worktree");
+    assert_eq!(component.path, "/Users/user/Developer/studio@worktree");
     assert_eq!(
         component.declared_path.as_deref(),
-        Some("/Users/chubes/Developer/studio")
+        Some("/Users/user/Developer/studio")
     );
     assert_eq!(component.sha.as_deref(), Some("bbbbbbbb"));
     assert_eq!(component.branch.as_deref(), Some("feature"));
@@ -142,14 +142,14 @@ fn set_effective_component_path_records_override_and_preserves_declared() {
 
 #[test]
 fn set_effective_component_path_is_noop_when_path_matches() {
-    let mut snapshot = snapshot_with_component("studio", "/Users/chubes/Developer/studio");
+    let mut snapshot = snapshot_with_component("studio", "/Users/user/Developer/studio");
 
-    snapshot.set_effective_component_path("studio", "/Users/chubes/Developer/studio", |_| {
+    snapshot.set_effective_component_path("studio", "/Users/user/Developer/studio", |_| {
         panic!("git lookup must not run when paths already match")
     });
 
     let component = snapshot.components.get("studio").expect("component");
-    assert_eq!(component.path, "/Users/chubes/Developer/studio");
+    assert_eq!(component.path, "/Users/user/Developer/studio");
     assert!(component.declared_path.is_none());
     assert_eq!(component.sha.as_deref(), Some("aaaaaaaa"));
     assert_eq!(component.branch.as_deref(), Some("main"));
@@ -157,21 +157,21 @@ fn set_effective_component_path_is_noop_when_path_matches() {
 
 #[test]
 fn set_effective_component_path_ignores_unknown_component() {
-    let mut snapshot = snapshot_with_component("studio", "/Users/chubes/Developer/studio");
+    let mut snapshot = snapshot_with_component("studio", "/Users/user/Developer/studio");
 
     snapshot.set_effective_component_path("missing", "/tmp/anywhere", |_| {
         panic!("git lookup must not run when component is unknown");
     });
 
     let component = snapshot.components.get("studio").expect("component");
-    assert_eq!(component.path, "/Users/chubes/Developer/studio");
+    assert_eq!(component.path, "/Users/user/Developer/studio");
     assert!(component.declared_path.is_none());
     assert!(snapshot.components.get("missing").is_none());
 }
 
 #[test]
 fn set_effective_component_path_clears_stale_git_metadata_for_non_repo_path() {
-    let mut snapshot = snapshot_with_component("studio", "/Users/chubes/Developer/studio");
+    let mut snapshot = snapshot_with_component("studio", "/Users/user/Developer/studio");
 
     snapshot.set_effective_component_path("studio", "/tmp/not-a-repo", |_| (None, None));
 
@@ -179,7 +179,7 @@ fn set_effective_component_path_clears_stale_git_metadata_for_non_repo_path() {
     assert_eq!(component.path, "/tmp/not-a-repo");
     assert_eq!(
         component.declared_path.as_deref(),
-        Some("/Users/chubes/Developer/studio")
+        Some("/Users/user/Developer/studio")
     );
     assert!(component.sha.is_none());
     assert!(component.branch.is_none());

@@ -823,16 +823,13 @@ mod tests {
             }"#,
         )
         .expect("parse rig spec");
-        let args = bench_args(
-            None,
-            Some("/home/chubes/Developer/_lab_workspaces/gutenberg"),
-        );
+        let args = bench_args(None, Some("/home/user/Developer/_lab_workspaces/gutenberg"));
 
         apply_bench_path_override(&mut rig_spec, &args);
 
         assert_eq!(
             rig_spec.components["gutenberg"].path,
-            "/home/chubes/Developer/_lab_workspaces/gutenberg"
+            "/home/user/Developer/_lab_workspaces/gutenberg"
         );
     }
 

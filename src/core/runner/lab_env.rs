@@ -411,8 +411,8 @@ mod tests {
             &RunnerWorkspaceSyncOutput {
                 command: "runner.workspace.sync",
                 runner_id: "homeboy-lab".to_string(),
-                local_path: "/Users/chubes/Developer/example-component".to_string(),
-                remote_path: "/home/chubes/Developer/example-component".to_string(),
+                local_path: "/Users/user/Developer/example-component".to_string(),
+                remote_path: "/home/user/Developer/example-component".to_string(),
                 sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                 snapshot_identity: "snapshot".to_string(),
                 files: 1,
@@ -430,18 +430,18 @@ mod tests {
             &mapping,
             [(
                 "HOMEBOY_TEST_COMPONENT_PATH".to_string(),
-                "/Users/chubes/Developer/example-component/includes".to_string(),
+                "/Users/user/Developer/example-component/includes".to_string(),
             )],
         )
         .expect("forward env");
 
         assert_eq!(
             env.get("HOMEBOY_TEST_COMPONENT_PATH").map(String::as_str),
-            Some("/home/chubes/Developer/example-component/includes")
+            Some("/home/user/Developer/example-component/includes")
         );
         assert_eq!(
             metadata["forwarded"][0]["runner_value"],
-            "/home/chubes/Developer/example-component/includes"
+            "/home/user/Developer/example-component/includes"
         );
     }
 
@@ -454,7 +454,7 @@ mod tests {
             &[],
             [(
                 "HOMEBOY_UNSYNCED_COMPONENT_PATH".to_string(),
-                "/Users/chubes/Developer/unsynced-component".to_string(),
+                "/Users/user/Developer/unsynced-component".to_string(),
             )],
         )
         .expect_err("unsynced path");

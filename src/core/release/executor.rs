@@ -1350,8 +1350,8 @@ mod tests {
     #[test]
     fn github_release_repair_commands_include_repo_asset_notes_and_enterprise_env() {
         let github = GitHubRepo {
-            host: "github.a8c.com".to_string(),
-            owner: "chubes4".to_string(),
+            host: "github.example.com".to_string(),
+            owner: "example-org".to_string(),
             repo: "studio-web".to_string(),
         };
         let artifacts = vec!["build/studio-web.zip".to_string()];
@@ -1368,7 +1368,7 @@ mod tests {
         assert!(repair.notes_guidance.contains("--notes-file"));
         assert!(repair
             .generate_notes_command
-            .contains("GH_HOST=github.a8c.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh api repos/chubes4/studio-web/releases/generate-notes"));
+            .contains("GH_HOST=github.example.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh api repos/example-org/studio-web/releases/generate-notes"));
         assert!(repair
             .generate_notes_command
             .contains("-f tag_name=v0.10.5"));
@@ -1383,10 +1383,10 @@ mod tests {
             .create_command
             .contains("--notes-file build/v0.10.5-release-notes.md"));
         assert!(repair.create_command.contains("build/studio-web.zip"));
-        assert!(repair.create_command.contains("-R chubes4/studio-web"));
+        assert!(repair.create_command.contains("-R example-org/studio-web"));
         assert_eq!(
             repair.view_command,
-            "GH_HOST=github.a8c.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh release view v0.10.5 -R chubes4/studio-web"
+            "GH_HOST=github.example.com HTTPS_PROXY=socks5://127.0.0.1:8080 gh release view v0.10.5 -R example-org/studio-web"
         );
         assert!(repair
             .env_hint
@@ -1399,7 +1399,7 @@ mod tests {
     fn github_release_notes_link_full_changelog_to_changelog_file() {
         let notes = concat!(
             "## What's Changed\n",
-            "* fix release notes by @chubes in https://github.com/Extra-Chill/homeboy/pull/1\n",
+            "* fix release notes by @example-user in https://github.com/Extra-Chill/homeboy/pull/1\n",
             "\n",
             "**Full Changelog**: https://github.com/Extra-Chill/homeboy/compare/v0.8.1...v0.9.0"
         );

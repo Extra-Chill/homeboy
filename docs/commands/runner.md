@@ -292,8 +292,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=chubes
-WorkingDirectory=/home/chubes
+User=deploy
+WorkingDirectory=/home/user
 ExecStart=/usr/local/bin/homeboy runner work homeboy-lab --broker-url https://controller.example.com --loop --idle-backoff-ms 1000 --max-idle-backoff-ms 30000 --broker-retry-limit 12
 Restart=on-failure
 RestartSec=10
@@ -445,7 +445,7 @@ Private/proxied sources:
 - Private or proxy-dependent source access stays on the controller machine.
 - Materialize those sources with `homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot`.
 - Use the returned `remote_path` for downstream `runner exec --cwd` or job inputs.
-- Runner-side Git fetches for configured private/proxied hosts are refused with an actionable diagnostic. The default host list includes `github.a8c.com`; override with `HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS` only when a runner is explicitly allowed to fetch those sources.
+- Runner-side Git fetches for configured private/proxied hosts are refused with an actionable diagnostic. The default host list includes `github.example.com`; override with `HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS` only when a runner is explicitly allowed to fetch those sources.
 
 Safety rules:
 

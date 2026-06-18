@@ -864,7 +864,7 @@ mod tests {
         let err = validate_installed_rig_source(
             "woocommerce-performance",
             "/missing/homeboy-rigs/woocommerce/woocommerce",
-            "/Users/chubes/Developer/homeboy-rigs@issue-323-codebox-fresh/woocommerce/woocommerce",
+            "/Users/user/Developer/homeboy-rigs@issue-323-codebox-fresh/woocommerce/woocommerce",
         )
         .expect_err("missing source should fail");
 
@@ -1092,7 +1092,7 @@ mod tests {
                     "components": {
                         "studio-web": {
                             "path": "${package.root}",
-                            "remote_url": "https://github.a8c.com/chubes4/studio-web.git"
+                            "remote_url": "https://github.example.com/example-org/studio-web.git"
                         }
                     }
                 })
@@ -1128,7 +1128,7 @@ mod tests {
                 ],
                 Some((
                     &checkout.display().to_string(),
-                    "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot",
+                    "/home/user/Developer/_lab_workspaces/studio-web-snapshot",
                 )),
                 None,
             )
@@ -1141,7 +1141,7 @@ mod tests {
             );
             assert_eq!(
                 dependencies[0].remote_checkout_root,
-                "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot"
+                "/home/user/Developer/_lab_workspaces/studio-web-snapshot"
             );
             assert!(!dependencies[0]
                 .remote_checkout_root
@@ -1186,7 +1186,7 @@ mod tests {
 
         let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
             &args,
-            "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+            "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
         );
 
         assert_eq!(
@@ -1199,7 +1199,7 @@ mod tests {
                 "--scenario",
                 "editable_preview_ready",
                 "--path",
-                "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+                "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
             ]
         );
     }
@@ -1216,7 +1216,7 @@ mod tests {
 
         let rewritten = remap_bench_rig_default_component_to_primary_snapshot(
             &args,
-            "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+            "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
         );
 
         assert_eq!(
@@ -1226,7 +1226,7 @@ mod tests {
                 "bench",
                 "--rig=studio-web-product-matrix",
                 "--path",
-                "/home/chubes/Developer/_lab_workspaces/studio-web-release-clean-abc",
+                "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
                 "--",
                 "--runner-owned",
             ]
@@ -1253,18 +1253,18 @@ mod tests {
     #[test]
     fn maps_non_primary_rig_dependency_to_runner_workspace_parent() {
         let remote = remote_checkout_root_for_local(
-            "/Users/chubes/Developer/studio@fix-many-sites-memory",
-            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            "/Users/user/Developer/studio@fix-many-sites-memory",
+            "/Users/user/Developer/studio@fix-many-sites-memory",
             Some((
-                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
-                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+                "/Users/user/Developer/homeboy-rigs/example-org/studio",
+                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
             )),
-            Some("/home/chubes/Developer"),
+            Some("/home/user/Developer"),
         );
 
         assert_eq!(
             remote,
-            "/home/chubes/Developer/_lab_workspaces/studio-fix-many-sites-memory"
+            "/home/user/Developer/_lab_workspaces/studio-fix-many-sites-memory"
         );
         assert!(!remote.contains("/Users/"));
     }
@@ -1276,18 +1276,15 @@ mod tests {
         // the workspace root), never a literal `~` subdirectory.
         let remote = remote_checkout_root_for_local(
             "~/Developer/studio@fix-many-sites-memory",
-            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            "/Users/user/Developer/studio@fix-many-sites-memory",
             Some((
-                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
-                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+                "/Users/user/Developer/homeboy-rigs/example-org/studio",
+                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
             )),
-            Some("/home/chubes/Developer"),
+            Some("/home/user/Developer"),
         );
 
-        assert_eq!(
-            remote,
-            "/home/chubes/Developer/studio@fix-many-sites-memory"
-        );
+        assert_eq!(remote, "/home/user/Developer/studio@fix-many-sites-memory");
         assert!(!remote.contains('~'));
     }
 
@@ -1297,10 +1294,10 @@ mod tests {
         // literal `~`; fall back to the materialized `_lab_workspaces` path.
         let remote = remote_checkout_root_for_local(
             "~/Developer/studio@fix-many-sites-memory",
-            "/Users/chubes/Developer/studio@fix-many-sites-memory",
+            "/Users/user/Developer/studio@fix-many-sites-memory",
             Some((
-                "/Users/chubes/Developer/homeboy-rigs/Automattic/studio",
-                "/home/chubes/Developer/_lab_workspaces/studio-rigs-snapshot",
+                "/Users/user/Developer/homeboy-rigs/example-org/studio",
+                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
             )),
             None,
         );
@@ -1308,19 +1305,19 @@ mod tests {
         assert!(!remote.contains('~'));
         assert_eq!(
             remote,
-            "/home/chubes/Developer/_lab_workspaces/studio-fix-many-sites-memory"
+            "/home/user/Developer/_lab_workspaces/studio-fix-many-sites-memory"
         );
     }
 
     #[test]
     fn runner_home_resolves_from_nested_workspace_root() {
         assert_eq!(
-            runner_home_from_workspace_root("/home/chubes/Developer"),
-            Some("/home/chubes".to_string())
+            runner_home_from_workspace_root("/home/user/Developer"),
+            Some("/home/user".to_string())
         );
         assert_eq!(
-            runner_home_from_workspace_root("/Users/chubes/Developer/lab"),
-            Some("/Users/chubes".to_string())
+            runner_home_from_workspace_root("/Users/user/Developer/lab"),
+            Some("/Users/user".to_string())
         );
         // Workspace root that is itself a home falls back to its parent.
         assert_eq!(
@@ -1332,30 +1329,30 @@ mod tests {
     #[test]
     fn expand_portable_runner_path_joins_tail_to_runner_home() {
         assert_eq!(
-            expand_portable_runner_path("~/Developer/x", Some("/home/chubes/Developer")),
-            Some("/home/chubes/Developer/x".to_string())
+            expand_portable_runner_path("~/Developer/x", Some("/home/user/Developer")),
+            Some("/home/user/Developer/x".to_string())
         );
         assert_eq!(
-            expand_portable_runner_path("~", Some("/home/chubes/Developer")),
-            Some("/home/chubes".to_string())
+            expand_portable_runner_path("~", Some("/home/user/Developer")),
+            Some("/home/user".to_string())
         );
         assert_eq!(
-            expand_portable_runner_path("/abs/path", Some("/home/chubes/Developer")),
+            expand_portable_runner_path("/abs/path", Some("/home/user/Developer")),
             None
         );
     }
 
     #[test]
     fn primary_workspace_dependency_is_not_materialized_again() {
-        let primary_remote_path = "/home/chubes/Developer/_lab_workspaces/studio-web-snapshot";
+        let primary_remote_path = "/home/user/Developer/_lab_workspaces/studio-web-snapshot";
         let dependencies = vec![RigComponentDependency {
             rig_id: "studio-web-product-matrix".to_string(),
             component_id: "studio-web".to_string(),
-            local_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
-            declared_checkout_root: "/Users/chubes/Developer/studio-web".to_string(),
+            local_checkout_root: "/Users/user/Developer/studio-web".to_string(),
+            declared_checkout_root: "/Users/user/Developer/studio-web".to_string(),
             remote_checkout_root: primary_remote_path.to_string(),
             required_subpath: None,
-            remote_url: Some("https://github.a8c.com/chubes4/studio-web.git".to_string()),
+            remote_url: Some("https://github.example.com/example-org/studio-web.git".to_string()),
             pinned_ref: None,
         }];
 

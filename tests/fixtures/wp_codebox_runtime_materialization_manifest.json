@@ -8,7 +8,7 @@
         "id": "wp-codebox",
         "label": "WP Codebox source",
         "path": "~/.cache/homeboy/runtimes/wp-codebox",
-        "remote_url": "https://github.com/Automattic/wp-codebox.git",
+        "remote_url": "https://github.com/example-org/wp-codebox.git",
         "git_ref": "main"
       }
     ],

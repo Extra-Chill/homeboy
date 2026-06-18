@@ -1053,7 +1053,7 @@ mod tests {
     fn test_repo() -> GitHubRepo {
         GitHubRepo {
             host: "github.com".to_string(),
-            owner: "chubes4".to_string(),
+            owner: "example-org".to_string(),
             repo: "studio-web".to_string(),
         }
     }
@@ -1206,13 +1206,13 @@ mod tests {
 
         let notes = fallback_release_notes(
             &state,
-            Some("https://github.com/chubes4/studio-web/blob/v0.10.6/CHANGELOG.md"),
+            Some("https://github.com/example-org/studio-web/blob/v0.10.6/CHANGELOG.md"),
             "v0.10.6",
         );
 
         assert!(notes.contains("- Fixed a thing"));
         assert!(notes.contains(
-            "**Full Changelog**: https://github.com/chubes4/studio-web/blob/v0.10.6/CHANGELOG.md"
+            "**Full Changelog**: https://github.com/example-org/studio-web/blob/v0.10.6/CHANGELOG.md"
         ));
     }
 

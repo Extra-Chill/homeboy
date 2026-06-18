@@ -597,14 +597,14 @@ mod tests {
     fn lab_extension_sync_command_replaces_by_default() {
         assert_eq!(
             runner_extension_install_command(
-                "/home/chubes/.cargo/bin/homeboy",
+                "/home/user/.cargo/bin/homeboy",
                 "https://github.com/Extra-Chill/homeboy-extensions.git",
                 "wordpress",
                 "5842f0e",
                 true,
             ),
             vec![
-                "/home/chubes/.cargo/bin/homeboy",
+                "/home/user/.cargo/bin/homeboy",
                 "extension",
                 "install",
                 "https://github.com/Extra-Chill/homeboy-extensions.git",
@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(
             runner_extension_install_command(
                 "homeboy",
-                "/home/chubes/Developer/homeboy-extensions/wordpress",
+                "/home/user/Developer/homeboy-extensions/wordpress",
                 "wordpress",
                 "main",
                 false,
@@ -631,7 +631,7 @@ mod tests {
                 "homeboy",
                 "extension",
                 "install",
-                "/home/chubes/Developer/homeboy-extensions/wordpress",
+                "/home/user/Developer/homeboy-extensions/wordpress",
                 "--id",
                 "wordpress",
                 "--ref",

@@ -14,7 +14,7 @@
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`
 //! - CLI verbs: `list`, `show`, `up`, `check`, `down`, `status`
 //!
-//! Deferred to later phases (see Automattic/homeboy#1462+): deeper stack
+//! Deferred to later phases (see example-org/homeboy#1462+): deeper stack
 //! lifecycle automation, extension-registered service kinds, spec sharing.
 
 pub mod app;

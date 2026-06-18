@@ -815,14 +815,14 @@ mod tests {
             "agent-task".to_string(),
             "dispatch".to_string(),
             "--cwd".to_string(),
-            "/Users/chubes/Developer/wp-site-generator".to_string(),
+            "/Users/user/Developer/wp-site-generator".to_string(),
             "--prompt".to_string(),
             "cook".to_string(),
         ];
 
         assert_eq!(
             lab_offload_source_path(&args).expect("source path"),
-            PathBuf::from("/Users/chubes/Developer/wp-site-generator")
+            PathBuf::from("/Users/user/Developer/wp-site-generator")
         );
     }
 
@@ -837,7 +837,7 @@ mod tests {
             "start".to_string(),
             "preview".to_string(),
             "--cwd".to_string(),
-            "/home/chubes/Developer/_lab_workspaces/site".to_string(),
+            "/home/user/Developer/_lab_workspaces/site".to_string(),
             "--command".to_string(),
             "npm run dev".to_string(),
         ];
@@ -852,7 +852,7 @@ mod tests {
                 "start".to_string(),
                 "preview".to_string(),
                 "--cwd".to_string(),
-                "/home/chubes/Developer/_lab_workspaces/site".to_string(),
+                "/home/user/Developer/_lab_workspaces/site".to_string(),
                 "--command".to_string(),
                 "npm run dev".to_string(),
             ]
@@ -973,19 +973,19 @@ mod tests {
     fn remap_inlines_and_rewrites_provider_config_local_paths() {
         let mappings = vec![
             LabPathRemap {
-                local: "/Users/chubes/Developer/data-machine@cook".to_string(),
-                remote: "/home/chubes/_lab_workspaces/data-machine@cook-abc".to_string(),
+                local: "/Users/user/Developer/data-machine@cook".to_string(),
+                remote: "/home/user/_lab_workspaces/data-machine@cook-abc".to_string(),
             },
             LabPathRemap {
-                local: "/Users/chubes/Developer/data-machine-code".to_string(),
-                remote: "/home/chubes/_lab_workspaces/data-machine-code-def".to_string(),
+                local: "/Users/user/Developer/data-machine-code".to_string(),
+                remote: "/home/user/_lab_workspaces/data-machine-code-def".to_string(),
             },
         ];
         let config = serde_json::json!({
-            "workspace_root": "/Users/chubes/Developer/data-machine@cook",
-            "mounts": [{ "source": "/Users/chubes/Developer/data-machine@cook", "target": "/workspace/data-machine" }],
-            "runtime_component_paths": { "agent_runtime_tools": "/Users/chubes/Developer/data-machine-code" },
-            "provider_plugin_paths": ["/Users/chubes/Developer/data-machine@cook/vendor/provider"],
+            "workspace_root": "/Users/user/Developer/data-machine@cook",
+            "mounts": [{ "source": "/Users/user/Developer/data-machine@cook", "target": "/workspace/data-machine" }],
+            "runtime_component_paths": { "agent_runtime_tools": "/Users/user/Developer/data-machine-code" },
+            "provider_plugin_paths": ["/Users/user/Developer/data-machine@cook/vendor/provider"],
             "model": "claude-opus-4-8"
         })
         .to_string();
@@ -1005,20 +1005,20 @@ mod tests {
 
         assert_eq!(
             remapped["workspace_root"],
-            "/home/chubes/_lab_workspaces/data-machine@cook-abc"
+            "/home/user/_lab_workspaces/data-machine@cook-abc"
         );
         assert_eq!(
             remapped["mounts"][0]["source"],
-            "/home/chubes/_lab_workspaces/data-machine@cook-abc"
+            "/home/user/_lab_workspaces/data-machine@cook-abc"
         );
         assert_eq!(remapped["mounts"][0]["target"], "/workspace/data-machine");
         assert_eq!(
             remapped["runtime_component_paths"]["agent_runtime_tools"],
-            "/home/chubes/_lab_workspaces/data-machine-code-def"
+            "/home/user/_lab_workspaces/data-machine-code-def"
         );
         assert_eq!(
             remapped["provider_plugin_paths"][0],
-            "/home/chubes/_lab_workspaces/data-machine@cook-abc/vendor/provider"
+            "/home/user/_lab_workspaces/data-machine@cook-abc/vendor/provider"
         );
         assert_eq!(remapped["model"], "claude-opus-4-8");
         // unrelated args preserved
@@ -1034,7 +1034,7 @@ mod tests {
                     ("provider".to_string(), serde_json::json!("codex")),
                     (
                         "provider_plugin_paths".to_string(),
-                        serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                        serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
                     ),
                 ]),
                 ..defaults::HomeboyConfig::default()
@@ -1060,7 +1060,7 @@ mod tests {
             assert_eq!(config["provider"], "codex");
             assert_eq!(
                 config["provider_plugin_paths"][0],
-                "/Users/chubes/Developer/ai-provider-for-openai@codex"
+                "/Users/user/Developer/ai-provider-for-openai@codex"
             );
             assert!(out.iter().any(|arg| arg == "--prompt"));
         });
@@ -1072,7 +1072,7 @@ mod tests {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([(
                     "provider_plugin_paths".to_string(),
-                    serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                    serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
                 )]),
                 ..defaults::HomeboyConfig::default()
             })
@@ -1090,8 +1090,8 @@ mod tests {
             let remapped = remap_provider_config_in_args(
                 &injected,
                 &[LabPathRemap {
-                    local: "/Users/chubes/Developer/ai-provider-for-openai@codex".to_string(),
-                    remote: "/home/chubes/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+                    local: "/Users/user/Developer/ai-provider-for-openai@codex".to_string(),
+                    remote: "/home/user/Developer/_lab_workspaces/ai-provider-for-openai@codex"
                         .to_string(),
                 }],
             );
@@ -1105,7 +1105,7 @@ mod tests {
 
             assert_eq!(
                 config["provider_plugin_paths"][0],
-                "/home/chubes/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+                "/home/user/Developer/_lab_workspaces/ai-provider-for-openai@codex"
             );
         });
     }
@@ -1116,7 +1116,7 @@ mod tests {
             defaults::save_config(&defaults::HomeboyConfig {
                 settings: HashMap::from([(
                     "provider_plugin_paths".to_string(),
-                    serde_json::json!(["/Users/chubes/Developer/ai-provider-for-openai@codex"]),
+                    serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
                 )]),
                 ..defaults::HomeboyConfig::default()
             })
@@ -1266,8 +1266,8 @@ mod tests {
                     "executor": {
                         "backend": "tool-runner",
                         "config": {
-                            "tool_bin": "/Users/chubes/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js",
-                            "artifact_root": "/Users/chubes/Developer/example-project/artifacts"
+                            "tool_bin": "/Users/user/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js",
+                            "artifact_root": "/Users/user/Developer/example-project/artifacts"
                         }
                     },
                     "instructions": "test"
@@ -1277,8 +1277,8 @@ mod tests {
         )
         .expect("write plan");
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/example-project".to_string(),
-            remote: "/home/chubes/Developer/example-project".to_string(),
+            local: "/Users/user/Developer/example-project".to_string(),
+            remote: "/home/user/Developer/example-project".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
@@ -1296,11 +1296,11 @@ mod tests {
 
         assert_eq!(
             remapped["tasks"][0]["executor"]["config"]["tool_bin"],
-            "/home/chubes/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js"
+            "/home/user/Developer/example-project/.ci/tool-runner/packages/cli/dist/index.js"
         );
         assert_eq!(
             remapped["tasks"][0]["executor"]["config"]["artifact_root"],
-            "/home/chubes/Developer/example-project/artifacts"
+            "/home/user/Developer/example-project/artifacts"
         );
         assert!(out.iter().any(|a| a == "--record-run-id=loop-1"));
     }
@@ -1316,7 +1316,7 @@ mod tests {
                 "plan_id": "plan-1",
                 "component_contracts": [{
                     "slug": "generic-component",
-                    "path": "/Users/chubes/Developer/generic-component",
+                    "path": "/Users/user/Developer/generic-component",
                     "loadAs": "plugin",
                     "activate": true,
                     "opaque": { "preserved": true }
@@ -1331,7 +1331,7 @@ mod tests {
         )
         .expect("write plan");
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/generic-component".to_string(),
+            local: "/Users/user/Developer/generic-component".to_string(),
             remote: "/srv/homeboy/_lab_workspaces/generic-component-snapshot".to_string(),
         }];
         let args = vec![
@@ -1396,11 +1396,11 @@ mod tests {
         let mappings = vec![
             LabPathRemap {
                 local: primary.canonicalize().unwrap().display().to_string(),
-                remote: "/home/chubes/_lab_workspaces/wp-site-generator".to_string(),
+                remote: "/home/user/_lab_workspaces/wp-site-generator".to_string(),
             },
             LabPathRemap {
                 local: tool.canonicalize().unwrap().display().to_string(),
-                remote: "/home/chubes/_lab_workspaces/tool-runner".to_string(),
+                remote: "/home/user/_lab_workspaces/tool-runner".to_string(),
             },
         ];
         let args = vec![
@@ -1418,7 +1418,7 @@ mod tests {
 
         assert_eq!(
             remapped["tasks"][0]["executor"]["config"]["tool_bin"],
-            "/home/chubes/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
+            "/home/user/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
         );
     }
 
@@ -1445,7 +1445,7 @@ mod tests {
         .expect("write plan");
         let mappings = vec![LabPathRemap {
             local: source.display().to_string(),
-            remote: "/home/chubes/Developer/example-project".to_string(),
+            remote: "/home/user/Developer/example-project".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
@@ -1460,7 +1460,7 @@ mod tests {
 
         assert_eq!(
             remapped["tasks"][0]["executor"]["config"]["artifact_root"],
-            "/home/chubes/Developer/example-project/artifacts"
+            "/home/user/Developer/example-project/artifacts"
         );
     }
 
@@ -1469,7 +1469,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let mappings = vec![LabPathRemap {
             local: temp.path().display().to_string(),
-            remote: "/home/chubes/Developer/example-project".to_string(),
+            remote: "/home/user/Developer/example-project".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
@@ -1589,14 +1589,14 @@ mod tests {
     #[test]
     fn remap_path_settings_rewrites_local_path_values() {
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/tool-runner".to_string(),
-            remote: "/home/chubes/_lab_workspaces/tool-runner".to_string(),
+            local: "/Users/user/Developer/tool-runner".to_string(),
+            remote: "/home/user/_lab_workspaces/tool-runner".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
             "trace".to_string(),
             "--setting".to_string(),
-            "tool_bin=/Users/chubes/Developer/tool-runner/packages/cli/dist/index.js".to_string(),
+            "tool_bin=/Users/user/Developer/tool-runner/packages/cli/dist/index.js".to_string(),
             "--setting=mode=fast".to_string(),
         ];
 
@@ -1604,7 +1604,7 @@ mod tests {
 
         assert_eq!(
             out[3],
-            "tool_bin=/home/chubes/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
+            "tool_bin=/home/user/_lab_workspaces/tool-runner/packages/cli/dist/index.js"
         );
         assert_eq!(out[4], "--setting=mode=fast");
     }
@@ -1612,27 +1612,27 @@ mod tests {
     #[test]
     fn remap_path_settings_rewrites_json_array_path_values() {
         let mappings = vec![LabPathRemap {
-            local: "/Users/chubes/Developer/woocommerce-gateway-stripe".to_string(),
-            remote: "/home/chubes/_lab_workspaces/woocommerce-gateway-stripe".to_string(),
+            local: "/Users/user/Developer/woocommerce-gateway-stripe".to_string(),
+            remote: "/home/user/_lab_workspaces/woocommerce-gateway-stripe".to_string(),
         }];
         let args = vec![
             "homeboy".to_string(),
             "bench".to_string(),
             "--setting-json".to_string(),
-            "validation_dependencies=[\"/Users/chubes/Developer/woocommerce-gateway-stripe\"]"
+            "validation_dependencies=[\"/Users/user/Developer/woocommerce-gateway-stripe\"]"
                 .to_string(),
-            "--setting-json=depends_on={\"plugins\":[\"/Users/chubes/Developer/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}".to_string(),
+            "--setting-json=depends_on={\"plugins\":[\"/Users/user/Developer/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}".to_string(),
         ];
 
         let out = remap_path_settings_in_args(&args, &mappings);
 
         assert_eq!(
             out[3],
-            "validation_dependencies=[\"/home/chubes/_lab_workspaces/woocommerce-gateway-stripe\"]"
+            "validation_dependencies=[\"/home/user/_lab_workspaces/woocommerce-gateway-stripe\"]"
         );
         assert_eq!(
             out[4],
-            "--setting-json=depends_on={\"plugins\":[\"/home/chubes/_lab_workspaces/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}"
+            "--setting-json=depends_on={\"plugins\":[\"/home/user/_lab_workspaces/woocommerce-gateway-stripe/includes\"],\"token\":\"keep-secret-like-string\"}"
         );
     }
 
@@ -1663,19 +1663,19 @@ mod tests {
             "dispatch".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "--cwd=/Users/chubes/Developer/wp-site-generator".to_string(),
+            "--cwd=/Users/user/Developer/wp-site-generator".to_string(),
             "--prompt".to_string(),
             "cook".to_string(),
         ];
 
         assert_eq!(
-            rewrite_lab_offload_args(&args, "/home/chubes/Developer/wp-site-generator", &[]),
+            rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[]),
             vec![
                 "homeboy".to_string(),
                 "--force-hot".to_string(),
                 "agent-task".to_string(),
                 "dispatch".to_string(),
-                "--cwd=/home/chubes/Developer/wp-site-generator".to_string(),
+                "--cwd=/home/user/Developer/wp-site-generator".to_string(),
                 "--prompt".to_string(),
                 "cook".to_string(),
             ]

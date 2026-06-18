@@ -903,7 +903,7 @@ mod tests {
             .try_get_matches_from([
                 "homeboy",
                 "--path",
-                "/Users/chubes/Developer/opencode",
+                "/Users/user/Developer/opencode",
                 "--watch-process",
                 ".opencode serve",
             ])
@@ -913,7 +913,7 @@ mod tests {
         assert!(parsed.comp.component.is_none());
         assert_eq!(
             parsed.comp.path.as_deref(),
-            Some("/Users/chubes/Developer/opencode")
+            Some("/Users/user/Developer/opencode")
         );
         assert_eq!(parsed.watch_processes, vec![".opencode serve".to_string()]);
     }

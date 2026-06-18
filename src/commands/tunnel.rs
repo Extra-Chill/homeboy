@@ -376,11 +376,11 @@ struct PreviewIngressInstallArgs {
     #[arg(long)]
     server: String,
 
-    /// Operator-owned domain, e.g. chubes.net
+    /// Operator-owned domain, e.g. example.com
     #[arg(long)]
     domain: String,
 
-    /// Wildcard host pattern routed to the ingress, e.g. *-tunnel.chubes.net
+    /// Wildcard host pattern routed to the ingress, e.g. *-tunnel.example.com
     #[arg(long)]
     public_host_pattern: String,
 

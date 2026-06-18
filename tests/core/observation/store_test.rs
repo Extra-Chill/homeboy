@@ -296,7 +296,7 @@ fn sample_import_run(id: &str) -> RunRecord {
         finished_at: Some("2026-05-25T00:01:00+00:00".to_string()),
         status: "pass".to_string(),
         command: Some("homeboy audit homeboy".to_string()),
-        cwd: Some("/home/chubes/Developer/homeboy".to_string()),
+        cwd: Some("/home/user/Developer/homeboy".to_string()),
         homeboy_version: Some("test-version".to_string()),
         git_sha: Some("abc123".to_string()),
         rig_id: None,

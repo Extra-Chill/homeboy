@@ -61,7 +61,7 @@ impl GitHubRepo {
 /// - `https://github.com/owner/repo.git`
 /// - `https://user:token@github.com/owner/repo.git`
 /// - `git@github.com:owner/repo.git`
-/// - GitHub Enterprise equivalents such as `git@github.a8c.com:owner/repo.git`
+/// - GitHub Enterprise equivalents such as `git@github.example.com:owner/repo.git`
 pub fn parse_github_url(url: &str) -> Option<GitHubRepo> {
     // HTTPS format
     if let Some(repo) = parse_github_http_url(url) {
@@ -366,17 +366,18 @@ mod tests {
 
     #[test]
     fn parse_github_url_enterprise_ssh() {
-        let repo = parse_github_url("git@github.a8c.com:Automattic/intelligence.git").unwrap();
-        assert_eq!(repo.host, "github.a8c.com");
-        assert_eq!(repo.owner, "Automattic");
+        let repo = parse_github_url("git@github.example.com:example-org/intelligence.git").unwrap();
+        assert_eq!(repo.host, "github.example.com");
+        assert_eq!(repo.owner, "example-org");
         assert_eq!(repo.repo, "intelligence");
     }
 
     #[test]
     fn parse_github_url_enterprise_https() {
-        let repo = parse_github_url("https://github.a8c.com/Automattic/intelligence.git").unwrap();
-        assert_eq!(repo.host, "github.a8c.com");
-        assert_eq!(repo.owner, "Automattic");
+        let repo =
+            parse_github_url("https://github.example.com/example-org/intelligence.git").unwrap();
+        assert_eq!(repo.host, "github.example.com");
+        assert_eq!(repo.owner, "example-org");
         assert_eq!(repo.repo, "intelligence");
     }
 
@@ -413,14 +414,14 @@ mod tests {
     #[test]
     fn enterprise_release_artifact_url_uses_remote_host() {
         let repo = GitHubRepo {
-            host: "github.a8c.com".to_string(),
-            owner: "Automattic".to_string(),
+            host: "github.example.com".to_string(),
+            owner: "example-org".to_string(),
             repo: "intelligence".to_string(),
         };
         let url = repo.release_artifact_url("v1.2.3", "intelligence.zip");
         assert_eq!(
             url,
-            "https://github.a8c.com/Automattic/intelligence/releases/download/v1.2.3/intelligence.zip"
+            "https://github.example.com/example-org/intelligence/releases/download/v1.2.3/intelligence.zip"
         );
     }
 
@@ -478,7 +479,7 @@ mod tests {
         let error = validate_downloaded_artifact(
             &artifact,
             "theme.zip",
-            "https://github.a8c.com/Automattic/theme/releases/download/v1/theme.zip",
+            "https://github.example.com/example-org/theme/releases/download/v1/theme.zip",
         )
         .expect_err("html auth page should be rejected");
         let message = error.to_string();

@@ -221,10 +221,10 @@ mod fixtures {
             rig_state: None,
             failure: Some(BenchRunFailure {
                 component_id: "studio".to_string(),
-                component_path: Some("/Users/chubes/Developer/studio@candidate".to_string()),
+                component_path: Some("/Users/user/Developer/studio@candidate".to_string()),
                 scenario_id: None,
                 exit_code: 2,
-                stderr_tail: "ERROR: Homeboy bench helper not found at /Users/chubes/.homeboy/runtime/bench-helper.sh".to_string(),
+                stderr_tail: "ERROR: Homeboy bench helper not found at /Users/user/.homeboy/runtime/bench-helper.sh".to_string(),
                 failure_classification: None,
                 responsiveness: None,
                 memory_sample: None,
@@ -1188,7 +1188,7 @@ fn aggregate_puts_actionable_failure_block_before_generic_hint() {
 
     assert!(hints[0].starts_with("Rig failed before producing parseable bench results:"));
     assert!(hints[0].contains("- rig: candidate"));
-    assert!(hints[0].contains("- component: studio (/Users/chubes/Developer/studio@candidate)"));
+    assert!(hints[0].contains("- component: studio (/Users/user/Developer/studio@candidate)"));
     assert!(hints[0].contains("- exit: 2"));
     assert!(hints[0].contains("Homeboy bench helper not found"));
     assert!(hints[1].contains("no parseable results"));

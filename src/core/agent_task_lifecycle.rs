@@ -2366,14 +2366,14 @@ mod tests {
             record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
             let local_path = store::aggregate_path("run-source").expect("local aggregate path");
             let mut record = store::read_record("run-source").expect("record loaded");
-            record.aggregate_path = Some("/home/chubes/remote/aggregate.json".to_string());
+            record.aggregate_path = Some("/home/user/remote/aggregate.json".to_string());
             store::write_record(&record).expect("remote aggregate path stored");
             std::fs::remove_file(&local_path).expect("local aggregate removed");
 
             let (raw, path) = aggregate_source("run-source").expect("aggregate source");
 
             assert!(path.ends_with("aggregate.json"));
-            assert_ne!(path, PathBuf::from("/home/chubes/remote/aggregate.json"));
+            assert_ne!(path, PathBuf::from("/home/user/remote/aggregate.json"));
             assert!(raw.contains("task-a"));
         });
     }

@@ -12,7 +12,7 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
         "homeboy",
         "audit",
         "--path",
-        "/Users/chubes/Developer/project",
+        "/Users/user/Developer/project",
         "--runner",
         "lab",
         "--json-summary",
@@ -22,13 +22,13 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",
             "audit",
             "--path",
-            "/home/chubes/Developer/project",
+            "/home/user/Developer/project",
             "--json-summary",
         ])
     );
@@ -39,7 +39,7 @@ fn leaves_passthrough_path_args_untouched() {
     let input = args(&[
         "homeboy",
         "test",
-        "--path=/Users/chubes/Developer/project",
+        "--path=/Users/user/Developer/project",
         "--",
         EXPLICIT_PASSTHROUGH_SENTINEL,
         "--path",
@@ -47,12 +47,12 @@ fn leaves_passthrough_path_args_untouched() {
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",
             "test",
-            "--path=/home/chubes/Developer/project",
+            "--path=/home/user/Developer/project",
             "--",
             "--path",
             "test-fixture",
@@ -68,21 +68,21 @@ fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
         "test",
         "data-machine",
         "--path",
-        "/Users/chubes/Developer/data-machine@fix",
+        "/Users/user/Developer/data-machine@fix",
         "--",
         EXPLICIT_PASSTHROUGH_SENTINEL,
         filter,
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/data-machine@fix", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/data-machine@fix", &[]),
         args(&[
             "homeboy",
             "--force-hot",
             "test",
             "data-machine",
             "--path",
-            "/home/chubes/Developer/data-machine@fix",
+            "/home/user/Developer/data-machine@fix",
             "--",
             filter,
         ])
@@ -98,11 +98,11 @@ fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
         "--from",
         "audit",
         "--path",
-        "/Users/chubes/Developer/project",
+        "/Users/user/Developer/project",
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/chubes/Developer/project", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
         args(&[
             "homeboy",
             "--force-hot",
@@ -110,22 +110,17 @@ fn rewrite_lab_offload_args_does_not_duplicate_force_hot() {
             "--from",
             "audit",
             "--path",
-            "/home/chubes/Developer/project",
+            "/home/user/Developer/project",
         ])
     );
 }
 
 #[test]
 fn detects_lab_offload_source_path_from_path_flag() {
-    let input = args(&[
-        "homeboy",
-        "test",
-        "--path",
-        "/Users/chubes/Developer/project",
-    ]);
+    let input = args(&["homeboy", "test", "--path", "/Users/user/Developer/project"]);
 
     assert_eq!(
         lab_offload_source_path(&input).expect("path"),
-        std::path::PathBuf::from("/Users/chubes/Developer/project")
+        std::path::PathBuf::from("/Users/user/Developer/project")
     );
 }

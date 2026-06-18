@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn find_prefix_match_version_suffix() {
-        let project = project_with_components(&["data-machine", "chubes-theme"]);
+        let project = project_with_components(&["data-machine", "example-theme"]);
         // Clone dir "data-machine-v0402-clean" → slugified inferred ID
         assert_eq!(
             find_prefix_match(&project, "data-machine-v0402-clean"),

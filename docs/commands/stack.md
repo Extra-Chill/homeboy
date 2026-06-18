@@ -21,8 +21,8 @@ Stack specs live at `~/.config/homeboy/stacks/<id>.json`. A stack declares one c
   "base": { "remote": "origin", "branch": "trunk" },
   "target": { "remote": "fork", "branch": "dev/combined-fixes" },
   "prs": [
-    { "repo": "Automattic/studio", "number": 3120, "note": "proc_open cwd fix" },
-    { "repo": "Automattic/studio", "number": 3211 }
+    { "repo": "example-org/studio", "number": 3120, "note": "proc_open cwd fix" },
+    { "repo": "example-org/studio", "number": 3211 }
   ]
 }
 ```
@@ -63,7 +63,7 @@ Create a spec file under `~/.config/homeboy/stacks/`.
 ### `add-pr`
 
 ```sh
-homeboy stack add-pr <stack-id> Automattic/studio 3120 --note "proc_open cwd fix"
+homeboy stack add-pr <stack-id> example-org/studio 3120 --note "proc_open cwd fix"
 ```
 
 Append a PR entry to the stack's `prs` array.
@@ -72,7 +72,7 @@ Append a PR entry to the stack's `prs` array.
 
 ```sh
 homeboy stack remove-pr <stack-id> 3120
-homeboy stack remove-pr <stack-id> 3120 --repo Automattic/studio
+homeboy stack remove-pr <stack-id> 3120 --repo example-org/studio
 ```
 
 Remove a PR entry. Use `--repo` when the same number appears for multiple repos in one stack.

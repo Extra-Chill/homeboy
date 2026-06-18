@@ -674,7 +674,7 @@ mod tests {
             let spec = r#"{
                 "id": "lab-local",
                 "kind": "local",
-                "workspace_root": "/Users/chubes/Developer",
+                "workspace_root": "/Users/user/Developer",
                 "homeboy_path": "/usr/local/bin/homeboy",
                 "daemon": true,
                 "concurrency_limit": 2,
@@ -691,7 +691,7 @@ mod tests {
             assert_eq!(runner.server_id, None);
             assert_eq!(
                 runner.workspace_root.as_deref(),
-                Some("/Users/chubes/Developer")
+                Some("/Users/user/Developer")
             );
             assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
@@ -723,7 +723,7 @@ mod tests {
                     "allowed_projects": ["extrachill"],
                     "allowed_commands": ["test", "bench"],
                     "allow_raw_exec": false,
-                    "workspace_roots": ["/home/chubes/Developer"],
+                    "workspace_roots": ["/home/user/Developer"],
                     "artifact_policy": "metadata"
                 }
             }"#;
@@ -739,10 +739,7 @@ mod tests {
             assert_eq!(runner.policy.allowed_projects, vec!["extrachill"]);
             assert_eq!(runner.policy.allowed_commands, vec!["test", "bench"]);
             assert_eq!(runner.policy.allow_raw_exec, Some(false));
-            assert_eq!(
-                runner.policy.workspace_roots,
-                vec!["/home/chubes/Developer"]
-            );
+            assert_eq!(runner.policy.workspace_roots, vec!["/home/user/Developer"]);
             assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
         });
     }
@@ -766,7 +763,7 @@ mod tests {
     fn ssh_runner_is_server_capability() {
         test_support::with_isolated_home(|_| {
             server::create(
-                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
             )
             .expect("create server");
@@ -776,7 +773,7 @@ mod tests {
                     "id":"homeboy-lab",
                     "kind":"ssh",
                     "server_id":"homeboy-lab",
-                    "workspace_root":"/home/chubes/Developer",
+                    "workspace_root":"/home/user/Developer",
                     "concurrency_limit":4,
                     "artifact_policy":"copy"
                 }"#,
@@ -790,7 +787,7 @@ mod tests {
             assert_eq!(runner.server_id.as_deref(), Some("homeboy-lab"));
             assert_eq!(
                 runner.workspace_root.as_deref(),
-                Some("/home/chubes/Developer")
+                Some("/home/user/Developer")
             );
             assert_eq!(runner.settings.concurrency_limit, Some(4));
 
@@ -858,7 +855,7 @@ mod tests {
             assert!(local_err.message.contains("concurrency_limit"));
 
             server::create(
-                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
             )
             .expect("create server");
@@ -877,7 +874,7 @@ mod tests {
     fn ssh_runner_id_must_match_server_id() {
         test_support::with_isolated_home(|_| {
             server::create(
-                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
             )
             .expect("create server");
@@ -887,7 +884,7 @@ mod tests {
                     "id":"lab",
                     "kind":"ssh",
                     "server_id":"homeboy-lab",
-                    "workspace_root":"/home/chubes/Developer"
+                    "workspace_root":"/home/user/Developer"
                 }"#,
                 false,
             )
@@ -937,7 +934,7 @@ mod tests {
     fn standalone_ssh_runner_config_is_not_loaded_or_listed() {
         test_support::with_isolated_home(|_| {
             server::create(
-                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"chubes"}"#,
+                r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
                 false,
             )
             .expect("create server");
@@ -946,7 +943,7 @@ mod tests {
                 id: "lab".to_string(),
                 kind: RunnerKind::Ssh,
                 server_id: Some("homeboy-lab".to_string()),
-                workspace_root: Some("/home/chubes/Developer".to_string()),
+                workspace_root: Some("/home/user/Developer".to_string()),
                 settings: RunnerSettings::default(),
                 env: HashMap::new(),
                 secret_env: HashMap::new(),

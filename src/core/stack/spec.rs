@@ -71,7 +71,7 @@ impl GitRef {
 /// optional fields so future additions don't break older specs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackPrEntry {
-    /// `<owner>/<repo>` coordinate, e.g. `Automattic/studio`.
+    /// `<owner>/<repo>` coordinate, e.g. `example-org/studio`.
     pub repo: String,
     /// PR number on `repo`.
     pub number: u64,

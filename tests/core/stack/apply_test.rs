@@ -198,36 +198,36 @@ fn rebase_rebuilds_target_without_editing_spec() {
 #[test]
 fn url_matches_https_with_and_without_dot_git() {
     assert!(url_matches(
-        "https://github.com/Automattic/studio.git",
-        "https://github.com/Automattic/studio"
+        "https://github.com/example-org/studio.git",
+        "https://github.com/example-org/studio"
     ));
     assert!(url_matches(
-        "https://github.com/Automattic/studio",
-        "https://github.com/Automattic/studio.git"
+        "https://github.com/example-org/studio",
+        "https://github.com/example-org/studio.git"
     ));
 }
 
 #[test]
 fn url_matches_https_vs_ssh() {
     assert!(url_matches(
-        "https://github.com/Automattic/studio.git",
-        "git@github.com:Automattic/studio.git"
+        "https://github.com/example-org/studio.git",
+        "git@github.com:example-org/studio.git"
     ));
 }
 
 #[test]
 fn url_matches_case_insensitive() {
     assert!(url_matches(
-        "https://github.com/automattic/STUDIO.git",
-        "https://github.com/Automattic/studio"
+        "https://github.com/EXAMPLE-ORG/STUDIO.git",
+        "https://github.com/example-org/studio"
     ));
 }
 
 #[test]
 fn url_matches_rejects_different_repos() {
     assert!(!url_matches(
-        "https://github.com/Automattic/studio",
-        "https://github.com/Automattic/playground"
+        "https://github.com/example-org/studio",
+        "https://github.com/example-org/playground"
     ));
 }
 
