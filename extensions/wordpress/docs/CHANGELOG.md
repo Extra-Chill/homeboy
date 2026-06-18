@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.10] - 2026-06-18
+
+### Changed
+- Add WP Codebox provider preflight manifests
+
 ## [3.4.9] - 2026-06-18
 
 ### Fixed
