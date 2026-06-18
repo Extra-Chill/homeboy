@@ -5,7 +5,8 @@
 //! the public outcome types — shape, serialization, `is_success` contract.
 
 use crate::core::rig::pipeline::{
-    run_pipeline, run_pipeline_check_groups, PipelineOutcome, PipelineStepOutcome,
+    run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings, PipelineOutcome,
+    PipelineStepOutcome,
 };
 use crate::core::rig::spec::RigSpec;
 
@@ -150,6 +151,39 @@ fn test_command_if_missing_skips_when_path_exists() {
     let out = run_pipeline(&rig, "bench_prepare", true).expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert!(!marker.exists(), "guarded command should not run");
+}
+
+#[test]
+fn test_command_step_exposes_pipeline_settings_env() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("setting.txt");
+    let marker_arg = marker.to_string_lossy();
+    let rig: RigSpec = serde_json::from_str(&format!(
+        r#"{{
+            "id": "command-settings-env",
+            "pipeline": {{
+                "bench_prepare": [{{
+                    "kind": "command",
+                    "command": "printf '%s' \"$HOMEBOY_SETTINGS_WP_CODEBOX_SOURCE_ROOT\" > {}"
+                }}]
+            }}
+        }}"#,
+        marker_arg
+    ))
+    .expect("parse rig");
+
+    let settings = vec![(
+        "wp_codebox_source_root".to_string(),
+        "/tmp/woocommerce".to_string(),
+    )];
+    let out =
+        run_pipeline_with_settings(&rig, "bench_prepare", true, &settings).expect("pipeline runs");
+
+    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert_eq!(
+        std::fs::read_to_string(marker).expect("marker"),
+        "/tmp/woocommerce"
+    );
 }
 
 #[test]

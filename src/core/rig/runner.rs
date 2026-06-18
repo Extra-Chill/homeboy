@@ -16,7 +16,8 @@ use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
 use super::pipeline::{
-    cleanup_shared_paths, run_pipeline, run_pipeline_check_groups, PipelineOutcome,
+    cleanup_shared_paths, run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings,
+    PipelineOutcome,
 };
 use super::service::{self, ServiceStatus};
 use super::spec::{RigSpec, ServiceKind, SymlinkSpec};
@@ -259,12 +260,15 @@ pub fn run_check_groups(rig: &RigSpec, groups: &[String]) -> Result<CheckReport>
 /// Missing `bench_prepare` pipelines are a no-op so existing rigs keep their
 /// previous bench behavior. Declared steps fail fast because workload timing
 /// must not start when dependency/bootstrap preparation is incomplete.
-pub fn run_bench_prepare(rig: &RigSpec) -> Result<Option<BenchPrepareReport>> {
+pub fn run_bench_prepare(
+    rig: &RigSpec,
+    settings: &[(String, String)],
+) -> Result<Option<BenchPrepareReport>> {
     if !rig.pipeline.contains_key("bench_prepare") {
         return Ok(None);
     }
 
-    let outcome = run_pipeline(rig, "bench_prepare", true)?;
+    let outcome = run_pipeline_with_settings(rig, "bench_prepare", true, settings)?;
     Ok(Some(BenchPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),

@@ -35,7 +35,8 @@ fn prepare_rig_bench_context(
     let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
     let lease = rig::lease::acquire_active_run_lease(&spec, "bench")?;
-    if let Some(prepare) = rig::run_bench_prepare(&spec)? {
+    let prepare_settings = bench_prepare_settings(args);
+    if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
         if !prepare.success {
             return Err(homeboy::core::Error::rig_pipeline_failed(
                 &spec.id,
@@ -54,6 +55,20 @@ fn prepare_rig_bench_context(
         snapshot,
         _lease: lease,
     })
+}
+
+fn bench_prepare_settings(args: &BenchRunArgs) -> Vec<(String, String)> {
+    args.setting_args
+        .setting
+        .iter()
+        .cloned()
+        .chain(
+            args.setting_args
+                .setting_json
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_string())),
+        )
+        .collect()
 }
 
 fn apply_bench_path_override(spec: &mut RigSpec, args: &BenchRunArgs) {

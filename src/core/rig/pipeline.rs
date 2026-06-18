@@ -55,9 +55,18 @@ impl PipelineOutcome {
 }
 
 pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<PipelineOutcome> {
+    run_pipeline_with_settings(rig, name, fail_fast, &[])
+}
+
+pub fn run_pipeline_with_settings(
+    rig: &RigSpec,
+    name: &str,
+    fail_fast: bool,
+    settings: &[(String, String)],
+) -> Result<PipelineOutcome> {
     let steps = rig.pipeline.get(name).cloned().unwrap_or_default();
     let ordered_indices = order_pipeline_steps(rig, name, &steps)?;
-    run_ordered_steps(rig, name, &steps, ordered_indices, fail_fast)
+    run_ordered_steps(rig, name, &steps, ordered_indices, fail_fast, settings)
 }
 
 pub fn run_pipeline_check_groups(
@@ -75,7 +84,7 @@ pub fn run_pipeline_check_groups(
         .filter(|step| step_matches_groups(step, &wanted))
         .collect::<Vec<_>>();
     let ordered_indices = order_pipeline_steps(rig, "check", &steps)?;
-    run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast)
+    run_ordered_steps(rig, "check", &steps, ordered_indices, fail_fast, &[])
 }
 
 fn run_ordered_steps(
@@ -84,6 +93,7 @@ fn run_ordered_steps(
     steps: &[PipelineStep],
     ordered_indices: Vec<usize>,
     fail_fast: bool,
+    settings: &[(String, String)],
 ) -> Result<PipelineOutcome> {
     let mut outcomes = Vec::with_capacity(ordered_indices.len());
     let mut failed = 0;
@@ -105,7 +115,7 @@ fn run_ordered_steps(
         let label = step_label(rig, step, idx);
         crate::log_status!("rig", "{}: {}", name, label);
 
-        let result = run_step(rig, name, step);
+        let result = run_step(rig, name, step, settings);
 
         let outcome = match &result {
             Ok(()) => PipelineStepOutcome {
@@ -152,7 +162,12 @@ fn step_matches_groups(step: &PipelineStep, wanted: &BTreeSet<&str>) -> bool {
     }
 }
 
-fn run_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep) -> Result<()> {
+fn run_step(
+    rig: &RigSpec,
+    pipeline_name: &str,
+    step: &PipelineStep,
+    settings: &[(String, String)],
+) -> Result<()> {
     match step {
         PipelineStep::Service { id, op, .. } => run_service_step(rig, id, *op),
         PipelineStep::Build { component, .. } => run_build_step(rig, component),
@@ -170,9 +185,11 @@ fn run_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep) -> Result<(
             ..
         } => run_stack_step(rig, component, *op, *dry_run),
         PipelineStep::Command { .. } | PipelineStep::CommandIfMissing { .. } => {
-            run_command_pipeline_step(rig, step)
+            run_command_pipeline_step(rig, step, settings)
         }
-        PipelineStep::Requirement { .. } => run_requirement_step(rig, pipeline_name, step),
+        PipelineStep::Requirement { .. } => {
+            run_requirement_step(rig, pipeline_name, step, settings)
+        }
         PipelineStep::Symlink { op, .. } => run_symlink_step(rig, *op),
         PipelineStep::SharedPath { op, .. } => run_shared_path_step(rig, *op),
         PipelineStep::Patch {
@@ -552,6 +569,7 @@ fn run_command_step(
     cmd: &str,
     cwd: Option<&str>,
     env: &HashMap<String, String>,
+    settings: &[(String, String)],
 ) -> Result<()> {
     let expanded = expand_vars(rig, cmd);
     let mut command = Command::new(command_step_shell());
@@ -570,6 +588,10 @@ fn run_command_step(
 
     for (k, v) in env {
         command.env(k, expand_vars(rig, v));
+    }
+
+    for (k, v) in settings_env(settings) {
+        command.env(k, v);
     }
 
     let status = command.status().map_err(|e| {
@@ -596,10 +618,26 @@ fn run_command_step(
     Ok(())
 }
 
-fn run_command_pipeline_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
+fn settings_env(settings: &[(String, String)]) -> Vec<(String, String)> {
+    settings
+        .iter()
+        .map(|(key, value)| {
+            (
+                format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
+                value.clone(),
+            )
+        })
+        .collect()
+}
+
+fn run_command_pipeline_step(
+    rig: &RigSpec,
+    step: &PipelineStep,
+    settings: &[(String, String)],
+) -> Result<()> {
     match step {
         PipelineStep::Command { cmd, cwd, env, .. } => {
-            run_command_step(rig, cmd, cwd.as_deref(), env)
+            run_command_step(rig, cmd, cwd.as_deref(), env, settings)
         }
         PipelineStep::CommandIfMissing {
             missing,
@@ -607,7 +645,7 @@ fn run_command_pipeline_step(rig: &RigSpec, step: &PipelineStep) -> Result<()> {
             cwd,
             env,
             ..
-        } => run_command_if_missing_step(rig, missing, cmd, cwd.as_deref(), env),
+        } => run_command_if_missing_step(rig, missing, cmd, cwd.as_deref(), env, settings),
         _ => unreachable!("command pipeline helper only accepts command steps"),
     }
 }
@@ -618,6 +656,7 @@ fn run_command_if_missing_step(
     cmd: &str,
     cwd: Option<&str>,
     env: &HashMap<String, String>,
+    settings: &[(String, String)],
 ) -> Result<()> {
     let expanded_missing = expand_vars(rig, missing);
     let missing_path = PathBuf::from(&expanded_missing);
@@ -633,10 +672,15 @@ fn run_command_if_missing_step(
         return Ok(());
     }
 
-    run_command_step(rig, cmd, cwd, env)
+    run_command_step(rig, cmd, cwd, env, settings)
 }
 
-fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep) -> Result<()> {
+fn run_requirement_step(
+    rig: &RigSpec,
+    pipeline_name: &str,
+    step: &PipelineStep,
+    settings: &[(String, String)],
+) -> Result<()> {
     let PipelineStep::Requirement {
         path,
         file,
@@ -723,6 +767,7 @@ fn run_requirement_step(rig: &RigSpec, pipeline_name: &str, step: &PipelineStep)
             prepare_command.as_deref().unwrap(),
             cwd.as_deref(),
             env,
+            settings,
         )?;
     }
 
