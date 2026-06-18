@@ -247,7 +247,7 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
         let browser = thread::spawn(move || {
             raw_http_request(
                 port,
-                "GET /__wp-codebox/reviewer-auth-bootstrap?token=fake HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
+                "GET /__runtime/reviewer-auth-bootstrap?token=fake HTTP/1.1\r\nHost: run-1-tunnel.example.com\r\n\r\n",
             )
         });
         thread::sleep(Duration::from_millis(100));
@@ -261,7 +261,7 @@ fn reverse_channel_client_forwards_bootstrap_redirect_and_repeated_cookies() {
             json!({ "public_host": "run-1-tunnel.example.com", "timeout_secs": 2 }).to_string(),
         );
         assert!(
-            next.contains("/__wp-codebox/reviewer-auth-bootstrap?token=fake"),
+            next.contains("/__runtime/reviewer-auth-bootstrap?token=fake"),
             "{next}"
         );
         let request_id = response_json(&next)["request"]["request_id"]

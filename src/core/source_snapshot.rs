@@ -248,12 +248,12 @@ mod tests {
         assert!(excludes.contains(&"node_modules/".to_string()));
         assert!(excludes.contains(&".homeboy-build/".to_string()));
         assert!(excludes.contains(&".env".to_string()));
-        assert!(!excludes.contains(&".datamachine/".to_string()));
+        assert!(!excludes.contains(&".sampleplugin/".to_string()));
     }
 
     #[test]
     fn source_snapshot_policy_allows_product_specific_excludes() {
-        let policy = SourceSnapshotPolicy::default().with_sync_excludes([".datamachine/"]);
+        let policy = SourceSnapshotPolicy::default().with_sync_excludes([".sampleplugin/"]);
         let snapshot = SourceSnapshot::existing_remote_with_policy(
             "lab",
             "/srv/homeboy/repo",
@@ -264,7 +264,7 @@ mod tests {
         assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
         assert!(snapshot
             .sync_excludes
-            .contains(&".datamachine/".to_string()));
+            .contains(&".sampleplugin/".to_string()));
     }
 
     #[test]

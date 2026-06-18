@@ -379,7 +379,10 @@ mod tests {
             "bench_env.GUTENBERG_RTC_BATCH_SIZE".to_string(),
             "25".to_string(),
         );
-        settings.insert("wp_codebox_bin".to_string(), "/tmp/wp-codebox".to_string());
+        settings.insert(
+            "sample_runtime_bin".to_string(),
+            "/tmp/sample-runtime".to_string(),
+        );
 
         apply_matrix_settings(&mut args, &settings);
 
@@ -394,7 +397,10 @@ mod tests {
                     "bench_env.GUTENBERG_RTC_CLIENTS".to_string(),
                     "100".to_string()
                 ),
-                ("wp_codebox_bin".to_string(), "/tmp/wp-codebox".to_string())
+                (
+                    "sample_runtime_bin".to_string(),
+                    "/tmp/sample-runtime".to_string()
+                )
             ]
         );
         assert!(args.setting_args.setting_json.is_empty());

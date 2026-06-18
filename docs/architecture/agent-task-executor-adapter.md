@@ -140,8 +140,8 @@ mechanics and native payload vocabulary.
 
 ```json
 {
-  "id": "wp-codebox.codex",
-  "backend": "codebox",
+  "id": "sample-runtime.codex",
+  "backend": "sample-runtime",
   "capabilities": ["structured_outcome"],
   "runtime_contract": {
     "capabilities": ["sandbox", "artifacts", "agent_result"],
@@ -160,14 +160,14 @@ mechanics and native payload vocabulary.
       }
     },
     "normalization": {
-      "status_path": "outputs.codebox.state",
-      "summary_path": "outputs.codebox.summary",
+      "status_path": "outputs.sample-runtime.state",
+      "summary_path": "outputs.sample-runtime.summary",
       "output_artifacts": [
         {
           "name": "patch",
           "type": "patch",
           "artifact_schema": "text/x-patch",
-          "path": "outputs.codebox.artifacts.patch",
+          "path": "outputs.sample-runtime.artifacts.patch",
           "kind": "patch",
           "mime": "text/x-patch"
         },
@@ -175,7 +175,7 @@ mechanics and native payload vocabulary.
           "name": "agent-report",
           "type": "agent_report",
           "artifact_schema": "application/json",
-          "path": "outputs.codebox.artifacts.report",
+          "path": "outputs.sample-runtime.artifacts.report",
           "kind": "report",
           "mime": "application/json"
         }
@@ -199,10 +199,10 @@ The normalization hook is intentionally manifest-driven and small:
   `AgentTaskArtifact` records and, when `type` or `artifact_schema` is present,
   matching `AgentTaskTypedArtifact` records.
 
-For Codebox, the adapter should expose the native Codebox result under a stable
-`outputs.codebox` object and declare the mapping above. Homeboy then treats
-Codebox like any other runtime adapter: it records the run, evaluates canonical
-artifacts, promotes patches, reports status, and leaves Codebox-specific session
+For Sample Runtime, the adapter should expose the native Sample Runtime result under a stable
+`outputs.sample-runtime` object and declare the mapping above. Homeboy then treats
+Sample Runtime like any other runtime adapter: it records the run, evaluates canonical
+artifacts, promotes patches, reports status, and leaves Sample Runtime-specific session
 details inside the runtime payload.
 
 For the fanout boundary, see

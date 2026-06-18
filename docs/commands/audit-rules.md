@@ -18,7 +18,7 @@ Use one of:
       "name": "engine-owns-terminal-status",
       "forbid": {
         "glob": "inc/Core/Steps/**/*.php",
-        "patterns": ["JobStatus::", "datamachine_fail_job"]
+        "patterns": ["JobStatus::", "sampleplugin_fail_job"]
       },
       "allow": {
         "glob": "inc/Abilities/Engine/**/*.php"

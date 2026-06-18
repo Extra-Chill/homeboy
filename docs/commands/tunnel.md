@@ -35,7 +35,7 @@ Check one published Workflow Bench path locally before sharing a public URL:
 ```sh
 HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
   homeboy tunnel artifact-origin inspect \
-  workflow-bench/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export/report.html \
+  workflow-bench/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export/report.html \
   --fail-on-missing
 ```
 
@@ -56,19 +56,19 @@ export HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.exa
 # 2. Publish/copy the Lab-generated replay bundle preserving its workflow-bench path.
 mkdir -p "$HOMEBOY_ARTIFACT_ROOT/workflow-bench"
 cp -R \
-  /home/user/Developer/studio-web-eval-runs/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export \
+  /home/user/Developer/studio-web-eval-runs/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export \
   "$HOMEBOY_ARTIFACT_ROOT/workflow-bench/"
 
 # 3. Smoke-check the exact public path before handing it to reviewers.
 homeboy tunnel artifact-origin inspect \
-  workflow-bench/studio-web-plain-site-data-machine-live-20260615-r15-pr995-replay-export/report.html \
+  workflow-bench/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export/report.html \
   --fail-on-missing
 
 # 4. Serve the root through the long-running artifact origin process.
 homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
 ```
 
-The same path convention covers `report.html`, `report.md`, `evidence.json`, compact WP Codebox replay files such as `blueprint.after.json`, and external bundle files such as `files/runtime-snapshot.json`.
+The same path convention covers `report.html`, `report.md`, `evidence.json`, compact Sample Runtime replay files such as `blueprint.after.json`, and external bundle files such as `files/runtime-snapshot.json`.
 
 ## Service Tunnels
 

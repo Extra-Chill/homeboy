@@ -402,12 +402,12 @@ mod tests {
         let repo = GitHubRepo {
             host: "github.com".to_string(),
             owner: "Extra-Chill".to_string(),
-            repo: "data-machine".to_string(),
+            repo: "sample-plugin".to_string(),
         };
-        let url = repo.release_artifact_url("v0.36.1", "data-machine.zip");
+        let url = repo.release_artifact_url("v0.36.1", "sample-plugin.zip");
         assert_eq!(
             url,
-            "https://github.com/Extra-Chill/data-machine/releases/download/v0.36.1/data-machine.zip"
+            "https://github.com/Extra-Chill/sample-plugin/releases/download/v0.36.1/sample-plugin.zip"
         );
     }
 

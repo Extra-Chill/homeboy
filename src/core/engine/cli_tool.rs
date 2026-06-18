@@ -30,8 +30,8 @@ pub struct CliToolResult {
 pub fn run(tool: &str, identifier: &str, args: &[String]) -> Result<CliToolResult> {
     // Normalize args: split quoted strings containing spaces.
     // This ensures both syntaxes work identically:
-    //   homeboy wp extra-chill:events datamachine pipelines list
-    //   homeboy wp extra-chill:events "datamachine pipelines list"
+    //   homeboy wp extra-chill:events sampleplugin pipelines list
+    //   homeboy wp extra-chill:events "sampleplugin pipelines list"
     let args = shell::normalize_args(args);
 
     // Parse project:subtarget syntax

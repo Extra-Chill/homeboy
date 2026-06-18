@@ -1252,8 +1252,8 @@ mod tests {
         fs::write(
             temp.path().join("homeboy.json"),
             r#"{
-                "id": "sample-codebox",
-                "build_artifact": "packages/browser-extension/dist/sample-codebox.zip",
+                "id": "sample-extension",
+                "build_artifact": "packages/browser-extension/dist/sample-extension.zip",
                 "build_command": "npm run package:browser-extension"
             }"#,
         )

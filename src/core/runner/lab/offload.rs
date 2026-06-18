@@ -3509,9 +3509,9 @@ mod tests {
                 "--from".to_string(),
                 "lint".to_string(),
                 "--write".to_string(),
-                "data-machine-code".to_string(),
+                "sample-plugin-code".to_string(),
             ],
-            remote_cwd: "/srv/homeboy/_lab_workspaces/data-machine-code".to_string(),
+            remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
@@ -3533,7 +3533,7 @@ mod tests {
                 "--from".to_string(),
                 "lint".to_string(),
                 "--write".to_string(),
-                "data-machine-code".to_string(),
+                "sample-plugin-code".to_string(),
             ],
             Some("--write"),
             &exec_output,
@@ -3560,7 +3560,7 @@ mod tests {
             .any(|hint| hint.contains("homeboy runs artifacts runner-exec-lab-default-job-123")));
         assert!(hints
             .iter()
-            .any(|hint| hint.contains("homeboy refactor --from lint --write data-machine-code")));
+            .any(|hint| hint.contains("homeboy refactor --from lint --write sample-plugin-code")));
     }
 
     #[test]

@@ -111,14 +111,14 @@ and the configured workspace root are usable on the target machine.
 
 Use `--scope lab-offload` before serious Lab evidence runs. It adds checks for
 the configured runner Homeboy command, bare `homeboy` PATH resolution, preferred
-runner binaries, connected daemon exec readiness, and WP Codebox runner-path
+runner binaries, connected daemon exec readiness, and Sample Runtime runner-path
 freshness signals. When Homeboy can identify a safe exact recovery command, the
 check includes that remediation instead of leaving the operator to infer it from
 logs.
 
 Use `--scope lab-offload --repair` for the narrow self-healing path. Today this
 reconnects a failing direct Lab runner daemon and reruns the daemon exec probe.
-It does not upgrade binaries, rewrite runner paths, or refresh WP Codebox caches;
+It does not upgrade binaries, rewrite runner paths, or refresh Sample Runtime caches;
 those remain explicit operator actions because they can be expensive or depend
 on environment-specific paths.
 

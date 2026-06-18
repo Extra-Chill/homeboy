@@ -154,15 +154,15 @@ mod tests {
         // component declares no version_targets, so Homeboy cannot confirm the
         // files actually landed. It must refuse to fabricate a success.
         let component = Component {
-            id: "data-machine-socials".to_string(),
-            remote_path: "wp-content/plugins/data-machine-socials".to_string(),
+            id: "sample-plugin-socials".to_string(),
+            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
             version_targets: None,
             ..Component::default()
         };
         let effect = DeployEffect {
-            remote_path: "wp-content/plugins/data-machine-socials".to_string(),
+            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
             artifact_path: Some(
-                "wp-content/plugins/data-machine-socials/.homeboy-data-machine-socials.zip"
+                "wp-content/plugins/sample-plugin-socials/.homeboy-sample-plugin-socials.zip"
                     .to_string(),
             ),
             verified: false,
@@ -190,14 +190,14 @@ mod tests {
         // When an extension verifier already confirmed the deploy (`verified`),
         // the absence of version_targets is acceptable and we report local_version.
         let component = Component {
-            id: "data-machine-socials".to_string(),
-            remote_path: "wp-content/plugins/data-machine-socials".to_string(),
+            id: "sample-plugin-socials".to_string(),
+            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
             version_targets: None,
             ..Component::default()
         };
         let effect = DeployEffect {
-            remote_path: "wp-content/plugins/data-machine-socials".to_string(),
-            artifact_path: Some("/srv/staging/.homeboy-data-machine-socials.zip".to_string()),
+            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
+            artifact_path: Some("/srv/staging/.homeboy-sample-plugin-socials.zip".to_string()),
             verified: true,
         };
         let expected_version = "0.14.0".to_string();

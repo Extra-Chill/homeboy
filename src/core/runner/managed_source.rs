@@ -11,7 +11,7 @@
 //! This module lets homeboy keep such a checkout synced automatically. Core
 //! treats the source generically: it is a *named* checkout with an optional
 //! canonical remote URL and an optional intended ref. Core has **no knowledge**
-//! of what the source actually is (wp-codebox, a CLI, a toolchain, ...). The
+//! of what the source actually is (a runtime, a CLI, a toolchain, ...). The
 //! declaring extension supplies the path/remote/ref via the
 //! [`AgentTaskProviderRunnerSource`] manifest contract; this keeps homeboy core
 //! runtime-agnostic.
@@ -285,12 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn script_is_runtime_agnostic_no_codebox_literals() {
+    fn script_is_runtime_agnostic_no_product_literals() {
         let mut decl = source("src", "/home/r/.cache/homeboy/source");
         decl.remote_url = Some("https://example.test/repo.git".to_string());
         let plan = plan_managed_runner_source_sync(&decl).expect("plan");
         let lower = plan.script.to_ascii_lowercase();
-        assert!(!lower.contains("codebox"));
+        assert!(!lower.contains("sample-runtime"));
         assert!(!lower.contains("wordpress"));
         assert!(!lower.contains("wp-"));
     }

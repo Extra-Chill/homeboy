@@ -589,8 +589,8 @@ mod tests {
         let artifact_root = temp.path().join("task-1-artifacts");
         let empty_runtime = artifact_root.join("runtime-mpxgndju-f4v9yn");
         fs::create_dir_all(&empty_runtime).expect("empty runtime bundle");
-        let preflight_path = artifact_root.join("homeboy-codebox-task-runner.json");
-        fs::write(&preflight_path, r#"{"runner":"codebox"}"#).expect("preflight evidence");
+        let preflight_path = artifact_root.join("sample-runtime-preflight.json");
+        fs::write(&preflight_path, r#"{"runner":"sample-runtime"}"#).expect("preflight evidence");
 
         let discovery = TimeoutArtifactDiscovery::discover_with_role_aliases(
             &test_request(json!({
@@ -598,7 +598,7 @@ mod tests {
             })),
             &role_aliases(json!({
                 "artifact_filenames": {
-                    "preflight_evidence": ["homeboy-codebox-task-runner.json"]
+                    "preflight_evidence": ["sample-runtime-preflight.json"]
                 }
             })),
         );

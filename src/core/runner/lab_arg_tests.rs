@@ -66,23 +66,23 @@ fn strips_internal_passthrough_sentinel_from_lab_offload_command() {
     let input = args(&[
         "homeboy",
         "test",
-        "data-machine",
+        "sample-plugin",
         "--path",
-        "/Users/user/Developer/data-machine@fix",
+        "/Users/user/Developer/sample-plugin@fix",
         "--",
         EXPLICIT_PASSTHROUGH_SENTINEL,
         filter,
     ]);
 
     assert_eq!(
-        rewrite_lab_offload_args(&input, "/home/user/Developer/data-machine@fix", &[]),
+        rewrite_lab_offload_args(&input, "/home/user/Developer/sample-plugin@fix", &[]),
         args(&[
             "homeboy",
             "--force-hot",
             "test",
-            "data-machine",
+            "sample-plugin",
             "--path",
-            "/home/user/Developer/data-machine@fix",
+            "/home/user/Developer/sample-plugin@fix",
             "--",
             filter,
         ])

@@ -84,7 +84,7 @@ only fetch logs when they need extra debugging context.
     "summary": {
       "passed": false,
       "status": "failed",
-      "component": "data-machine",
+      "component": "sample-plugin",
       "scope": "changed-since",
       "changed_since": "origin/main",
       "total_findings": 3,
@@ -97,7 +97,7 @@ only fetch logs when they need extra debugging context.
       "passed": false,
       "exit_code": 1,
       "finding_count": 2,
-      "hint": "Deep dive: homeboy audit data-machine --changed-since=origin/main",
+      "hint": "Deep dive: homeboy audit sample-plugin --changed-since=origin/main",
       "output": { "...": "AuditCommandOutput" }
     },
     "lint": { "...": "ReviewStage<LintCommandOutput>" },
@@ -172,12 +172,12 @@ Recommended manifest:
 {
   "schema": "homeboy.ci-results.v1",
   "producer": "homeboy-action",
-  "repo": "Extra-Chill/data-machine",
+  "repo": "Extra-Chill/sample-plugin",
   "head_sha": "abc123",
   "run_id": "1234567890",
   "run_attempt": "1",
   "artifact_name": "homeboy-ci-results",
-  "check_url": "https://github.com/Extra-Chill/data-machine/actions/runs/1234567890"
+  "check_url": "https://github.com/Extra-Chill/sample-plugin/actions/runs/1234567890"
 }
 ```
 

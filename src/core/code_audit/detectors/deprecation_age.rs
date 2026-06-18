@@ -572,9 +572,9 @@ function legacy_api() {}
  * @deprecated 0.48.0 Context has moved.
  */
 
-namespace DataMachine\Core\WordPress;
+namespace SamplePlugin\Core\WordPress;
 
-use DataMachine\Core\Baz;
+use SamplePlugin\Core\Baz;
 
 class SiteContext {}
 "#;

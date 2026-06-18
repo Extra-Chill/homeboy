@@ -313,8 +313,8 @@ fn routes_remote_runner_job_broker_lifecycle() {
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
             "project_id": "extrachill",
-            "command": ["homeboy", "test", "data-machine"],
-            "cwd": "/home/user/Developer/data-machine"
+            "command": ["homeboy", "test", "sample-plugin"],
+            "cwd": "/home/user/Developer/sample-plugin"
         })),
         &store,
     );
@@ -343,7 +343,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
     assert_eq!(
         claim.body["body"]["claim"]["request"]["command"],
-        serde_json::json!(["homeboy", "test", "data-machine"])
+        serde_json::json!(["homeboy", "test", "sample-plugin"])
     );
 
     let event = route_with_job_store_and_body(

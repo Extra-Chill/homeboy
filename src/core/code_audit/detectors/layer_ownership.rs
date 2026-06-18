@@ -162,7 +162,7 @@ mod tests {
                     "name": "engine-owns-terminal-status",
                     "forbid": {
                       "glob": "inc/Core/Steps/**/*.php",
-                      "patterns": ["JobStatus::", "datamachine_fail_job"]
+                      "patterns": ["JobStatus::", "sampleplugin_fail_job"]
                     },
                     "allow": {"glob": "inc/Abilities/Engine/**/*.php"}
                   }
@@ -199,7 +199,7 @@ mod tests {
                     "name": "engine-owns-terminal-status",
                     "forbid": {
                       "glob": "inc/Core/Steps/**/*.php",
-                      "patterns": ["datamachine_fail_job"]
+                      "patterns": ["sampleplugin_fail_job"]
                     }
                   }
                 ]
@@ -210,7 +210,7 @@ mod tests {
 
         std::fs::write(
             steps_dir.join("agent_ping.php"),
-            "<?php\ndatamachine_fail_job($job_id);\n",
+            "<?php\nsampleplugin_fail_job($job_id);\n",
         )
         .unwrap();
 

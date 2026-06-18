@@ -239,15 +239,15 @@ mod tests {
     #[test]
     fn merge_writes_registry_without_rewriting_portable_config() {
         crate::test_support::with_isolated_home(|home| {
-            let repo = home.path().join("codebox");
+            let repo = home.path().join("sample-plugin");
             fs::create_dir_all(&repo).expect("repo dir");
-            let portable = r#"{"id":"codebox","remote_path":"deploy/codebox"}"#;
+            let portable = r#"{"id":"sample-plugin","remote_path":"deploy/sample-plugin"}"#;
             fs::write(repo.join("homeboy.json"), portable).expect("homeboy.json");
 
             let component = Component::new(
-                "codebox".to_string(),
+                "sample-plugin".to_string(),
                 repo.to_string_lossy().to_string(),
-                "deploy/codebox".to_string(),
+                "deploy/sample-plugin".to_string(),
                 None,
             );
             inventory::write_standalone_registration(&component)
@@ -259,7 +259,7 @@ mod tests {
                 }
             })
             .to_string();
-            let result = merge(Some("codebox"), &patch, &[]).expect("component merge");
+            let result = merge(Some("sample-plugin"), &patch, &[]).expect("component merge");
             let MergeOutput::Single(result) = result else {
                 panic!("expected single merge result");
             };
@@ -271,13 +271,15 @@ mod tests {
                 "component set must not rewrite repo-owned homeboy.json by default"
             );
 
-            let loaded = crate::core::component::load("codebox").expect("load component");
+            let loaded = crate::core::component::load("sample-plugin").expect("load component");
             assert_eq!(
                 loaded.scripts.expect("scripts should be registered").build,
                 vec!["npm run package".to_string()]
             );
 
-            let registration_path = home.path().join(".config/homeboy/components/codebox.json");
+            let registration_path = home
+                .path()
+                .join(".config/homeboy/components/sample-plugin.json");
             let registration: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(registration_path).expect("read registration"),
             )

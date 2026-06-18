@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn deploy_tag_for_version_formats_regular_release_tag() {
-        let component = make_component("data-machine", "/tmp/not-a-git-repo");
+        let component = make_component("sample-plugin", "/tmp/not-a-git-repo");
 
         assert_eq!(deploy_tag_for_version(&component, "0.139.18"), "v0.139.18");
         assert_eq!(deploy_tag_for_version(&component, "v0.139.18"), "v0.139.18");
@@ -1088,9 +1088,9 @@ mod tests {
     #[test]
     fn deploy_validation_rejects_legacy_build_command_before_artifact_checks() {
         let dir = TempDir::new().expect("temp dir");
-        let mut component = make_component("sample-codebox", &dir.path().to_string_lossy());
+        let mut component = make_component("sample-extension", &dir.path().to_string_lossy());
         component.build_artifact =
-            Some("packages/browser-extension/dist/sample-codebox.zip".to_string());
+            Some("packages/browser-extension/dist/sample-extension.zip".to_string());
         component.build_command = Some("npm run package:browser-extension".to_string());
 
         let err = validate_supported_build_configs(&[component])
@@ -1322,17 +1322,17 @@ mod tests {
         let path = dir.path();
 
         init_clean_repo(path);
-        std::fs::create_dir_all(path.join("wp-content/plugins/data-machine/data-machine"))
+        std::fs::create_dir_all(path.join("wp-content/plugins/sample-plugin/sample-plugin"))
             .expect("deploy debris dir");
         std::fs::write(
-            path.join("wp-content/plugins/data-machine/data-machine/plugin.php"),
+            path.join("wp-content/plugins/sample-plugin/sample-plugin/plugin.php"),
             "<?php",
         )
         .expect("deploy debris file");
 
-        let mut component = make_component("data-machine", &path.to_string_lossy());
-        component.remote_path = "wp-content/plugins/data-machine".to_string();
-        component.build_artifact = Some("dist/data-machine.zip".to_string());
+        let mut component = make_component("sample-plugin", &path.to_string_lossy());
+        component.remote_path = "wp-content/plugins/sample-plugin".to_string();
+        component.build_artifact = Some("dist/sample-plugin.zip".to_string());
 
         check_uncommitted_changes(&[component])
             .expect("untracked deploy-target debris should not block deploy");
@@ -1371,20 +1371,20 @@ mod tests {
 
     #[test]
     fn auto_pull_version_drift_message_reports_changed_version() {
-        let component = make_component("data-machine", "/tmp/data-machine");
+        let component = make_component("sample-plugin", "/tmp/sample-plugin");
 
         let message =
             auto_pull_version_drift_message(&component, Some("0.139.12"), Some("0.139.13"))
                 .expect("version drift message");
 
-        assert!(message.contains("data-machine"));
+        assert!(message.contains("sample-plugin"));
         assert!(message.contains("0.139.12"));
         assert!(message.contains("0.139.13"));
     }
 
     #[test]
     fn auto_pull_version_drift_message_skips_unchanged_version() {
-        let component = make_component("data-machine", "/tmp/data-machine");
+        let component = make_component("sample-plugin", "/tmp/sample-plugin");
 
         assert!(
             auto_pull_version_drift_message(&component, Some("0.139.12"), Some("0.139.12"))

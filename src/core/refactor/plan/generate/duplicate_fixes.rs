@@ -829,19 +829,19 @@ mod tests {
     #[test]
     fn test_extract_php_fqcn_with_namespace() {
         let content =
-            "<?php\nnamespace DataMachine\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n";
+            "<?php\nnamespace SamplePlugin\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n";
         assert_eq!(
             extract_php_fqcn(content),
-            Some("DataMachine\\Abilities\\Fetch\\FetchRssAbility".to_string())
+            Some("SamplePlugin\\Abilities\\Fetch\\FetchRssAbility".to_string())
         );
     }
 
     #[test]
     fn test_extract_php_fqcn_abstract_class() {
-        let content = "<?php\nnamespace DataMachine\\Core;\n\nabstract class BaseHandler {\n";
+        let content = "<?php\nnamespace SamplePlugin\\Core;\n\nabstract class BaseHandler {\n";
         assert_eq!(
             extract_php_fqcn(content),
-            Some("DataMachine\\Core\\BaseHandler".to_string())
+            Some("SamplePlugin\\Core\\BaseHandler".to_string())
         );
     }
 
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_extract_php_fqcn_no_class() {
-        let content = "<?php\nnamespace DataMachine;\n\nfunction helper() {}\n";
+        let content = "<?php\nnamespace SamplePlugin;\n\nfunction helper() {}\n";
         assert_eq!(extract_php_fqcn(content), None);
     }
 
@@ -881,7 +881,7 @@ mod tests {
         fs::create_dir_all(&php_dir).unwrap();
         fs::write(
             php_dir.join("FetchRssAbility.php"),
-            "<?php\nnamespace DataMachine\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n    public function httpGet() {}\n}\n",
+            "<?php\nnamespace SamplePlugin\\Abilities\\Fetch;\n\nclass FetchRssAbility {\n    public function httpGet() {}\n}\n",
         ).unwrap();
 
         let import = generate_duplicate_import(
@@ -892,7 +892,7 @@ mod tests {
         );
         assert_eq!(
             import,
-            "use DataMachine\\Abilities\\Fetch\\FetchRssAbility;"
+            "use SamplePlugin\\Abilities\\Fetch\\FetchRssAbility;"
         );
     }
 

@@ -53,7 +53,7 @@ the call site when they adopt the contract.
   `ChangeArtifact`; local mutation belongs in `ApplyResult`.
 - Refactor write paths can treat `--write` as `ExecutionMode::Apply` while
   preserving their existing command outputs.
-- WP Codebox-style adapters should split local file mutation from publish steps:
+- Sample Runtime-style adapters should split local file mutation from publish steps:
   apply verifies and writes files, while publish commits, pushes, opens pull
   requests, releases, or deploys.
 

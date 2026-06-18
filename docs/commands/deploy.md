@@ -141,14 +141,14 @@ Exit code is `0` when `summary.failed == 0`, otherwise `1`.
 When a component belongs to multiple projects, use `--projects` to deploy to all of them in a single command:
 
 ```sh
-# Deploy data-machine to both extra-chill and sarai-chinwag projects
-homeboy deploy --projects extra-chill,sarai-chinwag data-machine
+# Deploy sample-plugin to both extra-chill and sarai-chinwag projects
+homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin
 
 # Deploy multiple components to multiple projects
-homeboy deploy --projects extra-chill,sarai-chinwag data-machine extrachill-api
+homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin extrachill-api
 
 # Preview multi-project deployment
-homeboy deploy --projects extra-chill,sarai-chinwag data-machine --dry-run
+homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin --dry-run
 ```
 
 The component is built once and the artifact is reused for all subsequent project deployments.
@@ -160,7 +160,7 @@ When using `--projects`, the output structure differs:
 ```json
 {
   "command": "deploy.run_multi",
-  "component_ids": ["data-machine"],
+  "component_ids": ["sample-plugin"],
   "dry_run": false,
   "check": false,
   "force": false,

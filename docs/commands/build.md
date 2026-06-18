@@ -21,7 +21,7 @@ Builds are extension-owned. A component links to one build-capable extension, an
 Use `--path` to run the build against a different directory than the configured `local_path`:
 
 ```sh
-homeboy build data-machine --path /var/lib/datamachine/workspace/data-machine
+homeboy build sample-plugin --path /var/lib/sampleplugin/workspace/sample-plugin
 ```
 
 This is useful for:
@@ -38,7 +38,7 @@ Build resolution checks component-owned `scripts.build` first. If absent, it req
 Use `--changed-since <ref>` to ask the build provider whether the changed files require a build:
 
 ```sh
-homeboy build data-machine --changed-since origin/main
+homeboy build sample-plugin --changed-since origin/main
 homeboy build intelligence-example --all --changed-since origin/main
 ```
 

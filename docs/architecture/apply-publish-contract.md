@@ -75,13 +75,13 @@ current JSON input can project into the shared contract without changing behavio
 This issue only defines the shared contract. Existing Lab CLI behavior can keep
 its current input and output shape while adapters migrate.
 
-## WP Codebox Migration Path
+## Sample Runtime Migration Path
 
-The existing `homeboy/wp-codebox-apply-adapter/v1` extension adapter can migrate
+The existing `homeboy/sample-runtime-apply-adapter/v1` extension adapter can migrate
 to the core contract in two steps:
 
 1. Return or accept `ApplyAdapterContract` with artifact types such as
-   `wp_codebox.bundle` and `wp_codebox.file`, plus an `ApplyPreflightPolicy`.
+   `wp_sample-runtime.bundle` and `wp_sample-runtime.file`, plus an `ApplyPreflightPolicy`.
 2. Map its current verify/apply/stage/commit/push/PR flow so verify and file
    mutation return `ApplyResult`, while commit, push, and PR creation move to
    `PublishRequest`/`PublishResult` or compatibility CLI flags that call publish

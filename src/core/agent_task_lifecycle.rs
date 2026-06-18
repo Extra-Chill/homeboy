@@ -1637,9 +1637,9 @@ mod tests {
                     "/runner/workspace/repo".to_string(),
                 ],
                 remote_workspace: "/runner/workspace/repo",
-                failure_message: "Invalid argument 'cwd': agent-task Codebox dispatch requires --cwd to be a git checkout",
+                failure_message: "Invalid argument 'cwd': agent-task runtime dispatch requires --cwd to be a git checkout",
                 stdout: "",
-                stderr: "Invalid argument 'cwd': agent-task Codebox dispatch requires --cwd to be a git checkout\n",
+                stderr: "Invalid argument 'cwd': agent-task runtime dispatch requires --cwd to be a git checkout\n",
                 exit_code: 1,
             })
             .expect("pre-dispatch failure recorded");
@@ -2133,7 +2133,7 @@ mod tests {
             aggregate.outcomes[0].metadata = json!({
                 "provider_handle": AgentTaskExecutionHandle {
                     task_id: "task-a".to_string(),
-                    backend: "codebox".to_string(),
+                    backend: "sample-runtime".to_string(),
                     run_id: "provider-run-123".to_string(),
                     stream_uri: Some("provider://runs/provider-run-123/events".to_string()),
                     metadata: json!({ "opaque": { "provider_owned": true } }),
@@ -2145,7 +2145,7 @@ mod tests {
 
             assert_eq!(record.provider_handles.len(), 1);
             assert_eq!(record.provider_handles[0].task_id, "task-a");
-            assert_eq!(record.provider_handles[0].backend, "codebox");
+            assert_eq!(record.provider_handles[0].backend, "sample-runtime");
             assert_eq!(
                 record.provider_handles[0].provider_run_id,
                 "provider-run-123"
@@ -2540,12 +2540,12 @@ mod tests {
             Vec::new(),
             vec![
                 AgentTaskEvidenceRef {
-                    kind: "codebox-command-log".to_string(),
+                    kind: "sample-runtime-command-log".to_string(),
                     uri: "".to_string(),
                     label: Some("command log".to_string()),
                 },
                 AgentTaskEvidenceRef {
-                    kind: "codebox-command-evidence".to_string(),
+                    kind: "sample-runtime-command-evidence".to_string(),
                     uri: "   ".to_string(),
                     label: None,
                 },
@@ -2571,11 +2571,11 @@ mod tests {
             vec![
                 artifact_ref_artifact(
                     "dir-empty",
-                    "codebox-artifact-directory",
+                    "sample-runtime-artifact-directory",
                     Some(""),
                     Some(""),
                 ),
-                artifact_ref_artifact("dir-none", "codebox-agent-task-input", None, None),
+                artifact_ref_artifact("dir-none", "sample-runtime-agent-task-input", None, None),
                 artifact_ref_artifact("patch", "patch", None, Some("/tmp/patch.diff")),
             ],
             Vec::new(),
@@ -2594,7 +2594,7 @@ mod tests {
             "task-a",
             vec![artifact_ref_artifact(
                 "dir",
-                "codebox-artifact-directory",
+                "sample-runtime-artifact-directory",
                 Some("   "),
                 Some("/tmp/artifacts/dir"),
             )],
@@ -2651,7 +2651,7 @@ mod tests {
                     vec![
                         artifact_ref_artifact(
                             "dir-empty",
-                            "codebox-artifact-directory",
+                            "sample-runtime-artifact-directory",
                             Some(""),
                             None,
                         ),
@@ -2659,7 +2659,7 @@ mod tests {
                     ],
                     vec![
                         AgentTaskEvidenceRef {
-                            kind: "codebox-command-log".to_string(),
+                            kind: "sample-runtime-command-log".to_string(),
                             uri: "".to_string(),
                             label: Some("command log".to_string()),
                         },

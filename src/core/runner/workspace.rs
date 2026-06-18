@@ -1683,7 +1683,7 @@ mod tests {
     #[test]
     fn git_materialization_restores_workspace_owner_after_root_run() {
         let command = materialize_git_command(
-            "/var/lib/datamachine/workspace/_lab_workspaces/homeboy-abc",
+            "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc",
             "https://github.com/Extra-Chill/homeboy.git",
             "abc123",
             None,
@@ -1703,7 +1703,7 @@ mod tests {
     #[test]
     fn snapshot_install_restores_workspace_owner_after_root_run() {
         let command =
-            snapshot_install_command("/var/lib/datamachine/workspace/_lab_workspaces/homeboy-abc");
+            snapshot_install_command("/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc");
 
         assert!(command.contains("owner_path=$parent"));
         assert!(command.contains("mkdir -p \"$parent\""));

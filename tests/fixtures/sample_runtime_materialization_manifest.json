@@ -1,14 +1,14 @@
 {
   "schema": "homeboy/agent-runtime-manifest/v1",
-  "id": "wp-codebox",
-  "label": "WP Codebox",
+  "id": "sample-runtime",
+  "label": "Sample Runtime",
   "materialization": {
     "source_roots": [
       {
-        "id": "wp-codebox",
-        "label": "WP Codebox source",
-        "path": "~/.cache/homeboy/runtimes/wp-codebox",
-        "remote_url": "https://github.com/example-org/wp-codebox.git",
+        "id": "sample-runtime",
+        "label": "Sample Runtime source",
+        "path": "~/.cache/homeboy/runtimes/sample-runtime",
+        "remote_url": "https://github.com/example-org/sample-runtime.git",
         "git_ref": "main"
       }
     ],
@@ -16,55 +16,55 @@
       {
         "id": "runtime-package",
         "label": "Runtime package",
-        "source_root": "wp-codebox",
+        "source_root": "sample-runtime",
         "requirement": "runtime source checkout"
       }
     ],
     "executable_requirements": [
       {
-        "id": "wp-codebox-cli",
-        "label": "WP Codebox CLI",
-        "env": ["WP_CODEBOX_BIN"],
-        "candidates": ["wp-codebox", "codebox"],
+        "id": "sample-runtime-cli",
+        "label": "Sample Runtime CLI",
+        "env": ["SAMPLE_RUNTIME_BIN"],
+        "candidates": ["sample-runtime", "sample-runtime-cli"],
         "version_command": ["--version"],
         "install_hint": "Install the runtime CLI before dispatching tasks."
       }
     ],
     "readiness_checks": [
       {
-        "id": "wp-codebox.ready",
-        "label": "WP Codebox runtime available",
+        "id": "sample-runtime.ready",
+        "label": "Sample Runtime available",
         "secret_env": ["AI_PROVIDER_OPENAI_CODEX_API_KEY"],
         "env_path": {
-          "env": ["WP_CODEBOX_HOME"],
+          "env": ["SAMPLE_RUNTIME_HOME"],
           "revision": true,
-          "canonical_path": "~/.cache/homeboy/runtimes/wp-codebox"
+          "canonical_path": "~/.cache/homeboy/runtimes/sample-runtime"
         },
         "executable": {
-          "env": ["WP_CODEBOX_BIN"],
-          "candidates": ["wp-codebox", "codebox"],
+          "env": ["SAMPLE_RUNTIME_BIN"],
+          "candidates": ["sample-runtime", "sample-runtime-cli"],
           "version_command": ["--version"]
         }
       }
     ],
     "env_passthrough": [
-      "WP_CODEBOX_HOME",
-      "WP_CODEBOX_BIN",
+      "SAMPLE_RUNTIME_HOME",
+      "SAMPLE_RUNTIME_BIN",
       "AI_PROVIDER_OPENAI_CODEX_API_KEY"
     ],
     "workspace": {
       "cwd": "git_checkout",
       "requires_git": true,
       "write_scope": "artifacts",
-      "artifact_paths": [".homeboy/codebox"]
+      "artifact_paths": [".homeboy/sample-runtime"]
     }
   },
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
-      "id": "wp-codebox.default",
-      "backend": "codebox",
-      "command": "wp-codebox-agent-task-provider",
+      "id": "sample-runtime.default",
+      "backend": "sample-runtime",
+      "command": "sample-runtime-agent-task-provider",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1"
     }

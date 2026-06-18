@@ -864,7 +864,7 @@ mod tests {
         let err = validate_installed_rig_source(
             "woocommerce-performance",
             "/missing/homeboy-rigs/woocommerce/woocommerce",
-            "/Users/user/Developer/homeboy-rigs@issue-323-codebox-fresh/woocommerce/woocommerce",
+            "/Users/user/Developer/sample-rigs@issue-323-runtime-fresh/sample-plugin/sample-plugin",
         )
         .expect_err("missing source should fail");
 

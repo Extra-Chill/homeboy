@@ -124,10 +124,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let counts = counts(100, 80, 15, 5);
 
-        save_baseline(dir.path(), "data-machine", &counts).unwrap();
+        save_baseline(dir.path(), "sample-plugin", &counts).unwrap();
         let loaded = load_baseline(dir.path()).unwrap();
 
-        assert_eq!(loaded.context_id, "data-machine");
+        assert_eq!(loaded.context_id, "sample-plugin");
         assert_eq!(loaded.metadata, counts);
     }
 

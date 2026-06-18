@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn aggregate_outcomes_does_not_apply_empty_patch_artifacts() {
-        let mut empty_patch = artifact("codebox-patch", "patch", json!({}));
+        let mut empty_patch = artifact("sample-patch", "patch", json!({}));
         empty_patch.size_bytes = Some(0);
 
         let report = aggregate_agent_task_outcomes(&[outcome(
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn aggregate_outcomes_keeps_non_empty_patch_apply_candidate() {
-        let mut non_empty_patch = artifact("codebox-patch", "patch", json!({}));
+        let mut non_empty_patch = artifact("sample-patch", "patch", json!({}));
         non_empty_patch.size_bytes = Some(128);
 
         let report = aggregate_agent_task_outcomes(&[outcome(
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(report.apply_candidates[0].task_id, "non-empty-patch");
         assert_eq!(
             report.apply_candidates[0].artifact_ids,
-            vec!["codebox-patch"]
+            vec!["sample-patch"]
         );
     }
 

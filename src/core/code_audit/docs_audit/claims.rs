@@ -19,7 +19,7 @@ pub enum ClaimType {
     DirectoryPath,
     /// Code example in a fenced block
     CodeExample,
-    /// Namespaced class reference (e.g., `DataMachine\Services\CacheManager`)
+    /// Namespaced class reference (e.g., `SamplePlugin\Services\CacheManager`)
     ClassName,
 }
 
@@ -67,8 +67,8 @@ static CODE_BLOCK_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static CLASS_NAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches namespaced class references like DataMachine\Services\CacheManager
-    // or DataMachine\\Services\\CacheManager (escaped backslashes in markdown)
+    // Matches namespaced class references like SamplePlugin\Services\CacheManager
+    // or SamplePlugin\\Services\\CacheManager (escaped backslashes in markdown)
     // Requires at least two segments (Namespace\Class)
     Regex::new(r"(?:`)?([A-Z][a-zA-Z0-9]*(?:\\{1,2}[A-Z][a-zA-Z0-9]*)+)(?:`)?").unwrap()
 });
@@ -489,7 +489,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
 
     #[test]
     fn test_ignore_patterns_filter_rest_api() {
-        let content = "The endpoint is at `/wp-json/datamachine/v1/events`.";
+        let content = "The endpoint is at `/wp-json/sampleplugin/v1/events`.";
         // Use ** to match multiple path segments
         let patterns = vec!["/wp-json/**".to_string()];
         let claims = extract_claims(content, "test.md", &patterns);
@@ -509,7 +509,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
 
     #[test]
     fn test_ignore_patterns_filter_oauth_callback() {
-        let content = "OAuth redirects to `/datamachine-auth/twitter/` callback.";
+        let content = "OAuth redirects to `/sampleplugin-auth/twitter/` callback.";
         // Use ** to match any path starting with segment ending in -auth
         let patterns = vec!["/*-auth/**".to_string()];
         let claims = extract_claims(content, "test.md", &patterns);
@@ -529,7 +529,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
     #[test]
     fn test_no_ignore_patterns_extracts_api_paths() {
         // Without ignore patterns, API-like paths ARE extracted
-        let content = "The endpoint is at `/wp-json/datamachine/v1/events.json`.";
+        let content = "The endpoint is at `/wp-json/sampleplugin/v1/events.json`.";
         let claims = extract_claims(content, "test.md", &[]);
 
         // With no patterns, this should be extracted as a file path
@@ -579,7 +579,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
 
     #[test]
     fn test_real_class_in_prose_is_real_confidence() {
-        let content = "The DataMachine\\Services\\CacheManager handles caching.";
+        let content = "The AcmeProduct\\Services\\CacheManager handles caching.";
         let claims = extract_claims(content, "test.md", &[]);
 
         let claim = claims
@@ -617,7 +617,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
 
     #[test]
     fn test_annotation_context_is_real() {
-        let content = "@see DataMachine\\Core\\Engine for the main engine class.";
+        let content = "@see AcmeProduct\\Core\\Engine for the main engine class.";
         let claims = extract_claims(content, "test.md", &[]);
 
         let claim = claims
@@ -634,7 +634,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
         assert!(is_placeholder_class("Example\\Namespace\\Class"));
         assert!(is_placeholder_class("Foo\\Bar\\Baz"));
         assert!(is_placeholder_class("Test\\Mock\\Handler"));
-        assert!(!is_placeholder_class("DataMachine\\Services\\Cache"));
+        assert!(!is_placeholder_class("AcmeProduct\\Services\\Cache"));
         assert!(!is_placeholder_class("WordPress\\Plugin\\Activator"));
     }
 
@@ -658,7 +658,7 @@ Supported types: `text/plain`, `image/png`, `audio/mpeg`, `video/mp4`.
         ));
         assert!(is_os_path_context("Path is C:/Users/admin/AppData", 20));
         assert!(!is_os_path_context(
-            "The DataMachine\\Services\\Cache class",
+            "The AcmeProduct\\Services\\Cache class",
             4
         ));
     }

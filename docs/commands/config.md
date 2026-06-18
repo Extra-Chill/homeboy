@@ -43,7 +43,7 @@ homeboy config set /defaults/permissions/local/file_mode '"g+r"'
 homeboy config set /artifact_root '"~/Developer/.homeboy-artifacts"'
 
 # Set an extension string setting without JSON quoting
-homeboy config set /settings/wp_codebox_provider codex --string
+homeboy config set /settings/wp_sample-runtime_provider codex --string
 ```
 
 ### `homeboy config remove`

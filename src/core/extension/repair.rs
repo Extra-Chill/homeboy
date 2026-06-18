@@ -436,11 +436,11 @@ mod tests {
 
     fn write_shared_runtime_fixture(root: &Path) {
         let runtime_script = root.join(
-            "agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
+            "agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
         );
         fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
             .expect("runtime script dir");
-        fs::write(&runtime_script, "console.log('wp-codebox runtime');\n").expect("runtime script");
+        fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -629,7 +629,7 @@ mod tests {
                 .expect("relink should materialize shared runtime");
 
             assert!(home
-                .join(".config/homeboy/agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs")
+                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
         });
     }

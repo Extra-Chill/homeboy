@@ -64,11 +64,11 @@ mod parsing {
     #[test]
     fn dedupe_refs_by_repo_keeps_unresolved_entries_separate() {
         let resolved = ComponentRef::new(
-            "data-machine".to_string(),
-            "/tmp/data-machine".to_string(),
-            Some("https://github.com/Extra-Chill/data-machine.git".to_string()),
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
+            Some("https://github.com/Extra-Chill/sample-plugin.git".to_string()),
             None,
-            "component:data-machine".to_string(),
+            "component:sample-plugin".to_string(),
         );
         let unresolved = ComponentRef::new(
             "local-only".to_string(),
@@ -81,7 +81,7 @@ mod parsing {
         let refs = dedupe_refs_by_repo(vec![unresolved, resolved]);
 
         assert_eq!(refs.len(), 2);
-        assert!(refs.iter().any(|r| r.component_id == "data-machine"));
+        assert!(refs.iter().any(|r| r.component_id == "sample-plugin"));
         assert!(refs.iter().any(|r| r.component_id == "local-only"));
     }
 
@@ -573,11 +573,11 @@ mod priority_and_summary {
     #[test]
     fn priority_actions_use_default_labels_when_unconfigured() {
         let component_ref = ComponentRef::new(
-            "data-machine".to_string(),
-            "/tmp/data-machine".to_string(),
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
             None,
-            Some("https://github.com/Extra-Chill/data-machine.git".to_string()),
-            "component:data-machine".to_string(),
+            Some("https://github.com/Extra-Chill/sample-plugin.git".to_string()),
+            "component:sample-plugin".to_string(),
         );
         let labels = resolve_priority_labels(&component_ref, None);
         let issues = issues_with_labels(vec![vec!["bug"], vec!["polish"]]);
@@ -592,11 +592,11 @@ mod priority_and_summary {
     #[test]
     fn component_priority_labels_override_global_labels() {
         let component_ref = ComponentRef::new(
-            "data-machine".to_string(),
-            "/tmp/data-machine".to_string(),
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
             None,
-            Some("https://github.com/Extra-Chill/data-machine.git".to_string()),
-            "component:data-machine".to_string(),
+            Some("https://github.com/Extra-Chill/sample-plugin.git".to_string()),
+            "component:sample-plugin".to_string(),
         )
         .with_priority_labels(Some(vec!["urgent".to_string()]));
         let global = vec!["bug".to_string()];
@@ -613,11 +613,11 @@ mod priority_and_summary {
     #[test]
     fn global_priority_labels_apply_when_component_and_fleet_unset() {
         let component_ref = ComponentRef::new(
-            "data-machine".to_string(),
-            "/tmp/data-machine".to_string(),
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
             None,
-            Some("https://github.com/Extra-Chill/data-machine.git".to_string()),
-            "component:data-machine".to_string(),
+            Some("https://github.com/Extra-Chill/sample-plugin.git".to_string()),
+            "component:sample-plugin".to_string(),
         );
         let global = vec!["critical".to_string()];
         let labels = resolve_priority_labels(&component_ref, Some(&global));
@@ -640,10 +640,10 @@ mod priority_and_summary {
             std::fs::create_dir_all(&project_dir).unwrap();
             std::fs::create_dir_all(&fleet_dir).unwrap();
             std::fs::write(
-                component_dir.join("data-machine.json"),
+                component_dir.join("sample-plugin.json"),
                 r#"{
-                    "local_path": "/tmp/data-machine",
-                    "remote_url": "https://github.com/Extra-Chill/data-machine.git"
+                    "local_path": "/tmp/sample-plugin",
+                    "remote_url": "https://github.com/Extra-Chill/sample-plugin.git"
                 }"#,
             )
             .unwrap();
@@ -651,7 +651,7 @@ mod priority_and_summary {
                 project_dir.join("site.json"),
                 r#"{
                     "components": [
-                        {"id": "data-machine", "local_path": "/tmp/data-machine"}
+                        {"id": "sample-plugin", "local_path": "/tmp/sample-plugin"}
                     ]
                 }"#,
             )
@@ -678,15 +678,15 @@ mod priority_and_summary {
     #[test]
     fn summarize_counts_component_actions() {
         let component = TriageComponentReport {
-            component_id: "data-machine".to_string(),
-            local_path: "/tmp/data-machine".to_string(),
-            sources: vec!["component:data-machine".to_string()],
+            component_id: "sample-plugin".to_string(),
+            local_path: "/tmp/sample-plugin".to_string(),
+            sources: vec!["component:sample-plugin".to_string()],
             usage: vec![],
             repo: TriageRepo {
                 provider: "github",
                 owner: "Extra-Chill".to_string(),
-                name: "data-machine".to_string(),
-                url: "https://github.com/Extra-Chill/data-machine".to_string(),
+                name: "sample-plugin".to_string(),
+                url: "https://github.com/Extra-Chill/sample-plugin".to_string(),
                 source_repo: None,
                 triage_remote_url: None,
             },

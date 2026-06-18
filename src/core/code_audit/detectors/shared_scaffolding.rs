@@ -6,7 +6,7 @@
 //! candidates for extraction into a shared base class.
 //!
 //! Where existing detectors compare pairs of functions, this detector compares
-//! whole class shapes. It catches cases like data-machine's ~90 ability classes
+//! whole class shapes. It catches cases like sample-plugin's ~90 ability classes
 //! all following `__construct → registerAbility → execute → checkPermission`.
 //!
 //! Algorithm:

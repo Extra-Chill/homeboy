@@ -258,15 +258,15 @@ impl RenameSpec {
     /// Splits the `from` and `to` terms into constituent words, then generates
     /// all standard naming convention variants:
     ///
-    /// - `kebab-case` (e.g., `data-machine-agent`)
-    /// - `snake_case` (e.g., `data_machine_agent`)
-    /// - `UPPER_SNAKE` (e.g., `DATA_MACHINE_AGENT`)
-    /// - `PascalCase` (e.g., `DataMachineAgent`)
-    /// - `camelCase` (e.g., `dataMachineAgent`)
-    /// - `Display Name` (e.g., `Data Machine Agent`)
+    /// - `kebab-case` (e.g., `sample-plugin-agent`)
+    /// - `snake_case` (e.g., `sample_plugin_agent`)
+    /// - `UPPER_SNAKE` (e.g., `SAMPLE_PLUGIN_AGENT`)
+    /// - `PascalCase` (e.g., `SamplePluginAgent`)
+    /// - `camelCase` (e.g., `samplePluginAgent`)
+    /// - `Display Name` (e.g., `Sample Plugin Agent`)
     /// - Plus plural forms of each
     ///
-    /// This means a single `--from wp-agent --to data-machine-agent` will also
+    /// This means a single `--from wp-agent --to sample-plugin-agent` will also
     /// match and replace `wp_agent`, `WP_AGENT`, `WPAgent`, `wpAgent`, `WP Agent`,
     /// and all their plurals.
     pub fn new(from: &str, to: &str, scope: RenameScope) -> Self {
@@ -498,7 +498,7 @@ fn pluralize(s: &str) -> String {
 /// - `UPPER_SNAKE` → `["upper", "snake"]`
 /// - `WPAgent` → `["wp", "agent"]` (consecutive uppercase → separate word)
 /// - `XMLParser` → `["xml", "parser"]`
-/// - `data-machine-agent` → `["data", "machine", "agent"]`
+/// - `sample-plugin-agent` → `["sample", "plugin", "agent"]`
 /// - Mixed: `my_WPAgent-thing` → `["my", "wp", "agent", "thing"]`
 ///
 /// All returned words are lowercase.
@@ -549,17 +549,17 @@ fn split_words(term: &str) -> Vec<String> {
 // Cross-separator join functions
 // ============================================================================
 
-/// Join words as kebab-case: `["data", "machine", "agent"]` → `"data-machine-agent"`
+/// Join words as kebab-case: `["sample", "plugin", "agent"]` → `"sample-plugin-agent"`
 fn join_kebab(words: &[String]) -> String {
     words.join("-")
 }
 
-/// Join words as snake_case: `["data", "machine", "agent"]` → `"data_machine_agent"`
+/// Join words as snake_case: `["sample", "plugin", "agent"]` → `"sample_plugin_agent"`
 fn join_snake(words: &[String]) -> String {
     words.join("_")
 }
 
-/// Join words as UPPER_SNAKE: `["data", "machine", "agent"]` → `"DATA_MACHINE_AGENT"`
+/// Join words as UPPER_SNAKE: `["sample", "plugin", "agent"]` → `"SAMPLE_PLUGIN_AGENT"`
 fn join_upper_snake(words: &[String]) -> String {
     words
         .iter()
@@ -568,7 +568,7 @@ fn join_upper_snake(words: &[String]) -> String {
         .join("_")
 }
 
-/// Join words as PascalCase: `["data", "machine", "agent"]` → `"DataMachineAgent"`
+/// Join words as PascalCase: `["sample", "plugin", "agent"]` → `"SamplePluginAgent"`
 fn join_pascal(words: &[String]) -> String {
     words
         .iter()
@@ -577,7 +577,7 @@ fn join_pascal(words: &[String]) -> String {
         .join("")
 }
 
-/// Join words as camelCase: `["data", "machine", "agent"]` → `"dataMachineAgent"`
+/// Join words as camelCase: `["sample", "plugin", "agent"]` → `"samplePluginAgent"`
 fn join_camel(words: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (i, w) in words.iter().enumerate() {
@@ -590,7 +590,7 @@ fn join_camel(words: &[String]) -> String {
     parts.join("")
 }
 
-/// Join words as display name: `["data", "machine", "agent"]` → `"Data Machine Agent"`
+/// Join words as display name: `["sample", "plugin", "agent"]` → `"Sample Plugin Agent"`
 fn join_display(words: &[String]) -> String {
     words
         .iter()
@@ -1464,36 +1464,36 @@ mod tests {
     #[test]
     fn literal_spec_has_single_variant() {
         let spec = RenameSpec::literal(
-            "datamachine-events",
-            "data-machine-events",
+            "sampleplugin-events",
+            "sample-plugin-events",
             RenameScope::All,
         );
         assert!(spec.literal);
         assert_eq!(spec.variants.len(), 1);
-        assert_eq!(spec.variants[0].from, "datamachine-events");
-        assert_eq!(spec.variants[0].to, "data-machine-events");
+        assert_eq!(spec.variants[0].from, "sampleplugin-events");
+        assert_eq!(spec.variants[0].to, "sample-plugin-events");
         assert_eq!(spec.variants[0].label, "literal");
     }
 
     #[test]
     fn find_literal_matches_exact() {
         // Should find exact substring — no boundary detection
-        let matches = find_literal_matches("datamachine-events is great", "datamachine-events");
+        let matches = find_literal_matches("sampleplugin-events is great", "sampleplugin-events");
         assert_eq!(matches, vec![0]);
 
         // Should match inside larger strings (no boundary filtering)
-        let matches = find_literal_matches("the-datamachine-events-plugin", "datamachine-events");
+        let matches = find_literal_matches("the-sampleplugin-events-plugin", "sampleplugin-events");
         assert_eq!(matches, vec![4]);
 
         // Multiple occurrences
         let matches = find_literal_matches(
-            "datamachine-events and datamachine-events",
-            "datamachine-events",
+            "sampleplugin-events and sampleplugin-events",
+            "sampleplugin-events",
         );
-        assert_eq!(matches, vec![0, 23]);
+        assert_eq!(matches, vec![0, 24]);
 
         // No match
-        let matches = find_literal_matches("data-machine-events", "datamachine-events");
+        let matches = find_literal_matches("sample-plugin-events", "sampleplugin-events");
         assert!(matches.is_empty());
     }
 
@@ -1504,26 +1504,26 @@ mod tests {
 
         std::fs::write(
             dir.join("plugin.php"),
-            "// Plugin: datamachine-events\ndefine('DATAMACHINE_EVENTS_VERSION', '1.0');\nfunction datamachine_events_init() {}\n",
+            "// Plugin: sampleplugin-events\ndefine('SAMPLEPLUGIN_EVENTS_VERSION', '1.0');\nfunction sampleplugin_events_init() {}\n",
         )
         .unwrap();
 
         // Literal mode: only exact match, no case variants
         let spec = RenameSpec::literal(
-            "datamachine-events",
-            "data-machine-events",
+            "sampleplugin-events",
+            "sample-plugin-events",
             RenameScope::All,
         );
         let refs = find_references(&spec, &dir);
 
-        // Should find only the hyphenated form, not DATAMACHINE_EVENTS or datamachine_events
+        // Should find only the hyphenated form, not SAMPLEPLUGIN_EVENTS or sampleplugin_events
         assert_eq!(
             refs.len(),
             1,
             "Should find exactly 1 literal match, got: {:?}",
             refs.iter().map(|r| &r.matched).collect::<Vec<_>>()
         );
-        assert_eq!(refs[0].matched, "datamachine-events");
+        assert_eq!(refs[0].matched, "sampleplugin-events");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1535,13 +1535,13 @@ mod tests {
 
         std::fs::write(
             dir.join("plugin.php"),
-            "Text Domain: datamachine-events\nSlug: datamachine-events\n",
+            "Text Domain: sampleplugin-events\nSlug: sampleplugin-events\n",
         )
         .unwrap();
 
         let spec = RenameSpec::literal(
-            "datamachine-events",
-            "data-machine-events",
+            "sampleplugin-events",
+            "sample-plugin-events",
             RenameScope::All,
         );
         let result = generate_renames(&spec, &dir);
@@ -1550,7 +1550,7 @@ mod tests {
         assert_eq!(result.edits[0].replacements, 2);
         assert_eq!(
             result.edits[0].new_content,
-            "Text Domain: data-machine-events\nSlug: data-machine-events\n"
+            "Text Domain: sample-plugin-events\nSlug: sample-plugin-events\n"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1561,22 +1561,22 @@ mod tests {
         let dir = std::env::temp_dir().join("homeboy_refactor_literal_file_rename_test");
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(dir.join("datamachine-events.php"), "// main file\n").unwrap();
+        std::fs::write(dir.join("sampleplugin-events.php"), "// main file\n").unwrap();
 
         let spec = RenameSpec::literal(
-            "datamachine-events",
-            "data-machine-events",
+            "sampleplugin-events",
+            "sample-plugin-events",
             RenameScope::All,
         );
         let result = generate_renames(&spec, &dir);
 
         assert!(
             !result.file_renames.is_empty(),
-            "Should rename datamachine-events.php"
+            "Should rename sampleplugin-events.php"
         );
         let rename = &result.file_renames[0];
-        assert_eq!(rename.from, "datamachine-events.php");
-        assert_eq!(rename.to, "data-machine-events.php");
+        assert_eq!(rename.from, "sampleplugin-events.php");
+        assert_eq!(rename.to, "sample-plugin-events.php");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1586,11 +1586,11 @@ mod tests {
         let dir = std::env::temp_dir().join("homeboy_refactor_literal_apply_test");
         let _ = std::fs::create_dir_all(&dir);
 
-        std::fs::write(dir.join("test.php"), "slug: datamachine-events\n").unwrap();
+        std::fs::write(dir.join("test.php"), "slug: sampleplugin-events\n").unwrap();
 
         let spec = RenameSpec::literal(
-            "datamachine-events",
-            "data-machine-events",
+            "sampleplugin-events",
+            "sample-plugin-events",
             RenameScope::All,
         );
         let mut result = generate_renames(&spec, &dir);
@@ -1599,7 +1599,7 @@ mod tests {
         assert!(result.applied);
 
         let content = std::fs::read_to_string(dir.join("test.php")).unwrap();
-        assert_eq!(content, "slug: data-machine-events\n");
+        assert_eq!(content, "slug: sample-plugin-events\n");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1630,8 +1630,8 @@ mod tests {
     fn split_words_kebab() {
         assert_eq!(split_words("wp-agent"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("data-machine-agent"),
-            vec!["data", "machine", "agent"]
+            split_words("sample-plugin-agent"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1639,8 +1639,8 @@ mod tests {
     fn split_words_snake() {
         assert_eq!(split_words("wp_agent"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("data_machine_agent"),
-            vec!["data", "machine", "agent"]
+            split_words("sample_plugin_agent"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1648,8 +1648,8 @@ mod tests {
     fn split_words_upper_snake() {
         assert_eq!(split_words("WP_AGENT"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("DATA_MACHINE_AGENT"),
-            vec!["data", "machine", "agent"]
+            split_words("SAMPLE_PLUGIN_AGENT"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1657,8 +1657,8 @@ mod tests {
     fn split_words_pascal() {
         assert_eq!(split_words("WpAgent"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("DataMachineAgent"),
-            vec!["data", "machine", "agent"]
+            split_words("SamplePluginAgent"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1676,8 +1676,8 @@ mod tests {
     fn split_words_camel() {
         assert_eq!(split_words("wpAgent"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("dataMachineAgent"),
-            vec!["data", "machine", "agent"]
+            split_words("samplePluginAgent"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1685,8 +1685,8 @@ mod tests {
     fn split_words_display() {
         assert_eq!(split_words("WP Agent"), vec!["wp", "agent"]);
         assert_eq!(
-            split_words("Data Machine Agent"),
-            vec!["data", "machine", "agent"]
+            split_words("Sample Plugin Agent"),
+            vec!["sample", "plugin", "agent"]
         );
     }
 
@@ -1703,7 +1703,7 @@ mod tests {
 
     #[test]
     fn cross_separator_variants_from_kebab() {
-        let spec = RenameSpec::new("wp-agent", "data-machine-agent", RenameScope::All);
+        let spec = RenameSpec::new("wp-agent", "sample-plugin-agent", RenameScope::All);
         let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
         let to_values: Vec<&str> = spec.variants.iter().map(|v| v.to.as_str()).collect();
 
@@ -1719,27 +1719,27 @@ mod tests {
         assert!(from_values.contains(&"Wp Agent"), "Missing display from");
 
         assert!(
-            to_values.contains(&"data-machine-agent"),
+            to_values.contains(&"sample-plugin-agent"),
             "Missing kebab to"
         );
         assert!(
-            to_values.contains(&"data_machine_agent"),
+            to_values.contains(&"sample_plugin_agent"),
             "Missing snake to"
         );
         assert!(
-            to_values.contains(&"DATA_MACHINE_AGENT"),
+            to_values.contains(&"SAMPLE_PLUGIN_AGENT"),
             "Missing UPPER_SNAKE to"
         );
         assert!(
-            to_values.contains(&"DataMachineAgent"),
+            to_values.contains(&"SamplePluginAgent"),
             "Missing PascalCase to"
         );
         assert!(
-            to_values.contains(&"dataMachineAgent"),
+            to_values.contains(&"samplePluginAgent"),
             "Missing camelCase to"
         );
         assert!(
-            to_values.contains(&"Data Machine Agent"),
+            to_values.contains(&"Sample Plugin Agent"),
             "Missing display to"
         );
 
@@ -1765,7 +1765,7 @@ mod tests {
     #[test]
     fn cross_separator_variants_from_pascal() {
         // Providing PascalCase input should produce the same cross-separator variants
-        let spec = RenameSpec::new("WpAgent", "DataMachineAgent", RenameScope::All);
+        let spec = RenameSpec::new("WpAgent", "SamplePluginAgent", RenameScope::All);
         let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
 
         assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
@@ -1781,7 +1781,7 @@ mod tests {
     #[test]
     fn cross_separator_variants_from_snake() {
         // Providing snake_case input should produce the same cross-separator variants
-        let spec = RenameSpec::new("wp_agent", "data_machine_agent", RenameScope::All);
+        let spec = RenameSpec::new("wp_agent", "sample_plugin_agent", RenameScope::All);
         let from_values: Vec<&str> = spec.variants.iter().map(|v| v.from.as_str()).collect();
 
         assert!(from_values.contains(&"wp-agent"), "Missing kebab from");
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn cross_separator_end_to_end_rename() {
-        // The real use case: rename wp-agent → data-machine-agent across all conventions
+        // The real use case: rename wp-agent → sample-plugin-agent across all conventions
         let dir = std::env::temp_dir().join("homeboy_cross_sep_e2e_test");
         let _ = std::fs::create_dir_all(&dir);
 
@@ -1873,34 +1873,34 @@ mod tests {
         )
         .unwrap();
 
-        let spec = RenameSpec::new("wp-agent", "data-machine-agent", RenameScope::All);
+        let spec = RenameSpec::new("wp-agent", "sample-plugin-agent", RenameScope::All);
         let result = generate_renames(&spec, &dir);
 
         assert!(!result.edits.is_empty(), "Should have edits");
         let content = &result.edits[0].new_content;
 
         assert!(
-            content.contains("data-machine-agent"),
+            content.contains("sample-plugin-agent"),
             "Should rename kebab: {}",
             content
         );
         assert!(
-            content.contains("DataMachineAgent"),
+            content.contains("SamplePluginAgent"),
             "Should rename PascalCase: {}",
             content
         );
         assert!(
-            content.contains("DATA_MACHINE_AGENT_VERSION"),
+            content.contains("SAMPLE_PLUGIN_AGENT_VERSION"),
             "Should rename UPPER_SNAKE: {}",
             content
         );
         assert!(
-            content.contains("data_machine_agent_init"),
+            content.contains("sample_plugin_agent_init"),
             "Should rename snake_case: {}",
             content
         );
         assert!(
-            content.contains("data-machine-agents"),
+            content.contains("sample-plugin-agents"),
             "Should rename plural kebab: {}",
             content
         );

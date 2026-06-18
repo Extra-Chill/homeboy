@@ -337,13 +337,13 @@ fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
                             }
                         ],
                         "runner_capabilities": [
-                            "wp-codebox.recipe-run",
+                            "sample-runtime.recipe-run",
                             "browser-probe.assertions"
                         ]
                     },
                     {
                         "path": "/tmp/ece-second.trace.mjs",
-                        "runner_capabilities": ["wp-codebox.recipe-run"]
+                        "runner_capabilities": ["sample-runtime.recipe-run"]
                     }
                 ]
             }
@@ -361,7 +361,7 @@ fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
         runner_capabilities_for_extension(&rig_spec, "extension-a"),
         vec![
             "browser-probe.assertions".to_string(),
-            "wp-codebox.recipe-run".to_string()
+            "sample-runtime.recipe-run".to_string()
         ]
     );
 }

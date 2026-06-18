@@ -956,11 +956,11 @@ mod provider_config_candidate_paths_tests {
     #[test]
     fn extracts_all_local_path_sources_including_runtime_overlays() {
         let value = serde_json::json!({
-            "workspace_root": "/local/data-machine@cook",
-            "mounts": [{ "source": "/local/data-machine@cook", "target": "/workspace/data-machine" }],
+            "workspace_root": "/local/sample-plugin@cook",
+            "mounts": [{ "source": "/local/sample-plugin@cook", "target": "/workspace/sample-plugin" }],
             "runtime_component_paths": {
-                "agent_runtime": "/local/data-machine",
-                "agent_runtime_tools": "/local/data-machine-code"
+                "agent_runtime": "/local/sample-plugin",
+                "agent_runtime_tools": "/local/sample-plugin-code"
             },
             "provider_plugin_paths": ["/local/ai-provider-for-claude-code"],
             "runtime_overlays": [
@@ -974,9 +974,9 @@ mod provider_config_candidate_paths_tests {
         let paths = provider_config_candidate_paths(&value);
 
         for expected in [
-            "/local/data-machine@cook",
-            "/local/data-machine",
-            "/local/data-machine-code",
+            "/local/sample-plugin@cook",
+            "/local/sample-plugin",
+            "/local/sample-plugin-code",
             "/local/ai-provider-for-claude-code",
             "/local/portable-ai-client@custom-provider-auth",
             "/local/agents-api",

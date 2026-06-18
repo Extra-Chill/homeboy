@@ -179,7 +179,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = release_skip_plan("data-machine-code", &options, None, None)
+        let plan = release_skip_plan("sample-plugin-code", &options, None, None)
             .expect("docs-only invocation should still skip");
 
         let hint = plan
@@ -197,7 +197,7 @@ mod tests {
             "skip hint should echo --path: {hint}"
         );
         assert!(
-            hint.contains("homeboy release data-machine-code --bump patch"),
+            hint.contains("homeboy release sample-plugin-code --bump patch"),
             "skip hint should provide a fully-qualified force command: {hint}"
         );
     }
@@ -290,7 +290,7 @@ mod tests {
             ..Default::default()
         };
 
-        let plan = release_skip_plan("data-machine-code", &options, None, Some("v0.47.121"))
+        let plan = release_skip_plan("sample-plugin-code", &options, None, Some("v0.47.121"))
             .expect("tag-already-at-HEAD should produce a skip plan");
 
         assert!(!plan.enabled());
@@ -317,7 +317,7 @@ mod tests {
             "hint should point operator at --head finalization: {hint}"
         );
         assert!(
-            hint.contains("homeboy release data-machine-code --head"),
+            hint.contains("homeboy release sample-plugin-code --head"),
             "hint should provide an actionable command: {hint}"
         );
     }

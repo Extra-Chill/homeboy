@@ -251,13 +251,13 @@ mod tests {
             },
             provider_runtime: vec![ProviderRuntimeLifecycle {
                 task_id: "task-a".to_string(),
-                backend: "codebox".to_string(),
+                backend: "sample-runtime".to_string(),
                 state: ProviderRuntimeState::Running,
                 stream_uri: Some("provider://runs/provider-run-123/events".to_string()),
                 external_runtime_ids: vec![ExternalRuntimeId {
                     kind: "provider_run_id".to_string(),
                     value: "provider-run-123".to_string(),
-                    provider: Some("codebox".to_string()),
+                    provider: Some("sample-runtime".to_string()),
                     url: None,
                 }],
                 metadata: Value::Null,

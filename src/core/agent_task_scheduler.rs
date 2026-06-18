@@ -1834,7 +1834,7 @@ fn runtime_result_is_materializable(outcome: &AgentTaskOutcome) -> bool {
 
 fn provider_run_result_is_empty_incomplete(result: &Value) -> bool {
     // The provider run state may live at the top level of the result object or
-    // nested under an `outputs` key (the shape Codebox reports today, e.g.
+    // nested under an `outputs` key (a common provider-wrapper shape, e.g.
     // `{ "success": true, "status": "completed", "outputs": { "completed": false, ... } }`).
     // Detect an incomplete, no-output run at either level so cook does not treat
     // a cell that never produced an assistant/tool interaction as successful.
@@ -2934,7 +2934,7 @@ mod tests {
 
     #[test]
     fn incomplete_nested_outputs_provider_result_is_detected() {
-        // Mirrors the Codebox wrapper shape reported in #4613: the provider claims
+        // Mirrors a provider wrapper shape: the provider claims
         // top-level success/completed, but `outputs.completed` is false, the reply
         // is empty, and `messages` only contains the initial user prompt.
         let result = json!({
@@ -3553,14 +3553,14 @@ mod tests {
                 task_id: request.task_id,
                 status: AgentTaskOutcomeStatus::Failed,
                 summary: Some(
-                    "WP Codebox agent task did not produce required typed artifacts: patch, agent_result, transcript."
+                    "Sample runtime agent task did not produce required typed artifacts: patch, agent_result, transcript."
                         .to_string(),
                 ),
                 failure_classification: Some(AgentTaskFailureClassification::Provider),
                 artifacts: vec![
                     AgentTaskArtifact {
                         schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "codebox-patch".to_string(),
+                        id: "sample-runtime-patch".to_string(),
                         kind: "patch".to_string(),
                         name: Some("patch.diff".to_string()),
                         path: Some(self.patch_path.display().to_string()),
@@ -3570,14 +3570,14 @@ mod tests {
                         sha256: Some("sha256:patch".to_string()),
                         metadata: json!({
                             "artifact": "files/patch.diff",
-                            "provider_kind": "codebox-patch",
+                            "provider_kind": "sample-runtime-patch",
                             "role": "patch"
                         }),
                     },
                     AgentTaskArtifact {
                         schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "codebox-transcript".to_string(),
-                        kind: "codebox-transcript".to_string(),
+                        id: "sample-runtime-transcript".to_string(),
+                        kind: "sample-runtime-transcript".to_string(),
                         name: Some("transcript.json".to_string()),
                         path: Some(self.transcript_path.display().to_string()),
                         url: None,
@@ -3589,7 +3589,7 @@ mod tests {
                 ],
                 typed_artifacts: Vec::new(),
                 evidence_refs: vec![AgentTaskEvidenceRef {
-                    kind: "codebox-artifact-bundle".to_string(),
+                    kind: "sample-runtime-artifact-bundle".to_string(),
                     uri: self
                         .patch_path
                         .parent()
@@ -3597,11 +3597,11 @@ mod tests {
                         .unwrap_or_else(|| self.patch_path.as_path())
                         .display()
                         .to_string(),
-                    label: Some("WP Codebox artifact bundle".to_string()),
+                    label: Some("Sample runtime artifact bundle".to_string()),
                 }],
                 diagnostics: vec![AgentTaskDiagnostic {
                     class: "agent_task.required_typed_artifacts_missing".to_string(),
-                    message: "WP Codebox agent task did not produce required typed artifacts: patch, agent_result, transcript."
+                    message: "Sample runtime agent task did not produce required typed artifacts: patch, agent_result, transcript."
                         .to_string(),
                     data: Value::Null,
                 }],
