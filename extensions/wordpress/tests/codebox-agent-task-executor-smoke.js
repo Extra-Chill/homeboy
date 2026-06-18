@@ -454,7 +454,23 @@ assert.deepEqual(codeboxRequest.runtime_overlays, [{
   target: '/wordpress/wp-includes/php-ai-client',
   metadata: { component: 'php-ai-client', ref: 'custom-provider-auth' },
 }]);
-assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+assert.deepEqual(codeboxRequest.runtime_requirements, {
+  schema: 'wp-codebox/runtime-profile/v1',
+  runtime_overlays: codeboxRequest.runtime_overlays,
+  provider_plugins: [{ path: '/providers/openai' }],
+  homeboy_parent_tool_bridge: {
+    schema: 'wp-codebox/parent-tool-bridge/v1',
+    status: 'declared-compatibility-bridge',
+    env: [
+      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
+      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
+    ],
+    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
+  },
+});
+const legacyOverlayNameRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'invalid-runtime-overlay-type-task-123',
   executor: {
@@ -464,16 +480,8 @@ assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
       runtime_overlays: [{ type: 'bundled-library', library: 'php-ai-client', source: '/components/php-ai-client' }],
     },
   },
-}), (error) => {
-  assert.equal(error.name, 'RuntimeOverlayConfigError');
-  assert.equal(error.diagnostics[0].class, 'codebox.runtime_overlay_config_invalid');
-  assert.equal(error.diagnostics[0].data.overlay_index, 0);
-  assert.equal(error.diagnostics[0].data.field, 'runtime_overlays[0].type');
-  assert.equal(error.diagnostics[0].data.offending_field, 'type');
-  assert.match(error.diagnostics[0].message, /use canonical field "kind"/);
-  assert.match(error.diagnostics[0].data.expected, /"kind": "bundled-library"/);
-  return true;
 });
+assert.deepEqual(legacyOverlayNameRequest.runtime_overlays, [{ type: 'bundled-library', library: 'php-ai-client', source: '/components/php-ai-client' }]);
 assert.deepEqual(codeboxRequest.runtime_env, {});
 assert.deepEqual(codeboxRequest.runtime_state_mounts, []);
 assert.deepEqual(codeboxRequest.runtime_config_mounts, []);
@@ -710,6 +718,8 @@ assert.deepEqual(topLevelComponentContractsRequest.component_contracts, [
   { slug: 'domain-component', path: '/workspace/domain-component', activate: true },
   { slug: 'config-component', path: '/workspace/config-component', activate: false },
 ]);
+assert.deepEqual(topLevelComponentContractsRequest.runtime_requirements.component_contracts, topLevelComponentContractsRequest.component_contracts);
+assert.deepEqual(topLevelComponentContractsRequest.runtime_requirements.extra_plugins, topLevelComponentContractsRequest.component_contracts);
 
 const genericRuntimeEnv = {
   GENERIC_PROVIDER_CONFIG: '/runtime/provider/config.json',
@@ -750,6 +760,25 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_state_mounts, genericRunt
 assert.deepEqual(genericProviderRuntimeRequest.runtime_config_mounts, genericRuntimeConfigMounts);
 assert.deepEqual(genericProviderRuntimeRequest.provider_plugin_paths, ['/providers/fixture-provider']);
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlays, [{ kind: 'fixture-overlay', source: '/overlays/fixture' }]);
+assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
+  schema: 'wp-codebox/runtime-profile/v1',
+  runtime_overlays: [{ kind: 'fixture-overlay', source: '/overlays/fixture' }],
+  env: genericRuntimeEnv,
+  provider_plugins: [{ path: '/providers/fixture-provider' }],
+  runtime_state_mounts: genericRuntimeStateMounts,
+  runtime_config_mounts: genericRuntimeConfigMounts,
+  homeboy_parent_tool_bridge: {
+    schema: 'wp-codebox/parent-tool-bridge/v1',
+    status: 'declared-compatibility-bridge',
+    env: [
+      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
+      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
+    ],
+    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
+  },
+});
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
 
@@ -2216,6 +2245,7 @@ try {
   assert.match(missingModelOutcome.summary, /provider-config\.model/);
   assert.equal(fs.existsSync(capture), false);
 
+  fs.rmSync(capture, { force: true });
   const invalidOverlayResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
     '--task-runner',
@@ -2235,16 +2265,9 @@ try {
       },
     }),
   });
-  assert.equal(invalidOverlayResult.status, 1, invalidOverlayResult.stderr || invalidOverlayResult.stdout);
-  const invalidOverlayOutcome = JSON.parse(invalidOverlayResult.stdout);
-  assert.equal(invalidOverlayOutcome.status, 'failed');
-  assert.equal(invalidOverlayOutcome.failure_classification, 'provider');
-  assert.equal(invalidOverlayOutcome.diagnostics[0].class, 'codebox.runtime_overlay_config_invalid');
-  assert.equal(invalidOverlayOutcome.diagnostics[0].data.overlay_index, 0);
-  assert.equal(invalidOverlayOutcome.diagnostics[0].data.field, 'runtime_overlays[0].type');
-  assert.match(invalidOverlayOutcome.diagnostics[0].message, /legacy field "type"/);
-  assert.match(invalidOverlayOutcome.diagnostics[0].data.expected, /"kind": "bundled-library"/);
-  assert.equal(fs.existsSync(capture), false);
+  assert.equal(invalidOverlayResult.status, 0, invalidOverlayResult.stderr || invalidOverlayResult.stdout);
+  const invalidOverlayCapture = JSON.parse(fs.readFileSync(capture, 'utf8'));
+  assert.deepEqual(invalidOverlayCapture.request.runtime_overlays, [{ type: 'bundled-library', library: 'php-ai-client', source: '/components/php-ai-client' }]);
 
   const result = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,

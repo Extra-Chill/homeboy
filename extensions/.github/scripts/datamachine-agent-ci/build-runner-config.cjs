@@ -93,6 +93,22 @@ function buildConfig(env) {
         ? ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job']
         : runtimeAbilityRequirements;
   const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
+  const runtimeOverlays = normalizePathSources(parseJsonInput('runtime_overlays', env.RUNTIME_OVERLAYS || '[]', 'array', []), workspace);
+  const componentContracts = parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []);
+  const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
+  const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
+  const codeboxRuntimeProfile = codeboxRuntimeProfilePayload({
+    id: runtimeProfile,
+    profile: runtimeProfiles[runtimeProfile],
+    componentContracts,
+    runtimeOverlays,
+    runtimeEnv,
+    providerPluginPaths,
+  });
+  const effectiveRuntimeProfiles = {
+    ...runtimeProfiles,
+    [runtimeProfile]: codeboxRuntimeProfile,
+  };
 
   return {
     _configPath: path.join(runnerTemp, 'datamachine-agent-config.json'),
@@ -103,7 +119,7 @@ function buildConfig(env) {
     validation_dependencies: validationDependencies.paths,
     runtime_id: runtimeId,
     runtime_profile: runtimeProfile,
-    ...(Object.keys(runtimeProfiles).length > 0 ? { runtime_profiles: runtimeProfiles } : {}),
+    runtime_profiles: effectiveRuntimeProfiles,
     execution_kind: executionKind,
     runtime_ref: env.AGENT_RUNTIME_REF || 'main',
     runtime_wordpress_version: env.RUNTIME_WORDPRESS_VERSION || '7.0',
@@ -119,7 +135,7 @@ function buildConfig(env) {
       ...runnerWorkspaceMounts,
     ],
     wp_config_defines: parseJsonInput('extra_wp_config_defines', env.EXTRA_WP_CONFIG_DEFINES || '{}', 'object', {}),
-    runtime_overlays: normalizePathSources(parseJsonInput('runtime_overlays', env.RUNTIME_OVERLAYS || '[]', 'array', []), workspace),
+    runtime_overlays: runtimeOverlays,
     workload_run_before: workloadRunBefore,
     workload_run_after: workloadRunAfter,
     required_abilities: Array.from(new Set([...executeRequiredAbilities, ...extraRequiredAbilities])),
@@ -142,7 +158,8 @@ function buildConfig(env) {
       data_machine_code: path.join(workspace, '.ci/data-machine-code'),
       ...runtimeComponents,
     },
-    provider_plugin_paths: validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [],
+    provider_plugin_paths: providerPluginPaths,
+    runtime_requirements: codeboxRuntimeProfile,
     github_token_env: 'HOMEBOY_GITHUB_APP_TOKEN',
     github_repository_token_env: 'GITHUB_TOKEN',
     github_profile_id: `${agentSlug}-ci`,
@@ -175,7 +192,7 @@ function buildConfig(env) {
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []),
     output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
-    component_contracts: parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []),
+    component_contracts: componentContracts,
     ...(runtimeTask ? { runtime_task: runtimeTask } : {}),
     ability_tools: parseJsonInput('ability_tools', env.ABILITY_TOOLS || '[]', 'array', []),
     tool_recorders: parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', []),
@@ -277,6 +294,43 @@ function runtimeTaskFromEnv(env) {
       ...abilityInput,
     },
   };
+}
+
+function codeboxRuntimeProfilePayload({ id, profile = {}, componentContracts = [], runtimeOverlays = [], runtimeEnv = {}, providerPluginPaths = [] }) {
+  return withoutEmptyObjectValues({
+    ...profile,
+    schema: 'wp-codebox/runtime-profile/v1',
+    id: profile.id || id,
+    homeboy_profile_schema: profile.schema && profile.schema !== 'wp-codebox/runtime-profile/v1' ? profile.schema : undefined,
+    component_contracts: componentContracts,
+    extra_plugins: componentContracts,
+    runtime_overlays: runtimeOverlays,
+    env: runtimeEnv,
+    provider_plugins: providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
+    homeboy_parent_tool_bridge: {
+      schema: 'wp-codebox/parent-tool-bridge/v1',
+      status: 'declared-compatibility-bridge',
+      env: [
+        'HOMEBOY_AGENT_TOOL_POLICY_JSON',
+        'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
+        'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
+        'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
+      ],
+      upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
+    },
+  });
+}
+
+function withoutEmptyObjectValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => {
+    if (Array.isArray(entry)) {
+      return entry.length > 0;
+    }
+    if (entry && typeof entry === 'object') {
+      return Object.keys(entry).length > 0;
+    }
+    return entry !== undefined && entry !== '';
+  }));
 }
 
 function withoutInternalKeys(config) {

@@ -103,7 +103,7 @@ const WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES = Object.fromEntries(Object.
 }).flatMap(([key, aliases]) => aliases.map((alias) => [alias, key])));
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
-const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects with a non-empty string kind, for example { "kind": "bundled-library", "library": "php-ai-client", "source": "/path/to/php-ai-client" }. The legacy type field is not accepted.';
+const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -406,6 +406,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
+  const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -448,8 +449,9 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_stack_mounts: config.runtime_stack_mounts || runtimeOptions.runtimeStackMounts || [],
     runtime_overlay_profiles: config.runtime_overlay_profiles || config.runtimeOverlayProfiles || runtimeOptions.runtimeOverlayProfiles || defaults.runtimeOverlayProfiles || [],
     runtime_overlays: runtimeOverlays,
+    runtime_requirements: runtimeRequirements,
     runtime_env: {
-      ...firstDefined(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
+      ...firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
       ...homeboyAgentToolContractEnv(),
       ...datamachineHostToolPolicyEnv(),
     },
@@ -503,6 +505,11 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
       ...normalizeArray(runtimeProfile.ability_requirements),
       ...normalizeArray(runtimeProfile.abilityRequirements),
     ]),
+    providerPluginPaths: providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
+    runtimeOverlays: firstDefined(runtimeRequirements.runtime_overlays, runtimeProfile.runtime_overlays, options.runtimeOverlays),
+    runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, options.runtime_env),
+    runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, options.runtime_state_mounts),
+    runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, options.runtime_config_mounts),
   };
 }
 
@@ -639,6 +646,8 @@ class RuntimeOverlayConfigError extends Error {
 function runtimeOverlaysFromConfig(config, options = {}, defaults = {}) {
   return validateRuntimeOverlays(firstDefined(
     config.runtime_overlays,
+    config.runtime_requirements?.runtime_overlays,
+    options.runtimeProfile?.runtime_overlays,
     options.runtimeOverlays,
     defaults.runtimeOverlays,
     []
@@ -656,13 +665,6 @@ function validateRuntimeOverlays(value) {
       return;
     }
 
-    if (Object.hasOwn(overlay, 'type')) {
-      diagnostics.push(runtimeOverlayDiagnostic(index, `${pathPrefix}.type`, 'type', overlay.type, 'Runtime overlay config uses legacy field "type"; use canonical field "kind" instead.'));
-    }
-
-    if (typeof overlay.kind !== 'string' || overlay.kind.trim() === '') {
-      diagnostics.push(runtimeOverlayDiagnostic(index, `${pathPrefix}.kind`, 'kind', overlay.kind, 'Runtime overlay config requires canonical field "kind" as a non-empty string.'));
-    }
   });
 
   if (diagnostics.length > 0) {
@@ -690,8 +692,74 @@ function componentContractsFromAgentTaskRequest(request, config, options = {}) {
   return uniqueComponentContracts([
     ...normalizeArray(request.component_contracts),
     ...normalizeArray(config.component_contracts),
+    ...normalizeArray(config.runtime_requirements?.component_contracts),
+    ...normalizeArray(config.runtime_requirements?.extra_plugins),
+    ...normalizeArray(options.runtimeProfile?.component_contracts),
+    ...normalizeArray(options.runtimeProfile?.extra_plugins),
     ...normalizeArray(options.componentContracts),
   ]);
+}
+
+function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
+  const runtimeProfile = firstObject(options.runtimeProfile) || {};
+  const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
+  const runtimeEnv = firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, defaults.runtimeEnv) || {};
+  const providerPluginPaths = firstNonEmptyArray(
+    config.provider_plugin_paths,
+    providerPluginPathsFromRuntimeProfile(runtimeRequirements, runtimeProfile, options),
+    defaults.providerPluginPaths,
+    []
+  );
+  return withoutEmptyObjectValues({
+    ...runtimeProfile,
+    ...runtimeRequirements,
+    schema: 'wp-codebox/runtime-profile/v1',
+    id: runtimeRequirements.id || runtimeProfile.id || config.runtime_profile || config.runtimeProfile,
+    homeboy_profile_schema: runtimeProfile.schema && runtimeProfile.schema !== 'wp-codebox/runtime-profile/v1' ? runtimeProfile.schema : undefined,
+    component_contracts: componentContracts,
+    extra_plugins: componentContracts,
+    runtime_overlays: runtimeOverlays,
+    env: runtimeEnv,
+    provider_plugins: providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
+    runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts),
+    runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts),
+    homeboy_parent_tool_bridge: homeboyParentToolBridgeRequirement(),
+  });
+}
+
+function providerPluginPathsFromRuntimeProfile(runtimeRequirements = {}, runtimeProfile = {}, options = {}) {
+  return uniquePaths([
+    ...providerPluginPathEntries(runtimeRequirements.provider_plugins),
+    ...providerPluginPathEntries(runtimeProfile.provider_plugins),
+    ...normalizeArray(options.providerPluginPaths),
+    ...normalizeArray(options.provider_plugin_paths),
+  ]);
+}
+
+function providerPluginPathEntries(value) {
+  return normalizeArray(value).flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [entry];
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return [];
+    }
+    return [entry.path, entry.source].filter(Boolean);
+  });
+}
+
+function homeboyParentToolBridgeRequirement() {
+  return {
+    schema: 'wp-codebox/parent-tool-bridge/v1',
+    status: 'declared-compatibility-bridge',
+    env: [
+      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
+      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
+      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
+    ],
+    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
+  };
 }
 
 function uniqueComponentContracts(contracts) {
@@ -1162,6 +1230,18 @@ function firstDefined(...values) {
   return values.find((value) => value !== undefined);
 }
 
+function withoutEmptyObjectValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => {
+    if (Array.isArray(entry)) {
+      return entry.length > 0;
+    }
+    if (entry && typeof entry === 'object') {
+      return Object.keys(entry).length > 0;
+    }
+    return entry !== undefined && entry !== '';
+  }));
+}
+
 function parseJsonObject(value) {
   if (!value || typeof value !== 'string') {
     return null;
@@ -1525,6 +1605,10 @@ function agentBundleMounts(bundleConfig, explicitMounts = []) {
 
 function firstObject(...candidates) {
   return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate)) || null;
+}
+
+function firstNonEmptyObject(...candidates) {
+  return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate) && Object.keys(candidate).length > 0) || null;
 }
 
 function firstValue(...candidates) {

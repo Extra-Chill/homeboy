@@ -122,6 +122,9 @@ assert.equal(config.runner_workspace.checkout_path, '/workspace/homeboy-extensio
 assert.deepEqual(config.writable_paths, ['src', 'tests']);
 assert.equal(config.provider_credentials.connectors_ai_openai_api_key, 'OPENAI_API_KEY');
 assert.equal(config.runtime_profile, 'datamachine-agent-ci');
+assert.equal(config.runtime_profiles['datamachine-agent-ci'].schema, 'wp-codebox/runtime-profile/v1');
+assert.equal(config.runtime_profiles['datamachine-agent-ci'].homeboy_parent_tool_bridge.schema, 'wp-codebox/parent-tool-bridge/v1');
+assert.deepEqual(config.runtime_requirements, config.runtime_profiles['datamachine-agent-ci']);
 assert.equal(config.runtime_bin, path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js'));
 assert.equal(config.runtime_components.runtime, path.join(workspace, '.ci/wp-codebox/packages/wordpress-plugin'));
 assert.equal(config.runtime_components.data_machine, path.join(workspace, '.ci/data-machine'));
@@ -199,6 +202,8 @@ assert.deepEqual(runtimeTaskConfig.runtime_task, {
 });
 assert.deepEqual(runtimeTaskConfig.output_mappings, { processed_packet: 'result.processed_packet' });
 assert.deepEqual(runtimeTaskConfig.component_contracts, [{ slug: 'example-fixture-plugin', path: '/workspace/plugins/example-fixture-plugin', activate: true }]);
+assert.deepEqual(runtimeTaskConfig.runtime_requirements.component_contracts, runtimeTaskConfig.component_contracts);
+assert.deepEqual(runtimeTaskConfig.runtime_requirements.extra_plugins, runtimeTaskConfig.component_contracts);
 assert.equal(runtimeTaskConfig.runtime_mounts.some((mount) => mount.target === '/workspace/input' && mount.mode === 'readonly'), true);
 assert.deepEqual(runtimeTaskConfig.artifact_declarations, [{ name: 'processed_packet', type: 'example-packet', schema: 'example/processed-packet/v1', required: true }]);
 assert.deepEqual(runtimeTaskConfig.required_abilities, ['example/process-artifact']);
@@ -279,6 +284,10 @@ assert.equal(customProfileConfig.runtime_profile, 'example-agent-ci');
 assert.equal(customProfileConfig.runtime_profiles['example-agent-ci'].runtime_task_ability, 'example/run-agent-bundle');
 assert.equal(customProfileConfig.runtime_components.example_agents, '/workspace/components/example-agents');
 assert.deepEqual(customProfileConfig.component_contracts, [{ slug: 'example-agents', path: '/workspace/components/example-agents', activate: true }]);
+assert.equal(customProfileConfig.runtime_requirements.schema, 'wp-codebox/runtime-profile/v1');
+assert.equal(customProfileConfig.runtime_requirements.homeboy_profile_schema, 'homeboy/runtime-profile/v1');
+assert.deepEqual(customProfileConfig.runtime_requirements.component_contracts, customProfileConfig.component_contracts);
+assert.deepEqual(customProfileConfig.runtime_requirements.extra_plugins, customProfileConfig.component_contracts);
 assert.deepEqual(customProfileConfig.required_abilities, ['example/run-agent-bundle']);
 
 const resultsFile = path.join(tempRoot, 'results.json');

@@ -159,7 +159,7 @@ jobs:
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
 - `output_mappings` maps named outputs to dotted paths in the runtime task result, and those outputs are validated when they are also listed in `engine_data_outputs`.
-- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox. Use it for caller-owned fixture ability providers or runtime components that are not part of the default Data Machine stack.
+- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the default Data Machine stack.
 - Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Data Machine Agent CI policy lives in this reusable workflow and runner adapter, not in the generic WP Codebox provider manifest.
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the Data Machine Agent CI stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin. The runner adapter forwards those paths to WP Codebox as explicit runtime component requirements.
 - `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
@@ -175,7 +175,7 @@ jobs:
 - `transcript_artifact_name` controls artifact upload. An empty value skips upload.
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
 - `runtime_mounts` adds selected-runtime mounts. It must be a JSON array.
-- `runtime_overlays` forwards runtime overlay entries to the runner config. It must be a JSON array.
+- `runtime_overlays` forwards runtime overlay entries to the Codebox runtime profile payload. It must be a JSON array; WP Codebox owns field-level overlay schema validation.
 - `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.

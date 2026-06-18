@@ -167,6 +167,14 @@ component must be mounted explicitly. Keep ability names, schemas, and artifact
 types owned by the caller; Homeboy Extensions only forwards the generic runtime
 task contract.
 
+WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
+`component_contracts`, `extra_plugins`, `runtime_overlays`, `env`, and
+`provider_plugins`. Homeboy Extensions also declares the temporary
+`wp-codebox/parent-tool-bridge/v1` compatibility component in that payload; the
+expected upstream primitive is a Codebox-owned parent-tool bridge that maps
+parent-owned tools into sandbox-visible descriptors without Homeboy injecting the
+bridge env directly.
+
 Each extension also exposes a CLI binding for direct use against a project or component:
 
 ```bash
