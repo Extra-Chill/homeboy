@@ -29,21 +29,16 @@ impl CommandLabRunnerPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandAdapterContract {
-    pub response_mode: CommandResponseMode,
-    pub output_file_mode: CommandOutputFileMode,
-    pub json_family: CommandJsonFamily,
-    pub output_contract: CommandOutputContractKind,
+    /// Shared output-routing spec (response mode, output-file mode, JSON family,
+    /// output contract), reused from [`CommandOutputDescriptor`] so the field
+    /// group is declared once.
+    pub output: CommandOutputDescriptor,
     pub lab_runner: CommandLabRunnerPolicy,
 }
 
 impl CommandAdapterContract {
     fn to_output_descriptor(self) -> CommandOutputDescriptor {
-        CommandOutputDescriptor {
-            response_mode: self.response_mode,
-            output_file_mode: self.output_file_mode,
-            json_family: self.json_family,
-            output_contract: self.output_contract,
-        }
+        self.output
     }
 }
 
@@ -89,10 +84,12 @@ impl<Args> TypedCommandAdapter<Args> {
     ) -> Self {
         Self {
             contract: CommandAdapterContract {
-                response_mode: CommandResponseMode::Json,
-                output_file_mode,
-                json_family,
-                output_contract,
+                output: CommandOutputDescriptor {
+                    response_mode: CommandResponseMode::Json,
+                    output_file_mode,
+                    json_family,
+                    output_contract,
+                },
                 lab_runner: CommandLabRunnerPolicy::LOCAL,
             },
             execute_json: Some(execute_json),
