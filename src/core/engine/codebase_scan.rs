@@ -577,8 +577,8 @@ pub fn discover_casing(root: &Path, term: &str, config: &ScanConfig) -> Vec<(Str
 /// audit pipeline (`code_audit::discovery::auto_discover_groups` and
 /// `fingerprint_reference_paths`) consumes snapshots directly, replacing the
 /// per-detector `walk_source_files` + `fingerprint_file` loops. Subsequent
-/// slices migrate the remaining consumers (refactor's `ModuleSurfaceIndex`,
-/// the symbol graph) onto the same shared state.
+/// slices migrate remaining consumers such as the symbol graph onto the same
+/// shared state.
 #[derive(Debug, Clone)]
 pub struct CodebaseSnapshot {
     root: PathBuf,
