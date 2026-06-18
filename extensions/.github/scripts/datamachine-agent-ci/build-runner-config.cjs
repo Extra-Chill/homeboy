@@ -15,6 +15,11 @@ const {
 } = require('./lib/common.cjs');
 const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
+const {
+  runtimeAgentCiFirstNonEmptyArray,
+  runtimeAgentCiFirstNonEmptyObject,
+  runtimeAgentCiTaskFromRequest,
+} = require('../../../runtime-agent-ci');
 
 function main() {
   const config = buildConfig(process.env);
@@ -79,17 +84,13 @@ function buildConfig(env) {
   const extraRequiredAbilities = parseJsonInput('extra_required_abilities', env.EXTRA_REQUIRED_ABILITIES || '[]', 'array', []);
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeTaskAbility = env.RUNTIME_TASK_ABILITY || runtimeProfiles[runtimeProfile]?.runtime_task_ability || 'datamachine/run-agent-bundle';
-  const runtimeOutputProjections = parseJsonInputWithLegacyObject(
-    'runtime_output_projections',
-    env.RUNTIME_OUTPUT_PROJECTIONS || '{}',
-    'engine_data_outputs',
-    env.ENGINE_DATA_OUTPUTS || '{}'
+  const runtimeOutputProjections = runtimeAgentCiFirstNonEmptyObject(
+    parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {}),
+    parseJsonInput('engine_data_outputs', env.ENGINE_DATA_OUTPUTS || '{}', 'object', {})
   );
-  const evidenceProjections = parseJsonInputWithLegacyArray(
-    'evidence_projections',
-    env.EVIDENCE_PROJECTIONS || '[]',
-    'tool_recorders',
-    env.TOOL_RECORDERS || '[]'
+  const evidenceProjections = runtimeAgentCiFirstNonEmptyArray(
+    parseJsonInput('evidence_projections', env.EVIDENCE_PROJECTIONS || '[]', 'array', []),
+    parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', [])
   );
   const runtimeAbilityRequirements = Array.isArray(runtimeProfiles[runtimeProfile]?.ability_requirements)
     ? runtimeProfiles[runtimeProfile].ability_requirements
@@ -285,44 +286,15 @@ function resolveExecuteWorkflowMounts(executeWorkflowPath, workspace, componentS
 }
 
 function runtimeTaskFromEnv(env) {
-  const runtimeTask = parseJsonInput('runtime_task', env.RUNTIME_TASK || '{}', 'object', {});
-  if (Object.keys(runtimeTask).length > 0) {
-    if (!runtimeTask.ability || typeof runtimeTask.ability !== 'string') {
-      throw new Error('runtime_task.ability is required when runtime_task is supplied.');
-    }
-    return runtimeTask;
-  }
-
-  const abilityRequest = parseJsonInput('ability_request', env.ABILITY_REQUEST || '{}', 'object', {});
-  const abilityInput = parseJsonInput('ability_input', env.ABILITY_INPUT || '{}', 'object', {});
-  if (Object.keys(abilityRequest).length === 0 && Object.keys(abilityInput).length === 0) {
-    return null;
-  }
-  if (!abilityRequest.ability || typeof abilityRequest.ability !== 'string') {
-    throw new Error('ability_request.ability is required when ability_request or ability_input is supplied.');
-  }
-
-  return {
-    ...abilityRequest,
-    input: {
-      ...(abilityRequest.input && typeof abilityRequest.input === 'object' && !Array.isArray(abilityRequest.input) ? abilityRequest.input : {}),
-      ...abilityInput,
-    },
-  };
+  return runtimeAgentCiTaskFromRequest(
+    parseJsonInput('runtime_task', env.RUNTIME_TASK || '{}', 'object', {}),
+    parseJsonInput('ability_request', env.ABILITY_REQUEST || '{}', 'object', {}),
+    parseJsonInput('ability_input', env.ABILITY_INPUT || '{}', 'object', {})
+  );
 }
 
 function withoutInternalKeys(config) {
   return Object.fromEntries(Object.entries(config).filter(([key]) => !key.startsWith('_')));
-}
-
-function parseJsonInputWithLegacyObject(name, value, legacyName, legacyValue) {
-  const parsed = parseJsonInput(name, value, 'object', {});
-  return Object.keys(parsed).length > 0 ? parsed : parseJsonInput(legacyName, legacyValue, 'object', {});
-}
-
-function parseJsonInputWithLegacyArray(name, value, legacyName, legacyValue) {
-  const parsed = parseJsonInput(name, value, 'array', []);
-  return parsed.length > 0 ? parsed : parseJsonInput(legacyName, legacyValue, 'array', []);
 }
 
 function required(value, name) {

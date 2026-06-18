@@ -72,6 +72,23 @@ assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
 assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
 
+assert.deepEqual(
+  runtimeAgentCi.runtimeAgentCiTaskFromRequest(
+    {},
+    { ability: 'example/process', input: { source: 'artifact.json' } },
+    { mode: 'typed' }
+  ),
+  { ability: 'example/process', input: { source: 'artifact.json', mode: 'typed' } }
+);
+assert.deepEqual(
+  runtimeAgentCi.runtimeAgentCiFirstNonEmptyObject({}, { legacy: true }),
+  { legacy: true }
+);
+assert.deepEqual(
+  runtimeAgentCi.runtimeAgentCiFirstNonEmptyArray([], [{ legacy: true }]),
+  [{ legacy: true }]
+);
+
 const genericBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeProfile: runtimeProfile.id,
   runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },

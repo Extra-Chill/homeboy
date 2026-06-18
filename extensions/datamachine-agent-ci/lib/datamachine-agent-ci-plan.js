@@ -6,6 +6,7 @@ const {
   AGENT_TASK_REQUEST_SCHEMA,
   agentTaskRequestFromRunnerSpec,
   runtimeAgentCiAbilityTaskRequest,
+  runtimeAgentCiBundleRuntimeExecution,
   runtimeAgentCiPlan,
   runtimeAgentCiRuntimeProfilesForOptions,
   runtimeAgentCiRunnerSpec,
@@ -140,29 +141,12 @@ function datamachineAgentCiBundleTaskRequest(options = {}, context = {}) {
   const pipelineSlug = requiredString(options.pipelineSlug || options.pipeline_slug, 'pipelineSlug');
   const flowSlug = requiredString(options.flowSlug || options.flow_slug, 'flowSlug');
 
-  const runtimeTaskInput = stripUndefined({
+  const runtimeTaskInput = datamachineAgentCiBundleInput({
+    ...options,
     source,
-    agent_slug: agentSlug,
-    pipeline_slug: pipelineSlug,
-    flow_slug: flowSlug,
-    target_repo: options.targetRepo || options.target_repo,
-    prompt: options.prompt || '',
-    wait_for_completion: options.waitForCompletion ?? options.wait_for_completion ?? true,
-    success_requires_pr: options.successRequiresPr ?? options.success_requires_pr,
-    success_completion_outcomes: options.successCompletionOutcomes || options.success_completion_outcomes,
-    artifact_outputs: options.artifactOutputs || options.artifact_outputs,
-    flow_step_patches: options.flowStepPatches || options.flow_step_patches,
-    evidence_projections: options.evidenceProjections || options.evidence_projections,
-    tool_recorders: options.toolRecorders || options.tool_recorders,
-    runtime_output_projections: options.runtimeOutputProjections || options.runtime_output_projections,
-    engine_data_outputs: options.engineDataOutputs || options.engine_data_outputs,
-    transcript_artifact_name: options.transcriptArtifactName || options.transcript_artifact_name,
-    artifacts: options.artifactsPath || options.artifacts,
-    max_turns: options.maxTurns || options.max_turns,
-    step_budget: options.stepBudget || options.step_budget,
-    time_budget_ms: options.timeBudgetMs || options.time_budget_ms,
-    complexity_policy: options.complexityPolicy || options.complexity_policy,
-    ...stripUndefined(options.runtimeTaskInput || options.runtime_task_input || {}),
+    agentSlug,
+    pipelineSlug,
+    flowSlug,
   });
 
   return datamachineAgentCiAbilityTaskRequest({
@@ -170,11 +154,7 @@ function datamachineAgentCiBundleTaskRequest(options = {}, context = {}) {
     taskId,
     ability: options.ability,
     abilityInput: runtimeTaskInput,
-    runtimeExecution: options.runtimeExecution || options.runtime_execution || {
-      kind: 'bundle',
-      ability: options.ability,
-      input: runtimeTaskInput,
-    },
+    runtimeExecution: options.runtimeExecution || options.runtime_execution || runtimeAgentCiBundleRuntimeExecution(options, runtimeTaskInput),
   }, context);
 }
 
@@ -213,36 +193,34 @@ function datamachineAgentCiRuntimeOptions(options = {}) {
 }
 
 function datamachineAgentCiRuntimeExecution(options = {}) {
-  const source = options.source || options.bundle;
-  if (!source) {
-    return null;
-  }
-  return {
-    kind: 'bundle',
-    ability: options.ability,
-    input: stripUndefined({
-      source,
-      agent_slug: options.agentSlug || options.agent_slug,
-      pipeline_slug: options.pipelineSlug || options.pipeline_slug,
-      flow_slug: options.flowSlug || options.flow_slug,
-      target_repo: options.targetRepo || options.target_repo,
-      prompt: options.prompt || '',
-      wait_for_completion: options.waitForCompletion ?? options.wait_for_completion ?? true,
-      success_requires_pr: options.successRequiresPr ?? options.success_requires_pr,
-      success_completion_outcomes: options.successCompletionOutcomes || options.success_completion_outcomes,
-      artifact_outputs: options.artifactOutputs || options.artifact_outputs,
-      flow_step_patches: options.flowStepPatches || options.flow_step_patches,
-      tool_recorders: options.toolRecorders || options.tool_recorders,
-      engine_data_outputs: options.engineDataOutputs || options.engine_data_outputs,
-      transcript_artifact_name: options.transcriptArtifactName || options.transcript_artifact_name,
-      artifacts: options.artifactsPath || options.artifacts,
-      max_turns: options.maxTurns || options.max_turns,
-      step_budget: options.stepBudget || options.step_budget,
-      time_budget_ms: options.timeBudgetMs || options.time_budget_ms,
-      complexity_policy: options.complexityPolicy || options.complexity_policy,
-      ...stripUndefined(options.runtimeTaskInput || options.runtime_task_input || {}),
-    }),
-  };
+  return runtimeAgentCiBundleRuntimeExecution(options, datamachineAgentCiBundleInput(options));
+}
+
+function datamachineAgentCiBundleInput(options = {}) {
+  return stripUndefined({
+    source: options.source || options.bundle,
+    agent_slug: options.agentSlug || options.agent_slug,
+    pipeline_slug: options.pipelineSlug || options.pipeline_slug,
+    flow_slug: options.flowSlug || options.flow_slug,
+    target_repo: options.targetRepo || options.target_repo,
+    prompt: options.prompt || '',
+    wait_for_completion: options.waitForCompletion ?? options.wait_for_completion ?? true,
+    success_requires_pr: options.successRequiresPr ?? options.success_requires_pr,
+    success_completion_outcomes: options.successCompletionOutcomes || options.success_completion_outcomes,
+    artifact_outputs: options.artifactOutputs || options.artifact_outputs,
+    flow_step_patches: options.flowStepPatches || options.flow_step_patches,
+    evidence_projections: options.evidenceProjections || options.evidence_projections,
+    tool_recorders: options.toolRecorders || options.tool_recorders,
+    runtime_output_projections: options.runtimeOutputProjections || options.runtime_output_projections,
+    engine_data_outputs: options.engineDataOutputs || options.engine_data_outputs,
+    transcript_artifact_name: options.transcriptArtifactName || options.transcript_artifact_name,
+    artifacts: options.artifactsPath || options.artifacts,
+    max_turns: options.maxTurns || options.max_turns,
+    step_budget: options.stepBudget || options.step_budget,
+    time_budget_ms: options.timeBudgetMs || options.time_budget_ms,
+    complexity_policy: options.complexityPolicy || options.complexity_policy,
+    ...stripUndefined(options.runtimeTaskInput || options.runtime_task_input || {}),
+  });
 }
 
 function datamachineAgentCiPlan(options = {}) {

@@ -132,6 +132,57 @@ function normalizeRuntimeExecutionDescriptor(descriptor, runtimeProfile = {}) {
   });
 }
 
+function runtimeAgentCiBundleRuntimeExecution(options = {}, input = {}) {
+  const bundle = options.bundle && typeof options.bundle === 'object' && !Array.isArray(options.bundle) ? options.bundle : {};
+  const source = options.source || options.bundlePath || options.bundle_path || bundle.source || bundle.path || bundle.bundle_path || (typeof options.bundle === 'string' ? options.bundle : undefined);
+  if (!source) {
+    return null;
+  }
+  return {
+    kind: 'bundle',
+    ability: options.ability,
+    input: stripUndefined({
+      source,
+      ...input,
+      ...stripUndefined(options.runtimeTaskInput || options.runtime_task_input || {}),
+    }),
+  };
+}
+
+function runtimeAgentCiTaskFromRequest(runtimeTask = {}, abilityRequest = {}, abilityInput = {}) {
+  if (runtimeTask && typeof runtimeTask === 'object' && !Array.isArray(runtimeTask) && Object.keys(runtimeTask).length > 0) {
+    if (!runtimeTask.ability || typeof runtimeTask.ability !== 'string') {
+      throw new Error('runtime_task.ability is required when runtime_task is supplied.');
+    }
+    return runtimeTask;
+  }
+
+  const hasAbilityRequest = abilityRequest && typeof abilityRequest === 'object' && !Array.isArray(abilityRequest) && Object.keys(abilityRequest).length > 0;
+  const hasAbilityInput = abilityInput && typeof abilityInput === 'object' && !Array.isArray(abilityInput) && Object.keys(abilityInput).length > 0;
+  if (!hasAbilityRequest && !hasAbilityInput) {
+    return null;
+  }
+  if (!abilityRequest.ability || typeof abilityRequest.ability !== 'string') {
+    throw new Error('ability_request.ability is required when ability_request or ability_input is supplied.');
+  }
+
+  return {
+    ...abilityRequest,
+    input: {
+      ...(abilityRequest.input && typeof abilityRequest.input === 'object' && !Array.isArray(abilityRequest.input) ? abilityRequest.input : {}),
+      ...abilityInput,
+    },
+  };
+}
+
+function runtimeAgentCiFirstNonEmptyObject(primary = {}, legacy = {}) {
+  return primary && typeof primary === 'object' && !Array.isArray(primary) && Object.keys(primary).length > 0 ? primary : legacy;
+}
+
+function runtimeAgentCiFirstNonEmptyArray(primary = [], legacy = []) {
+  return Array.isArray(primary) && primary.length > 0 ? primary : legacy;
+}
+
 function abilityForRuntimeExecutionKind(kind, runtimeProfile = {}) {
   if (kind === 'bundle') {
     return runtimeProfile.runtime_bundle_ability || runtimeProfile.runtime_task_ability;
@@ -244,10 +295,14 @@ module.exports = {
   RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID,
   agentTaskRequestFromRunnerSpec,
   runtimeAgentCiAbilityTaskRequest,
+  runtimeAgentCiBundleRuntimeExecution,
+  runtimeAgentCiFirstNonEmptyArray,
+  runtimeAgentCiFirstNonEmptyObject,
   runtimeAgentCiPlan,
   runtimeAgentCiRunnerSpec,
   runtimeAgentCiRuntimeTaskRequest,
   runtimeAgentCiRuntimeProfilesForOptions,
+  runtimeAgentCiTaskFromRequest,
   runtimeAgentCiTaskExecutorConfig,
   normalizeRuntimeExecutionDescriptor,
   resolveRuntimeAgentCiRuntimeProfile,
