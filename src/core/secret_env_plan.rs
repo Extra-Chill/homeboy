@@ -89,11 +89,9 @@ pub struct SecretEnvResolutionError {
     pub status: Vec<SecretEnvStatus>,
 }
 
-type SecretEnvResolverFn<'a> = dyn FnMut(&str) -> Option<String> + 'a;
-
 pub struct SecretEnvValueProvider<'a> {
     source: String,
-    resolve: Box<SecretEnvResolverFn<'a>>,
+    resolve: Box<dyn FnMut(&str) -> Option<String> + 'a>,
 }
 
 impl<'a> SecretEnvValueProvider<'a> {
