@@ -239,11 +239,17 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
     let mut providers = Vec::new();
     for runtime_manifest in discover_agent_runtime_manifests() {
+        let materialization_plan = runtime_materialization_plan(&runtime_manifest);
         for mut provider in runtime_manifest.agent_task_executors {
             provider.extension_id = runtime_manifest.extension_id.clone();
             provider.extension_path = runtime_manifest.extension_path.clone();
             provider.runtime_id = Some(runtime_manifest.id.clone());
             provider.runtime_path = runtime_manifest.runtime_path.clone();
+            if let Ok(value) = serde_json::to_value(&materialization_plan) {
+                provider
+                    .extra
+                    .insert("runtime_materialization_plan".to_string(), value);
+            }
             providers.push(provider);
         }
     }
