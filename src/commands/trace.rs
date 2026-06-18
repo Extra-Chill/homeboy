@@ -15,8 +15,7 @@ use homeboy::core::extension::trace::{
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::observation::{
-    NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunEvidenceCommands,
-    RunStatus,
+    NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunStatus,
 };
 use homeboy::core::rig::{self, RigSpec};
 
@@ -1455,36 +1454,24 @@ pub(super) struct LabTraceDispatchObservation {
     scenario_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PersistedRunRetrieval {
-    pub run_id: String,
-    pub commands: RunEvidenceCommands,
-    pub export_command: String,
-}
-
-impl PersistedRunRetrieval {
-    pub(super) fn for_run(run_id: &str) -> Self {
-        Self {
-            run_id: run_id.to_string(),
-            commands: RunEvidenceCommands::for_run_id(run_id),
-            export_command: format!(
-                "homeboy runs export --run {run_id} --output homeboy-run-{run_id}"
-            ),
-        }
+impl homeboy::core::lab_routing::LabDispatchObserver for LabTraceDispatchObservation {
+    fn run_id(&self) -> Option<&str> {
+        Some(self.run_id.as_str())
     }
 
-    pub(super) fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "persisted_run_id": self.run_id,
-            "id_scope": "persisted_homeboy_run",
-            "retrieval_commands": {
-                "evidence": self.commands.evidence_command,
-                "artifacts": self.commands.artifacts_command,
-                "export": self.export_command,
-            }
-        })
+    fn finish(
+        self: Box<Self>,
+        status: RunStatus,
+        metadata: serde_json::Value,
+    ) -> Option<PersistedRunRetrieval> {
+        finish_lab_dispatch_observation(Some(*self), status, metadata)
     }
 }
+
+/// Re-exported from core so existing CLI call sites keep using the
+/// `trace::PersistedRunRetrieval` path while the type is owned by
+/// `core::lab_routing`.
+pub(super) use homeboy::core::lab_routing::PersistedRunRetrieval;
 
 pub(super) fn start_lab_dispatch_observation(
     args: &TraceArgs,
@@ -1585,14 +1572,6 @@ pub(super) fn finish_lab_dispatch_observation(
         .store
         .finish_run(&observation.run_id, status, Some(metadata));
     Some(retrieval)
-}
-
-pub(super) fn lab_dispatch_observation_run_id(
-    observation: &Option<LabTraceDispatchObservation>,
-) -> Option<&str> {
-    observation
-        .as_ref()
-        .map(|observation| observation.run_id.as_str())
 }
 
 fn persist_trace_workflow_result(

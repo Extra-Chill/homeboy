@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use serde_json::json;
+
 use crate::command_contract::{
     LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
     LabWorkspaceModePolicy,
@@ -9,12 +11,19 @@ use crate::command_contract::{
 use crate::core::command_execution_plan::{
     CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
 };
+use crate::core::observation::records::RunEvidenceCommands;
+use crate::core::observation::RunStatus;
 use crate::core::runners;
 use crate::core::Result;
 
 pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
 pub const LAB_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_DISPATCH_TIMEOUT_SECS";
 pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
+
+/// Phase tag used for Lab trace dispatch observation metadata payloads. Kept in
+/// core so the routing service owns the observation envelope shape rather than
+/// the CLI adapter.
+const LAB_DISPATCH_PHASE: &str = "route_lab_dispatch";
 
 pub struct LabRoutingRequest<'a> {
     pub command: Option<runners::LabOffloadCommand>,
@@ -46,6 +55,241 @@ pub fn route_lab_offload(request: LabRoutingRequest<'_>) -> Result<runners::LabO
         capture_patch: request.capture_patch,
         mutation_flag: request.mutation_flag,
     })
+}
+
+/// Retrieval guidance for a persisted Homeboy run, derived solely from a run id.
+///
+/// Lives in core so the Lab routing service can render run-retrieval guidance
+/// into offload output without depending on CLI command modules. The CLI trace
+/// adapter re-exports this type for backward compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedRunRetrieval {
+    pub run_id: String,
+    pub commands: RunEvidenceCommands,
+    pub export_command: String,
+}
+
+impl PersistedRunRetrieval {
+    pub fn for_run(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            commands: RunEvidenceCommands::for_run_id(run_id),
+            export_command: format!(
+                "homeboy runs export --run {run_id} --output homeboy-run-{run_id}"
+            ),
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        json!({
+            "persisted_run_id": self.run_id,
+            "id_scope": "persisted_homeboy_run",
+            "retrieval_commands": {
+                "evidence": self.commands.evidence_command,
+                "artifacts": self.commands.artifacts_command,
+                "export": self.export_command,
+            }
+        })
+    }
+}
+
+/// Observation lifecycle for a Lab dispatch, implemented by the CLI adapter.
+///
+/// The core routing service owns the *control flow* (when to finish, which
+/// [`RunStatus`] applies, and the metadata envelope) while the adapter owns the
+/// *implementation* (persisting trace runs). This keeps observation wiring out
+/// of `commands/route.rs` while avoiding a core dependency on CLI command
+/// modules.
+pub trait LabDispatchObserver {
+    /// The run id of the active dispatch observation, if one was started.
+    fn run_id(&self) -> Option<&str>;
+
+    /// Finish the observation with the given status and metadata, returning the
+    /// persisted run retrieval guidance when a run was recorded.
+    fn finish(
+        self: Box<Self>,
+        status: RunStatus,
+        metadata: serde_json::Value,
+    ) -> Option<PersistedRunRetrieval>;
+}
+
+/// No-op observer used when a command does not participate in Lab dispatch
+/// observation (everything except `trace`).
+pub struct NoopLabDispatchObserver;
+
+impl LabDispatchObserver for NoopLabDispatchObserver {
+    fn run_id(&self) -> Option<&str> {
+        None
+    }
+
+    fn finish(
+        self: Box<Self>,
+        _status: RunStatus,
+        _metadata: serde_json::Value,
+    ) -> Option<PersistedRunRetrieval> {
+        None
+    }
+}
+
+/// Typed output of an offloaded Lab dispatch, ready for the CLI adapter to
+/// render to stdout/stderr/exit-code and optional `--output` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabRouteOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+/// Typed outcome of routing a command through the Lab service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabRouteOutcome {
+    /// The command should continue executing locally on the controller.
+    RunLocal,
+    /// The command was offloaded to a runner; render the captured output.
+    Offloaded(LabRouteOutput),
+}
+
+/// Orchestrate a Lab dispatch end-to-end: run the offload, drive the dispatch
+/// observation lifecycle, and transform the runner outcome into typed output.
+///
+/// This is the core entrypoint that lets `commands/route.rs` stay a thin
+/// adapter: it builds the [`LabRoutingRequest`], supplies a runner id and an
+/// observer, and renders the returned [`LabRouteOutcome`]. All status-decision
+/// and output-shaping policy lives here.
+pub fn dispatch_lab_offload(
+    request: LabRoutingRequest<'_>,
+    runner_id: Option<&str>,
+    observer: Box<dyn LabDispatchObserver>,
+) -> Result<LabRouteOutcome> {
+    match route_lab_offload(request) {
+        Err(err) => {
+            let _ = observer.finish(
+                RunStatus::Error,
+                lab_dispatch_metadata(
+                    runner_id,
+                    "error",
+                    json!({
+                        "error": {
+                            "code": err.code.as_str(),
+                            "message": err.message,
+                            "details": err.details,
+                            "hints": err.hints,
+                        }
+                    }),
+                ),
+            );
+            Err(err)
+        }
+        Ok(runners::LabOffloadOutcome::RunLocal {
+            metadata, messages, ..
+        }) => {
+            let _ = observer.finish(
+                RunStatus::Skipped,
+                lab_dispatch_metadata(
+                    runner_id,
+                    "run_local",
+                    json!({
+                        "metadata": metadata,
+                        "messages": messages,
+                    }),
+                ),
+            );
+            if let Some(metadata) = metadata {
+                runners::capture_lab_offload_subprocess_metadata(metadata);
+            }
+            for message in messages {
+                eprintln!("{message}");
+            }
+            Ok(LabRouteOutcome::RunLocal)
+        }
+        Ok(runners::LabOffloadOutcome::Offloaded {
+            stdout,
+            stderr,
+            exit_code,
+            ..
+        }) => {
+            let retrieval = observer.finish(
+                if exit_code == 0 {
+                    RunStatus::Pass
+                } else {
+                    RunStatus::Fail
+                },
+                lab_dispatch_metadata(
+                    runner_id,
+                    "offloaded_complete",
+                    json!({ "exit_code": exit_code }),
+                ),
+            );
+            let stdout = stdout_with_persisted_run_retrieval(&stdout, retrieval.as_ref());
+            Ok(LabRouteOutcome::Offloaded(LabRouteOutput {
+                stdout,
+                stderr,
+                exit_code,
+            }))
+        }
+    }
+}
+
+fn lab_dispatch_metadata(
+    runner_id: Option<&str>,
+    status: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut dispatch = json!({
+        "phase": LAB_DISPATCH_PHASE,
+        "runner_id": runner_id,
+        "status": status,
+    });
+    if let (Some(object), Some(extra)) = (dispatch.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    json!({ "lab_dispatch": dispatch })
+}
+
+/// Render offloaded stdout, attaching persisted-run retrieval guidance when a
+/// run was recorded. Mirrors the legacy CLI helper but is owned by core so the
+/// transformation is testable without constructing a clap `Cli`.
+pub fn stdout_with_persisted_run_retrieval(
+    stdout: &str,
+    retrieval: Option<&PersistedRunRetrieval>,
+) -> String {
+    let Some(retrieval) = retrieval else {
+        return stdout.to_string();
+    };
+
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(stdout) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("homeboy_persisted_run".to_string(), retrieval.to_json());
+        }
+        if let Ok(mut rendered) = serde_json::to_string_pretty(&value) {
+            rendered.push('\n');
+            return rendered;
+        }
+    }
+
+    let mut rendered = stdout.to_string();
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    rendered.push('\n');
+    rendered.push_str("# Homeboy persisted run\n\n");
+    rendered.push_str(&format!(
+        "- **Persisted Homeboy run ID:** `{}`\n",
+        retrieval.run_id
+    ));
+    rendered.push_str("- **ID scope:** runtime, temp, and artifact identifiers above are offload context; use the persisted Homeboy run ID for local retrieval.\n");
+    rendered.push_str("- **Retrieve evidence:** `");
+    rendered.push_str(&retrieval.commands.evidence_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **List artifacts:** `");
+    rendered.push_str(&retrieval.commands.artifacts_command);
+    rendered.push_str("`\n");
+    rendered.push_str("- **Export run bundle:** `");
+    rendered.push_str(&retrieval.export_command);
+    rendered.push_str("`\n");
+    rendered
 }
 
 pub fn lab_offload_command_from_contract(
@@ -125,7 +369,7 @@ pub fn lab_trace_dispatch_timeout() -> Duration {
     lab_dispatch_timeout()
 }
 
-pub fn lab_dispatch_timeout() -> Duration {
+fn lab_dispatch_timeout() -> Duration {
     std::env::var(LAB_DISPATCH_TIMEOUT_ENV)
         .or_else(|_| std::env::var(LAB_TRACE_DISPATCH_TIMEOUT_ENV))
         .ok()
@@ -339,5 +583,185 @@ mod tests {
         let _env = EnvGuard::set("7");
 
         assert_eq!(lab_trace_dispatch_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn test_for_run() {
+        let retrieval = PersistedRunRetrieval::for_run("run-xyz");
+
+        assert_eq!(retrieval.run_id, "run-xyz");
+        assert_eq!(
+            retrieval.commands.evidence_command,
+            "homeboy runs evidence run-xyz"
+        );
+        assert_eq!(
+            retrieval.commands.artifacts_command,
+            "homeboy runs artifacts run-xyz"
+        );
+        assert_eq!(
+            retrieval.export_command,
+            "homeboy runs export --run run-xyz --output homeboy-run-run-xyz"
+        );
+    }
+
+    #[test]
+    fn offloaded_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = PersistedRunRetrieval::for_run("trace-run-123");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":true,"data":{"runtime_id":"runtime-abc","artifact_id":"artifact-xyz"}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["data"]["runtime_id"], "runtime-abc");
+        assert_eq!(json["data"]["artifact_id"], "artifact-xyz");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["evidence"],
+            "homeboy runs evidence trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["artifacts"],
+            "homeboy runs artifacts trace-run-123"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["retrieval_commands"]["export"],
+            "homeboy runs export --run trace-run-123 --output homeboy-run-trace-run-123"
+        );
+    }
+
+    #[test]
+    fn offloaded_error_json_stdout_labels_persisted_homeboy_run_id() {
+        let retrieval = PersistedRunRetrieval::for_run("trace-run-err");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            r#"{"success":false,"error":{"code":"remote.command_failed","message":"failed","details":{"temp_id":"tmp-1"}}}"#,
+            Some(&retrieval),
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+
+        assert_eq!(json["error"]["details"]["temp_id"], "tmp-1");
+        assert_eq!(
+            json["homeboy_persisted_run"]["persisted_run_id"],
+            "trace-run-err"
+        );
+        assert_eq!(
+            json["homeboy_persisted_run"]["id_scope"],
+            "persisted_homeboy_run"
+        );
+    }
+
+    #[test]
+    fn offloaded_text_stdout_appends_persisted_run_retrieval_commands() {
+        let retrieval = PersistedRunRetrieval::for_run("trace-run-text");
+
+        let stdout = stdout_with_persisted_run_retrieval(
+            "runtime_id=runtime-abc\nartifact_id=artifact-xyz\n",
+            Some(&retrieval),
+        );
+
+        assert!(stdout.contains("runtime_id=runtime-abc"));
+        assert!(stdout.contains("artifact_id=artifact-xyz"));
+        assert!(stdout.contains("**Persisted Homeboy run ID:** `trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs evidence trace-run-text`"));
+        assert!(stdout.contains("`homeboy runs artifacts trace-run-text`"));
+        assert!(stdout.contains(
+            "`homeboy runs export --run trace-run-text --output homeboy-run-trace-run-text`"
+        ));
+    }
+
+    #[test]
+    fn stdout_without_retrieval_is_unchanged() {
+        let stdout = stdout_with_persisted_run_retrieval("{\"ok\":true}\n", None);
+
+        assert_eq!(stdout, "{\"ok\":true}\n");
+    }
+
+    #[test]
+    fn noop_observer_finishes_without_retrieval() {
+        let observer: Box<dyn LabDispatchObserver> = Box::new(NoopLabDispatchObserver);
+
+        assert_eq!(observer.run_id(), None);
+        assert!(observer
+            .finish(RunStatus::Skipped, serde_json::Value::Null)
+            .is_none());
+    }
+
+    /// Observer that records the finishing status/metadata so the orchestration
+    /// control flow can be asserted without persisting a real trace run.
+    #[derive(Default)]
+    struct RecordingObserver {
+        run_id: Option<String>,
+        finished: std::sync::Arc<std::sync::Mutex<Option<(RunStatus, serde_json::Value)>>>,
+    }
+
+    impl LabDispatchObserver for RecordingObserver {
+        fn run_id(&self) -> Option<&str> {
+            self.run_id.as_deref()
+        }
+
+        fn finish(
+            self: Box<Self>,
+            status: RunStatus,
+            metadata: serde_json::Value,
+        ) -> Option<PersistedRunRetrieval> {
+            *self.finished.lock().unwrap() = Some((status, metadata));
+            self.run_id.as_deref().map(PersistedRunRetrieval::for_run)
+        }
+    }
+
+    #[test]
+    fn test_dispatch_lab_offload() {
+        // A non-Lab command (`command: None`) routes to a local run and drives
+        // the observer to a `Skipped` finish without offloading.
+        let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observer = Box::new(RecordingObserver {
+            run_id: None,
+            finished: finished.clone(),
+        });
+
+        let outcome = dispatch_lab_offload(
+            LabRoutingRequest {
+                command: None,
+                normalized_args: &["homeboy".to_string(), "status".to_string()],
+                explicit_runner: None,
+                force_hot: false,
+                allow_local_hot: false,
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace: false,
+                capture_patch: false,
+                mutation_flag: None,
+                timeout: None,
+                active_run_id: None,
+            },
+            None,
+            observer,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, LabRouteOutcome::RunLocal);
+        let recorded = finished.lock().unwrap().clone();
+        let (status, metadata) = recorded.expect("observer finished");
+        assert_eq!(status, RunStatus::Skipped);
+        assert_eq!(metadata["lab_dispatch"]["phase"], LAB_DISPATCH_PHASE);
+        assert_eq!(metadata["lab_dispatch"]["status"], "run_local");
+    }
+
+    #[test]
+    fn lab_dispatch_metadata_merges_extra_into_envelope() {
+        let metadata = lab_dispatch_metadata(
+            Some("homeboy-lab"),
+            "offloaded_complete",
+            json!({ "exit_code": 0 }),
+        );
+
+        assert_eq!(metadata["lab_dispatch"]["phase"], LAB_DISPATCH_PHASE);
+        assert_eq!(metadata["lab_dispatch"]["runner_id"], "homeboy-lab");
+        assert_eq!(metadata["lab_dispatch"]["status"], "offloaded_complete");
+        assert_eq!(metadata["lab_dispatch"]["exit_code"], 0);
     }
 }
