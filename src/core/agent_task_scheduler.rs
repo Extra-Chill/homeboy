@@ -28,6 +28,8 @@ use crate::core::agent_task_timeout_artifacts::{
 };
 use crate::core::config::value_type_name;
 
+const SCHEDULER_MAX_RESULT_WAIT_MS: u64 = 25;
+
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
 /// Provider lifecycle payloads live with the agent-task schemas, but execution
@@ -338,7 +340,7 @@ where
                 continue;
             }
 
-            match rx.recv_timeout(Duration::from_millis(10)) {
+            match rx.recv_timeout(scheduler_result_wait_timeout(&running)) {
                 Ok(result) => {
                     if cancellation.is_cancelled() {
                         AgentTaskScheduleSupport::cancel_queued(
@@ -445,6 +447,23 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+}
+
+fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Duration {
+    let max_wait = Duration::from_millis(SCHEDULER_MAX_RESULT_WAIT_MS);
+    running
+        .iter()
+        .filter_map(|task| {
+            task.timeout_ms.map(|timeout_ms| {
+                let timeout = timeout_with_grace(timeout_ms);
+                timeout
+                    .checked_sub(task.started_at.elapsed())
+                    .unwrap_or_default()
+            })
+        })
+        .min()
+        .map(|until_timeout| until_timeout.min(max_wait))
+        .unwrap_or(max_wait)
 }
 
 /// Record a finalized outcome in the completed-by-task index and the ordered
@@ -2067,6 +2086,26 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    #[test]
+    fn scheduler_result_wait_timeout_uses_bounded_default_without_task_timeouts() {
+        let running = vec![running_task("task-1", None, Duration::from_millis(0))];
+
+        assert_eq!(
+            scheduler_result_wait_timeout(&running),
+            Duration::from_millis(SCHEDULER_MAX_RESULT_WAIT_MS)
+        );
+    }
+
+    #[test]
+    fn scheduler_result_wait_timeout_wakes_for_nearest_timeout_deadline() {
+        let running = vec![
+            running_task("task-1", Some(5_000), Duration::from_millis(0)),
+            running_task("task-2", Some(1), Duration::from_millis(149)),
+        ];
+
+        assert_eq!(scheduler_result_wait_timeout(&running), Duration::ZERO);
+    }
 
     #[test]
     fn schedules_tasks_with_bounded_concurrency_and_success_aggregate() {
@@ -3724,6 +3763,20 @@ mod tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             metadata: Value::Null,
+        }
+    }
+
+    fn running_task(task_id: &str, timeout_ms: Option<u64>, elapsed: Duration) -> RunningTask {
+        let request = request(task_id);
+        RunningTask {
+            task_id: task_id.to_string(),
+            executor_key: executor_key(&request),
+            model_key: model_key(&request),
+            resource_units: 1,
+            request,
+            attempt: 1,
+            started_at: Instant::now() - elapsed,
+            timeout_ms,
         }
     }
 
