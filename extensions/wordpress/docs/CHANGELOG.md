@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.14] - 2026-06-18
+
+### Changed
+- Project Codebox transcripts as typed artifacts
+
+### Fixed
+- never fail the wordpress lint gate on a missing sidecar writer
+
 ## [3.7.13] - 2026-06-18
 
 ### Changed
