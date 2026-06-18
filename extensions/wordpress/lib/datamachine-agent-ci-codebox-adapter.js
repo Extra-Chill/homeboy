@@ -19,8 +19,11 @@ function datamachineAgentCiCodeboxExecutorConfig(config = {}) {
   };
 }
 
+const datamachineAgentCiExecutorConfig = datamachineAgentCiCodeboxExecutorConfig;
+
 module.exports = {
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
+  datamachineAgentCiExecutorConfig,
   datamachineAgentCiCodeboxExecutorConfig,
 };

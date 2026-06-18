@@ -149,6 +149,15 @@ assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec: bundleRunnerSpec }
 });
 assert.equal(validateAgentTaskRunnerSpec(bundleRunnerSpec), bundleRunnerSpec);
 
+assert.equal(datamachineAgentCiRunnerSpec({
+  taskId: 'wp-codebox-runtime-id',
+  runtimeProvider: 'wp-codebox',
+  source: '/workspace/example-repo/bundles/concept-agent',
+  agentSlug: 'concept-agent',
+  pipelineSlug: 'concept-pipeline',
+  flowSlug: 'concept-flow',
+}).executor.backend, 'codebox');
+
 const abilityTask = datamachineAgentCiAbilityTaskRequest({
   taskId: 'validate-artifact',
   ability: 'example/validate-artifact',

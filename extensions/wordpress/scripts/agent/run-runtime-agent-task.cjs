@@ -65,7 +65,7 @@ function expectedArtifactsFromConfig(config) {
     .filter(Boolean);
 }
 
-function buildAgentTaskRequest(config, configPath) {
+function buildAgentTaskRequest(config, configPath, runtime) {
   const taskId = config.task_id || config.workload_id || 'runtime-agent-full-run';
   const timeoutMs = Number.parseInt(config.time_budget_ms || '', 10);
   const timeoutSeconds = Number.parseInt(config.task_timeout_seconds || config.taskTimeoutSeconds || '', 10);
@@ -112,7 +112,7 @@ function buildAgentTaskRequest(config, configPath) {
       },
     },
     executor: {
-      backend: 'codebox',
+      backend: runtime.executor.backend,
       model: config.model || '',
       config: executorConfig,
       secret_env: config.secret_env || [],
@@ -171,7 +171,7 @@ try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
   const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME_PROVIDER || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
-  const request = buildAgentTaskRequest(config, configPath);
+  const request = buildAgentTaskRequest(config, configPath, runtime);
   const result = spawnSync(process.execPath, [runtime.executor.path], {
     encoding: 'utf8',
     input: JSON.stringify(request),

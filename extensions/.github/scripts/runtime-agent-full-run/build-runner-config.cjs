@@ -40,8 +40,8 @@ function buildConfig(env) {
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
   const runtimeBin = runtime.paths.runtime_bin;
-  if (!fs.existsSync(runtimeBin)) {
-    throw new Error(`Runtime CLI build missing at ${runtimeBin}`);
+  if (runtimePathRequired(runtime, 'runtime_bin') && (!runtimeBin || !fs.existsSync(runtimeBin))) {
+    throw new Error(`Runtime CLI build missing at ${runtimeBin || 'runtime.paths.runtime_bin'}`);
   }
 
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', false);
@@ -76,17 +76,18 @@ function buildConfig(env) {
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
-  const codeboxRuntimeProfile = codeboxRuntimeProfilePayload({
+  const resolvedRuntimeProfile = runtimeProfiles[runtimeProfile] || {};
+  const effectiveRuntimeProfile = isCodeboxRuntime(runtime) ? codeboxRuntimeProfilePayload({
     id: runtimeProfile,
-    profile: runtimeProfiles[runtimeProfile],
+    profile: resolvedRuntimeProfile,
     componentContracts,
     runtimeOverlays,
     runtimeEnv,
     providerPluginPaths,
-  });
+  }) : resolvedRuntimeProfile;
   const effectiveRuntimeProfiles = {
     ...runtimeProfiles,
-    [runtimeProfile]: codeboxRuntimeProfile,
+    [runtimeProfile]: effectiveRuntimeProfile,
   };
   const runnerWorkspace = parseJsonInput('runner_workspace', env.RUNNER_WORKSPACE_CONFIG || '{}', 'object', {});
   const runnerWorkspaceRepo = targetRepo.split('/')[1].replace(/\.git$/, '');
@@ -131,14 +132,14 @@ function buildConfig(env) {
     model: env.MODEL || '',
     provider_register_function: providerPlugin.register_function || '',
     provider_credentials: providerCredentials,
-    runtime_bin: runtimeBin,
+    ...(runtimeBin ? { runtime_bin: runtimeBin } : {}),
     runtime_components: {
-      runtime: runtime.paths.runtime_component,
+      ...(runtime.paths.runtime_component ? { runtime: runtime.paths.runtime_component } : {}),
       ...runtimeComponents,
     },
     runtime_component_paths: runtimeComponents,
     provider_plugin_paths: providerPluginPaths,
-    runtime_requirements: codeboxRuntimeProfile,
+    runtime_requirements: effectiveRuntimeProfile,
     github_token_env: 'HOMEBOY_GITHUB_APP_TOKEN',
     github_repository_token_env: 'GITHUB_TOKEN',
     github_profile_id: env.GITHUB_PROFILE_ID || `${workloadId}-ci`,
@@ -232,6 +233,15 @@ function runtimeTaskFromEnv(env) {
   );
 }
 
+function isCodeboxRuntime(runtime) {
+  return runtime?.id === 'wp-codebox' || runtime?.executor?.backend === 'codebox';
+}
+
+function runtimePathRequired(runtime, pathName) {
+  const requiredPaths = runtime?.manifest?.ci_materialization?.required_paths;
+  return isCodeboxRuntime(runtime) || (Array.isArray(requiredPaths) && requiredPaths.includes(pathName));
+}
+
 function withoutInternalKeys(config) {
   return Object.fromEntries(Object.entries(config).filter(([key]) => !key.startsWith('_')));
 }
@@ -243,11 +253,13 @@ function required(value, name) {
   return value;
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exit(1);
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(1);
+  }
 }
 
-module.exports = { buildConfig };
+module.exports = { buildConfig, isCodeboxRuntime, runtimePathRequired };

@@ -17,7 +17,8 @@ const {
 } = require('../../agent-runtimes/lib/agent-task-runner-contract');
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
-const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = 'codebox';
+const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = 'codebox';
+const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND;
 const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 	read: 'sandbox',
 	write: 'sandbox',
@@ -26,10 +27,12 @@ const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 
 function wordpressRuntimeTaskPlan(options = {}) {
 	const planId = requiredString(options.planId || options.plan_id, 'planId');
+	const backend = wordpressRuntimeTaskBackend(options);
 	const taskOptions = normalizeTaskOptions(options);
 	const tasks = taskOptions.map((taskOption, index) => wordpressRuntimeTaskRequest({
 		...options,
 		...taskOption,
+		backend: wordpressRuntimeTaskBackend({ ...options, ...taskOption }, backend),
 		planId,
 		parentPlanId: planId,
 		taskId: taskOption.taskId || taskOption.task_id || taskIdForPlan(planId, index, taskOption),
@@ -48,7 +51,7 @@ function wordpressRuntimeTaskPlan(options = {}) {
 			...(options.metadata || {}),
 			planner: 'homeboy-extension-wordpress/wordpress-runtime-task-planner',
 			runtime: options.runtime || options.runtimeId || options.runtime_id,
-			backend: options.backend || WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND,
+			backend,
 		}),
 	});
 }
@@ -94,13 +97,17 @@ function wordpressRuntimeTaskRequest(options = {}) {
 function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	const config = wordpressRuntimeTaskExecutorConfig(options);
 	return agentTaskRunnerSpec({
-		backend: options.backend || WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND,
+		backend: wordpressRuntimeTaskBackend(options),
 		config,
 		secret_env: normalizeArray(options.secretEnv || options.secret_env),
 		task_timeout_seconds: numberOrUndefined(options.taskTimeoutSeconds || options.task_timeout_seconds || options.timeoutSeconds || options.timeout_seconds),
 		limits: options.limits,
 		expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
 	});
+}
+
+function wordpressRuntimeTaskBackend(options = {}, fallback = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND) {
+	return options.backend || options.runtimeBackend || options.runtime_backend || options.agentRuntimeBackend || options.agent_runtime_backend || fallback;
 }
 
 function wordpressRuntimeTaskExecutorConfig(options = {}) {
@@ -207,8 +214,10 @@ function stripUndefined(value) {
 
 module.exports = {
 	WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND,
+	WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND,
 	WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY,
 	WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
+	wordpressRuntimeTaskBackend,
 	wordpressRuntimeTaskExecutorConfig,
 	wordpressRuntimeTaskPlan,
 	wordpressRuntimeTaskRequest,

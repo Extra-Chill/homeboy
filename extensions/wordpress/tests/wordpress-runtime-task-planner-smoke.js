@@ -59,6 +59,16 @@ for (const task of plan.tasks) {
 assert.deepEqual(plan.tasks.map((task) => task.metadata.fanout.scenario), ['import', 'verify']);
 assert(!JSON.stringify(plan).includes('/Users/'), 'planner must not inject local user paths');
 
+const genericBackendPlan = wordpressRuntimeTaskPlan({
+	planId: 'runtime-task-generic-backend-smoke',
+	ability: 'datamachine/run-runtime-task',
+	runtimeBackend: 'opencode',
+	runtimeId: 'opencode-local',
+});
+assert.equal(genericBackendPlan.metadata.backend, 'opencode');
+assert.equal(genericBackendPlan.tasks[0].executor.backend, 'opencode');
+assert.equal(genericBackendPlan.tasks[0].executor.config.runtime_id, 'opencode-local');
+
 const request = wordpressRuntimeTaskRequest({
 	taskId: 'single-runtime-task-smoke',
 	ability: 'example/materialize-artifact',
