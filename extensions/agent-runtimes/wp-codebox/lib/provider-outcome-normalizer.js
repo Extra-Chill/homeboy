@@ -34,10 +34,7 @@ function normalizeProviderTaskOutcome(request, result = {}, options = {}) {
 }
 
 function normalizeProviderStatus(result = {}, exitStatus = 0) {
-  if (result.status === 'completed') {
-    return result.success === false ? 'failed' : 'succeeded';
-  }
-  if (result.status === 'succeeded' || result.status === 'failed' || result.status === 'provider_error' || result.status === 'timeout' || result.status === 'no_op' || result.status === 'unable_to_remediate') {
+  if (result.status === 'failed' || result.status === 'provider_error' || result.status === 'timeout' || result.status === 'unable_to_remediate') {
     return result.status;
   }
   if (result.provider_error) {
@@ -49,14 +46,20 @@ function normalizeProviderStatus(result = {}, exitStatus = 0) {
   if (result.unable_to_remediate) {
     return 'unable_to_remediate';
   }
+  if (result.success === false || exitStatus !== 0) {
+    return 'failed';
+  }
+  if (result.status === 'completed') {
+    return 'succeeded';
+  }
+  if (result.status === 'succeeded' || result.status === 'no_op') {
+    return result.status;
+  }
   if (result.outcome === 'no_op' || result.no_op) {
     return 'no_op';
   }
   if (result.success === true) {
     return 'succeeded';
-  }
-  if (result.success === false || exitStatus !== 0) {
-    return 'failed';
   }
   return 'succeeded';
 }

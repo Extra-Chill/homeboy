@@ -1441,7 +1441,7 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
   return Object.fromEntries(Object.entries(bundleConfig).filter(([, value]) => value !== undefined && value !== ''));
 }
 
-function normalizeStatus(result) {
+function normalizeStatus(result, exitStatus = 0) {
   if (recipeRunFailedPhase(recipeRunFromResult(result))) {
     return 'failed';
   }
@@ -1449,6 +1449,21 @@ function normalizeStatus(result) {
     return 'failed';
   }
   if (agentRuntimeFailure(result)) {
+    return 'failed';
+  }
+  if (result?.status === 'failed' || result?.status === 'provider_error' || result?.status === 'timeout' || result?.status === 'unable_to_remediate') {
+    return result.status;
+  }
+  if (result?.unable_to_remediate) {
+    return 'unable_to_remediate';
+  }
+  if (result?.timeout) {
+    return 'timeout';
+  }
+  if (result?.provider_error) {
+    return 'provider_error';
+  }
+  if ((exitStatus ?? 0) !== 0) {
     return 'failed';
   }
   if (AGENT_TASK_OUTCOME_STATUSES.includes(result?.status)) {
@@ -1465,15 +1480,6 @@ function normalizeStatus(result) {
   }
   if (result?.outcome === 'no_op' || result?.no_op) {
     return 'no_op';
-  }
-  if (result?.unable_to_remediate) {
-    return 'unable_to_remediate';
-  }
-  if (result?.timeout) {
-    return 'timeout';
-  }
-  if (result?.provider_error) {
-    return 'provider_error';
   }
   return result?.success === true ? 'succeeded' : 'failed';
 }
