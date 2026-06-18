@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.0] - 2026-06-18
+
+### Added
+- add static-site fanout adapter
+
 ## [3.6.1] - 2026-06-18
 
 ### Changed
