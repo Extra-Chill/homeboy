@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.16] - 2026-06-18
+
+### Changed
+- Add generic fanout reconcile workflow
+
 ## [3.7.15] - 2026-06-18
 
 ### Changed
