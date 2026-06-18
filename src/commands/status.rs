@@ -390,18 +390,6 @@ fn summarize_components(
     ))
 }
 
-fn status_has_filter(args: &StatusArgs) -> bool {
-    args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased
-}
-
-fn status_includes_upstream_drift(args: &StatusArgs) -> bool {
-    !status_has_filter(args)
-}
-
-fn status_includes_unreleased_merges(args: &StatusArgs) -> bool {
-    !status_has_filter(args) || args.unreleased
-}
-
 /// Path override mode: inspect one checkout without requiring registry membership.
 fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
     let path = args.path.as_deref();
@@ -1006,32 +994,6 @@ mod tests {
             Commands::Status(args) => assert!(args.unreleased),
             _ => panic!("expected status command"),
         }
-    }
-
-    #[test]
-    fn unfiltered_summary_includes_origin_dependent_sections() {
-        let args = status_args(None, "/tmp/example".to_string(), false);
-
-        assert!(status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
-    }
-
-    #[test]
-    fn local_release_state_filters_skip_origin_dependent_sections() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.needs_release = true;
-
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(!status_includes_unreleased_merges(&args));
-    }
-
-    #[test]
-    fn unreleased_filter_keeps_unreleased_origin_work_without_drift() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.unreleased = true;
-
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
     }
 
     #[test]
