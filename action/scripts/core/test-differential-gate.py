@@ -55,6 +55,22 @@ def main() -> None:
             "audit failure remains when outliers increase",
         )
 
+        write_json(
+            current / "audit.json",
+            {
+                "success": False,
+                "data": {
+                    "summary": {"outliers_found": 6},
+                    "changed_since": {"introduced_findings": 0, "contextual_findings": 6},
+                },
+            },
+        )
+        assert_equal(
+            {"audit": "pass"},
+            run_gate({"audit": "fail"}, current, base),
+            "changed-scope audit failure passes when no findings were introduced",
+        )
+
         write_json(base / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         assert_equal(
@@ -68,6 +84,22 @@ def main() -> None:
             {"test": "fail"},
             run_gate({"test": "fail"}, current, base),
             "test failure remains when failures increase",
+        )
+
+        write_json(
+            current / "test.json",
+            {
+                "success": False,
+                "data": {
+                    "test_counts": {"failed": 3, "errors": 1},
+                    "changed_since": {"introduced_failures": 0},
+                },
+            },
+        )
+        assert_equal(
+            {"test": "pass"},
+            run_gate({"test": "fail"}, current, base),
+            "changed-scope test failure passes when no failures were introduced",
         )
 
         assert_equal(
