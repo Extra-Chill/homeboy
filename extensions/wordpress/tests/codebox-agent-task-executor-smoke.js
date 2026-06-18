@@ -9,7 +9,12 @@ const { spawnSync } = require('node:child_process');
 const {
   agentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
+  missingRequiredSecretEnvMapping,
+  missingRequiredSecretEnvValues,
   providerContract,
+  providerPreflightManifest,
+  providerRequiredSecretEnv,
+  providerSecretEnv,
 } = require('../../agent-runtimes/wp-codebox');
 const {
   datamachineAgentCiCodeboxExecutorConfig,
@@ -378,6 +383,13 @@ assert.deepEqual(provider.provider_defaults, {
     },
   },
 });
+assert.deepEqual(providerRequiredSecretEnv('codex'), codexSecretEnv.slice(0, 4));
+assert.deepEqual(providerSecretEnv('codex'), codexSecretEnv);
+assert.deepEqual(providerRequiredSecretEnv('claude-code'), [claudeCodeRefreshTokenEnv]);
+assert.equal(providerPreflightManifest('codex').refresh_hook, 'codex-oauth-refresh');
+assert.equal(providerPreflightManifest('codex').provider_plugin_validation.diagnostic_class, 'codebox.preflight.codex_provider_plugin_path');
+assert.deepEqual(missingRequiredSecretEnvMapping({ secret_env: codexSecretEnv.slice(0, 3) }, 'codex'), ['AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID']);
+assert.deepEqual(missingRequiredSecretEnvValues('claude-code', {}), [claudeCodeRefreshTokenEnv]);
 assert.deepEqual(provider.role_aliases, {
   artifact_kinds: {
     patch: ['codebox-patch'],

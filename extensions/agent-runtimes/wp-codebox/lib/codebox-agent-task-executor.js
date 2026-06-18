@@ -140,6 +140,7 @@ function providerContract(options = {}) {
     workspace_tools: runtimeWorkspaceTools(options),
     component_path_defaults: runtimeComponentPathDefaults(options),
     provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
+    provider_preflight: runtimeProviderPreflight(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
@@ -189,6 +190,10 @@ function runtimeComponentDiscovery(options = {}) {
 
 function runtimeProviderDefaults() {
   return firstObject(runtimeExecutorManifest().provider_defaults) || {};
+}
+
+function runtimeProviderPreflight() {
+  return firstObject(runtimeExecutorManifest().provider_preflight) || {};
 }
 
 function runtimeRunnerReadiness(options = {}) {

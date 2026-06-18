@@ -19,18 +19,17 @@ const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
 } = require('../../lib/codebox-agent-task-executor');
+const {
+  normalizeStringArray,
+  providerAuthEnvSources,
+  providerDiagnosticClass,
+  providerLabel,
+  providerPluginValidation,
+  providerSecretEnv,
+} = require('../../lib/provider-preflight-manifest');
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const DEFAULT_TASK_RUNNER = path.resolve(__dirname, 'homeboy-wp-codebox-task-runner.cjs');
-const CODEX_SECRET_ENV = [
-  'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
-  'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
-  'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
-  'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
-  'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
-];
-const CODEX_PROVIDER_PLUGIN_GUIDANCE = 'Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ai-provider-for-opencode will not work.';
-
 function argValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
@@ -76,6 +75,19 @@ function defaultCodexAuthPath() {
   return process.env.HOME ? path.join(process.env.HOME, '.codex', 'auth.json') : '';
 }
 
+function defaultAuthPath(source) {
+  if (source?.path_env && process.env[source.path_env]) {
+    return process.env[source.path_env];
+  }
+  if (source?.path === '~/.codex/auth.json') {
+    return defaultCodexAuthPath();
+  }
+  if (typeof source?.path === 'string' && source.path.startsWith('~/') && process.env.HOME) {
+    return path.join(process.env.HOME, source.path.slice(2));
+  }
+  return source?.path || '';
+}
+
 function jwtExpiration(token) {
   const payload = String(token || '').split('.')[1];
   if (!payload) {
@@ -90,26 +102,72 @@ function jwtExpiration(token) {
   }
 }
 
-function codexAuthEnv(taskInput) {
-  if (taskInput?.provider !== 'codex') {
+function nestedField(value, field) {
+  return String(field || '').split('.').reduce((current, key) => {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    return current[key];
+  }, value);
+}
+
+function sourceValue(source, auth) {
+  for (const field of [source.field, ...normalizeStringArray(source.fallback_fields)]) {
+    const value = nestedField(auth, field);
+    if (value !== undefined && value !== null && value !== '') {
+      return value;
+    }
+  }
+  return source.value;
+}
+
+function providerAuthEnv(taskInput) {
+  const provider = taskInput?.provider || '';
+  const secretEnv = providerSecretEnv(provider);
+  const sources = providerAuthEnvSources(provider);
+  if (secretEnv.length === 0 || Object.keys(sources).length === 0) {
     return {};
   }
-  if (CODEX_SECRET_ENV.slice(0, 4).every((name) => Boolean(process.env[name]))) {
+  if (secretEnv.every((name) => Boolean(process.env[name]))) {
     return {};
   }
-  const authPath = process.env.HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH || defaultCodexAuthPath();
-  const auth = readJsonIfAvailable(authPath);
-  const tokens = auth?.tokens || {};
-  if (!tokens.access_token || !tokens.refresh_token || !tokens.account_id) {
+
+  const authByPath = new Map();
+  const env = {};
+  for (const [name, source] of Object.entries(sources)) {
+    if (!secretEnv.includes(name)) {
+      continue;
+    }
+    const authPath = defaultAuthPath(source);
+    if (!authPath) {
+      continue;
+    }
+    if (!authByPath.has(authPath)) {
+      authByPath.set(authPath, readJsonIfAvailable(authPath));
+    }
+    const auth = authByPath.get(authPath);
+    if (source.source === 'json-file-jwt-expiration') {
+      const fallbackValue = normalizeStringArray(source.fallback_fields)
+        .map((field) => nestedField(auth, field))
+        .find((value) => value !== undefined && value !== null && value !== '');
+      if (fallbackValue !== undefined) {
+        env[name] = String(fallbackValue);
+        continue;
+      }
+      const token = nestedField(auth, source.field);
+      env[name] = jwtExpiration(token);
+      continue;
+    }
+    const value = sourceValue(source, auth);
+    if (value !== undefined && value !== null && value !== '') {
+      env[name] = String(value);
+    }
+  }
+  const required = secretEnv.filter((name) => name !== 'AI_PROVIDER_OPENAI_CODEX_FEDRAMP');
+  if (!required.every((name) => Boolean(env[name] || process.env[name]))) {
     return {};
   }
-  return Object.fromEntries(Object.entries({
-    AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: tokens.access_token,
-    AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: tokens.refresh_token,
-    AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: tokens.expires_at || tokens.expiresAt || jwtExpiration(tokens.access_token),
-    AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: tokens.account_id,
-    AI_PROVIDER_OPENAI_CODEX_FEDRAMP: tokens.fedramp === undefined ? 'false' : String(tokens.fedramp),
-  }).filter(([name, value]) => CODEX_SECRET_ENV.includes(name) && value !== undefined && value !== null && value !== ''));
+  return env;
 }
 
 function directorySizeBytes(directory) {
@@ -329,13 +387,11 @@ function missingSecretEnvNames(stderr) {
 }
 
 function preflightFailureClass(stderr, missingSecretEnv) {
-  if (/Codex provider auth preflight failed:/i.test(stderr)) {
-    return 'codebox.preflight.codex_auth';
-  }
-  if (/Claude Code provider auth preflight failed:/i.test(stderr)) {
-    return missingSecretEnv.length > 0
-      ? 'codebox.preflight.claude_code_auth'
-      : 'codebox.preflight.stderr';
+  for (const provider of ['codex', 'claude-code']) {
+    const label = providerLabel(provider).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`${label} provider auth preflight failed:`, 'i').test(stderr)) {
+      return providerDiagnosticClass(provider) || 'codebox.preflight.stderr';
+    }
   }
   return missingSecretEnv.length > 0
     ? 'codebox.preflight.missing_secret_env'
@@ -434,13 +490,6 @@ function missingWorkspacePayload(request, taskInput) {
   };
 }
 
-function normalizeStringArray(value) {
-  if (Array.isArray(value)) {
-    return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
-  }
-  return typeof value === 'string' && value.trim() ? [value.trim()] : [];
-}
-
 function collectProviderProbeFiles(providerPath, maxFiles = 200) {
   const files = [];
   const queue = [{ filePath: providerPath, depth: 0 }];
@@ -471,9 +520,9 @@ function collectProviderProbeFiles(providerPath, maxFiles = 200) {
   return files;
 }
 
-function codexProviderPluginInspection(providerPath) {
+function providerPluginInspection(providerPath, validation) {
   const slug = path.basename(providerPath).toLowerCase();
-  if (slug === 'ai-provider-for-opencode' || slug.includes('opencode')) {
+  if (normalizeStringArray(validation.invalid_slug_patterns).some((pattern) => slug.includes(pattern.toLowerCase()))) {
     return { status: 'invalid', reason: 'opencode_provider_plugin' };
   }
   if (!fs.existsSync(providerPath)) {
@@ -486,22 +535,23 @@ function codexProviderPluginInspection(providerPath) {
     } catch {
       continue;
     }
-    if (/codex/i.test(contents)) {
+    if (new RegExp(validation.marker_pattern || validation.markerPattern || 'codex', 'i').test(contents)) {
       return { status: 'valid', reason: 'codex_marker_found', marker_path: filePath };
     }
   }
   return { status: 'invalid', reason: 'no_codex_marker_found' };
 }
 
-function codexProviderPluginPreflightPayload(request, taskInput) {
-  if (taskInput?.provider !== 'codex') {
+function providerPluginPreflightPayload(request, taskInput) {
+  const validation = providerPluginValidation(taskInput?.provider || '');
+  if (!validation) {
     return null;
   }
 
   const providerPluginPaths = normalizeStringArray(taskInput.provider_plugin_paths);
   const inspections = providerPluginPaths.map((providerPath) => ({
     path: providerPath,
-    ...codexProviderPluginInspection(providerPath),
+    ...providerPluginInspection(providerPath, validation),
   }));
   const invalidInspections = inspections.filter((inspection) => inspection.status === 'invalid');
   if (providerPluginPaths.length > 0 && invalidInspections.length === 0) {
@@ -509,23 +559,23 @@ function codexProviderPluginPreflightPayload(request, taskInput) {
   }
 
   const message = providerPluginPaths.length === 0
-    ? `WP Codebox Codex task has no provider_plugin_paths configured. ${CODEX_PROVIDER_PLUGIN_GUIDANCE}`
-    : `WP Codebox Codex task selected provider plugin path(s) that do not look Codex-capable. ${CODEX_PROVIDER_PLUGIN_GUIDANCE}`;
+    ? `WP Codebox ${providerLabel(taskInput.provider)} task has no provider_plugin_paths configured. ${validation.guidance}`
+    : `WP Codebox ${providerLabel(taskInput.provider)} task selected provider plugin path(s) that do not look ${providerLabel(taskInput.provider)}-capable. ${validation.guidance}`;
   return {
     success: false,
     status: 'failed',
     failure_classification: 'provider',
     summary: message,
     diagnostics: [{
-      class: 'codebox.preflight.codex_provider_plugin_path',
+      class: validation.diagnostic_class || 'codebox.preflight.provider_plugin_path',
       message,
       data: {
         phase: 'codebox.preflight',
         provider: taskInput.provider,
         provider_plugin_paths: providerPluginPaths,
         inspections,
-        expected: 'Codex-capable ai-provider-for-openai checkout from the Codex provider branch/PR.',
-        guidance: CODEX_PROVIDER_PLUGIN_GUIDANCE,
+        expected: validation.expected || '',
+        guidance: validation.guidance || '',
       },
     }],
     metadata: {
@@ -533,7 +583,7 @@ function codexProviderPluginPreflightPayload(request, taskInput) {
       provider: taskInput.provider,
       provider_plugin_paths: providerPluginPaths,
       inspections,
-      codex_provider_plugin_required: true,
+      provider_plugin_required: true,
     },
   };
 }
@@ -628,9 +678,9 @@ async function runTaskRunner(request) {
   if (missingModelPayload) {
     return agentTaskOutcomeFromCodeboxResult(request, missingModelPayload, { exitStatus: 1, ...coreNormalizers });
   }
-  const codexProviderPluginPayload = codexProviderPluginPreflightPayload(request, taskInput);
-  if (codexProviderPluginPayload) {
-    return agentTaskOutcomeFromCodeboxResult(request, codexProviderPluginPayload, { exitStatus: 1, ...coreNormalizers });
+  const providerPluginPayload = providerPluginPreflightPayload(request, taskInput);
+  if (providerPluginPayload) {
+    return agentTaskOutcomeFromCodeboxResult(request, providerPluginPayload, { exitStatus: 1, ...coreNormalizers });
   }
   const preflightPayload = missingWorkspacePayload(request, taskInput);
   if (preflightPayload) {
@@ -650,7 +700,7 @@ async function runTaskRunner(request) {
   const result = spawnSync(process.execPath, [runner, ...args, ...configArgs], {
     encoding: 'utf8',
     input: JSON.stringify(taskInput),
-    env: { ...process.env, ...codexAuthEnv(taskInput) },
+    env: { ...process.env, ...providerAuthEnv(taskInput) },
     maxBuffer: 1024 * 1024 * 20,
     timeout: requestTimeoutMs(request),
   });

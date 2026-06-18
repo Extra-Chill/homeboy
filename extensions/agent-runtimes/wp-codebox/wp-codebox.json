@@ -214,6 +214,68 @@
           }
         }
       },
+      "provider_preflight": {
+        "codex": {
+          "label": "Codex",
+          "diagnostic_class": "codebox.preflight.codex_auth",
+          "required_secret_env": [
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN",
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT",
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID"
+          ],
+          "optional_secret_env": ["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"],
+          "refresh_hook": "codex-oauth-refresh",
+          "validation_hooks": ["codex-token-expiration"],
+          "guidance": "Refresh Codex OAuth credentials before launching WP Codebox, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the codebox executor.",
+          "auth_env_sources": {
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+              "source": "json-file",
+              "path_env": "HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.access_token"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN": {
+              "source": "json-file",
+              "path_env": "HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.refresh_token"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT": {
+              "source": "json-file-jwt-expiration",
+              "path_env": "HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.access_token",
+              "fallback_fields": ["tokens.expires_at", "tokens.expiresAt"]
+            },
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID": {
+              "source": "json-file",
+              "path_env": "HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.account_id"
+            },
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP": {
+              "source": "json-file",
+              "path_env": "HOMEBOY_WP_CODEBOX_CODEX_AUTH_PATH",
+              "path": "~/.codex/auth.json",
+              "field": "tokens.fedramp",
+              "value": "false"
+            }
+          },
+          "provider_plugin_validation": {
+            "diagnostic_class": "codebox.preflight.codex_provider_plugin_path",
+            "marker_pattern": "codex",
+            "invalid_slug_patterns": ["opencode"],
+            "guidance": "Codex tasks require a Codex-capable provider plugin checkout, such as the Codex PR branch for ai-provider-for-openai. Released ai-provider-for-openai trunk registers openai, not codex, and unrelated provider defaults such as ai-provider-for-opencode will not work.",
+            "expected": "Codex-capable ai-provider-for-openai checkout from the Codex provider branch/PR."
+          }
+        },
+        "claude-code": {
+          "label": "Claude Code",
+          "diagnostic_class": "codebox.preflight.claude_code_auth",
+          "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
+        }
+      },
       "role_aliases": {
         "artifact_kinds": {
           "patch": ["codebox-patch"]

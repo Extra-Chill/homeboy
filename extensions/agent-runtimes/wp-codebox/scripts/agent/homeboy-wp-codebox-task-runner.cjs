@@ -14,6 +14,13 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { URLSearchParams } = require('node:url');
 
+const {
+  assertProviderSecretEnvPreflight,
+  normalizeStringArray,
+  providerGuidance,
+  providerPreflightManifest,
+} = require('../../lib/provider-preflight-manifest');
+
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
@@ -106,25 +113,11 @@ function secretEnvNames(request) {
   return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
 }
 
-function claudeCodeRequiredSecretEnv() {
-  return ['AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN'];
-}
-
-function codexRequiredAuthEnv() {
-  return [
-    'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
-    'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
-    'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
-    'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
-  ];
-}
-
-function isClaudeCodeRequest(request) {
-  return request.provider === 'claude-code';
-}
-
-function isCodexRequest(request) {
-  return request.provider === 'codex';
+function requestWithCliSecretEnv(request) {
+  return {
+    ...request,
+    secret_env: secretEnvNames(request),
+  };
 }
 
 function parseUnixTimestamp(value) {
@@ -141,7 +134,7 @@ function parseUnixTimestamp(value) {
 }
 
 function codexAuthGuidance() {
-  return 'Refresh Codex OAuth credentials before launching WP Codebox, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the codebox executor.';
+  return providerGuidance('codex');
 }
 
 function codexOAuthTokenUrl() {
@@ -262,50 +255,31 @@ function persistRefreshedCodexAuth(refreshedEnv) {
 }
 
 async function codexAuthPreflightEnv(request) {
-  if (!isCodexRequest(request)) {
+  const manifest = providerPreflightManifest(request.provider);
+  if (request.provider !== 'codex' || !manifest) {
     return {};
   }
 
-  const names = secretEnvNames(request);
-  const missingMapping = codexRequiredAuthEnv().filter((name) => !names.includes(name));
-  if (missingMapping.length > 0) {
-    throw new Error(`Codex provider auth preflight failed: missing required secret environment mapping: ${missingMapping.join(', ')}. ${codexAuthGuidance()}`);
+  assertProviderSecretEnvPreflight(requestWithCliSecretEnv(request), request.provider, process.env);
+
+  if (normalizeStringArray(manifest.validation_hooks).includes('codex-token-expiration')) {
+    const expiresAt = parseUnixTimestamp(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT);
+    if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
+      throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is malformed. ${codexAuthGuidance()}`);
+    }
+
+    const safetyWindowSeconds = 300;
+    const now = Math.floor(Date.now() / 1000);
+    if (expiresAt > now + safetyWindowSeconds) {
+      return {};
+    }
   }
 
-  const missing = codexRequiredAuthEnv().filter((name) => !process.env[name]);
-  if (missing.length > 0) {
-    throw new Error(`Codex provider auth preflight failed: missing required secret environment value: ${missing.join(', ')}. ${codexAuthGuidance()}`);
+  if (manifest.refresh_hook === 'codex-oauth-refresh') {
+    return refreshCodexAuthEnv();
   }
 
-  const expiresAt = parseUnixTimestamp(process.env.AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT);
-  if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
-    throw new Error(`Codex provider auth preflight failed: AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT is malformed. ${codexAuthGuidance()}`);
-  }
-
-  const safetyWindowSeconds = 300;
-  const now = Math.floor(Date.now() / 1000);
-  if (expiresAt > now + safetyWindowSeconds) {
-    return {};
-  }
-
-  return refreshCodexAuthEnv();
-}
-
-function assertClaudeCodeAuthPreflight(request) {
-  if (!isClaudeCodeRequest(request)) {
-    return;
-  }
-
-  const names = secretEnvNames(request);
-  const missingMapping = claudeCodeRequiredSecretEnv().filter((name) => !names.includes(name));
-  if (missingMapping.length > 0) {
-    throw new Error(`Claude Code provider auth preflight failed: missing required secret environment mapping: ${missingMapping.join(', ')}`);
-  }
-
-  const missing = claudeCodeRequiredSecretEnv().filter((name) => !process.env[name]);
-  if (missing.length > 0) {
-    throw new Error(`Claude Code provider auth preflight failed: missing required secret environment value: ${missing.join(', ')}`);
-  }
+  return {};
 }
 
 function assertRequiredSecretEnvAvailable(request) {
@@ -1908,7 +1882,9 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
 try {
   const request = readTaskRequest();
   const codexEnv = await codexAuthPreflightEnv(request);
-  assertClaudeCodeAuthPreflight(request);
+  if (request.provider === 'claude-code') {
+    assertProviderSecretEnvPreflight(requestWithCliSecretEnv(request), request.provider, process.env);
+  }
   assertRequiredSecretEnvAvailable(request);
   process.exitCode = runWpCodeboxParentTask(request, codexEnv);
 } catch (error) {
