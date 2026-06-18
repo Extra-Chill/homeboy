@@ -23,10 +23,11 @@ pub use args::{
     AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
-    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs, AgentTaskLoopArgs, CancelArgs,
-    CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs,
-    ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
+    AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs,
+    GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs,
+    SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 

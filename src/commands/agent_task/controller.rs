@@ -6,6 +6,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
+use homeboy::core::agent_task_loop_definition::{
+    materialize_repo_loop_spec, AgentTaskLoopSpecMaterializationRequest,
+};
 use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
 use homeboy::core::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerApplyEventRequest, ControllerDispatchHook,
@@ -22,8 +25,8 @@ use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
-    AgentTaskControllerFromSpecArgs, AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunNextArgs,
+    AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs,
 };
 use super::command_json_value;
 
@@ -38,6 +41,9 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
         AgentTaskControllerCommand::FromSpec(spec_args) => controller_from_spec(spec_args),
+        AgentTaskControllerCommand::Materialize(materialize_args) => {
+            controller_materialize(materialize_args)
+        }
         AgentTaskControllerCommand::Plan(plan_args) => controller_plan(plan_args),
         AgentTaskControllerCommand::Status(status_args) => {
             let report = homeboy::core::agent_tasks::loop_controller::controller_status_report(
@@ -64,6 +70,37 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
     }
+}
+
+pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
+    let raw = config::read_json_spec_to_string(&args.spec)?;
+    let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "spec",
+            error.to_string(),
+            Some(args.spec.clone()),
+            None,
+        )
+    })?;
+    apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
+    let run_inputs = match args.inputs {
+        Some(inputs) => {
+            serde_json::from_str(&config::read_json_spec_to_string(&inputs)?).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "inputs",
+                    error.to_string(),
+                    Some(inputs),
+                    None,
+                )
+            })?
+        }
+        None => Value::Null,
+    };
+    let report = materialize_repo_loop_spec(AgentTaskLoopSpecMaterializationRequest {
+        spec: &spec,
+        run_inputs: &run_inputs,
+    })?;
+    Ok((command_json_value(report)?, 0))
 }
 
 fn controller_plan(args: AgentTaskControllerPlanArgs) -> CmdResult<Value> {

@@ -57,6 +57,29 @@ Use `events` for downstream integrations that need a stable generic controller
 event contract. `apply-event` remains the explicit event-application spelling and
 uses the same request and response contract.
 
+## Controller Spec Materialization
+
+`agent-task controller materialize <SPEC> --inputs <JSON>` is the generic seam for
+repos that have a loop spec plus per-run inputs, but should not carry repo-local
+`build-homeboy-controller-run-spec` scripts. It returns
+`homeboy/agent-task-loop-spec-materialization/v1` with a cloned materialized spec;
+it does not initialize durable controller state or mutate the source spec file.
+
+The inputs payload may contain `inputs` and `metadata` objects. `inputs` are
+merged into each workflow's `inputs`, and `metadata` is merged into top-level spec
+metadata. Explicit values override same-named workflow input or metadata keys.
+
+```bash
+homeboy agent-task controller materialize \
+  @.github/homeboy/controllers/site-loop.json \
+  --inputs @run-inputs.json
+```
+
+`agent-task controller from-spec` keeps its existing behavior: it reads a complete
+repo-authored controller spec, applies dispatch defaults for the spec checkout,
+and initializes or resumes durable controller state. Use `materialize` first when
+the spec needs deterministic run-input expansion before `from-spec`.
+
 ## Loop Spec Compilation
 
 `agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into

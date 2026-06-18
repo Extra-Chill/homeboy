@@ -4,14 +4,15 @@
 use std::process::Command;
 
 use super::super::agent_task_dispatch::DispatchArgs;
-use super::args::AgentTaskControllerApplyEventArgs;
+use super::args::{AgentTaskControllerApplyEventArgs, AgentTaskControllerMaterializeArgs};
 use super::args::{
     AgentTaskLoopArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 use super::controller::{
     apply_controller_event, apply_from_spec_dispatch_defaults,
-    apply_from_spec_dispatch_defaults_with_cwd, controller_run_action_with_executor,
-    controller_run_next_with_executor, dispatch_args_from_controller_request,
+    apply_from_spec_dispatch_defaults_with_cwd, controller_materialize,
+    controller_run_action_with_executor, controller_run_next_with_executor,
+    dispatch_args_from_controller_request,
 };
 use super::run::{
     retry, run_loaded_plan, run_loop_with_executor, run_next_with_executor,
@@ -272,6 +273,95 @@ fn compile_loop_command_rejects_controller_only_sections() {
         .expect("diagnostics")
         .iter()
         .any(|diagnostic| diagnostic.as_str().unwrap_or_default().contains("policy")));
+}
+
+#[test]
+fn controller_materialize_merges_inputs_and_metadata_without_mutating_source() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec_path = temp.path().join("repo-loop.json");
+    let inputs_path = temp.path().join("inputs.json");
+    std::fs::write(
+        &spec_path,
+        serde_json::to_string(&json!({
+            "loop_id": "materialize-loop",
+            "metadata": { "source": "fixture" },
+            "artifacts": {
+                "brief": { "kind": "example/Brief/v1" }
+            },
+            "workflows": [
+                {
+                    "workflow_id": "brief",
+                    "prompt": "Draft the brief.",
+                    "inputs": { "topic": "existing" },
+                    "emits": ["brief"]
+                }
+            ]
+        }))
+        .expect("spec json"),
+    )
+    .expect("write spec");
+    std::fs::write(
+        &inputs_path,
+        serde_json::to_string(&json!({
+            "inputs": { "topic": "explicit", "audience": "operators" },
+            "metadata": { "run_id": "run-123" }
+        }))
+        .expect("inputs json"),
+    )
+    .expect("write inputs");
+
+    let (value, status) = controller_materialize(AgentTaskControllerMaterializeArgs {
+        spec: format!("@{}", spec_path.display()),
+        inputs: Some(format!("@{}", inputs_path.display())),
+    })
+    .expect("materialize spec");
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        value["schema"],
+        "homeboy/agent-task-loop-spec-materialization/v1"
+    );
+    assert_eq!(value["spec"]["workflows"][0]["inputs"]["topic"], "explicit");
+    assert_eq!(
+        value["spec"]["workflows"][0]["inputs"]["audience"],
+        "operators"
+    );
+    assert_eq!(value["spec"]["metadata"]["source"], "fixture");
+    assert_eq!(value["spec"]["metadata"]["run_id"], "run-123");
+
+    let source_after: Value = serde_json::from_str(
+        &std::fs::read_to_string(&spec_path).expect("source spec remains readable"),
+    )
+    .expect("source spec json");
+    assert_eq!(source_after["workflows"][0]["inputs"]["topic"], "existing");
+    assert!(source_after["metadata"].get("run_id").is_none());
+}
+
+#[test]
+fn compile_loop_command_rejects_undeclared_workflow_artifacts() {
+    let error = loop_definition::compile_loop(CompileLoopArgs {
+        definition: serde_json::to_string(&json!({
+            "loop_id": "repo-loop-with-missing-artifact",
+            "artifacts": {
+                "brief": { "kind": "example/Brief/v1" }
+            },
+            "workflows": [
+                { "workflow_id": "brief", "prompt": "Draft.", "emits": ["missing"] }
+            ]
+        }))
+        .expect("definition json"),
+    })
+    .expect_err("undeclared artifact is rejected");
+
+    assert!(error.message.contains("artifacts"));
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .any(|diagnostic| diagnostic
+            .as_str()
+            .unwrap_or_default()
+            .contains("references undeclared artifact 'missing'")));
 }
 
 #[test]

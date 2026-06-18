@@ -22,8 +22,8 @@ pub use auth::{
 pub use controller::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
-    AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerStatusArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs,
+    AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
 };
 
 #[derive(Args, Debug)]

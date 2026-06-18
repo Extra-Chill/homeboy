@@ -18,6 +18,8 @@ use crate::core::agent_task_schedule::{
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_LOOP_DEFINITION_SCHEMA: &str = "homeboy/agent-task-loop-definition/v1";
+pub const AGENT_TASK_LOOP_SPEC_MATERIALIZATION_SCHEMA: &str =
+    "homeboy/agent-task-loop-spec-materialization/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskLoopDefinition {
@@ -48,6 +50,52 @@ pub struct AgentTaskLoopDefinitionTask {
     pub bindings: HashMap<String, AgentTaskOutputBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_outputs: Vec<AgentTaskArtifactOutputDeclaration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentTaskLoopSpecMaterializationRequest<'a> {
+    pub spec: &'a AgentTaskRepoLoopSpec,
+    pub run_inputs: &'a Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopSpecMaterialization {
+    #[serde(default = "loop_spec_materialization_schema")]
+    pub schema: String,
+    pub spec: AgentTaskRepoLoopSpec,
+}
+
+pub fn materialize_repo_loop_spec(
+    request: AgentTaskLoopSpecMaterializationRequest<'_>,
+) -> Result<AgentTaskLoopSpecMaterialization> {
+    validate_repo_loop_artifact_references(request.spec)?;
+
+    let mut spec = request.spec.clone();
+    let explicit_inputs = request.run_inputs.get("inputs").or_else(|| {
+        request
+            .run_inputs
+            .get("metadata")
+            .is_none()
+            .then_some(request.run_inputs)
+    });
+    if let Some(explicit_inputs) = explicit_inputs.filter(|value| !value.is_null()) {
+        for workflow in &mut spec.workflows {
+            merge_workflow_inputs(&mut workflow.inputs, explicit_inputs);
+        }
+    }
+
+    if let Some(metadata) = request
+        .run_inputs
+        .get("metadata")
+        .filter(|value| value.is_object())
+    {
+        merge_json_objects(&mut spec.metadata, metadata);
+    }
+
+    Ok(AgentTaskLoopSpecMaterialization {
+        schema: AGENT_TASK_LOOP_SPEC_MATERIALIZATION_SCHEMA.to_string(),
+        spec,
+    })
 }
 
 pub fn compile_loop_definition(definition: AgentTaskLoopDefinition) -> Result<AgentTaskPlan> {
@@ -159,6 +207,8 @@ fn compile_repo_loop_spec(spec: AgentTaskRepoLoopSpec) -> Result<AgentTaskPlan> 
 }
 
 fn validate_repo_loop_spec_for_agent_task_plan(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    validate_repo_loop_artifact_references(spec)?;
+
     if spec.loop_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "loop_id",
@@ -765,6 +815,93 @@ fn compile_metadata(definition: &AgentTaskLoopDefinition) -> Value {
 
 fn loop_definition_schema() -> String {
     AGENT_TASK_LOOP_DEFINITION_SCHEMA.to_string()
+}
+
+fn loop_spec_materialization_schema() -> String {
+    AGENT_TASK_LOOP_SPEC_MATERIALIZATION_SCHEMA.to_string()
+}
+
+fn merge_workflow_inputs(target: &mut Value, explicit_inputs: &Value) {
+    if !explicit_inputs.is_object() {
+        return;
+    }
+    if !target.is_object() {
+        let mut wrapped = serde_json::Map::new();
+        if !target.is_null() {
+            wrapped.insert("workflow_inputs".to_string(), target.clone());
+        }
+        *target = Value::Object(wrapped);
+    }
+    merge_json_objects(target, explicit_inputs);
+}
+
+fn merge_json_objects(target: &mut Value, source: &Value) {
+    let Some(source) = source.as_object() else {
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(serde_json::Map::new());
+    }
+    let target = target.as_object_mut().expect("target object");
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
+fn validate_repo_loop_artifact_references(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    let declared = spec
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.artifact_id.as_str())
+        .collect::<HashSet<_>>();
+    if declared.is_empty() {
+        return Ok(());
+    }
+
+    let mut diagnostics = Vec::new();
+    for workflow in &spec.workflows {
+        for (field, artifact_id) in workflow
+            .artifacts
+            .iter()
+            .map(|artifact_id| ("artifacts", artifact_id))
+            .chain(
+                workflow
+                    .emits
+                    .iter()
+                    .map(|artifact_id| ("emits", artifact_id)),
+            )
+            .chain(
+                workflow
+                    .consumes
+                    .iter()
+                    .map(|artifact_id| ("consumes", artifact_id)),
+            )
+            .chain(
+                workflow
+                    .dependencies
+                    .iter()
+                    .map(|artifact_id| ("dependencies", artifact_id)),
+            )
+        {
+            if !declared.contains(artifact_id.as_str()) {
+                diagnostics.push(format!(
+                    "workflows[{}].{} references undeclared artifact '{}'",
+                    workflow.workflow_id, field, artifact_id
+                ));
+            }
+        }
+    }
+
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "artifacts",
+        "repo loop spec workflows reference artifacts that are not declared in artifacts",
+        Some(spec.loop_id.clone()),
+        Some(diagnostics),
+    ))
 }
 
 #[cfg(test)]
