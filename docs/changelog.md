@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.240.0] - 2026-06-18
+
+### Added
+- feat(agent-task): add runtime materialization contract
+- feat(secret-env): add deterministic plan diagnostics
+
+### Changed
+- Avoid generic secret env default helper
+- Attach runtime materialization plans to providers
+- Inline secret env resolver callback type
+- Keep runtime manifest helpers internal
+
 ## [0.239.1] - 2026-06-18
 
 ### Changed
