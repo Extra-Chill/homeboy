@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.15] - 2026-06-18
+
+### Changed
+- Remove Data Machine agent CI workflow wrapper
+
 ## [3.7.14] - 2026-06-18
 
 ### Changed
