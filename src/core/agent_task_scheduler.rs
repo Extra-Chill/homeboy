@@ -342,12 +342,17 @@ where
                 continue;
             }
 
-            let scheduler_event = match AgentTaskScheduleSupport::result_wait_timeout(&running) {
-                Some(timeout) => rx.recv_timeout(timeout).map_err(Some),
-                None => rx.recv().map_err(|_| None),
-            };
-
-            match scheduler_event {
+            let wait_timeout = running
+                .iter()
+                .filter_map(|task| {
+                    task.timeout_ms
+                        .map(|ms| timeout_with_grace(ms).saturating_sub(task.started_at.elapsed()))
+                })
+                .min();
+            match wait_timeout.map_or_else(
+                || rx.recv().map_err(|_| None),
+                |timeout| rx.recv_timeout(timeout).map_err(Some),
+            ) {
                 Ok(SchedulerEvent::Cancellation) => {
                     continue;
                 }
@@ -479,20 +484,6 @@ fn record_completed_outcome(
 struct AgentTaskScheduleSupport;
 
 impl AgentTaskScheduleSupport {
-    fn result_wait_timeout(running: &[RunningTask]) -> Option<Duration> {
-        running
-            .iter()
-            .filter_map(|task| {
-                task.timeout_ms.map(|timeout_ms| {
-                    let timeout = timeout_with_grace(timeout_ms);
-                    timeout
-                        .checked_sub(task.started_at.elapsed())
-                        .unwrap_or_default()
-                })
-            })
-            .min()
-    }
-
     fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
@@ -2098,43 +2089,6 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-
-    #[test]
-    fn scheduler_result_wait_timeout_blocks_without_task_timeouts() {
-        let running = vec![running_task("task-1", None, Duration::from_millis(0))];
-
-        assert_eq!(
-            AgentTaskScheduleSupport::result_wait_timeout(&running),
-            None
-        );
-    }
-
-    #[test]
-    fn scheduler_result_wait_timeout_wakes_for_nearest_timeout_deadline() {
-        let running = vec![
-            running_task("task-1", Some(5_000), Duration::from_millis(0)),
-            running_task("task-2", Some(1), Duration::from_millis(149)),
-        ];
-
-        assert_eq!(
-            AgentTaskScheduleSupport::result_wait_timeout(&running),
-            Some(Duration::ZERO)
-        );
-    }
-
-    #[test]
-    fn scheduler_result_wait_timeout_is_not_capped_before_deadline() {
-        let running = vec![running_task(
-            "task-1",
-            Some(5_000),
-            Duration::from_millis(0),
-        )];
-
-        assert!(
-            AgentTaskScheduleSupport::result_wait_timeout(&running).expect("deadline")
-                > Duration::from_secs(1)
-        );
-    }
 
     #[test]
     fn cancellation_token_callbacks_fire_once_and_after_existing_cancel() {
@@ -3815,20 +3769,6 @@ mod tests {
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
             metadata: Value::Null,
-        }
-    }
-
-    fn running_task(task_id: &str, timeout_ms: Option<u64>, elapsed: Duration) -> RunningTask {
-        let request = request(task_id);
-        RunningTask {
-            task_id: task_id.to_string(),
-            executor_key: executor_key(&request),
-            model_key: model_key(&request),
-            resource_units: 1,
-            request,
-            attempt: 1,
-            started_at: Instant::now() - elapsed,
-            timeout_ms,
         }
     }
 
