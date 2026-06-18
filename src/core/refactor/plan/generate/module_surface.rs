@@ -61,11 +61,11 @@ pub struct ModuleSurfaceIndex {
 
 impl ModuleSurfaceIndex {
     pub fn build(root: &Path) -> Self {
-        let files = walker::walk_source_files(root).unwrap_or_default();
+        let snapshot = walker::walk_source_files_snapshot(root);
         let mut fingerprints = Vec::new();
 
-        for file_path in files {
-            let Some(fp) = fingerprint::fingerprint_file(&file_path, root) else {
+        for (file_path, content) in snapshot.iter() {
+            let Some(fp) = fingerprint::fingerprint_content(file_path, root, content) else {
                 continue;
             };
             fingerprints.push(fp);
@@ -252,5 +252,34 @@ mod tests {
         assert!(has_pub_use_of(content, "foo"));
         assert!(has_pub_use_of(content, "bar"));
         assert!(!has_pub_use_of(content, "baz"));
+    }
+
+    #[test]
+    fn build_uses_snapshot_content_for_module_surfaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src/core/example");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("producer.rs"),
+            "pub fn make_value() -> usize { 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("consumer.rs"),
+            "use crate::core::example::producer::make_value;\n\npub fn consume() -> usize { make_value() }\n",
+        )
+        .unwrap();
+
+        let index = ModuleSurfaceIndex::build(dir.path());
+        let producer = index.get("src/core/example/producer.rs").unwrap();
+        let surface = producer.symbol_surface("make_value").unwrap();
+
+        assert!(producer.owns_public_symbol("make_value"));
+        assert!(surface
+            .incoming_callers
+            .contains(&"src/core/example/consumer.rs".to_string()));
+        assert!(surface
+            .incoming_importers
+            .contains(&"src/core/example/consumer.rs".to_string()));
     }
 }
