@@ -100,6 +100,10 @@ where
         let mut cancellation_notified = false;
         let max_attempts = plan.options.retry.max_attempts.max(1);
         let (tx, rx) = mpsc::channel();
+        let cancellation_tx = tx.clone();
+        cancellation.on_cancel(Arc::new(move || {
+            let _ = cancellation_tx.send(SchedulerEvent::Cancellation);
+        }));
         let mut adaptive_decisions = Vec::new();
         let mut last_effective_concurrency = None;
 
@@ -321,11 +325,11 @@ where
 
                 thread::spawn(move || {
                     let outcome = executor.execute(request, context);
-                    let _ = tx.send(TaskResult {
+                    let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
                         task_id,
                         attempt,
                         outcome,
-                    });
+                    }));
                 });
             }
 
@@ -341,7 +345,10 @@ where
             }
 
             match rx.recv_timeout(scheduler_result_wait_timeout(&running)) {
-                Ok(result) => {
+                Ok(SchedulerEvent::Cancellation) => {
+                    continue;
+                }
+                Ok(SchedulerEvent::TaskResult(result)) => {
                     if cancellation.is_cancelled() {
                         AgentTaskScheduleSupport::cancel_queued(
                             &mut queued,
@@ -447,6 +454,11 @@ struct TaskResult {
     task_id: String,
     attempt: u32,
     outcome: AgentTaskOutcome,
+}
+
+enum SchedulerEvent {
+    TaskResult(TaskResult),
+    Cancellation,
 }
 
 fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Duration {
@@ -2105,6 +2117,29 @@ mod tests {
         ];
 
         assert_eq!(scheduler_result_wait_timeout(&running), Duration::ZERO);
+    }
+
+    #[test]
+    fn cancellation_token_callbacks_fire_once_and_after_existing_cancel() {
+        let token = AgentTaskCancellationToken::default();
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_for_token = Arc::clone(&callback_count);
+        token.on_cancel(Arc::new(move || {
+            callback_count_for_token.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        token.cancel();
+        token.cancel();
+
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+
+        let immediate_count = Arc::new(AtomicUsize::new(0));
+        let immediate_count_for_token = Arc::clone(&immediate_count);
+        token.on_cancel(Arc::new(move || {
+            immediate_count_for_token.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        assert_eq!(immediate_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
