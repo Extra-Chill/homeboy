@@ -1,0 +1,323 @@
+{
+  "schema": "homeboy/static-site-fanout-plan/v1",
+  "orchestrator": {
+    "id": "homeboy-extensions/static-site-fanout-adapter",
+    "run_id": "fixture-run",
+    "plan_id": "static-site-fanout-plan",
+    "controller_id": "",
+    "source": "static-site/import-validation",
+    "preset": "static-site/import-validation",
+    "parent_plan_id": "fixture-parent-plan",
+    "provider": "codex",
+    "model": "gpt-5.5",
+    "provider_plugin_paths": [],
+    "secret_env": [
+      "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
+    ],
+    "request_schema": "homeboy/agent-task-request/v1"
+  },
+  "summary": {
+    "item_count": 3,
+    "group_count": 2,
+    "task_count": 2,
+    "preset": "static-site/import-validation",
+    "finding_count": 3,
+    "no_actionable_findings": false
+  },
+  "groups": [
+    {
+      "key": "converter-support",
+      "index": 0,
+      "item_count": 2
+    },
+    {
+      "key": "visual-parity-policy",
+      "index": 1,
+      "item_count": 1
+    }
+  ],
+  "task_requests": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "static-site-fixture-run-converter-support",
+      "group_key": "converter-support",
+      "parent_plan_id": "fixture-parent-plan",
+      "executor_backend": "codebox",
+      "executor_secret_env": [
+        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
+      ],
+      "runtime_task": {
+        "ability": "datamachine/run-agent-bundle",
+        "input": {
+          "source": "bundles/php-transformer-iterator-agent",
+          "agent_slug": "php-transformer-iterator-agent",
+          "pipeline_slug": "php-transformer-iterator-pipeline",
+          "flow_slug": "php-transformer-iterator-manual-flow",
+          "prompt": "Process static-site import validation group converter-support.\n\nFindings:\n\n[\n  {\n    \"id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"unsupported_html_fallback\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"home.html\",\n    \"source_path\": \"home.html\",\n    \"selector\": \".hero fancy-card\",\n    \"reason\": \"Unsupported custom element fell back during DOM-to-block conversion.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  },\n  {\n    \"id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"core_html_block\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"patterns/page-home.php\",\n    \"source_path\": \"patterns/page-home.php\",\n    \"selector\": \".product-card\",\n    \"reason\": \"Generated block document contains core/html for product-card markup.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-002-core-html-block-product-card\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      },\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"asset-map-product-card\",\n        \"kind\": \"asset_map\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  }\n]\n\nArtifact refs:\n\n[\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"asset-map-product-card\",\n    \"kind\": \"asset_map\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  }\n]",
+          "wait_for_completion": true,
+          "artifact_outputs": [
+            {
+              "schema": "homeboy/static-site-revalidation-outcome/v1",
+              "path": "/artifacts/static-site-revalidation-outcome.json"
+            }
+          ]
+        }
+      },
+      "instructions": "Resolve static-site import validation group converter-support.\nReturn typed artifact references for every issue, pull request, patch, revalidation result, or no-op decision produced by the task.\nIf the group has no actionable findings, return the no_actionable_findings outcome with a concise justification.",
+      "inputs": {
+        "title": "Resolve static-site validation group converter-support",
+        "preset": "static-site/import-validation",
+        "controller_id": "",
+        "finding_ids": [
+          "diag-001-unsupported-html-fallback-home-html",
+          "diag-002-core-html-block-product-card"
+        ],
+        "findings": [
+          {
+            "id": "diag-001-unsupported-html-fallback-home-html",
+            "kind": "unsupported_html_fallback",
+            "category": "fallback_block",
+            "severity": "warning",
+            "path": "home.html",
+            "source_path": "home.html",
+            "selector": ".hero fancy-card",
+            "reason": "Unsupported custom element fell back during DOM-to-block conversion.",
+            "repair_mode": "",
+            "artifact_refs": [
+              {
+                "schema": "homeboy/artifact-ref/v1",
+                "artifact_id": "diag-001-unsupported-html-fallback-home-html",
+                "kind": "diagnostic",
+                "path": "",
+                "url": "",
+                "source": "",
+                "role": ""
+              }
+            ]
+          },
+          {
+            "id": "diag-002-core-html-block-product-card",
+            "kind": "core_html_block",
+            "category": "fallback_block",
+            "severity": "warning",
+            "path": "patterns/page-home.php",
+            "source_path": "patterns/page-home.php",
+            "selector": ".product-card",
+            "reason": "Generated block document contains core/html for product-card markup.",
+            "repair_mode": "",
+            "artifact_refs": [
+              {
+                "schema": "homeboy/artifact-ref/v1",
+                "artifact_id": "diag-002-core-html-block-product-card",
+                "kind": "diagnostic",
+                "path": "",
+                "url": "",
+                "source": "",
+                "role": ""
+              },
+              {
+                "schema": "homeboy/artifact-ref/v1",
+                "artifact_id": "asset-map-product-card",
+                "kind": "asset_map",
+                "path": "",
+                "url": "",
+                "source": "",
+                "role": ""
+              }
+            ]
+          }
+        ],
+        "artifact_refs": [
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "diag-001-unsupported-html-fallback-home-html",
+            "kind": "diagnostic",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          },
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "diag-002-core-html-block-product-card",
+            "kind": "diagnostic",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          },
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "asset-map-product-card",
+            "kind": "asset_map",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          }
+        ]
+      },
+      "limits": {
+        "task_timeout_seconds": 900
+      },
+      "expected_artifacts": [
+        "typed-artifact-refs",
+        "datamachine-transcript"
+      ]
+    },
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "static-site-fixture-run-visual-parity-policy",
+      "group_key": "visual-parity-policy",
+      "parent_plan_id": "fixture-parent-plan",
+      "executor_backend": "codebox",
+      "executor_secret_env": [
+        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
+      ],
+      "runtime_task": {
+        "ability": "datamachine/run-agent-bundle",
+        "input": {
+          "source": "bundles/php-transformer-iterator-agent",
+          "agent_slug": "php-transformer-iterator-agent",
+          "pipeline_slug": "php-transformer-iterator-pipeline",
+          "flow_slug": "php-transformer-iterator-manual-flow",
+          "prompt": "Process static-site import validation group visual-parity-policy.\n\nFindings:\n\n[\n  {\n    \"id\": \"visual-parity-demo-store\",\n    \"kind\": \"visual_parity_mismatch\",\n    \"category\": \"visual_parity\",\n    \"severity\": \"warning\",\n    \"path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"source_path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"selector\": \"section.hero\",\n    \"reason\": \"Imported WordPress screenshot differs from source static HTML screenshot.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": []\n  }\n]\n\nArtifact refs:\n\n[]",
+          "wait_for_completion": true,
+          "artifact_outputs": [
+            {
+              "schema": "homeboy/static-site-revalidation-outcome/v1",
+              "path": "/artifacts/static-site-revalidation-outcome.json"
+            }
+          ]
+        }
+      },
+      "instructions": "Resolve static-site import validation group visual-parity-policy.\nReturn typed artifact references for every issue, pull request, patch, revalidation result, or no-op decision produced by the task.\nIf the group has no actionable findings, return the no_actionable_findings outcome with a concise justification.",
+      "inputs": {
+        "title": "Resolve static-site validation group visual-parity-policy",
+        "preset": "static-site/import-validation",
+        "controller_id": "",
+        "finding_ids": [
+          "visual-parity-demo-store"
+        ],
+        "findings": [
+          {
+            "id": "visual-parity-demo-store",
+            "kind": "visual_parity_mismatch",
+            "category": "visual_parity",
+            "severity": "warning",
+            "path": "visual-parity-artifacts/demo-store/visual-diff.json",
+            "source_path": "visual-parity-artifacts/demo-store/visual-diff.json",
+            "selector": "section.hero",
+            "reason": "Imported WordPress screenshot differs from source static HTML screenshot.",
+            "repair_mode": "",
+            "artifact_refs": []
+          }
+        ],
+        "artifact_refs": []
+      },
+      "limits": {
+        "task_timeout_seconds": 900
+      },
+      "expected_artifacts": [
+        "typed-artifact-refs",
+        "datamachine-transcript"
+      ]
+    }
+  ],
+  "reconciliation": {
+    "schema": "homeboy/static-site-fanout-reconciliation/v1",
+    "status": "reconciled",
+    "no_actionable_findings": false,
+    "group_count": 2,
+    "task_count": 2,
+    "groups": [
+      {
+        "group_key": "converter-support",
+        "task_id": "static-site-fixture-run-converter-support",
+        "status": "pending",
+        "finding_ids": [
+          "diag-001-unsupported-html-fallback-home-html",
+          "diag-002-core-html-block-product-card"
+        ],
+        "outcome_kind": "",
+        "artifact_refs": [
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "diag-001-unsupported-html-fallback-home-html",
+            "kind": "diagnostic",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          },
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "diag-002-core-html-block-product-card",
+            "kind": "diagnostic",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          },
+          {
+            "schema": "homeboy/artifact-ref/v1",
+            "artifact_id": "asset-map-product-card",
+            "kind": "asset_map",
+            "path": "",
+            "url": "",
+            "source": "",
+            "role": ""
+          }
+        ],
+        "group_index": 0
+      },
+      {
+        "group_key": "visual-parity-policy",
+        "task_id": "static-site-fixture-run-visual-parity-policy",
+        "status": "pending",
+        "finding_ids": [
+          "visual-parity-demo-store"
+        ],
+        "outcome_kind": "",
+        "artifact_refs": [],
+        "group_index": 1
+      }
+    ],
+    "artifact_refs": [
+      {
+        "schema": "homeboy/artifact-ref/v1",
+        "artifact_id": "diag-001-unsupported-html-fallback-home-html",
+        "kind": "diagnostic",
+        "path": "",
+        "url": "",
+        "source": "",
+        "role": ""
+      },
+      {
+        "schema": "homeboy/artifact-ref/v1",
+        "artifact_id": "diag-002-core-html-block-product-card",
+        "kind": "diagnostic",
+        "path": "",
+        "url": "",
+        "source": "",
+        "role": ""
+      },
+      {
+        "schema": "homeboy/artifact-ref/v1",
+        "artifact_id": "asset-map-product-card",
+        "kind": "asset_map",
+        "path": "",
+        "url": "",
+        "source": "",
+        "role": ""
+      }
+    ]
+  },
+  "static_site": {
+    "preset": "static-site/import-validation",
+    "finding_count": 3,
+    "group_count": 2,
+    "task_count": 2,
+    "no_actionable_findings": false
+  }
+}

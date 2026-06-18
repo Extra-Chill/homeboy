@@ -17,6 +17,7 @@ module.exports = {
 	...require('./lib/codebox-memory-report'),
 	...require('./lib/webperf-evidence-summary'),
 	...require('./lib/benchmark-matrix-report'),
+	...require('./lib/static-site-fanout-adapter'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
 	...require('./lib/datamachine-agent-ci-plan'),
