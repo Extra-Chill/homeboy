@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.3] - 2026-06-18
+
+### Changed
+- Enforce generic runtime boundaries
+
 ## [3.7.2] - 2026-06-18
 
 ### Changed
