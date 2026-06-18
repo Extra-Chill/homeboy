@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.241.1] - 2026-06-18
+
+### Changed
+- Add agent task loop definition compiler
+
+### Fixed
+- reconnect stale runner daemons after upgrade
+- tolerate missing cleanup paths
+
 ## [0.241.0] - 2026-06-18
 
 ### Added
