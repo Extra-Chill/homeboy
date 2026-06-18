@@ -292,7 +292,7 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     outputs: {
       concept_packet: {
         type: 'ConceptPacket',
-        schema: 'static-site-generator/concept-packet/v1',
+        schema: 'example/concept-packet/v1',
         required: true,
       },
     },
@@ -301,8 +301,8 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     ability_request: { name: 'datamachine/run-agent-bundle' },
     client_context: {
       inputs: {
-        source: 'bundles/store-idea-agent',
-        flow: 'store-idea-artifact-flow',
+        source: 'bundles/example-agent',
+        flow: 'example-artifact-flow',
         wait_for_completion: true,
       },
     },
@@ -311,15 +311,15 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 
 assert.equal(repoLoopBundleTaskInput.runtime_task.ability, 'datamachine/run-agent-bundle');
 assert.deepEqual(repoLoopBundleTaskInput.runtime_task.input, {
-  source: 'bundles/store-idea-agent',
-  flow: 'store-idea-artifact-flow',
+  source: 'bundles/example-agent',
+  flow: 'example-artifact-flow',
   wait_for_completion: true,
 });
 assert.deepEqual(repoLoopBundleTaskInput.artifact_declarations, [{
   schema: 'wp-codebox/artifact-declaration/v1',
   name: 'concept_packet',
   type: 'ConceptPacket',
-  artifact_schema: 'static-site-generator/concept-packet/v1',
+  artifact_schema: 'example/concept-packet/v1',
   required: true,
 }]);
 
@@ -356,7 +356,7 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-workspace-task-1',
   cwd: repoLoopWorkspaceRoot,
-  repo: 'wp-site-generator@canonical-loop-main-20260616',
+  repo: 'example-repo@example-loop-main-20260616',
   executor: {
     backend: 'codebox',
     config: datamachineAgentCiCodeboxExecutorConfig({
@@ -380,7 +380,7 @@ assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('datamachine/run-agent-bundle'), true);
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
-  repo: 'wp-site-generator@canonical-loop-main-20260616',
+  repo: 'example-repo@example-loop-main-20260616',
   cwd: repoLoopWorkspaceRoot,
   root: repoLoopWorkspaceRoot,
 });
@@ -398,7 +398,7 @@ const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     typed_artifacts: [{
       name: 'concept_packet',
       type: 'ConceptPacket',
-      artifact_schema: 'static-site-generator/concept-packet/v1',
+      artifact_schema: 'example/concept-packet/v1',
     }],
   },
   inputs: {
@@ -410,7 +410,7 @@ assert.deepEqual(repoLoopTypedOutputsTaskInput.artifact_declarations, [{
   schema: 'wp-codebox/artifact-declaration/v1',
   name: 'concept_packet',
   type: 'ConceptPacket',
-  artifact_schema: 'static-site-generator/concept-packet/v1',
+  artifact_schema: 'example/concept-packet/v1',
   required: true,
 }]);
 

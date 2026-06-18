@@ -118,16 +118,16 @@ namespace {
     $result = homeboy_datamachine_agent_result(
         array( 'job_completed' => 1 ),
         array(
-            'task_id'     => 'store-idea-agent',
+            'task_id'     => 'example-agent',
             'engine_data' => array(
-                'store_idea_agent' => array(
+                'example_agent' => array(
                     'issue_number' => 123,
                 ),
             ),
         )
     );
 
-    if ( 123 !== ( $result['scenarios'][0]['metadata']['engine_data']['store_idea_agent']['issue_number'] ?? 0 ) ) {
+    if ( 123 !== ( $result['scenarios'][0]['metadata']['engine_data']['example_agent']['issue_number'] ?? 0 ) ) {
         fwrite( STDERR, "Expected workload result scenarios to expose engine_data.\n" );
         exit( 1 );
     }

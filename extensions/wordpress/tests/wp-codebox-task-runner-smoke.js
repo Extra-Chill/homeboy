@@ -80,17 +80,17 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
       job_id: 1,
       job_status: 'completed',
       bundle: {
-        bundle_slug: 'store-idea-agent',
-        flow_slug: 'static-site-manual-flow',
-        pipeline_slug: 'static-site-pipeline',
+        bundle_slug: 'example-agent',
+        flow_slug: 'example-manual-flow',
+        pipeline_slug: 'example-pipeline',
       },
       typed_artifacts: {
-        static_site_candidate: {
-          schema: 'static-site-importer/static-site-candidate/v1',
-          type: 'StaticSiteCandidate',
-          payload: { slug: 'store-idea-agent', import_ready: true },
-          provenance: { bundle_slug: 'store-idea-agent', task_id: input.orchestrator.agent_task_id },
-          file_refs: [{ path: input.artifacts_path + '/static-site-candidate.json', mime: 'application/json' }]
+        example_review: {
+          schema: 'example/review-artifact/v1',
+          type: 'ExampleReviewArtifact',
+          payload: { slug: 'example-agent', review_ready: true },
+          provenance: { bundle_slug: 'example-agent', task_id: input.orchestrator.agent_task_id },
+          file_refs: [{ path: input.artifacts_path + '/example-review.json', mime: 'application/json' }]
         }
       },
       workflow: { steps: [{ step_type: 'ai' }] },
@@ -105,14 +105,14 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
                   tool_result_data: {
                     data: {
                       issue_number: 123,
-                      issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123'
+                      issue_url: 'https://github.com/example-org/example-repo/issues/123'
                     }
                   }
                 }
               }]
             }
           }
-        : { store_idea_agent: { issue_number: 123, issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123' } }
+        : { example_agent: { issue_number: 123, issue_url: 'https://github.com/example-org/example-repo/issues/123' } }
     }
   : null;
 const runtimeTaskResult = isRuntimeTask
@@ -168,12 +168,12 @@ const agentResult = isRuntimeTask
           summary: 'Created issue 123.',
           outputs: {
             issue_number: 123,
-            issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123'
+            issue_url: 'https://github.com/example-org/example-repo/issues/123'
           },
           diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }]
         }
   : (isAgentBundle && !process.env.FIXTURE_WP_CODEBOX_INCOMPLETE_AGENT_BUNDLE
-      ? { metrics: { config_present: 1 }, metadata: { engine_data: { store_idea_agent: { issue_number: 123 } } } }
+      ? { metrics: { config_present: 1 }, metadata: { engine_data: { example_agent: { issue_number: 123 } } } }
       : { status: 'completed' })))));
 fs.writeFileSync(out, JSON.stringify({
   argv: process.argv.slice(2),
@@ -643,14 +643,14 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        source: 'bundles/store-idea-agent',
-        flow_slug: 'store-idea-artifact-flow',
+        source: 'bundles/example-agent',
+        flow_slug: 'example-artifact-flow',
       },
       artifact_declarations: [{
         schema: 'wp-codebox/artifact-declaration/v1',
         name: 'concept_packet',
         type: 'ConceptPacket',
-        artifact_schema: 'static-site-generator/concept-packet/v1',
+        artifact_schema: 'example/concept-packet/v1',
         required: true,
       }],
     }),
@@ -960,8 +960,8 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
-        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },
       provider_plugin_paths: [],
     }),
@@ -981,15 +981,15 @@ try {
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].allowed, false);
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.environment, 'control_plane');
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.capability_scope, 'control_plane');
-  assert.equal(agentBundleCapture.input.agent_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.store_idea_agent.issue_number');
+  assert.equal(agentBundleCapture.input.agent_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.example_agent.issue_number');
   assert.equal(agentBundleCapture.input.runtime_task.ability, 'datamachine/run-agent-bundle');
-  assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/wp-site-generator/bundles/store-idea-agent');
+  assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/example-repo/bundles/example-agent');
   assert.equal(agentBundleCapture.input.runtime_task.input.wait_for_completion, true);
   assert.equal(agentBundleCapture.input.runtime_task.input.runtime_bundles, undefined);
   const agentBundleOutput = JSON.parse(agentBundleResult.stdout);
   assert.equal(agentBundleOutput.success, true);
   assert.equal(agentBundleOutput.session.status, 'completed');
-  assert.equal(agentBundleOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
+  assert.equal(agentBundleOutput.run.agentResult.scenarios[0].metadata.engine_data.example_agent.issue_number, 123);
 
   const singleResultCapturePath = path.join(root, 'capture-single-result-datamachine.json');
   const singleResult = spawnSync(process.execPath, [
@@ -1003,10 +1003,10 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
-          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
-          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+          issue_number: 'metadata.engine_data.example_agent.issue_number',
+          issue_url: 'metadata.engine_data.example_agent.issue_url',
         },
       },
       provider_plugin_paths: [],
@@ -1023,7 +1023,7 @@ try {
   assert.equal(singleResultOutput.success, true);
   assert.equal(singleResultOutput.session.status, 'completed');
   assert.equal(singleResultOutput.run.agentResult.outputs.issue_number, 123);
-  assert.equal(singleResultOutput.run.agentResult.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+  assert.equal(singleResultOutput.run.agentResult.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
   assert.equal(Array.isArray(singleResultOutput.run.agentResult.scenarios), false);
   assert.equal(singleResultOutput.diagnostics.some((diagnostic) => diagnostic.class === 'agent_runtime.output'), true);
 
@@ -1039,8 +1039,8 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
-        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
         dry_run: true,
       },
       provider_plugin_paths: [],
@@ -1058,12 +1058,12 @@ try {
   assert.equal(canonicalBundleRunOutput.session.status, 'completed');
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.schema, 'datamachine/agent-bundle-run/v1');
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.job_status, 'completed');
-  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.engine_data.store_idea_agent.issue_number, 123);
+  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.engine_data.example_agent.issue_number, 123);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.dry_run, true);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metrics.workflow_step_count, 1);
-  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
-  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.artifact_schema, 'static-site-importer/static-site-candidate/v1');
-  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.static_site_candidate.payload.import_ready, true);
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.type, 'ExampleReviewArtifact');
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.artifact_schema, 'example/review-artifact/v1');
+  assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.payload.review_ready, true);
 
   const recorderBundleRunCapturePath = path.join(root, 'capture-recorder-datamachine-bundle-run.json');
   const recorderBundleRunResult = spawnSync(process.execPath, [
@@ -1077,15 +1077,15 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
-          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
-          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+          issue_number: 'metadata.engine_data.example_agent.issue_number',
+          issue_url: 'metadata.engine_data.example_agent.issue_url',
         },
         tool_recorders: [{
           tool: 'github_issue_publish',
           record: {
-            engine_key: 'store_idea_agent',
+            engine_key: 'example_agent',
             fields: {
               issue_number: 'data.issue_number',
               issue_url: 'data.issue_url',
@@ -1108,9 +1108,9 @@ try {
   assert.equal(recorderBundleRunOutput.success, true);
   assert.equal(recorderBundleRunOutput.status, 'completed');
   assert.equal(recorderBundleRunOutput.outputs.issue_number, 123);
-  assert.equal(recorderBundleRunOutput.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+  assert.equal(recorderBundleRunOutput.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_number, 123);
-  assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
+  assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
 
   const completedBundleNonzeroExitCapturePath = path.join(root, 'capture-completed-bundle-nonzero-exit.json');
   const completedBundleNonzeroExitResult = spawnSync(process.execPath, [
@@ -1124,15 +1124,15 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
-          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
-          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+          issue_number: 'metadata.engine_data.example_agent.issue_number',
+          issue_url: 'metadata.engine_data.example_agent.issue_url',
         },
         tool_recorders: [{
           tool: 'github_issue_publish',
           record: {
-            engine_key: 'store_idea_agent',
+            engine_key: 'example_agent',
             fields: {
               issue_number: 'data.issue_number',
               issue_url: 'data.issue_url',
@@ -1170,8 +1170,8 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
-        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },
       provider_plugin_paths: [],
     }),
@@ -1204,8 +1204,8 @@ try {
       execution_kind: 'agent_bundle',
       homeboy_extensions: path.join(__dirname, '..'),
       agent_bundle: {
-        bundle_path: '/workspace/wp-site-generator/bundles/store-idea-agent',
-        engine_data_outputs: { issue_number: 'metadata.engine_data.store_idea_agent.issue_number' },
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
+        engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },
       provider_plugin_paths: [],
     }),

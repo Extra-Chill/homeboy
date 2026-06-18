@@ -204,7 +204,7 @@ process.stdout.write(JSON.stringify({
       metadata: {
         transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
         replay_bundle_path: input.artifacts_path + '/replay-bundle',
-        engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
+        engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } }
       }
     }]
   },
@@ -217,7 +217,7 @@ process.stdout.write(JSON.stringify({
           metadata: {
             transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
             replay_bundle_path: input.artifacts_path + '/replay-bundle',
-            engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } }
+            engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } }
           }
         }]
       }
@@ -230,7 +230,7 @@ process.stdout.write(JSON.stringify({
 }
 
 function writeBundleFixture(root) {
-  const bundle = path.join(root, 'static-site-agent');
+  const bundle = path.join(root, 'example-agent');
   fs.mkdirSync(bundle, { recursive: true });
   fs.writeFileSync(path.join(bundle, 'manifest.json'), '{}\n');
   return bundle;
@@ -683,7 +683,7 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
       output_mappings: {
         validation_result: 'result.import_validation_result',
       },
-      component_contracts: [{ slug: 'wp-site-generator', path: '/workspace/wp-site-generator', activate: true }],
+      component_contracts: [{ slug: 'example-repo', path: '/workspace/example-repo', activate: true }],
       engine_data_outputs: {
         validation_result: 'metadata.artifacts.ImportValidationResult',
       },
@@ -693,7 +693,7 @@ const abilityBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
 assert.equal(abilityBridgeRequest.runtime_task.ability, 'example/validate-artifact');
 assert.deepEqual(abilityBridgeRequest.runtime_task.input, { artifact: { slug: 'example-site' }, report: '/artifacts/import-report.json' });
 assert.equal(abilityBridgeRequest.parent_request.executor.config.output_mappings.validation_result, 'result.import_validation_result');
-assert.deepEqual(abilityBridgeRequest.component_contracts, [{ slug: 'wp-site-generator', path: '/workspace/wp-site-generator', activate: true }]);
+assert.deepEqual(abilityBridgeRequest.component_contracts, [{ slug: 'example-repo', path: '/workspace/example-repo', activate: true }]);
 
 const topLevelComponentContractsRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -1200,7 +1200,7 @@ try {
   assert.equal(explicitPhpAiClientRequest.runtime_overlays[0].strategy, 'wordpress-scoped-bundle');
 
   const originalCwd = process.cwd();
-  const labOffloadCwd = path.join(defaultsRoot, '_lab_workspaces', 'wp-site-generator-pilot-homeboy-ssi-loop');
+  const labOffloadCwd = path.join(defaultsRoot, '_lab_workspaces', 'example-repo-pilot-homeboy-agent-loop');
   fs.mkdirSync(labOffloadCwd, { recursive: true });
   try {
     process.chdir(labOffloadCwd);
@@ -1314,36 +1314,36 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
         agent_runtime_tools: '/components/data-machine-code',
       },
       homeboy_extensions: '/components/homeboy-extensions/wordpress',
-      bundle_path: '/bundles/static-site-agent',
-      bundle_host_path: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
-      agent_slug: 'static-site-agent',
-      pipeline_slug: 'static-site-pipeline',
-      flow_slug: 'static-site-manual-flow',
-      target_repo: 'chubes4/wp-site-generator',
+      bundle_path: '/bundles/example-agent',
+      bundle_host_path: '/home/runner/work/example-repo/example-repo/bundles/example-agent',
+      agent_slug: 'example-agent',
+      pipeline_slug: 'example-pipeline',
+      flow_slug: 'example-manual-flow',
+      target_repo: 'example-org/example-repo',
       pipeline_step_patches: [{ slug: 'generate', config: { max_turns: 4 } }],
       flow_step_patches: [{ slug: 'run-pipeline', config: { step_budget: 12 } }],
-      tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }],
-      engine_data_outputs: { static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url' },
-      transcript_artifact_name: 'static-site-agent-transcript',
-      replay_bundle_artifact_name: 'static-site-agent-replay',
-      runner_workspace: { handle: 'wp-site-generator@site-loop', expose_to_agent: false },
+      tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }],
+      engine_data_outputs: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
+      transcript_artifact_name: 'example-agent-transcript',
+      replay_bundle_artifact_name: 'example-agent-replay',
+      runner_workspace: { handle: 'example-repo@example-loop', expose_to_agent: false },
     }),
   },
 });
-assert.equal(agentBundleRequest.agent_bundle.bundle_path, '/bundles/static-site-agent');
-assert.equal(agentBundleRequest.agent_bundle.agent_slug, 'static-site-agent');
-assert.equal(agentBundleRequest.agent_bundle.pipeline_slug, 'static-site-pipeline');
-assert.equal(agentBundleRequest.agent_bundle.flow_slug, 'static-site-manual-flow');
+assert.equal(agentBundleRequest.agent_bundle.bundle_path, '/bundles/example-agent');
+assert.equal(agentBundleRequest.agent_bundle.agent_slug, 'example-agent');
+assert.equal(agentBundleRequest.agent_bundle.pipeline_slug, 'example-pipeline');
+assert.equal(agentBundleRequest.agent_bundle.flow_slug, 'example-manual-flow');
 assert.deepEqual(agentBundleRequest.agent_bundle.pipeline_step_patches, [{ slug: 'generate', config: { max_turns: 4 } }]);
 assert.deepEqual(agentBundleRequest.agent_bundle.flow_step_patches, [{ slug: 'run-pipeline', config: { step_budget: 12 } }]);
-assert.deepEqual(agentBundleRequest.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
-assert.deepEqual(agentBundleRequest.agent_bundle.engine_data_outputs, { static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url' });
+assert.deepEqual(agentBundleRequest.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }]);
+assert.deepEqual(agentBundleRequest.agent_bundle.engine_data_outputs, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
 assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
 assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
 assert.equal(agentBundleRequest.homeboy_extensions_path, '/components/homeboy-extensions/wordpress');
 assert.deepEqual(agentBundleRequest.mounts, [{
-  source: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
-  target: '/bundles/static-site-agent',
+  source: '/home/runner/work/example-repo/example-repo/bundles/example-agent',
+  target: '/bundles/example-agent',
   mode: 'readonly',
   metadata: { kind: 'agent-bundle' },
 }]);
@@ -1355,18 +1355,18 @@ const agentBundleRequestWithExplicitMount = codeboxTaskRequestFromAgentTaskReque
     config: {
       execution_kind: 'agent_bundle',
       mounts: [{
-        source: '/custom/static-site-agent',
-        target: '/bundles/static-site-agent',
+        source: '/custom/example-agent',
+        target: '/bundles/example-agent',
         mode: 'readonly',
         metadata: { kind: 'custom' },
       }],
-      bundle_path: '/bundles/static-site-agent',
-      bundle_host_path: '/home/runner/work/wp-site-generator/wp-site-generator/bundles/static-site-agent',
+      bundle_path: '/bundles/example-agent',
+      bundle_host_path: '/home/runner/work/example-repo/example-repo/bundles/example-agent',
     },
   },
 });
 assert.equal(agentBundleRequestWithExplicitMount.mounts.length, 1);
-assert.equal(agentBundleRequestWithExplicitMount.mounts[0].source, '/custom/static-site-agent');
+assert.equal(agentBundleRequestWithExplicitMount.mounts[0].source, '/custom/example-agent');
 
 const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
@@ -1559,7 +1559,7 @@ const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   summary: 'WP Codebox agent task succeeded.',
   outputs: {
     issue_number: 123,
-    issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123',
+    issue_url: 'https://github.com/example-org/example-repo/issues/123',
   },
   session: { id: 'sandbox-session-1', status: 'completed' },
 }, { exitStatus: 1 });
@@ -1769,13 +1769,13 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
       workload: {
         outputs: {
           typed_artifacts: {
-            static_site_candidate: {
+            example_review: {
               schema: 'homeboy/agent-task-typed-artifact/v1',
-              type: 'StaticSiteCandidate',
-              artifact_schema: 'static-site-importer/static-site-candidate/v1',
-              payload: { slug: 'issue-1222-transformer-loop', import_ready: true },
-              provenance: { bundle_slug: 'static-site-agent', task_id: 'agent-bundle-task-123' },
-              file_refs: [{ path: '/tmp/wp-codebox-artifacts/static-site-candidate.json', mime: 'application/json' }],
+              type: 'ExampleReviewArtifact',
+              artifact_schema: 'example/review-artifact/v1',
+              payload: { slug: 'issue-1222-transformer-loop', review_ready: true },
+              provenance: { bundle_slug: 'example-agent', task_id: 'agent-bundle-task-123' },
+              file_refs: [{ path: '/tmp/wp-codebox-artifacts/example-review.json', mime: 'application/json' }],
             },
           },
         },
@@ -1784,7 +1784,7 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
           metadata: {
             transcript_artifacts: { json: '/tmp/transcript.json', summary: '/tmp/transcript.md' },
             replay_bundle_path: '/tmp/replay-bundle',
-            engine_data: { static_site_agent: { pr_url: 'https://github.com/chubes4/wp-site-generator/pull/123' } },
+            engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } },
           },
         }],
       },
@@ -1793,15 +1793,15 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 });
 assert.equal(agentBundleOutcome.schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(agentBundleOutcome.status, 'succeeded');
-assert.equal(agentBundleOutcome.outputs.static_site_pr_url, 'https://github.com/chubes4/wp-site-generator/pull/123');
-assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
-assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.artifact_schema, 'static-site-importer/static-site-candidate/v1');
-assert.equal(agentBundleOutcome.outputs.typed_artifacts.static_site_candidate.payload.import_ready, true);
-assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.name === 'static_site_candidate' && artifact.path === '/tmp/wp-codebox-artifacts/static-site-candidate.json'), true);
+assert.equal(agentBundleOutcome.outputs.example_pr_url, 'https://github.com/example-org/example-repo/pull/123');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.example_review.type, 'ExampleReviewArtifact');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.example_review.artifact_schema, 'example/review-artifact/v1');
+assert.equal(agentBundleOutcome.outputs.typed_artifacts.example_review.payload.review_ready, true);
+assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.name === 'example_review' && artifact.path === '/tmp/wp-codebox-artifacts/example-review.json'), true);
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-transcript' && artifact.path === '/tmp/transcript.json'), true);
 assert.equal(agentBundleOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-replay-bundle' && artifact.path === '/tmp/replay-bundle'), true);
-assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
-assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/wp-codebox-artifacts/static-site-candidate.json'), true);
+assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/example-org/example-repo/pull/123'), true);
+assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/wp-codebox-artifacts/example-review.json'), true);
 assert.equal(agentBundleOutcome.metadata.sandbox_policy.policy.apply, 'review');
 assert.equal(agentBundleOutcome.metadata.sandbox_policy.sandbox_tool_policy.tools[0].allowed, false);
 assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
@@ -1844,7 +1844,7 @@ const missingGenericRepoLoopArtifactOutcome = agentTaskOutcomeFromCodeboxResult(
     outputs: {
       concept_packet: {
         type: 'ConceptPacket',
-        schema: 'static-site-generator/concept-packet/v1',
+        schema: 'example/concept-packet/v1',
       },
     },
   },
@@ -1866,7 +1866,7 @@ assert.equal(missingGenericRepoLoopArtifactOutcome.status, 'failed');
 assert.equal(missingGenericRepoLoopArtifactOutcome.failure_classification, 'execution_failed');
 assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].class, 'codebox.required_typed_artifacts_missing');
 assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0].name, 'concept_packet');
-assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0].artifact_schema, 'static-site-generator/concept-packet/v1');
+assert.equal(missingGenericRepoLoopArtifactOutcome.diagnostics[0].data.missing[0].artifact_schema, 'example/concept-packet/v1');
 
 const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
@@ -1880,9 +1880,9 @@ const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     agent_runtime: {
       bundle: {
         engine_data_outputs: {
-          static_site_branch: 'metadata.engine_data.static_site_agent.branch',
-          static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url',
-          static_site_slug: 'metadata.engine_data.static_site_agent.slug',
+          example_branch: 'metadata.engine_data.example_agent.branch',
+          example_pr_url: 'metadata.engine_data.example_agent.pr_url',
+          example_slug: 'metadata.engine_data.example_agent.slug',
         },
       },
       workload: {
@@ -1892,28 +1892,28 @@ const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   },
   outputs: {
     engine_data: {
-      static_site_agent: {
-        branch: 'static/issue-451-design-direction',
-        pr_url: 'https://github.com/chubes4/wp-site-generator/pull/453',
+      example_agent: {
+        branch: 'example/issue-451-design-direction',
+        pr_url: 'https://github.com/example-org/example-repo/pull/453',
         slug: 'issue-451-design-direction',
       },
     },
   },
 });
 assert.equal(canonicalTopLevelAgentBundleOutcome.status, 'succeeded');
-assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_branch, 'static/issue-451-design-direction');
-assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_pr_url, 'https://github.com/chubes4/wp-site-generator/pull/453');
-assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.static_site_slug, 'issue-451-design-direction');
-assert.equal(canonicalTopLevelAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/453'), true);
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.example_branch, 'example/issue-451-design-direction');
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.example_pr_url, 'https://github.com/example-org/example-repo/pull/453');
+assert.equal(canonicalTopLevelAgentBundleOutcome.outputs.example_slug, 'issue-451-design-direction');
+assert.equal(canonicalTopLevelAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/example-org/example-repo/pull/453'), true);
 
 const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'projected-typed-artifact-bundle-task-123',
   artifact_declarations: [{
     schema: 'wp-codebox/artifact-declaration/v1',
-    name: 'static_site_candidate',
-    type: 'StaticSiteCandidate',
-    artifact_schema: 'static-site-importer/static-site-candidate/v1',
+    name: 'example_review',
+    type: 'ExampleReviewArtifact',
+    artifact_schema: 'example/review-artifact/v1',
     required: true,
   }],
   executor: { backend: 'codebox' },
@@ -1925,7 +1925,7 @@ const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     agent_runtime: {
       bundle: {
         engine_data_outputs: {
-          static_site_candidate: 'outputs.typed_artifacts.static_site_candidate.payload',
+          example_review: 'outputs.typed_artifacts.example_review.payload',
         },
       },
       workload: {
@@ -1935,13 +1935,13 @@ const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
             schema: 'datamachine/agent-bundle-run/v1',
             outputs: {
               typed_artifacts: {
-                static_site_candidate: {
+                example_review: {
                   schema: 'homeboy/agent-task-typed-artifact/v1',
-                  type: 'StaticSiteCandidate',
-                  artifact_schema: 'static-site-importer/static-site-candidate/v1',
-                  payload: { slug: 'projected-candidate', import_ready: true },
-                  provenance: { bundle_slug: 'static-site-agent' },
-                  file_refs: [{ path: '/tmp/wp-codebox-artifacts/projected-candidate.json', mime: 'application/json' }],
+                  type: 'ExampleReviewArtifact',
+                  artifact_schema: 'example/review-artifact/v1',
+                  payload: { slug: 'projected-review', review_ready: true },
+                  provenance: { bundle_slug: 'example-agent' },
+                  file_refs: [{ path: '/tmp/wp-codebox-artifacts/projected-review.json', mime: 'application/json' }],
                 },
               },
             },
@@ -1952,11 +1952,11 @@ const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   },
 });
 assert.equal(projectedTypedArtifactBundleOutcome.status, 'succeeded');
-assert.equal(projectedTypedArtifactBundleOutcome.outputs.static_site_candidate.import_ready, true);
-assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.static_site_candidate.type, 'StaticSiteCandidate');
-assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.static_site_candidate.payload.slug, 'projected-candidate');
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.example_review.review_ready, true);
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.example_review.type, 'ExampleReviewArtifact');
+assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.example_review.payload.slug, 'projected-review');
 assert.equal(projectedTypedArtifactBundleOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
-assert.equal(projectedTypedArtifactBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.path === '/tmp/wp-codebox-artifacts/projected-candidate.json'), true);
+assert.equal(projectedTypedArtifactBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.path === '/tmp/wp-codebox-artifacts/projected-review.json'), true);
 
 const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
@@ -2005,14 +2005,14 @@ const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
     agent_runtime: {
       bundle: {
         engine_data_outputs: {
-          issue_number: 'metadata.engine_data.store_idea_agent.issue_number',
-          issue_url: 'metadata.engine_data.store_idea_agent.issue_url',
+          issue_number: 'metadata.engine_data.example_agent.issue_number',
+          issue_url: 'metadata.engine_data.example_agent.issue_url',
         },
       },
       workload: {
         outputs: {
           issue_number: 123,
-          issue_url: 'https://github.com/chubes4/wp-site-generator/issues/123',
+          issue_url: 'https://github.com/example-org/example-repo/issues/123',
         },
         diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }],
       },
@@ -2022,8 +2022,8 @@ const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 assert.equal(singleResultAgentBundleOutcome.schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(singleResultAgentBundleOutcome.status, 'succeeded');
 assert.equal(singleResultAgentBundleOutcome.outputs.issue_number, 123);
-assert.equal(singleResultAgentBundleOutcome.outputs.issue_url, 'https://github.com/chubes4/wp-site-generator/issues/123');
-assert.equal(singleResultAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/issues/123'), true);
+assert.equal(singleResultAgentBundleOutcome.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
+assert.equal(singleResultAgentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/example-org/example-repo/issues/123'), true);
 
 const canaryRunOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
@@ -2549,11 +2549,11 @@ try {
         homeboy_extensions: path.join(__dirname, '..'),
         wp_codebox_bin: fakeWpCodebox,
         bundle_path: bundle,
-        agent_slug: 'static-site-agent',
-        pipeline_slug: 'static-site-pipeline',
-        flow_slug: 'static-site-manual-flow',
-        tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }],
-        engine_data_outputs: { static_site_pr_url: 'metadata.engine_data.static_site_agent.pr_url' },
+        agent_slug: 'example-agent',
+        pipeline_slug: 'example-pipeline',
+        flow_slug: 'example-manual-flow',
+        tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }],
+        engine_data_outputs: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
       },
     },
   };
@@ -2568,7 +2568,7 @@ try {
   const agentBundleCliOutcome = JSON.parse(agentBundleCliResult.stdout);
   assert.equal(agentBundleCliOutcome.status, 'succeeded');
   assert.equal(agentBundleCliOutcome.artifacts.some((artifact) => artifact.kind === 'agent-runtime-transcript'), true);
-  assert.equal(agentBundleCliOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/chubes4/wp-site-generator/pull/123'), true);
+  assert.equal(agentBundleCliOutcome.evidence_refs.some((ref) => ref.uri === 'https://github.com/example-org/example-repo/pull/123'), true);
   const capturedAgentBundleRun = JSON.parse(fs.readFileSync(fakeWpCodeboxCapture, 'utf8'));
   assert.equal(capturedAgentBundleRun.argv[0], 'agent-task-run');
   assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
@@ -2578,9 +2578,9 @@ try {
   assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
   assert.equal(capturedAgentBundleRun.input.agent_bundle.bundle_path, bundle);
-  assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'static-site-agent');
-  assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'static-site-pipeline');
-  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'static_site_agent.pr_url' }]);
+  assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'example-agent');
+  assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'example-pipeline');
+  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }]);
 
   const recipeWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'recipe-wp-codebox-'));
   const { fixture: recipeFakeWpCodebox, capture: recipeFakeWpCodeboxCapture } = writeFakeWpCodebox(recipeWpCodeboxRoot);

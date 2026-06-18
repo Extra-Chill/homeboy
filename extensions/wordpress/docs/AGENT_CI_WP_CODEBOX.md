@@ -50,19 +50,19 @@ Use `.github/workflows/datamachine-agent-ci.yml` from a consumer workflow:
 
 ```yaml
 jobs:
-  run-static-site-agent:
+  run-example-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@main
     with:
-      bundle_path: bundles/static-site-agent
-      agent_slug: static-site-agent
-      pipeline_slug: static-site-pipeline
-      flow_slug: static-site-manual-flow
-      target_repo: chubes4/wp-site-generator
+      bundle_path: bundles/example-agent
+      agent_slug: example-agent
+      pipeline_slug: example-pipeline
+      flow_slug: example-manual-flow
+      target_repo: example-org/example-repo
       prompt: ${{ inputs.prompt }}
       success_requires_pr: true
-      engine_data_outputs: '{"static_site_pr_url":"metadata.engine_data.static_site_agent.pr_url"}'
+      engine_data_outputs: '{"example_pr_url":"metadata.engine_data.example_agent.pr_url"}'
       comment_pr_summary: true
-      transcript_artifact_name: static-site-agent-transcript-${{ github.run_id }}
+      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
 
@@ -413,7 +413,7 @@ secrets: inherit
 
 The same Data Machine bundle run can be expressed as a Homeboy agent-task plan,
 which lets `homeboy agent-task run-plan --plan ...` replace a bespoke workflow
-wrapper such as `wp-site-generator`'s site-generation loop:
+wrapper with a reusable runner boundary:
 
 `homeboy/agent-task-runner-spec/v1` is the normalized runner boundary inside each
 task. It contains only generic execution details: `executor.backend`,
@@ -425,12 +425,12 @@ same spec without inheriting GitHub Actions glue.
 ```json
 {
   "schema": "homeboy/agent-task-plan/v1",
-  "plan_id": "site-generation-loop",
+  "plan_id": "example-agent-loop",
   "tasks": [
     {
       "schema": "homeboy/agent-task-request/v1",
-      "task_id": "site-generation-loop/static-site-agent",
-      "group_key": "site-generation-loop",
+      "task_id": "example-agent-loop/example-agent",
+      "group_key": "example-agent-loop",
       "executor": {
         "backend": "codebox",
         "model": "gpt-5.5",
@@ -445,30 +445,30 @@ same spec without inheriting GitHub Actions glue.
           },
           "homeboy_extensions": "/components/homeboy-extensions/wordpress",
           "wp_codebox_bin": "/components/wp-codebox/packages/wp-codebox/dist/cli.js",
-          "bundle_path": "bundles/static-site-agent",
-          "agent_slug": "static-site-agent",
-          "pipeline_slug": "static-site-pipeline",
-          "flow_slug": "static-site-manual-flow",
-          "target_repo": "chubes4/wp-site-generator",
+          "bundle_path": "bundles/example-agent",
+          "agent_slug": "example-agent",
+          "pipeline_slug": "example-pipeline",
+          "flow_slug": "example-manual-flow",
+          "target_repo": "example-org/example-repo",
           "success_requires_pr": true,
           "engine_data_outputs": {
-            "static_site_pr_url": "metadata.engine_data.static_site_agent.pr_url"
+            "example_pr_url": "metadata.engine_data.example_agent.pr_url"
           },
           "tool_recorders": [
             {
               "tool": "github/create-pull-request",
-              "engine_data_path": "static_site_agent.pr_url"
+              "engine_data_path": "example_agent.pr_url"
             }
           ],
           "pipeline_step_patches": [],
           "flow_step_patches": [],
-          "transcript_artifact_name": "static-site-agent-transcript",
-          "replay_bundle_artifact_name": "static-site-agent-replay"
+          "transcript_artifact_name": "example-agent-transcript",
+          "replay_bundle_artifact_name": "example-agent-replay"
         }
       },
-      "instructions": "Generate the requested WordPress site and open or reuse a pull request with the materialized source.",
+      "instructions": "Run the requested repository workflow and open or reuse a pull request with the materialized source.",
       "inputs": {
-        "title": "Run static site agent"
+        "title": "Run example agent"
       },
       "limits": {
         "task_timeout_seconds": 1800
@@ -486,7 +486,7 @@ same spec without inheriting GitHub Actions glue.
 Run it with:
 
 ```bash
-homeboy agent-task run-plan --plan .homeboy/plans/site-generation-loop.json
+homeboy agent-task run-plan --plan .homeboy/plans/example-agent-loop.json
 ```
 
 For bundle repositories outside the target checkout, use `bundle_repo`,

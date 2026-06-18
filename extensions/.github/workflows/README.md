@@ -87,19 +87,19 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ```yaml
 jobs:
-  run-static-site-agent:
+  run-example-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@main
     with:
-      bundle_path: bundles/static-site-agent
-      agent_slug: static-site-agent
-      pipeline_slug: static-site-pipeline
-      flow_slug: static-site-manual-flow
-      target_repo: chubes4/wp-site-generator
+      bundle_path: bundles/example-agent
+      agent_slug: example-agent
+      pipeline_slug: example-pipeline
+      flow_slug: example-manual-flow
+      target_repo: example-org/example-repo
       prompt: ${{ inputs.prompt }}
       success_requires_pr: true
-      engine_data_outputs: '{"static_site_pr_url":"metadata.engine_data.static_site_agent.pr_url"}'
+      engine_data_outputs: '{"example_pr_url":"metadata.engine_data.example_agent.pr_url"}'
       comment_pr_summary: true
-      transcript_artifact_name: static-site-agent-transcript-${{ github.run_id }}
+      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
 

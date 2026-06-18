@@ -150,24 +150,24 @@ assert.equal(validateAgentTaskRunnerSpec(bundleRunnerSpec), bundleRunnerSpec);
 const abilityTask = datamachineAgentCiAbilityTaskRequest({
   taskId: 'validate-artifact',
   ability: 'example/validate-artifact',
-  abilityInput: { artifact: '{{outputs.static_site_candidate}}' },
+  abilityInput: { artifact: '{{outputs.example_review}}' },
   instructions: 'Validate the artifact.',
 });
 
 assert.equal(abilityTask.executor.config.runtime_task.ability, 'example/validate-artifact');
 assert.deepEqual(abilityTask.executor.config.runtime_task.input, {
-  artifact: '{{outputs.static_site_candidate}}',
+  artifact: '{{outputs.example_review}}',
 });
 
 const plan = datamachineAgentCiPlan({
-  planId: 'site-generation-loop-123',
+  planId: 'example-agent-loop-123',
   tasks: [bundleTask, abilityTask],
   options: { max_concurrency: 1 },
   metadata: { source: 'example' },
 });
 
 assert.equal(plan.schema, 'homeboy/agent-task-plan/v1');
-assert.equal(plan.plan_id, 'site-generation-loop-123');
+assert.equal(plan.plan_id, 'example-agent-loop-123');
 assert.equal(plan.tasks.length, 2);
 assert.deepEqual(plan.options, { max_concurrency: 1 });
 
