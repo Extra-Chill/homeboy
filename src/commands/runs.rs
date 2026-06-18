@@ -40,6 +40,7 @@ pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 use bundle::{
     export_runs, import_runs, RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput,
 };
+use common::run_summaries_with_artifact_indexes;
 pub use common::RunSummary;
 use compare::{compare_runs, RunsCompareArgs, RunsCompareOutput};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
@@ -464,19 +465,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         rig_id: args.rig,
         limit: Some(args.limit),
     })?;
-    let rig_run_ids = run_records
-        .iter()
-        .filter(|run| run.kind == "rig" && run.rig_id.is_some())
-        .map(|run| run.id.clone())
-        .collect::<Vec<_>>();
-    let mut artifacts_by_run = store.list_artifacts_for_runs(&rig_run_ids)?;
-    let mut runs: Vec<RunSummary> = run_records
-        .into_iter()
-        .map(|run| {
-            let artifacts = artifacts_by_run.remove(&run.id).unwrap_or_default();
-            run_summary_with_artifact_index(run, &artifacts)
-        })
-        .collect();
+    let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
     runs.extend(active_runner_job_summaries(status_filter.as_deref()));
 
@@ -717,14 +706,6 @@ pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
         cwd: run.cwd,
         status_note,
         artifact_index: None,
-    }
-}
-
-fn run_summary_with_artifact_index(run: RunRecord, artifacts: &[ArtifactRecord]) -> RunSummary {
-    let artifact_index = homeboy::core::rig::artifact_index_for_run_with_artifacts(&run, artifacts);
-    RunSummary {
-        artifact_index,
-        ..run_summary(run)
     }
 }
 
