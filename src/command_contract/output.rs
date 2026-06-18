@@ -201,9 +201,7 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Version(_) => version::adapter(output_file_mode)
-                .contract
-                .to_output_descriptor(),
+            Commands::Version(_) => version::adapter(output_file_mode).output_descriptor(),
             Commands::AgentTask(_)
             | Commands::Project(_)
             | Commands::Component(_)
@@ -245,9 +243,7 @@ impl Commands {
             | Commands::Http(_)
             | Commands::Upgrade(_)
             | Commands::Ssh(_) => ops_json_descriptor(output_file_mode),
-            Commands::Fleet(_) => fleet::adapter(output_file_mode)
-                .contract
-                .to_output_descriptor(),
+            Commands::Fleet(_) => fleet::adapter(output_file_mode).output_descriptor(),
             Commands::Triage(_) => ops_json_descriptor(output_file_mode),
         }
     }

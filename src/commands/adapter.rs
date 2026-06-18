@@ -51,6 +51,10 @@ pub(crate) struct TypedCommandAdapter<Args> {
 }
 
 impl<Args> TypedCommandAdapter<Args> {
+    pub fn output_descriptor(&self) -> CommandOutputDescriptor {
+        self.contract.to_output_descriptor()
+    }
+
     pub fn json_only(
         json_family: CommandJsonFamily,
         output_file_mode: CommandOutputFileMode,
@@ -102,7 +106,7 @@ mod tests {
             |_, _| (Ok(Value::Null), 0),
         );
 
-        let descriptor = adapter.contract.to_output_descriptor();
+        let descriptor = adapter.output_descriptor();
 
         assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
         assert_eq!(
@@ -128,7 +132,7 @@ mod tests {
             );
 
             assert_eq!(
-                adapter.contract.to_output_descriptor().response_mode,
+                adapter.output_descriptor().response_mode,
                 CommandResponseMode::Raw(raw_mode)
             );
             assert!(adapter.execute_json.is_none());
