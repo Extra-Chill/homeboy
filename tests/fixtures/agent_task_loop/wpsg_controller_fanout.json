@@ -1,0 +1,52 @@
+{
+  "schema": "homeboy/repo-loop-spec/v1",
+  "loop_id": "wpsg/build-pages",
+  "metadata": {
+    "group_key": "wpsg",
+    "dispatch_defaults": {
+      "backend": "noop",
+      "repo": "wp-site-generator"
+    }
+  },
+  "agents": {
+    "page-builder": {
+      "role": "builder",
+      "tools": ["blocks"]
+    }
+  },
+  "tools": {
+    "blocks": {
+      "description": "Generate WordPress blocks"
+    }
+  },
+  "artifacts": {
+    "page_spec": {
+      "kind": "wpsg/PageSpec/v1",
+      "required": true
+    },
+    "page_blocks": {
+      "kind": "wpsg/PageBlocks/v1",
+      "required": true
+    }
+  },
+  "workflows": [
+    {
+      "workflow_id": "plan-page",
+      "agent_id": "page-builder",
+      "prompt": "Plan the requested WordPress page.",
+      "entity_ids": ["home", "about"],
+      "emits": ["page_spec"],
+      "inputs": {
+        "site_goal": "demo"
+      }
+    },
+    {
+      "workflow_id": "build-page",
+      "agent_id": "page-builder",
+      "prompt": "Build blocks for the planned page.",
+      "entity_ids": ["home", "about"],
+      "consumes": ["page_spec"],
+      "emits": ["page_blocks"]
+    }
+  ]
+}
