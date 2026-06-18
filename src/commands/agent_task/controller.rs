@@ -49,6 +49,7 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             let report = agent_task_controller_service::list()?;
             Ok((command_json_value(report)?, 0))
         }
+        AgentTaskControllerCommand::Events(event_args) => apply_controller_event(event_args),
         AgentTaskControllerCommand::ApplyEvent(event_args) => apply_controller_event(event_args),
         AgentTaskControllerCommand::RunNext(run_args) => controller_run_next(run_args),
         AgentTaskControllerCommand::Run(run_args) => controller_run_action(run_args),
@@ -245,7 +246,7 @@ pub(super) fn dispatch_args_from_controller_request(
     })
 }
 
-fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) -> CmdResult<Value> {
+pub(super) fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) -> CmdResult<Value> {
     let payload = match args.payload {
         Some(spec) => {
             serde_json::from_str(&config::read_json_spec_to_string(&spec)?).map_err(|error| {

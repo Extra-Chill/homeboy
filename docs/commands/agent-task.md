@@ -36,6 +36,27 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `auth` | Configure and inspect provider authentication secrets. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
+## Controller Events
+
+`agent-task controller events` is the stable generic primitive for applying an
+external event to a durable controller. It accepts the same provider-neutral event
+shape as `agent-task controller apply-event` and returns
+`homeboy/agent-task-loop-controller-event-result/v1` with the updated controller
+record and any actions created by event policy evaluation.
+
+```bash
+homeboy agent-task controller events "$loop_id" \
+  --event-type task.completed \
+  --event-id task-123-completed \
+  --event-key task#123 \
+  --entity-id entity-123 \
+  --payload @event.json
+```
+
+Use `events` for downstream integrations that need a stable generic controller
+event contract. `apply-event` remains the explicit event-application spelling and
+uses the same request and response contract.
+
 ## Loop Spec Compilation
 
 `agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
