@@ -41,6 +41,8 @@ pub struct AgentTaskLoopControllerRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate_results: Vec<AgentTaskGateBundleResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminal_outcomes: Vec<AgentTaskLoopTerminalOutcome>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waits: Vec<AgentTaskLoopWait>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subcontrollers: Vec<AgentTaskLoopSubcontrollerRef>,
@@ -566,6 +568,32 @@ pub enum AgentTaskGateBundleStatus {
     Warn,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopTerminalStatus {
+    Passed,
+    BlockedByGate,
+    NoPublication,
+    NoActionableFindings,
+    NeedsRevalidation,
+    NeedsUpstreamFix,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopTerminalOutcome {
+    pub outcome_id: String,
+    pub status: AgentTaskLoopTerminalStatus,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+    pub recorded_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateCheckResult {
     pub check_id: String,
@@ -755,6 +783,7 @@ impl AgentTaskLoopControllerRecord {
             task_lineage: Vec::new(),
             gate_bundles: Vec::new(),
             gate_results: Vec::new(),
+            terminal_outcomes: Vec::new(),
             waits: Vec::new(),
             subcontrollers: Vec::new(),
             feedback: Vec::new(),
@@ -1290,6 +1319,35 @@ impl AgentTaskLoopControllerRecord {
         });
         self.touch();
         record
+    }
+
+    pub fn record_terminal_outcome(
+        &mut self,
+        status: AgentTaskLoopTerminalStatus,
+        reason: impl Into<String>,
+        action_id: Option<String>,
+        entity_id: Option<String>,
+        details: Value,
+    ) -> AgentTaskLoopTerminalOutcome {
+        let outcome = AgentTaskLoopTerminalOutcome {
+            outcome_id: format!("terminal-outcome-{}", self.terminal_outcomes.len() + 1),
+            status,
+            reason: reason.into(),
+            action_id,
+            entity_id,
+            details,
+            recorded_at: now_timestamp(),
+        };
+        self.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("terminal-outcome-{}", self.history.len() + 1),
+            event_type: "controller.terminal_outcome.recorded".to_string(),
+            recorded_at: now_timestamp(),
+            entity_id: outcome.entity_id.clone(),
+            payload: json!({ "outcome": outcome.clone() }),
+        });
+        self.terminal_outcomes.push(outcome.clone());
+        self.touch();
+        outcome
     }
 
     fn apply_action_side_effects(

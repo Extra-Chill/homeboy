@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::CommandJsonFamily;
+use crate::command_contract::{registered_command_dispatch_family, CommandDispatchFamily};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, JsonCommandRun};
@@ -67,12 +67,19 @@ fn agent_task_summary_kind_for_output_mode(
 }
 
 fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
-    match command.output_descriptor(false).json_family {
-        CommandJsonFamily::Quality => quality::dispatch(command, global),
-        CommandJsonFamily::Workspace => workspace::dispatch(command, global),
-        CommandJsonFamily::Ops => ops::dispatch(command, global),
-        CommandJsonFamily::RawOnly => unsupported_raw_command("List command uses raw output mode"),
+    match dispatch_family(&command) {
+        CommandDispatchFamily::Quality => quality::dispatch(command, global),
+        CommandDispatchFamily::Workspace => workspace::dispatch(command, global),
+        CommandDispatchFamily::Ops => ops::dispatch(command, global),
+        CommandDispatchFamily::RawOnly => {
+            unsupported_raw_command("List command uses raw output mode")
+        }
     }
+}
+
+fn dispatch_family(command: &Commands) -> CommandDispatchFamily {
+    registered_command_dispatch_family(command.top_level_name())
+        .expect("top-level command should be registered")
 }
 
 fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
@@ -87,9 +94,8 @@ fn unsupported_raw_command(message: &'static str) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::{CommandJsonFamily, COMMAND_REGISTRY};
+    use crate::command_contract::CommandDispatchFamily;
     use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand, StatusArgs};
-    use std::collections::BTreeMap;
 
     #[test]
     fn list_json_dispatch_reports_raw_output_mode() {
@@ -116,42 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn json_dispatch_modules_match_command_registry_families() {
-        let mut registered: BTreeMap<&str, CommandJsonFamily> = COMMAND_REGISTRY
-            .iter()
-            .map(|entry| (entry.name, entry.json_family))
-            .collect();
-        assert_eq!(registered.remove("list"), Some(CommandJsonFamily::RawOnly));
-
-        assert_family_commands(
-            &mut registered,
-            CommandJsonFamily::Quality,
-            quality::COMMANDS,
+    fn json_dispatch_family_comes_from_command_registry() {
+        assert_eq!(
+            dispatch_family(&Commands::List),
+            CommandDispatchFamily::RawOnly
         );
-        assert_family_commands(
-            &mut registered,
-            CommandJsonFamily::Workspace,
-            workspace::COMMANDS,
-        );
-        assert_family_commands(&mut registered, CommandJsonFamily::Ops, ops::COMMANDS);
-
-        assert!(
-            registered.is_empty(),
-            "unclaimed JSON commands: {registered:?}"
-        );
-    }
-
-    fn assert_family_commands(
-        registered: &mut BTreeMap<&'static str, CommandJsonFamily>,
-        expected_family: CommandJsonFamily,
-        commands: &[&'static str],
-    ) {
-        for command in commands {
-            assert_eq!(
-                registered.remove(command),
-                Some(expected_family),
-                "{command} JSON dispatch family drifted from command registry"
-            );
-        }
     }
 }

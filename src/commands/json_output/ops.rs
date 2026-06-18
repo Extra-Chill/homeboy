@@ -6,12 +6,6 @@ use crate::commands::{
     self_cmd, server, ssh, status, triage, upgrade, GlobalArgs,
 };
 
-#[cfg(test)]
-pub(super) const COMMANDS: &[&str] = &[
-    "api", "auth", "ci", "daemon", "db", "deploy", "deps", "doctor", "file", "fleet", "git",
-    "http", "issues", "logs", "self", "server", "ssh", "status", "triage", "upgrade",
-];
-
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
     match command {
         Commands::Status(args) => map(status::run(args, global)),
