@@ -6,7 +6,7 @@ use crate::core::runner::{
     RunnerStatusReport, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::core::upgrade::ExtensionUpgradeEntry;
-use crate::core::Result;
+use crate::core::{Error, Result};
 use std::path::Path;
 
 use super::helpers::{current_version, version_is_newer};
@@ -111,6 +111,32 @@ fn upgrade_runners_with_executor_source_materializer_and_path_updater(
     mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
     mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+        runners,
+        force,
+        method_override,
+        source_path,
+        extension_updates,
+        &mut exec,
+        status,
+        reconnect_runner_daemon,
+        &mut materialize_source_path,
+        &mut update_homeboy_path,
+    )
+}
+
+fn upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+    runners: &[Runner],
+    force: bool,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&Path>,
+    extension_updates: &[ExtensionUpgradeEntry],
+    mut exec: impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: impl Fn(&str) -> Result<RunnerStatusReport>,
+    mut reconnect_stale_daemon: impl FnMut(&str) -> Result<String>,
+    mut materialize_source_path: impl FnMut(&Runner, &Path) -> Result<String>,
+    mut update_homeboy_path: impl FnMut(&str, &str) -> Result<()>,
+) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
@@ -123,6 +149,7 @@ fn upgrade_runners_with_executor_source_materializer_and_path_updater(
             extension_updates,
             &mut exec,
             &status,
+            &mut reconnect_stale_daemon,
             &mut materialize_source_path,
             &mut update_homeboy_path,
         );
@@ -151,6 +178,7 @@ fn upgrade_runner_with_executor(
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
+    reconnect_stale_daemon: &mut impl FnMut(&str) -> Result<String>,
     materialize_source_path: &mut impl FnMut(&Runner, &Path) -> Result<String>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
 ) -> RunnerUpgradeEntry {
@@ -392,7 +420,22 @@ fn upgrade_runner_with_executor(
         new_version.as_deref(),
         bare_homeboy_version.as_deref(),
     );
-    let stale_daemon = runner_stale_daemon(runner, status);
+    let mut stale_daemon_repair_detail = None;
+    let mut stale_daemon = runner_stale_daemon(runner, status);
+    if stale_daemon.is_some() && path_drift.is_none() {
+        match reconnect_stale_daemon(&runner.id) {
+            Ok(detail) => {
+                stale_daemon = None;
+                stale_daemon_repair_detail = Some(detail);
+            }
+            Err(err) => {
+                stale_daemon_repair_detail = Some(format!(
+                    "automatic stale runner daemon restart failed: {}",
+                    err.message
+                ));
+            }
+        }
+    }
     let upgraded = source_path_realigned
         || match (previous_version.as_deref(), new_version.as_deref()) {
             (Some(previous), Some(new)) => new != previous,
@@ -406,6 +449,7 @@ fn upgrade_runner_with_executor(
         &runner.id,
         detail,
         path_update_detail.as_deref(),
+        stale_daemon_repair_detail.as_deref(),
         path_drift.as_deref(),
         stale_daemon.as_ref(),
         &extensions_skipped,
@@ -1245,6 +1289,29 @@ fn update_runner_homeboy_path(runner_id: &str, homeboy_path: &str) -> Result<()>
     Ok(())
 }
 
+fn reconnect_runner_daemon(runner_id: &str) -> Result<String> {
+    runner::disconnect(runner_id)?;
+    let (report, exit_code) = runner::connect(runner_id)?;
+    if exit_code == 0 && report.connected {
+        return Ok(format!(
+            "connected runner daemon restarted after upgrade; session reports {}",
+            report
+                .homeboy_version
+                .as_deref()
+                .unwrap_or("the upgraded version")
+        ));
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "runner reconnect exited with {}; {}",
+        exit_code,
+        report
+            .failure_message
+            .as_deref()
+            .unwrap_or("runner did not report a connected session")
+    )))
+}
+
 fn runner_recovery_commands(
     runner_id: &str,
     homeboy_path: &str,
@@ -1344,6 +1411,7 @@ fn runner_upgrade_final_detail(
     runner_id: &str,
     detail: String,
     path_update_detail: Option<&str>,
+    stale_daemon_repair_detail: Option<&str>,
     path_drift: Option<&str>,
     stale_daemon: Option<&RunnerDaemonDriftEntry>,
     extensions_skipped: &[RunnerExtensionSyncEntry],
@@ -1353,6 +1421,10 @@ fn runner_upgrade_final_detail(
 
     if let Some(path_update_detail) = path_update_detail {
         parts.push(path_update_detail.to_string());
+    }
+
+    if let Some(stale_daemon_repair_detail) = stale_daemon_repair_detail {
+        parts.push(stale_daemon_repair_detail.to_string());
     }
 
     if !extensions_skipped.is_empty() {
@@ -2466,31 +2538,43 @@ mod tests {
     }
 
     #[test]
-    fn reports_stale_connected_daemon_after_runner_upgrade() {
+    fn restarts_stale_connected_daemon_after_runner_upgrade() {
         let runner = ssh_runner("lab", None);
+        let mut reconnects = Vec::new();
 
-        let (updated, skipped) = upgrade_runners_with_executor(
-            &[runner],
-            false,
-            None,
-            None,
-            &[],
-            |runner_id, options| {
-                let stdout = match options.command.as_slice() {
-                    [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
-                    _ => "{\"success\":true}\n",
-                };
-                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
-            },
-            stale_runner_status,
-        );
+        let (updated, skipped) =
+            upgrade_runners_with_executor_source_materializer_path_updater_and_reconnector(
+                &[runner],
+                false,
+                None,
+                None,
+                &[],
+                |runner_id, options| {
+                    let stdout = match options.command.as_slice() {
+                        [_, flag] if flag == "--version" => "homeboy 0.228.5\n",
+                        _ => "{\"success\":true}\n",
+                    };
+                    Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+                },
+                stale_runner_status,
+                |runner_id| {
+                    reconnects.push(runner_id.to_string());
+                    Ok(
+                        "connected runner daemon restarted after upgrade; session reports 0.228.5"
+                            .to_string(),
+                    )
+                },
+                |_runner, _path| unreachable!("source materialization not used"),
+                |_runner_id, _homeboy_path| unreachable!("homeboy_path update not used"),
+            );
 
-        assert!(updated.is_empty());
-        assert_eq!(skipped.len(), 1);
-        assert!(skipped[0].stale_daemon.is_some());
-        assert!(skipped[0]
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert_eq!(reconnects, vec!["lab".to_string()]);
+        assert_eq!(updated[0].stale_daemon, None);
+        assert!(updated[0]
             .detail
-            .contains("connected runner daemon is stale"));
+            .contains("connected runner daemon restarted after upgrade"));
     }
 
     fn extension_update(extension_id: &str, source_revision: &str) -> ExtensionUpgradeEntry {
