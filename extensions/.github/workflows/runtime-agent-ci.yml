@@ -1,0 +1,136 @@
+name: Runtime Agent CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      runtime_provider:
+        description: Runtime provider backend identifier.
+        required: false
+        type: string
+        default: codebox
+      provider:
+        description: Model/provider identifier forwarded to the runtime.
+        required: false
+        type: string
+        default: ''
+      model:
+        description: Model identifier forwarded to the runtime.
+        required: false
+        type: string
+        default: ''
+      runtime_profile:
+        description: Runtime profile id to select from runtime_profiles.
+        required: true
+        type: string
+      runtime_profiles:
+        description: JSON object keyed by runtime profile id.
+        required: true
+        type: string
+      runtime_component_paths:
+        description: JSON object mapping runtime component keys to workspace paths.
+        required: false
+        type: string
+        default: '{}'
+      ignored_workspace_paths:
+        description: JSON array of workspace paths ignored by drift/status checks.
+        required: false
+        type: string
+        default: '[]'
+      runtime_task:
+        description: JSON object with ability and input keys.
+        required: true
+        type: string
+      ability_requirements:
+        description: JSON array of required ability/tool identifiers.
+        required: false
+        type: string
+        default: '[]'
+      ability_tools:
+        description: JSON array of tool declarations made available to the runtime.
+        required: false
+        type: string
+        default: '[]'
+      artifact_slots:
+        description: JSON array/object declaring expected artifact slots.
+        required: false
+        type: string
+        default: '[]'
+      transcript_slots:
+        description: JSON array/object declaring transcript slots.
+        required: false
+        type: string
+        default: '[]'
+      task_timeout_seconds:
+        description: Runtime task timeout in seconds.
+        required: false
+        type: number
+        default: 900
+    outputs:
+      runtime_config_path:
+        description: Path to the validated runtime config envelope.
+        value: ${{ jobs.prepare.outputs.runtime_config_path }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_config_path: ${{ steps.config.outputs.runtime_config_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: config
+        shell: bash
+        env:
+          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
+          RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
+          RUNTIME_COMPONENT_PATHS: ${{ inputs.runtime_component_paths }}
+          IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
+          RUNTIME_TASK: ${{ inputs.runtime_task }}
+          ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
+          ABILITY_TOOLS: ${{ inputs.ability_tools }}
+          ARTIFACT_SLOTS: ${{ inputs.artifact_slots }}
+          TRANSCRIPT_SLOTS: ${{ inputs.transcript_slots }}
+          TASK_TIMEOUT_SECONDS: ${{ inputs.task_timeout_seconds }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const {
+            runtimeAgentCiTaskExecutorConfig,
+          } = require('./runtime-agent-ci');
+
+          function parseJson(name, fallback) {
+            const value = process.env[name];
+            if (!value) {
+              return fallback;
+            }
+            return JSON.parse(value);
+          }
+
+          const config = runtimeAgentCiTaskExecutorConfig({
+            runtimeProvider: process.env.RUNTIME_PROVIDER,
+            provider: process.env.PROVIDER || undefined,
+            model: process.env.MODEL || undefined,
+            runtimeProfile: process.env.RUNTIME_PROFILE,
+            runtimeProfiles: parseJson('RUNTIME_PROFILES', {}),
+            runtimeComponentPaths: parseJson('RUNTIME_COMPONENT_PATHS', {}),
+            ignoredWorkspacePaths: parseJson('IGNORED_WORKSPACE_PATHS', []),
+            abilityInput: parseJson('RUNTIME_TASK', {}).input || {},
+            ability: parseJson('RUNTIME_TASK', {}).ability,
+            abilityRequirements: parseJson('ABILITY_REQUIREMENTS', []),
+            abilityTools: parseJson('ABILITY_TOOLS', []),
+            artifactSlots: parseJson('ARTIFACT_SLOTS', []),
+            transcriptSlots: parseJson('TRANSCRIPT_SLOTS', []),
+            taskTimeoutSeconds: Number(process.env.TASK_TIMEOUT_SECONDS || 900),
+          });
+
+          const outputPath = path.join(process.cwd(), 'runtime-agent-ci-config.json');
+          fs.writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `runtime_config_path=${outputPath}\n`);
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-agent-ci-config
+          path: runtime-agent-ci-config.json

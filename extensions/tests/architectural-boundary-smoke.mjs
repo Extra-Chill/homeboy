@@ -9,11 +9,13 @@ const boundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site
 const productionExtensions = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx']);
 
 const scannedRoots = [
+  'runtime-agent-ci',
   'wordpress/lib',
   'agent-runtimes/lib',
 ];
 
 const scannedFiles = [
+  '.github/workflows/runtime-agent-ci.yml',
   'wordpress/scripts/agent/run-host-runner-lifecycle.cjs',
   'agent-runtimes/lib/runtime-provider-resolver.cjs',
 ];
