@@ -1,6 +1,9 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use homeboy::core::cleanup::{
+    self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput,
+};
 use homeboy::core::worktree::{
     self, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
     WorktreeListOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
@@ -56,6 +59,9 @@ enum WorktreeCommand {
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
+        /// Skip the automatic rebuildable artifact cleanup pass.
+        #[arg(long)]
+        skip_artifact_cleanup: bool,
     },
 }
 
@@ -81,7 +87,14 @@ pub enum WorktreeOutput {
     List(WorktreeListOutput),
     Status(WorktreeStatusOutput),
     Remove(WorktreeRemoveOutput),
-    Cleanup(WorktreeCleanupOutput),
+    Cleanup(WorktreeCleanupCommandOutput),
+}
+
+#[derive(Serialize)]
+pub struct WorktreeCleanupCommandOutput {
+    pub worktrees: WorktreeCleanupOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_cleanup: Option<ArtifactCleanupOutput>,
 }
 
 pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<WorktreeOutput> {
@@ -106,7 +119,28 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         WorktreeCommand::Remove { id, force } => {
             WorktreeOutput::Remove(worktree::remove(WorktreeRemoveOptions { id, force })?)
         }
-        WorktreeCommand::Cleanup { force } => WorktreeOutput::Cleanup(worktree::cleanup(force)?),
+        WorktreeCommand::Cleanup {
+            force,
+            skip_artifact_cleanup,
+        } => {
+            let worktrees = worktree::cleanup(force)?;
+            let artifact_cleanup = if skip_artifact_cleanup {
+                None
+            } else {
+                Some(artifact_cleanup::cleanup_artifacts(
+                    ArtifactCleanupOptions {
+                        path: None,
+                        apply: true,
+                        self_artifacts: true,
+                        temp_roots: Vec::new(),
+                    },
+                )?)
+            };
+            WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
+                worktrees,
+                artifact_cleanup,
+            })
+        }
     };
     Ok((output, 0))
 }
