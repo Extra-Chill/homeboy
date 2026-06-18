@@ -38,7 +38,9 @@ pub mod workloads;
 
 pub use app::{AppLauncherAction, AppLauncherOptions, AppLauncherReport};
 pub use artifact_index::{
-    for_run as artifact_index_for_run, RigRunArtifactIndex, RigRunArtifactRef, RigRunFailedStepRef,
+    for_run as artifact_index_for_run,
+    for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
+    RigRunArtifactRef, RigRunFailedStepRef,
 };
 pub use capabilities::{evaluate_requirements, plan_requirement_checks, RigRequirementCheckPlan};
 pub use install::{

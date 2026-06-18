@@ -40,6 +40,7 @@ pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 use bundle::{
     export_runs, import_runs, RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput,
 };
+use common::run_summaries_with_artifact_indexes;
 pub use common::RunSummary;
 use compare::{compare_runs, RunsCompareArgs, RunsCompareOutput};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
@@ -457,17 +458,14 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
     let status_filter = args.status.clone();
-    let mut runs: Vec<RunSummary> = store
-        .list_runs(RunListFilter {
-            kind: args.kind,
-            component_id: args.component_id,
-            status: args.status,
-            rig_id: args.rig,
-            limit: Some(args.limit),
-        })?
-        .into_iter()
-        .map(|run| run_summary_with_artifact_index(&store, run))
-        .collect();
+    let run_records = store.list_runs(RunListFilter {
+        kind: args.kind,
+        component_id: args.component_id,
+        status: args.status,
+        rig_id: args.rig,
+        limit: Some(args.limit),
+    })?;
+    let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
     runs.extend(active_runner_job_summaries(status_filter.as_deref()));
 
@@ -708,14 +706,6 @@ pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
         cwd: run.cwd,
         status_note,
         artifact_index: None,
-    }
-}
-
-fn run_summary_with_artifact_index(store: &ObservationStore, run: RunRecord) -> RunSummary {
-    let artifact_index = homeboy::core::rig::artifact_index_for_run(store, &run);
-    RunSummary {
-        artifact_index,
-        ..run_summary(run)
     }
 }
 
