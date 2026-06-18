@@ -1,0 +1,72 @@
+{
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "wp-codebox",
+  "label": "WP Codebox",
+  "materialization": {
+    "source_roots": [
+      {
+        "id": "wp-codebox",
+        "label": "WP Codebox source",
+        "path": "~/.cache/homeboy/runtimes/wp-codebox",
+        "remote_url": "https://github.com/Automattic/wp-codebox.git",
+        "git_ref": "main"
+      }
+    ],
+    "dependencies": [
+      {
+        "id": "runtime-package",
+        "label": "Runtime package",
+        "source_root": "wp-codebox",
+        "requirement": "runtime source checkout"
+      }
+    ],
+    "executable_requirements": [
+      {
+        "id": "wp-codebox-cli",
+        "label": "WP Codebox CLI",
+        "env": ["WP_CODEBOX_BIN"],
+        "candidates": ["wp-codebox", "codebox"],
+        "version_command": ["--version"],
+        "install_hint": "Install the runtime CLI before dispatching tasks."
+      }
+    ],
+    "readiness_checks": [
+      {
+        "id": "wp-codebox.ready",
+        "label": "WP Codebox runtime available",
+        "secret_env": ["AI_PROVIDER_OPENAI_CODEX_API_KEY"],
+        "env_path": {
+          "env": ["WP_CODEBOX_HOME"],
+          "revision": true,
+          "canonical_path": "~/.cache/homeboy/runtimes/wp-codebox"
+        },
+        "executable": {
+          "env": ["WP_CODEBOX_BIN"],
+          "candidates": ["wp-codebox", "codebox"],
+          "version_command": ["--version"]
+        }
+      }
+    ],
+    "env_passthrough": [
+      "WP_CODEBOX_HOME",
+      "WP_CODEBOX_BIN",
+      "AI_PROVIDER_OPENAI_CODEX_API_KEY"
+    ],
+    "workspace": {
+      "cwd": "git_checkout",
+      "requires_git": true,
+      "write_scope": "artifacts",
+      "artifact_paths": [".homeboy/codebox"]
+    }
+  },
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "wp-codebox.default",
+      "backend": "codebox",
+      "command": "wp-codebox-agent-task-provider",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1"
+    }
+  ]
+}
