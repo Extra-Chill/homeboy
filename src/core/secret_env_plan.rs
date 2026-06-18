@@ -22,7 +22,10 @@ pub struct SecretEnvPlan {
     pub env_name_mapping: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status: Vec<SecretEnvStatus>,
-    #[serde(default, skip_serializing_if = "SecretEnvRedactionPolicy::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "SecretEnvRedactionPolicy::is_default_policy"
+    )]
     pub redaction: SecretEnvRedactionPolicy,
 }
 
@@ -394,7 +397,7 @@ impl Default for SecretEnvRedactionPolicy {
 }
 
 impl SecretEnvRedactionPolicy {
-    fn is_default(&self) -> bool {
+    fn is_default_policy(&self) -> bool {
         self == &Self::default()
     }
 
