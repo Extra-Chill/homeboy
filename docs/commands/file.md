@@ -20,6 +20,7 @@ homeboy file <COMMAND>
 - `upload <server> <local_path> <remote_path> [-c|--compress] [--dry-run]`
 - `copy <source> <destination> [-r|--recursive] [-c|--compress] [--dry-run] [--exclude <pattern>]`
 - `sync <source> <destination> [-c|--compress] [--dry-run] [--exclude <pattern>]`
+- `edit <project_id> <file_path> [operations] [-n|--dry-run] [-f|--force]`
 
 `copy` and `sync` targets use `local/path` or `server_id:/path` syntax. `sync` is recursive and non-deleting by default; it does not expose a delete mode.
 
@@ -88,6 +89,41 @@ Notes:
 - `upload` is the ergonomic mirror of `download` for local-to-server uploads.
 - `copy` preserves the old local↔remote and remote↔remote transfer target syntax.
 - `sync` is directory-oriented and recursive, but does not delete files from the destination.
+
+### `edit`
+
+```sh
+homeboy file edit <project_id> <file_path> [operations]
+```
+
+Operations:
+
+- `--replace-line <n> --replace-line-content <content>`: replace one line by number.
+- `--insert-after <n> --insert-after-content <content>`: insert content after a line.
+- `--insert-before <n> --insert-before-content <content>`: insert content before a line.
+- `--delete-line <n>`: delete one line by number.
+- `--delete-lines <start> <end>`: delete an inclusive line range.
+- `--replace-pattern <pattern> --replace-pattern-content <content>`: replace a unique pattern match.
+- `--replace-all-pattern <pattern> --replace-all-content <content>`: replace all pattern matches.
+- `--delete-pattern <pattern>`: delete the line or content matched by a pattern operation.
+- `--append <content>`: append content to the file.
+- `--prepend <content>`: prepend content to the file.
+
+Flags:
+
+- `-n`, `--dry-run`: show changes without applying them.
+- `-f`, `--force`: apply even when a pattern operation has multiple matches.
+
+Examples:
+
+```sh
+homeboy file edit mysite /var/www/wp-config.php \
+  --replace-pattern "WP_DEBUG', false" \
+  --replace-pattern-content "WP_DEBUG', true" \
+  --dry-run
+
+homeboy file edit mysite /var/www/.maintenance --append "enabled"
+```
 
 ## JSON output
 
@@ -159,6 +195,19 @@ Match objects (`matches[]`):
 - `file`: file path
 - `line`: line number
 - `content`: matching line content
+
+### Edit output
+
+Fields:
+
+- `command`: `file.edit`
+- `project_id`
+- `base_path`: project base path if configured
+- `path`: edited file path
+- `changes_made`: array of line change records
+- `change_count`: number of changes made or planned
+- `success`
+- `error`: error string when editing failed
 
 ## Exit code
 

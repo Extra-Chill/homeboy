@@ -268,13 +268,19 @@ non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
 ### `job`
 
 ```sh
-homeboy runner job logs <job-id>
-homeboy runner job logs <job-id> --follow
+homeboy runner job logs <runner-id> <job-id>
+homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
+homeboy runner job cancel <runner-id> <job-id>
 ```
 
-Inspects durable runner daemon job events. Use `logs` to read the persisted event
-stream for a brokered or daemon-backed runner job without connecting directly to
-the runner process.
+Inspects or cancels durable runner daemon jobs after `runner exec` or Lab offload
+has submitted work to a connected runner. `logs` fetches the persisted job plus
+its event stream; `--follow` keeps polling until the job reaches a terminal state
+and prints newly observed events as they arrive. Use this when a controller exits
+after dispatching runner work and you need to inspect the already-started job.
+
+`cancel` requests cancellation for a queued or running durable runner daemon job
+through the connected runner daemon.
 
 Minimal Homeboy Lab systemd unit:
 
@@ -300,19 +306,6 @@ WantedBy=multi-user.target
 The unit intentionally leaves authentication out until the broker auth contract
 lands; configure the broker URL and any future auth material using the production
 mechanism for issue #2990 rather than embedding secrets in the unit file.
-
-### `job`
-
-```sh
-homeboy runner job logs <runner-id> <job-id>
-homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
-```
-
-Inspects durable runner daemon jobs after `runner exec` or Lab offload has
-submitted work to a connected runner. `logs` fetches the persisted job plus its
-event stream; `--follow` keeps polling until the job reaches a terminal state and
-prints newly observed events as they arrive. Use this when a controller exits
-after dispatching runner work and you need to inspect the already-started job.
 
 ### `status`
 

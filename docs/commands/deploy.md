@@ -3,8 +3,8 @@
 ## Synopsis
 
 ```sh
-homeboy deploy <project_id> [<component_ids...>] [-c|--component <id>]... [--all] [--outdated] [--check] [--dry-run] [--json '<spec>']
-# If no component IDs are provided, you must use --all, --outdated, or --check.
+homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--check] [--dry-run] [--json '<spec>']
+# If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
 
 # Multi-project deployment
 homeboy deploy --projects <project1>,<project2> <component_ids...>
@@ -24,17 +24,25 @@ homeboy deploy <component_id> --shared
 Options:
 
 - `-c`, `--component`: component ID to deploy (can be repeated, alternative to positional)
+- `-p`, `--project`: explicit project ID; takes precedence over positional project/component detection
 - `--all`: deploy all configured components
 - `--outdated`: deploy only outdated components
   - Determined from the first version target for each component.
+- `--behind-upstream`: deploy only components whose local checkout is behind upstream. Conflicts with `--outdated`.
 - `--check`: check component status without building or deploying
   - Shows all components for the project with version comparison status.
   - Combines with `--outdated` or component IDs to filter results.
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
+- `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
 - `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. The build artifact is reused across projects.
 - `-f`, `--fleet`: deploy to all projects in a fleet. Resolves fleet to project IDs, then runs multi-project deployment.
 - `-s`, `--shared`: deploy to all projects using the specified component(s). Auto-detects which projects have the component configured and deploys to all of them.
+- `--keep-deps`: keep build dependencies and skip post-deploy cleanup.
+- `--version <version>`: assert the expected local component version before deploying; aborts on mismatch.
+- `--no-pull`: skip the automatic pull before deploy.
+- `--head`: deploy the current branch `HEAD` instead of the latest tag.
+- `--tagged`: force tag-based deploy and ignore reusable build artifacts.
 
 Bulk JSON input uses `component_ids` (snake_case):
 
@@ -44,7 +52,7 @@ Bulk JSON input uses `component_ids` (snake_case):
 
 Positional and flag component IDs can be mixed; both are merged into the deployment list.
 
-If no component IDs are provided and neither `--all` nor `--outdated` is set, Homeboy returns an error. If `--outdated` finds no outdated components, Homeboy returns an error.
+If no component IDs are provided and none of `--all`, `--outdated`, `--behind-upstream`, or `--check` is set, Homeboy returns an error. If `--outdated` or `--behind-upstream` finds no matching components, Homeboy returns an error.
 
 ## JSON output
 
@@ -229,6 +237,8 @@ Use `--dry-run` to see what would be deployed without executing:
 
 ```sh
 homeboy deploy myproject --outdated --dry-run
+homeboy deploy myproject --behind-upstream --dry-run
+homeboy deploy myproject my-plugin --version 1.2.3 --tagged --dry-run
 ```
 
 ## Check Component Status
