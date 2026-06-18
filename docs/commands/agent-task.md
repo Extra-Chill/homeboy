@@ -6,6 +6,36 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Subcommands
+
+| Subcommand | Purpose |
+|---|---|
+| `cook` | Sync a workspace when `--runner` is supplied, dispatch a repo-cooking task, and return the durable run id. |
+| `loop` | Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize. |
+| `dispatch` | Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON. |
+| `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
+| `run <run-id>` | Execute a previously submitted durable run. |
+| `run-next` | Claim and execute the oldest queued durable run. |
+| `submit` | Persist an agent-task plan and return a durable run id without executing it. |
+| `status <run-id>` | Read durable run status. |
+| `list` | List durable runs, newest first. |
+| `active` | List queued and running durable runs, newest first. |
+| `latest` | Show the latest durable run. |
+| `logs <run-id>` | Read durable run scheduler events. |
+| `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
+| `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
+| `resume <run-id>` | Resume a queued or stale-running durable run. |
+| `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
+| `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
+| `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
+| `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
+| `gate-feedback` | Convert deterministic gate results into a cook-loop retry or stop decision. |
+| `providers` | List extension-declared executor providers and optional secret readiness. |
+| `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
+| `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
+| `auth` | Configure and inspect provider authentication secrets. |
+| `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
+
 ## Dispatch
 
 `agent-task dispatch` builds a durable task plan from common repo-cooking inputs
