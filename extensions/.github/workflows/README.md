@@ -85,61 +85,28 @@ jobs:
     secrets: inherit
 ```
 
-### Legacy Data Machine Wrapper Mapping
+### Migrating Old Data Machine Bundle Callers
 
-`datamachine-agent-ci.yml` is compatibility-only and delegates to
-`runtime-agent-full-run.yml`. Keep it for existing default-branch consumers, but
-new workflows should call the generic workflow directly and supply the equivalent
-generic inputs:
+The former `datamachine-agent-ci.yml` reusable workflow has been removed after
+active default-branch callers migrated. Existing Data Machine bundle callers
+should call `runtime-agent-full-run.yml` directly and provide their runtime stack
+as explicit generic inputs.
 
-| Legacy `datamachine-agent-ci.yml` input | Generic `runtime-agent-full-run.yml` input |
+Use this mapping when updating old workflow bodies:
+
+| Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| `agent_runtime` | `runtime_provider` |
-| `agent_runtime_ref` | `runtime_ref` |
-| `runtime_wordpress_version` | `runtime_wordpress_version` |
-| `flow_slug` | `workload_id` |
-| `agent_slug`, `flow_slug` | `workload_label` / `callback_data` |
-| `target_repo` | `target_repo` |
-| `prompt` | `prompt` |
-| `provider`, `model`, `provider_plugin` | `provider`, `model`, `provider_plugin` |
-| `include_agent_runtime_dependencies`, `runtime_dependencies`, `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref` | `runtime_dependencies` supplied explicitly by the caller |
-| `validation_dependencies` | `validation_dependencies` |
-| `context_repositories` | `context_repositories` |
-| `bundle_path` | `runtime_execution: {"kind":"bundle","source":"..."}` |
-| `execute_workflow_path` | `runtime_execution: {"kind":"workflow","path":"..."}` |
-| `runtime_task`, `ability_request`, `ability_input` | same generic inputs |
-| `component_contracts`, `runtime_components` | same generic inputs |
-| `extra_required_abilities` | `required_abilities` |
-| `success_requires_pr`, `success_completion_outcomes` | same generic inputs |
-| `max_turns`, `step_budget`, `time_budget_ms` | same generic inputs |
-| `engine_data_outputs`, `runtime_output_projections`, `output_mappings` | same generic inputs; prefer `runtime_output_projections` |
-| `evidence_projections`, `tool_recorders` | same generic inputs; prefer `evidence_projections` |
-| `expected_artifacts`, `artifact_declarations`, `artifact_export_config` | same generic inputs |
-| `transcript_artifact_name`, `replay_bundle_artifact_name` | same generic inputs |
-| `extra_wp_config_defines`, `runtime_mounts`, `runtime_overlays` | same generic inputs |
-| `workload_run_before`, `workload_run_after` | same generic inputs |
-| `runner_workspace`, `verification_commands`, `drift_checks`, `writable_paths`, `workspace_contract_checks` | same generic inputs |
-| `actions_artifact_downloads` | `actions_artifact_downloads` |
-| `execute_workflow_builder_command` | `prepare_payload_command` |
-| `app_token_repos`, `require_homeboy_app_token`, `allowed_repos` | same generic inputs |
-| `rules`, `general_rules`, `task_rules`, `probes` | same generic inputs |
-
-`datamachine-agent-ci.yml` wraps the common GitHub Actions shape for existing
-Data Machine agent bundle consumers in a disposable WordPress execution
-substrate. Bundle consumers provide bundle and flow identifiers, a prompt, and
-optional output projections. Runtime-task consumers should migrate to
-`runtime-agent-full-run.yml` and pass `runtime_task` or the `ability_request` /
-`ability_input` shorthand directly. Agent runs use the WP Codebox substrate; the
-legacy direct Playground runner is no longer selectable by callers.
-See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
-for the WP Codebox contract, runtime surface, and evaluation notes.
-
-The workflow intentionally stays a thin GitHub Actions wrapper around scripts in
-`.github/scripts/datamachine-agent-ci/`. Those scripts own GitHub token scope
-validation, dependency checkout planning/materialization, runtime setup, runner
-config synthesis, engine-data projection, artifact path resolution, and comment
-payload preparation. Keep consumer-specific semantics in workflow inputs and
-bundle files rather than baking domain policy into those generic helpers.
+| Runtime selection | `runtime_provider`, `runtime_ref`, `runtime_wordpress_version` |
+| Flow identity | `workload_id`, `workload_label`, `callback_data` |
+| Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
+| Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
+| Runtime stack | `runtime_dependencies`, `runtime_components`, `runtime_profile`, `runtime_profiles` |
+| Required abilities | `required_abilities` |
+| Output projection | `runtime_output_projections`, `evidence_projections` |
+| Artifacts | `expected_artifacts`, `artifact_declarations`, `artifact_export_config` |
+| WordPress setup | `extra_wp_config_defines`, `runtime_mounts`, `runtime_overlays`, `workload_run_before`, `workload_run_after` |
+| Runner workspace | `runner_workspace`, `verification_commands`, `drift_checks`, `writable_paths`, `workspace_contract_checks` |
+| GitHub auth | `app_token_repos`, `require_homeboy_app_token`, `allowed_repos` |
 
 The reusable workflow exposes `engine_data_json` as one combined JSON object.
 Dynamic per-key `workflow_call` outputs are not possible in GitHub Actions, so
@@ -164,51 +131,29 @@ The workflow keeps two GitHub authentication modes:
 The run summary includes the selected auth mode, target repository, token scope,
 and whether the caller required a Homeboy App token. Tokens are never printed.
 
-## Compatibility wrapper example
+## Data Machine Bundle Example
 
-```yaml
-jobs:
-  run-example-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@main
-    with:
-      bundle_path: bundles/example-agent
-      agent_slug: example-agent
-      pipeline_slug: example-pipeline
-      flow_slug: example-manual-flow
-      target_repo: example-org/example-repo
-      prompt: ${{ inputs.prompt }}
-      success_requires_pr: true
-      engine_data_outputs: '{"example_pr_url":"metadata.engine_data.example_agent.pr_url"}'
-      comment_pr_summary: true
-      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
-    secrets: inherit
-```
-
-Use this shape only when maintaining an existing Data Machine bundle caller. New
-callers should start from the `runtime-agent-full-run.yml` example above.
-
-## World Creator agent example
-
-Workflows that need additional WordPress sandbox configuration can pass
-JSON-string inputs through to the runner config without changing the reusable
-workflow. This shape covers the `world-of-wordpress` migration that needs MDI
-primary mode, a `db.php` drop-in mount, pre-run bootstrap work, daily memory,
-and extra ability assertions.
+Workflows that need a Data Machine runtime can pass the runtime profile,
+dependencies, WordPress sandbox configuration, pre-run bootstrap work, and extra
+ability assertions through generic full-run inputs.
 
 ```yaml
 jobs:
   run-world-creator:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      bundle_path: bundles/world-creator
-      agent_slug: world-creator
-      pipeline_slug: world-creator-pipeline
-      flow_slug: world-creator-day-cycle-flow
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: datamachine-agent-ci
+      runtime_profiles: >-
+        {"datamachine-agent-ci":{"id":"datamachine-agent-ci","runtime_task_ability":"datamachine/run-agent-bundle","runtime_bundle_ability":"datamachine/run-agent-bundle","ability_requirements":["datamachine/run-agent-bundle"]}}
+      runtime_dependencies: '["Automattic/agents-api@main","Extra-Chill/data-machine@main","Extra-Chill/data-machine-code@main"]'
+      workload_id: world-creator-day-cycle-flow
+      workload_label: Run world-creator Data Machine agent
       target_repo: chubes4/world-of-wordpress
       prompt: ${{ inputs.prompt }}
+      runtime_execution: '{"kind":"bundle","source":"bundles/world-creator"}'
       validation_dependencies: chubes4/world-of-wordpress@main,chubes4/markdown-database-integration@main
-      agent_runtime: wp-codebox
-      agent_runtime_ref: main
       runtime_wordpress_version: beta
       max_turns: 16
       step_budget: 20
@@ -226,8 +171,8 @@ jobs:
         [
           { "type": "php", "file": "world-creator-bootstrap.php" }
         ]
-      daily_memory_enabled: true
-      extra_required_abilities: |
+      runtime_config: '{"daily_memory_enabled":true}'
+      required_abilities: |
         ["datamachine/create-or-update-github-file", "datamachine/daily-memory-write"]
       success_requires_pr: true
       runtime_output_projections: '{"world_creator_pr_url":"metadata.engine_data.world_creator.pr_url"}'
@@ -237,21 +182,19 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `agent_runtime`. Today the only supported value is `wp-codebox`, and the workflow checks out/builds `Automattic/wp-codebox` for that runtime.
-- `agent_runtime_ref` controls the selected runtime ref.
-- `execution_kind` defaults to `agent_bundle`; when `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
+- Agent CI runs through the selected `runtime_provider`. Today the supported value is `wp-codebox`.
+- `runtime_ref` controls the selected runtime ref.
+- `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
-- `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result. `output_mappings` and `engine_data_outputs` remain legacy aliases for existing callers.
-- Generic `runtime-agent-ci.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
+- `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
+- Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
 - `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the default Data Machine stack.
-- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Data Machine Agent CI policy lives in this reusable workflow and runner adapter, not in the generic WP Codebox provider manifest.
-- `include_agent_runtime_dependencies` defaults to `true` and checks out the Data Machine Agent CI stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin. The runner adapter forwards those paths to WP Codebox as explicit runtime component requirements.
-- `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref`, and `openai_provider_ref` control runtime dependency refs. `openai_provider_ref` defaults to `trunk` for the built-in OpenAI preset.
+- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
+- `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to WP Codebox as runtime component requirements.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
-- `bundle_path` is resolved relative to the consumer checkout for bundle runs. It is optional for `execution_kind: runtime_task`.
-- `bundle_repo`, `bundle_ref`, and `bundle_path_in_repo` let a consumer run against a bundle stored in another repository. The runner clones that repository before mounting the bundle into the WordPress substrate.
+- Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
 - `require_homeboy_app_token` fails before agent setup when Homeboy App credentials are missing. Enable it for central, cross-repo, and private-target runs; leave it false for same-repo consumers that intentionally use `github.token` fallback.
 - `allowed_repos` is a JSON array of `OWNER/REPO` entries exposed to the injected GitHub profile. It defaults to `[target_repo]`.
@@ -261,7 +204,7 @@ jobs:
 - `extra_wp_config_defines` must be a JSON object and is merged into the runner config `wp_config_defines`.
 - `runtime_mounts` adds selected-runtime mounts. It must be a JSON array.
 - `runtime_overlays` forwards runtime overlay entries to the Codebox runtime profile payload. It must be a JSON array; WP Codebox owns field-level overlay schema validation.
-- `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
+- `workload_run_before`, `workload_run_after`, and `required_abilities` must be JSON arrays.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. `tool_recorders` remains a legacy alias for existing Data Machine bundle callers that also need forced parameters.
@@ -271,7 +214,7 @@ jobs:
 - `verification_commands` and `drift_checks` run through the WP Codebox runner workspace command API, so remote runner workspaces do not require Homeboy to know backend-local paths.
 - If runner-owned workspace publication is unavailable or fails, the run fails as `write_without_pr`; Homeboy does not compose alternate PR fallback calls.
 
-## External bundle and tool recording example
+## External Bundle And Tool Recording Example
 
 Consumers such as `docs-agent` can keep the agent bundle in one repository while
 running it against another repository. The reusable workflow handles the bundle
@@ -280,20 +223,22 @@ checkout and passes tool recorder config to the WordPress runner.
 ```yaml
 jobs:
   run-docs-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      bundle_path: bundles/docs-agent
-      bundle_repo: https://github.com/Automattic/docs-agent.git
-      bundle_ref: main
-      bundle_path_in_repo: bundles/docs-agent
-      agent_slug: docs-agent
-      pipeline_slug: docs-agent-pipeline
-      flow_slug: docs-agent-flow
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: datamachine-agent-ci
+      runtime_profiles: >-
+        {"datamachine-agent-ci":{"id":"datamachine-agent-ci","runtime_task_ability":"datamachine/run-agent-bundle","runtime_bundle_ability":"datamachine/run-agent-bundle","ability_requirements":["datamachine/run-agent-bundle"]}}
+      runtime_dependencies: '["Automattic/agents-api@main","Extra-Chill/data-machine@main","Extra-Chill/data-machine-code@main"]'
+      runtime_execution: '{"kind":"bundle","source":".ci/docs-agent/bundles/docs-agent"}'
+      workload_id: docs-agent-flow
+      workload_label: Run docs-agent Data Machine agent
       target_repo: Automattic/agents-api
+      validation_dependencies: Automattic/docs-agent@main
       app_token_repos: Automattic/agents-api,Automattic/docs-agent
       require_homeboy_app_token: true
       allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
-      engine_key: docs_agent
       tool_results_key: github_tool_results
       evidence_projections: |
         [
@@ -310,25 +255,24 @@ jobs:
     secrets: inherit
 ```
 
-Use `evidence_projections` when a consumer currently has a custom bootstrap file
-whose only job is to copy selected provider operation results into stable runner
-outputs. Keep `tool_recorders` only when a legacy Data Machine bundle also needs
-forced tool parameters.
+Use `evidence_projections` when a consumer needs selected provider operation
+results copied into stable runner outputs.
 
 ## Provider plugin examples
 
-OpenAI remains the compatibility preset. Existing callers can keep omitting
-`provider_plugin` and pass `OPENAI_API_KEY` through inherited secrets:
+OpenAI is the default provider. Callers can omit `provider_plugin` and pass
+`OPENAI_API_KEY` through inherited secrets:
 
 ```yaml
 jobs:
   run-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      bundle_path: bundles/example-agent
-      agent_slug: example-agent
-      pipeline_slug: example-pipeline
-      flow_slug: example-flow
+      runtime_provider: wp-codebox
+      runtime_profile: example-agent
+      runtime_profiles: >-
+        {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
+      workload_id: example-flow
       target_repo: Extra-Chill/example
       provider: openai
       model: gpt-5.5
@@ -342,12 +286,13 @@ secret env names, then pass that secret in the reusable workflow call:
 ```yaml
 jobs:
   run-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@v3
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      bundle_path: bundles/example-agent
-      agent_slug: example-agent
-      pipeline_slug: example-pipeline
-      flow_slug: example-flow
+      runtime_provider: wp-codebox
+      runtime_profile: example-agent
+      runtime_profiles: >-
+        {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
+      workload_id: example-flow
       target_repo: Extra-Chill/example
       provider: example-provider
       model: example-model

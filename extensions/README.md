@@ -165,9 +165,9 @@ jobs:
       expected_artifacts: '["processed_packet"]'
 ```
 
-`.github/workflows/datamachine-agent-ci.yml` remains available only as a
-compatibility wrapper for existing Data Machine bundle consumers. New workflows
-should call `runtime-agent-full-run.yml` directly.
+Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
+agent runs. The former Data Machine-specific reusable workflow wrapper has been
+removed after active default-branch consumers migrated to the generic workflow.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact

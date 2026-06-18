@@ -46,22 +46,22 @@ WordPress APIs while the host stays small and repeatable:
 
 ## Reusable workflow
 
-Use `.github/workflows/datamachine-agent-ci.yml` from a consumer workflow:
+Use `.github/workflows/runtime-agent-full-run.yml` from a consumer workflow:
 
 ```yaml
 jobs:
   run-example-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/datamachine-agent-ci.yml@main
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@main
     with:
-      bundle_path: bundles/example-agent
-      agent_slug: example-agent
-      pipeline_slug: example-pipeline
-      flow_slug: example-manual-flow
+      runtime_provider: wp-codebox
+      runtime_profile: example-agent
+      runtime_profiles: >-
+        {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
+      workload_id: example-manual-flow
       target_repo: example-org/example-repo
       prompt: ${{ inputs.prompt }}
       success_requires_pr: true
-      engine_data_outputs: '{"example_pr_url":"metadata.engine_data.example_agent.pr_url"}'
-      comment_pr_summary: true
+      runtime_output_projections: '{"example_pr_url":"metadata.engine_data.example_agent.pr_url"}'
       transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
@@ -106,8 +106,8 @@ The runner converts the agent config into a single WP Codebox sandbox run:
 - `component_path` points at the consumer checkout.
 - `bundle_path` points at the Data Machine agent bundle.
 - The workflow checks out and builds WP Codebox whenever `run_agent` is true.
-- `include_agent_runtime_dependencies` mounts the standard Data Machine agent
-  runtime before consumer-supplied `validation_dependencies`.
+- `runtime_dependencies` mounts the caller-declared runtime stack before
+  consumer-supplied `validation_dependencies`.
 - `wp_codebox_mounts` adds fixture files such as the CI driver plugin.
 - `bench_env` forwards credentials and the serialized runner config into the
   sandbox.
@@ -360,20 +360,21 @@ Example global settings payload:
 
 ## Runner config surface
 
-Most consumers should use `.github/workflows/datamachine-agent-ci.yml` rather than
-building runner config directly. The reusable workflow forwards these generic
-knobs to `homeboy-codebox-agent-task-executor.cjs` through the quarantined
-`run-datamachine-agent-task.cjs` config adapter:
+Most consumers should use `.github/workflows/runtime-agent-full-run.yml` rather
+than building runner config directly. The reusable workflow forwards generic
+runtime inputs to `homeboy-codebox-agent-task-executor.cjs` through
+`run-runtime-agent-task.cjs`:
 
-- Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
-- Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
+- Runtime execution: `runtime_execution`, `runtime_task`, `ability_request`, `ability_input`.
+- Workload selection: `workload_id`, `workload_label`, `prompt`, `provider`, `model`.
+- Runtime stack: `runtime_provider`, `runtime_ref`, `runtime_profile`, `runtime_profiles`, `runtime_dependencies`, `runtime_components`.
 - Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
-- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `wordpress_runtime_version`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`.
+- WordPress runtime: `runtime_wordpress_version`, `extra_wp_config_defines`, `runtime_mounts`, `runtime_overlays`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `require_homeboy_app_token`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
-- Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
+- Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `runtime_output_projections`, `evidence_projections`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.
 - Eval projection: `wp_gym_benchmark_mode` turns missing wp-gym replay/evidence references into errors.
-- Extension points: `extra_required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`.
+- Extension points: `required_abilities`, `ability_tools`, `tool_recorders`, `enable_terminal_actions`, `wp_cli_tool_name`, `pipeline_step_patches`, `flow_step_patches`, `runner_workspace`.
 
 `bundle_repo` is for cross-repo consumers. The workflow clones the bundle
 repository, points `bundle_path` at the cloned bundle inside WP Codebox, and adds
@@ -384,7 +385,7 @@ maintaining a bespoke runner script.
 `tool_recorders` are the main migration path for custom bootstrap files that only
 wrap GitHub tools. A recorder can attach forced parameters, capture selected input
 or output fields, and write them under a stable `metadata.engine_data` key for
-later `engine_data_outputs` projection.
+later `runtime_output_projections` projection.
 
 `runner_workspace.expose_to_agent` defaults to `true` for backwards
 compatibility. Set it to `false` for task-sandbox runs where the agent should see
@@ -526,7 +527,7 @@ The reusable workflow exposes stable outputs:
 - `engine_data_json`, a caller-declared projection of agent engine data.
 
 Use `success_requires_pr: true` when the task is only successful if the agent
-opens or reuses a pull request. Use `engine_data_outputs` for additional
+opens or reuses a pull request. Use `runtime_output_projections` for additional
 consumer-specific assertions such as a generated PR URL, published artifact path,
 or scenario result field.
 
@@ -636,7 +637,7 @@ and environment policy checks, and the `forbidden_mutations` /
 
 ## Related files
 
-- `.github/workflows/datamachine-agent-ci.yml` is the reusable workflow.
+- `.github/workflows/runtime-agent-full-run.yml` is the reusable workflow.
 - `.github/workflows/README.md` documents workflow inputs and examples.
 - `agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs`
   is the generic Homeboy agent-task provider entry point.
