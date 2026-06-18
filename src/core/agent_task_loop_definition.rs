@@ -129,16 +129,19 @@ fn compile_repo_loop_spec(spec: AgentTaskRepoLoopSpec) -> Result<AgentTaskPlan> 
         HashMap::new();
 
     for workflow in &spec.workflows {
-        let request = repo_loop_workflow_request(&spec, workflow)?;
-        let dependencies = repo_loop_workflow_output_dependencies(&spec, workflow);
-        if !dependencies.depends_on.is_empty() || !dependencies.bindings.is_empty() {
-            output_dependencies.insert(workflow.workflow_id.clone(), dependencies);
+        for entity_id in repo_loop_workflow_entity_ids(workflow) {
+            let request = repo_loop_workflow_request(&spec, workflow, entity_id)?;
+            let task_id = request.task_id.clone();
+            let dependencies = repo_loop_workflow_output_dependencies(&spec, workflow, entity_id);
+            if !dependencies.depends_on.is_empty() || !dependencies.bindings.is_empty() {
+                output_dependencies.insert(task_id.clone(), dependencies);
+            }
+            let outputs = repo_loop_workflow_artifact_outputs(&spec, workflow);
+            if !outputs.is_empty() {
+                artifact_outputs.insert(task_id, outputs);
+            }
+            tasks.push(request);
         }
-        let outputs = repo_loop_workflow_artifact_outputs(&spec, workflow);
-        if !outputs.is_empty() {
-            artifact_outputs.insert(workflow.workflow_id.clone(), outputs);
-        }
-        tasks.push(request);
     }
 
     let mut plan = AgentTaskPlan::new(spec.loop_id.clone(), tasks);
@@ -184,6 +187,7 @@ fn validate_repo_loop_spec_for_agent_task_plan(spec: &AgentTaskRepoLoopSpec) -> 
     }
 
     let mut workflow_ids = HashSet::new();
+    let mut task_ids = HashSet::new();
     for workflow in &spec.workflows {
         if workflow.workflow_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -200,6 +204,27 @@ fn validate_repo_loop_spec_for_agent_task_plan(spec: &AgentTaskRepoLoopSpec) -> 
                 Some(spec.loop_id.clone()),
                 None,
             ));
+        }
+        for entity_id in repo_loop_workflow_entity_ids(workflow) {
+            if entity_id
+                .is_some_and(|entity_id| sanitize_repo_loop_task_id_segment(entity_id).is_empty())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "workflows[].entity_ids",
+                    "repo loop spec entity_id must contain at least one task-id-safe character",
+                    Some(workflow.workflow_id.clone()),
+                    entity_id.map(|entity_id| vec![entity_id.to_string()]),
+                ));
+            }
+            let task_id = repo_loop_task_id(workflow, entity_id);
+            if !task_ids.insert(task_id.clone()) {
+                return Err(Error::validation_invalid_argument(
+                    "workflows[].entity_ids",
+                    format!("duplicate expanded task_id {task_id}"),
+                    Some(workflow.workflow_id.clone()),
+                    None,
+                ));
+            }
         }
         if workflow
             .prompt
@@ -243,19 +268,54 @@ fn unsupported_repo_loop_spec_fields(spec: &AgentTaskRepoLoopSpec) -> Vec<String
             .push("initial_event: event evaluation belongs to agent-task controller".to_string());
     }
     for workflow in &spec.workflows {
-        if !workflow.entity_ids.is_empty() {
+        if !workflow.gates.is_empty() {
             unsupported.push(format!(
-                "workflows[{}].entity_ids: fan-out expansion needs explicit entity materialization before compile-loop",
+                "workflows[{}].gates: gate execution belongs to the controller path; compile-loop only supports executable agent tasks",
                 workflow.workflow_id
             ));
+        }
+        if !workflow.metrics.is_empty() {
+            unsupported.push(format!(
+                "workflows[{}].metrics: metric evaluation belongs to the controller path; compile-loop only supports executable agent tasks",
+                workflow.workflow_id
+            ));
+        }
+        for artifact_id in workflow.consumes.iter().chain(workflow.dependencies.iter()) {
+            let fanout_producers: Vec<String> =
+                repo_loop_artifact_producers(spec, workflow, artifact_id)
+                    .into_iter()
+                    .filter(|producer| !producer.entity_ids.is_empty())
+                    .map(|producer| producer.workflow_id.clone())
+                    .collect();
+            if workflow.entity_ids.is_empty() && !fanout_producers.is_empty() {
+                unsupported.push(format!(
+                    "workflows[{}].consumes: join over fan-out artifact '{}' from workflows [{}] requires the controller path",
+                    workflow.workflow_id,
+                    artifact_id,
+                    fanout_producers.join(", ")
+                ));
+            }
         }
     }
     unsupported
 }
 
+fn repo_loop_workflow_entity_ids(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Vec<Option<&str>> {
+    if workflow.entity_ids.is_empty() {
+        vec![None]
+    } else {
+        workflow
+            .entity_ids
+            .iter()
+            .map(|entity_id| Some(entity_id.as_str()))
+            .collect()
+    }
+}
+
 fn repo_loop_workflow_request(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
+    entity_id: Option<&str>,
 ) -> Result<AgentTaskRequest> {
     let defaults = spec
         .metadata
@@ -290,9 +350,12 @@ fn repo_loop_workflow_request(
         .cloned()
         .unwrap_or(Value::Null);
 
+    let task_id = repo_loop_task_id(workflow, entity_id);
+    let inputs = repo_loop_workflow_inputs(workflow, entity_id);
+
     Ok(AgentTaskRequest {
         schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-        task_id: workflow.workflow_id.clone(),
+        task_id,
         group_key: optional_metadata_string(&spec.metadata, "group_key"),
         parent_plan_id: Some(spec.loop_id.clone()),
         executor: AgentTaskExecutor {
@@ -305,7 +368,7 @@ fn repo_loop_workflow_request(
             config,
         },
         instructions: repo_loop_workflow_instructions(workflow),
-        inputs: workflow.inputs.clone(),
+        inputs,
         source_refs: Vec::new(),
         workspace: repo_loop_workspace(spec),
         component_contracts: Vec::new(),
@@ -322,8 +385,69 @@ fn repo_loop_workflow_request(
             "abilities": workflow.abilities,
             "consumes": workflow.consumes,
             "emits": workflow.emits,
+            "entity_id": entity_id,
         }),
     })
+}
+
+fn repo_loop_task_id(workflow: &AgentTaskRepoLoopSpecWorkflow, entity_id: Option<&str>) -> String {
+    match entity_id {
+        Some(entity_id) => format!(
+            "{}__{}",
+            workflow.workflow_id,
+            sanitize_repo_loop_task_id_segment(entity_id)
+        ),
+        None => workflow.workflow_id.clone(),
+    }
+}
+
+fn sanitize_repo_loop_task_id_segment(value: &str) -> String {
+    let mut segment = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while segment.contains("--") {
+        segment = segment.replace("--", "-");
+    }
+    segment.trim_matches('-').to_string()
+}
+
+fn repo_loop_workflow_inputs(
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+    entity_id: Option<&str>,
+) -> Value {
+    let Some(entity_id) = entity_id else {
+        return workflow.inputs.clone();
+    };
+    let mut inputs = match workflow.inputs.clone() {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("workflow_inputs".to_string(), other);
+            map
+        }
+    };
+    let mut repo_loop = inputs
+        .remove("repo_loop")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    repo_loop.insert(
+        "entity_id".to_string(),
+        Value::String(entity_id.to_string()),
+    );
+    repo_loop.insert(
+        "workflow_id".to_string(),
+        Value::String(workflow.workflow_id.clone()),
+    );
+    inputs.insert("repo_loop".to_string(), Value::Object(repo_loop));
+    Value::Object(inputs)
 }
 
 fn repo_loop_workspace(spec: &AgentTaskRepoLoopSpec) -> AgentTaskWorkspace {
@@ -436,18 +560,21 @@ fn repo_loop_workflow_artifact_outputs(
 fn repo_loop_workflow_output_dependencies(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
+    entity_id: Option<&str>,
 ) -> AgentTaskOutputDependencies {
     let mut depends_on = Vec::new();
     let mut bindings = HashMap::new();
     for artifact_id in workflow.consumes.iter().chain(workflow.dependencies.iter()) {
-        for producer in repo_loop_artifact_producers(spec, workflow, artifact_id) {
-            if !depends_on.contains(&producer.workflow_id) {
-                depends_on.push(producer.workflow_id.clone());
+        for (_producer, producer_task_id) in
+            repo_loop_artifact_producer_task_ids(spec, workflow, artifact_id, entity_id)
+        {
+            if !depends_on.contains(&producer_task_id) {
+                depends_on.push(producer_task_id.clone());
             }
             bindings
                 .entry(artifact_id.clone())
                 .or_insert(AgentTaskOutputBinding {
-                    task_id: producer.workflow_id.clone(),
+                    task_id: producer_task_id,
                     path: format!("/typed_artifacts/{artifact_id}"),
                     artifact: repo_loop_artifact(spec, artifact_id).map(|artifact| {
                         crate::core::agent_task_schedule::AgentTaskArtifactBinding {
@@ -466,6 +593,32 @@ fn repo_loop_workflow_output_dependencies(
         depends_on,
         bindings,
     }
+}
+
+fn repo_loop_artifact_producer_task_ids<'a>(
+    spec: &'a AgentTaskRepoLoopSpec,
+    consumer: &AgentTaskRepoLoopSpecWorkflow,
+    artifact_id: &str,
+    entity_id: Option<&str>,
+) -> Vec<(&'a AgentTaskRepoLoopSpecWorkflow, String)> {
+    repo_loop_artifact_producers(spec, consumer, artifact_id)
+        .into_iter()
+        .flat_map(|producer| {
+            if producer.entity_ids.is_empty() {
+                vec![(producer, repo_loop_task_id(producer, None))]
+            } else if let Some(entity_id) = entity_id {
+                producer
+                    .entity_ids
+                    .iter()
+                    .any(|producer_entity_id| producer_entity_id == entity_id)
+                    .then(|| (producer, repo_loop_task_id(producer, Some(entity_id))))
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
 }
 
 fn repo_loop_artifact<'a>(
@@ -662,6 +815,119 @@ mod tests {
             plan.artifact_outputs["idea"][0].kind,
             "example/ConceptPacket/v1"
         );
+    }
+
+    #[test]
+    fn compiles_repo_loop_entity_fanout_into_concrete_agent_tasks() {
+        let spec: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/agent_task_loop/wpsg_controller_fanout.json"
+        ))
+        .expect("fixture parses");
+
+        let plan = compile_loop_spec_value(spec).expect("fanout repo loop spec compiles");
+
+        let task_ids: Vec<&str> = plan
+            .tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect();
+        assert_eq!(
+            task_ids,
+            vec![
+                "plan-page__home",
+                "plan-page__about",
+                "build-page__home",
+                "build-page__about"
+            ]
+        );
+        assert_eq!(
+            plan.tasks[0].inputs["repo_loop"],
+            json!({ "entity_id": "home", "workflow_id": "plan-page" })
+        );
+        assert_eq!(
+            plan.output_dependencies["build-page__home"].depends_on,
+            vec!["plan-page__home"]
+        );
+        assert_eq!(
+            plan.output_dependencies["build-page__home"].bindings["page_spec"].task_id,
+            "plan-page__home"
+        );
+        assert_eq!(
+            plan.output_dependencies["build-page__about"].depends_on,
+            vec!["plan-page__about"]
+        );
+        assert_eq!(
+            plan.artifact_outputs["plan-page__home"][0].name,
+            "page_spec"
+        );
+        assert_eq!(
+            plan.artifact_outputs["build-page__about"][0].name,
+            "page_blocks"
+        );
+    }
+
+    #[test]
+    fn rejects_repo_loop_join_over_fanout_with_controller_diagnostic() {
+        let error = compile_loop_spec_value(json!({
+            "loop_id": "wpsg/join",
+            "artifacts": {
+                "page_blocks": { "kind": "wpsg/PageBlocks/v1" }
+            },
+            "workflows": [
+                {
+                    "workflow_id": "build-page",
+                    "prompt": "Build blocks.",
+                    "entity_ids": ["home", "about"],
+                    "emits": ["page_blocks"]
+                },
+                {
+                    "workflow_id": "assemble-site",
+                    "prompt": "Assemble the site.",
+                    "consumes": ["page_blocks"]
+                }
+            ]
+        }))
+        .expect_err("join over fanout requires controller path");
+
+        assert!(error.message.contains("controller-only sections"));
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("diagnostics are tried values")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tried.contains("join over fan-out artifact 'page_blocks'"));
+        assert!(tried.contains("requires the controller path"));
+    }
+
+    #[test]
+    fn rejects_repo_loop_gates_with_controller_diagnostic() {
+        let error = compile_loop_spec_value(json!({
+            "loop_id": "wpsg/gated",
+            "gates": {
+                "visual-parity": { "description": "Check visual parity" }
+            },
+            "workflows": [
+                {
+                    "workflow_id": "build-page",
+                    "prompt": "Build blocks.",
+                    "gates": ["visual-parity"]
+                }
+            ]
+        }))
+        .expect_err("gates require controller path");
+
+        assert!(error.message.contains("controller-only sections"));
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("diagnostics are tried values")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tried.contains("workflows[build-page].gates"));
+        assert!(tried.contains("gate execution belongs to the controller path"));
     }
 
     #[test]
