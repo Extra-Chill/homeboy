@@ -4,13 +4,14 @@
 use std::process::Command;
 
 use super::super::agent_task_dispatch::DispatchArgs;
+use super::args::AgentTaskControllerApplyEventArgs;
 use super::args::{
     AgentTaskLoopArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 use super::controller::{
-    apply_from_spec_dispatch_defaults, apply_from_spec_dispatch_defaults_with_cwd,
-    controller_run_action_with_executor, controller_run_next_with_executor,
-    dispatch_args_from_controller_request,
+    apply_controller_event, apply_from_spec_dispatch_defaults,
+    apply_from_spec_dispatch_defaults_with_cwd, controller_run_action_with_executor,
+    controller_run_next_with_executor, dispatch_args_from_controller_request,
 };
 use super::run::{
     retry, run_loaded_plan, run_loop_with_executor, run_next_with_executor,
@@ -471,6 +472,42 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
         plan.metadata["workspace_root"].as_str(),
         Some(repo_path.as_str())
     );
+}
+
+#[test]
+fn controller_events_command_applies_generic_event() {
+    with_isolated_home(|_| {
+        agent_task_controller_service::init(
+            homeboy::core::agent_tasks::controller_service::ControllerInitRequest {
+                loop_id: "controller-events-cli".to_string(),
+                phase: "init".to_string(),
+                config_version: "v1".to_string(),
+            },
+        )
+        .expect("controller initialized");
+
+        let (value, status) = apply_controller_event(AgentTaskControllerApplyEventArgs {
+            loop_id: "controller-events-cli".to_string(),
+            event_type: "task.completed".to_string(),
+            event_id: Some("event-1".to_string()),
+            event_key: Some("task#1".to_string()),
+            entity_id: Some("entity-1".to_string()),
+            payload: Some(r#"{"status":"ok"}"#.to_string()),
+        })
+        .expect("event applied");
+
+        assert_eq!(status, 0);
+        assert_eq!(
+            value["schema"],
+            homeboy::core::agent_tasks::controller_service::APPLY_EVENT_RESULT_SCHEMA
+        );
+        assert_eq!(
+            value["controller"]["history"][0]["event_type"],
+            "task.completed"
+        );
+        assert_eq!(value["controller"]["history"][0]["entity_id"], "entity-1");
+        assert_eq!(value["controller"]["history"][0]["payload"]["status"], "ok");
+    });
 }
 
 #[test]

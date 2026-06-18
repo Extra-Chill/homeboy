@@ -14,6 +14,8 @@ pub enum AgentTaskControllerCommand {
     Status(AgentTaskControllerStatusArgs),
     /// List durable loop controller records.
     List,
+    /// Apply a generic external controller event.
+    Events(AgentTaskControllerApplyEventArgs),
     /// Apply an external event and resume matching waits.
     ApplyEvent(AgentTaskControllerApplyEventArgs),
     /// Claim and execute the next pending controller action.

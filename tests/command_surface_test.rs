@@ -54,11 +54,34 @@ fn includes_second_level_subcommands() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+    assert!(surface.contains_path(&["agent-task", "controller", "events"]));
     assert!(surface.contains_path(&["agent-task", "auth", "status"]));
     assert!(surface.contains_path(&["runner", "job", "logs"]));
     assert!(surface.contains_path(&["tunnel", "preview-ingress", "route"]));
     assert!(surface.contains_path(&["tunnel", "preview-ingress", "list"]));
     assert!(surface.contains_path(&["tunnel", "preview-ingress", "status"]));
+}
+
+#[test]
+fn agent_task_controller_events_command_parses() {
+    Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "controller",
+        "events",
+        "loop-1",
+        "--event-type",
+        "task.completed",
+        "--event-id",
+        "event-1",
+        "--event-key",
+        "task#1",
+        "--entity-id",
+        "entity-1",
+        "--payload",
+        r#"{"status":"ok"}"#,
+    ])
+    .expect("agent-task controller events should parse as the generic event primitive");
 }
 
 #[test]
