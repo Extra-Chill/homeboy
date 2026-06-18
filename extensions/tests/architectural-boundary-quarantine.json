@@ -1,0 +1,17 @@
+{
+  "agent-runtimes/wp-codebox/lib/codebox-agent-task-executor.js": "WP Codebox generic executor still carries Data Machine host-tool-policy compatibility env until runtime callers consume the generic Homeboy policy contract directly.",
+  "agent-runtimes/wp-codebox/scripts/agent/homeboy-wp-codebox-task-runner.cjs": "WP Codebox task runner still carries legacy Data Machine component and bundle compatibility while callers migrate to generic runtime profiles.",
+  "datamachine-agent-ci/index.js": "Data Machine Agent CI compatibility package entrypoint; quarantine until callers migrate to runtime-agent-ci.",
+  "datamachine-agent-ci/lib/datamachine-agent-ci-plan.js": "Data Machine Agent CI adapter constants and option mapping around generic runtime-agent-ci primitives.",
+  ".github/scripts/datamachine-agent-ci/artifacts-and-comments.cjs": "Reusable Data Machine Agent CI workflow comment and artifact adapter script.",
+  ".github/scripts/datamachine-agent-ci/auth.cjs": "Reusable Data Machine Agent CI workflow auth reporting adapter script.",
+  ".github/scripts/datamachine-agent-ci/build-runner-config.cjs": "Reusable Data Machine Agent CI workflow config adapter that maps legacy inputs to generic runtime-agent-ci config.",
+  ".github/scripts/datamachine-agent-ci/materialize-dependencies.cjs": "Reusable Data Machine Agent CI workflow dependency adapter for the legacy Data Machine runtime stack.",
+  ".github/workflows/datamachine-agent-ci-self-smoke.yml": "Self-smoke workflow for the quarantined Data Machine Agent CI reusable workflow.",
+  ".github/workflows/datamachine-agent-ci.yml": "Quarantined reusable Data Machine Agent CI workflow kept while callers migrate to generic runtime-agent-ci.",
+  "wordpress/lib/datamachine-agent-ci-codebox-adapter.js": "WordPress Codebox adapter shim that injects the Data Machine Agent CI runtime profile.",
+  "wordpress/lib/datamachine-agent-ci-plan.js": "WordPress package compatibility wrapper around the quarantined Data Machine Agent CI adapter.",
+  "wordpress/scripts/agent/build-replay-bundle.js": "Replay bundle projection keeps Data Machine provenance fields for legacy agent-ci evidence bundles.",
+  "wordpress/scripts/agent/project-wpgym-eval-row.js": "WP Gym eval row projection keeps Data Machine provenance fields from legacy agent-ci evidence bundles.",
+  "wordpress/scripts/agent/run-datamachine-agent-task.cjs": "WordPress runner entrypoint for the quarantined Data Machine Agent CI workflow."
+}
