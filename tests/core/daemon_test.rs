@@ -314,7 +314,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
             "runner_id": "homeboy-lab",
             "project_id": "extrachill",
             "command": ["homeboy", "test", "data-machine"],
-            "cwd": "/home/chubes/Developer/data-machine"
+            "cwd": "/home/user/Developer/data-machine"
         })),
         &store,
     );
@@ -413,7 +413,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
 fn routes_remote_runner_session_registration() {
     let _home = HomeGuard::new();
     crate::core::runner::create(
-        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/chubes/Developer"}"#,
+        r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/user/Developer"}"#,
         false,
     )
     .expect("create runner");
@@ -739,7 +739,7 @@ fn exec_capture_patch_records_remote_delta_artifact() {
 fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatch() {
     let _home = HomeGuard::new();
     crate::core::server::create(
-        r#"{"id":"lab-server","host":"192.0.2.10","user":"chubes"}"#,
+        r#"{"id":"lab-server","host":"192.0.2.10","user":"user"}"#,
         false,
     )
     .expect("create server");

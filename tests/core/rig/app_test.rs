@@ -49,7 +49,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
         app_launcher: Some(AppLauncherSpec {
             platform: AppLauncherPlatform::Macos,
             wrapper_display_name: "Studio (Dev)".to_string(),
-            wrapper_bundle_id: "com.chubes.studio-dev".to_string(),
+            wrapper_bundle_id: "com.example.studio-dev".to_string(),
             target_app: "${components.studio.path}/out/Studio.app".to_string(),
             install_dir: Some(install_dir.to_string()),
             preflight: vec![AppLauncherPreflight::RigCheck],
@@ -74,7 +74,7 @@ fn test_app_launcher_spec_parses() {
         "app_launcher": {
             "platform": "macos",
             "wrapper_display_name": "Studio (Dev)",
-            "wrapper_bundle_id": "com.chubes.studio-dev",
+            "wrapper_bundle_id": "com.example.studio-dev",
             "target_app": "${components.studio.path}/out/Studio.app",
             "install_dir": "/tmp/apps",
             "preflight": ["rig:check"],
@@ -85,7 +85,7 @@ fn test_app_launcher_spec_parses() {
     let launcher = spec.app_launcher.expect("launcher");
     assert_eq!(launcher.platform, AppLauncherPlatform::Macos);
     assert_eq!(launcher.wrapper_display_name, "Studio (Dev)");
-    assert_eq!(launcher.wrapper_bundle_id, "com.chubes.studio-dev");
+    assert_eq!(launcher.wrapper_bundle_id, "com.example.studio-dev");
     assert_eq!(launcher.preflight, vec![AppLauncherPreflight::RigCheck]);
 }
 
@@ -97,7 +97,7 @@ fn test_linux_app_launcher_spec_parses() {
         "app_launcher": {
             "platform": "linux",
             "wrapper_display_name": "Studio Dev",
-            "wrapper_bundle_id": "com.chubes.studio-dev",
+            "wrapper_bundle_id": "com.example.studio-dev",
             "target_app": "${components.studio.path}/out/studio",
             "install_dir": "/tmp/apps",
             "preflight": ["rig:check"]
@@ -200,7 +200,7 @@ fn test_install_writes_script_backed_bundle_to_temp_dir() {
     assert!(script.exists(), "launch script written");
     assert!(fs::read_to_string(plist)
         .expect("read plist")
-        .contains("com.chubes.studio-dev"));
+        .contains("com.example.studio-dev"));
     assert!(fs::read_to_string(script)
         .expect("read script")
         .contains("homeboy"));

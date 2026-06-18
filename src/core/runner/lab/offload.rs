@@ -2341,7 +2341,7 @@ mod tests {
     fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
         let source_policy =
             crate::core::runner::source_materialization::SourceMaterializationPolicy {
-                private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+                private_proxied_source_hosts: vec!["github.example.com".to_string()],
             };
         let dir = tempfile::tempdir().expect("temp dir");
         std::process::Command::new("git")
@@ -2354,7 +2354,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "git@github.a8c.com:Automattic/a8c-intelligence.git",
+                "git@github.example.com:example-org/example-repo.git",
             ])
             .current_dir(dir.path())
             .status()
@@ -2389,7 +2389,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "git@github.a8c.com:chubes4/conductor.git",
+                "git@github.example.com:example-org/conductor.git",
             ])
             .current_dir(dir.path())
             .status()
@@ -2734,7 +2734,7 @@ mod tests {
         let snapshot = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
-            local_path: "/Users/chubes/Developer/app".to_string(),
+            local_path: "/Users/user/Developer/app".to_string(),
             remote_path: "/srv/homeboy/_lab_workspaces/app-abc".to_string(),
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot:abc".to_string(),
@@ -2748,7 +2748,7 @@ mod tests {
         let git = RunnerWorkspaceSyncOutput {
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
-            local_path: "/Users/chubes/Developer/dep".to_string(),
+            local_path: "/Users/user/Developer/dep".to_string(),
             remote_path: "/srv/homeboy/_lab_workspaces/dep-def".to_string(),
             sync_mode: RunnerWorkspaceSyncMode::Git,
             snapshot_identity: "abc123".to_string(),
@@ -2773,7 +2773,7 @@ mod tests {
         assert_eq!(metadata["workspaces"][1]["role"], "dependency");
         assert_eq!(metadata["workspaces"][1]["sync_mode"], "git");
         assert_eq!(
-            metadata["local_to_remote"]["/Users/chubes/Developer/dep"],
+            metadata["local_to_remote"]["/Users/user/Developer/dep"],
             "/srv/homeboy/_lab_workspaces/dep-def"
         );
     }
@@ -2783,7 +2783,7 @@ mod tests {
         let mapping = serde_json::json!({
             "schema": LAB_WORKSPACE_MAPPING_SCHEMA,
             "local_to_remote": {
-                "/Users/chubes/Developer/app": "/srv/homeboy/_lab_workspaces/app-abc"
+                "/Users/user/Developer/app": "/srv/homeboy/_lab_workspaces/app-abc"
             },
             "workspaces": []
         });
@@ -2865,7 +2865,7 @@ mod tests {
 
         let err = stale_runner_homeboy_error(
             "homeboy lab",
-            "/home/chubes/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy",
+            "/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy",
             &status,
         );
 
@@ -2877,7 +2877,7 @@ mod tests {
             .contains("Lab offload refused runner `homeboy lab`"));
         assert!(err
             .message
-            .contains("/home/chubes/Developer/_lab_workspaces/homeboy-post-4583-proof"));
+            .contains("/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof"));
         assert!(err.message.contains("Active daemon: homeboy 0.0.0+test"));
         assert!(err
             .message

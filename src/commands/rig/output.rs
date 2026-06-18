@@ -200,7 +200,7 @@ mod tests {
             },
             resources: RigResourcesSpec {
                 exclusive: vec!["studio-runtime".to_string()],
-                paths: vec!["/Users/chubes/Developer/studio".to_string()],
+                paths: vec!["/Users/user/Developer/studio".to_string()],
                 ports: vec![9724],
                 process_patterns: vec!["wordpress-server-child.mjs".to_string()],
             },
@@ -209,7 +209,7 @@ mod tests {
         let json = serde_json::to_string(&output).expect("serialize");
         assert!(json.contains("\"command\":\"rig.show\""));
         assert!(json.contains("\"resources\""));
-        assert!(json.contains("/Users/chubes/Developer/studio"));
+        assert!(json.contains("/Users/user/Developer/studio"));
         assert!(json.contains("studio-runtime"));
         assert!(json.contains("wordpress-server-child.mjs"));
     }

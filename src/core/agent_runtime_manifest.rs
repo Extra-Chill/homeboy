@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(materialization_plan.source_roots[0].id, "wp-codebox");
         assert_eq!(
             materialization_plan.source_roots[0].remote_url.as_deref(),
-            Some("https://github.com/Automattic/wp-codebox.git")
+            Some("https://github.com/example-org/wp-codebox.git")
         );
         assert_eq!(
             materialization_plan.executable_requirements[0].env,

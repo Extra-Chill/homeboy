@@ -141,7 +141,7 @@ pub fn validate_local_path(component: &Component) -> Result<PathBuf> {
         return Err(Error::validation_invalid_argument(
             "local_path",
             format!(
-                "Component '{}' has relative local_path '{}' which cannot be resolved. Use absolute path like /Users/chubes/path/to/component",
+                "Component '{}' has relative local_path '{}' which cannot be resolved. Use absolute path like /Users/user/path/to/component",
                 component.id, component.local_path
             ),
             Some(component.id.clone()),

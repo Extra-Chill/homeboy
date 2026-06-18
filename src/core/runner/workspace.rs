@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn deterministic_path_stays_under_workspace_root() {
-        let path = Path::new("/Users/chubes/Developer/homeboy@fix-runner-workspace-sync");
+        let path = Path::new("/Users/user/Developer/homeboy@fix-runner-workspace-sync");
         let remote = deterministic_remote_path("/srv/homeboy", path, "snapshot:abc");
 
         assert!(
@@ -1237,7 +1237,7 @@ mod tests {
     #[test]
     fn git_sync_for_private_remote_materializes_controller_bundle_checkout() {
         crate::test_support::with_isolated_home(|_| {
-            // Recognize `github.a8c.com` as a private/proxied source host so the
+            // Recognize `github.example.com` as a private/proxied source host so the
             // sync takes the hermetic controller-bundle path
             // (`materialize_git_from_controller_bundle`) instead of attempting a
             // real `git clone` over SSH. This keeps the test fully hermetic: it
@@ -1245,7 +1245,7 @@ mod tests {
             // network. `with_isolated_home` serializes env-mutating tests via a
             // global lock, so setting/clearing this env var here is race-free.
             let prior_private_hosts = std::env::var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS").ok();
-            std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", "github.a8c.com");
+            std::env::set_var("HOMEBOY_PRIVATE_PROXIED_SOURCE_HOSTS", "github.example.com");
 
             let source = tempfile::tempdir().expect("source tempdir");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -1261,7 +1261,7 @@ mod tests {
                     "remote",
                     "add",
                     "origin",
-                    "git@github.a8c.com:chubes4/conductor.git",
+                    "git@github.example.com:example-org/conductor.git",
                 ],
             );
 
@@ -1308,7 +1308,7 @@ mod tests {
             // materialized from the local bundle rather than a network clone.
             assert_eq!(
                 git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-                "git@github.a8c.com:chubes4/conductor.git"
+                "git@github.example.com:example-org/conductor.git"
             );
             assert_eq!(
                 fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
@@ -1714,7 +1714,7 @@ mod tests {
     #[test]
     fn snapshot_archive_command_disables_extended_attributes() {
         let command = snapshot_archive_command(
-            Path::new("/Users/chubes/Developer/wp-site-generator"),
+            Path::new("/Users/user/Developer/wp-site-generator"),
             "ssh runner 'tar -xf -'",
             &[],
         );

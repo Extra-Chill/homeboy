@@ -2199,7 +2199,7 @@ mod tests {
     #[test]
     fn runner_exec_failure_error_promotes_homeboy_stdout_error() {
         let output = failed_runner_exec_output(
-            r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'source': Path does not exist: /Users/chubes/Developer/homeboy-extensions/wordpress","details":{"field":"source"}}}"#,
+            r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'source': Path does not exist: /Users/user/Developer/homeboy-extensions/wordpress","details":{"field":"source"}}}"#,
             "",
         );
 
@@ -3076,7 +3076,7 @@ mod tests {
     fn test_exec_rejects_disconnected_ssh_runner_without_diagnostic_fallback() {
         crate::test_support::with_isolated_home(|_| {
             server::create(
-                r#"{"id":"lab-server","host":"192.168.86.63","user":"chubes"}"#,
+                r#"{"id":"lab-server","host":"192.168.86.63","user":"user"}"#,
                 false,
             )
             .expect("create server");
@@ -3379,7 +3379,7 @@ mod tests {
     fn lab_offload_handoff_hints_render_durable_commands() {
         let hints = lab_offload_handoff_hints(
             "homeboy-lab",
-            Some("/home/chubes/Developer/project with spaces"),
+            Some("/home/user/Developer/project with spaces"),
             "job-123",
             Some("run-456"),
             DaemonJobHandoffState::InFlight,
@@ -3394,7 +3394,7 @@ mod tests {
         assert!(joined.contains("homeboy runs evidence run-456"));
         assert!(joined.contains("homeboy runs artifacts run-456"));
         assert!(joined.contains(
-            "homeboy runner exec homeboy-lab --cwd '/home/chubes/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
+            "homeboy runner exec homeboy-lab --cwd '/home/user/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
         ));
         assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
         assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));

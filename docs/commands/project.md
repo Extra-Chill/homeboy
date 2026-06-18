@@ -285,13 +285,13 @@ an array of attachments with fields such as `id`, `local_path`, and
 You can also do this via `project set` by merging `components`:
 
 ```sh
-homeboy project set <project_id> --json '{"components":[{"id":"chubes-theme","local_path":"/repo/chubes-theme","remote_path":"wp-content/themes/chubes-theme"}]}'
+homeboy project set <project_id> --json '{"components":[{"id":"example-theme","local_path":"/repo/example-theme","remote_path":"wp-content/themes/example-theme"}]}'
 ```
 
 Example:
 
 ```sh
-homeboy project components set chubes --json '[{"id":"chubes-theme","local_path":"/repo/chubes-theme","remote_path":"wp-content/themes/chubes-theme"}]'
+homeboy project components set example-project --json '[{"id":"example-theme","local_path":"/repo/example-theme","remote_path":"wp-content/themes/example-theme"}]'
 ```
 
 JSON output:

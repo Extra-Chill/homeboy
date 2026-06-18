@@ -456,8 +456,8 @@ mod cli_path_tests {
     #[test]
     fn base_path_under_studio_root_matches() {
         assert!(base_path_is_under_studio(
-            Some("/Users/chubes/Studio/my-site"),
-            "/Users/chubes/Studio"
+            Some("/Users/user/Studio/my-site"),
+            "/Users/user/Studio"
         ));
     }
 
@@ -465,31 +465,31 @@ mod cli_path_tests {
     fn base_path_outside_studio_root_does_not_match() {
         assert!(!base_path_is_under_studio(
             Some("/var/www/my-site"),
-            "/Users/chubes/Studio"
+            "/Users/user/Studio"
         ));
     }
 
     #[test]
     fn empty_or_missing_base_path_does_not_match() {
-        assert!(!base_path_is_under_studio(None, "/Users/chubes/Studio"));
-        assert!(!base_path_is_under_studio(Some(""), "/Users/chubes/Studio"));
+        assert!(!base_path_is_under_studio(None, "/Users/user/Studio"));
+        assert!(!base_path_is_under_studio(Some(""), "/Users/user/Studio"));
     }
 
     #[test]
     fn empty_studio_root_does_not_match() {
         assert!(!base_path_is_under_studio(
-            Some("/Users/chubes/Studio/my-site"),
+            Some("/Users/user/Studio/my-site"),
             ""
         ));
     }
 
     #[test]
     fn studio_root_without_trailing_slash_is_normalized() {
-        // Without normalization, "/Users/chubes/Studio" would match
-        // "/Users/chubes/StudioOther/x" — which is wrong.
+        // Without normalization, "/Users/user/Studio" would match
+        // "/Users/user/StudioOther/x" — which is wrong.
         assert!(!base_path_is_under_studio(
-            Some("/Users/chubes/StudioOther/my-site"),
-            "/Users/chubes/Studio"
+            Some("/Users/user/StudioOther/my-site"),
+            "/Users/user/Studio"
         ));
     }
 

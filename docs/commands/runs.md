@@ -98,7 +98,7 @@ The structured output includes stable Homeboy run/artifact IDs and persisted loc
 ```bash
 homeboy runs import --from-gh-actions \
   --component wp-site-generator \
-  --repo chubes4/wp-site-generator \
+  --repo example-org/wp-site-generator \
   --run-id 26731420339 \
   --artifact-glob 'php-transformer-iterator-transcript-*'
 ```

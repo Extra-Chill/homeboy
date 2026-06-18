@@ -141,7 +141,7 @@ fn runner_exec_raw_command_parses_before_trailing_command() {
         "homeboy-lab",
         "--raw",
         "--cwd",
-        "/home/chubes/Developer",
+        "/home/user/Developer",
         "python3",
         "-c",
         "print('hello')",

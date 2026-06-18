@@ -176,9 +176,9 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
             "block-format-bridge",
             "/repo/block-format-bridge",
             vec![DependencyStackEdge {
-                upstream: "chubes4/html-to-blocks-converter".to_string(),
+                upstream: "example-org/html-to-blocks-converter".to_string(),
                 downstream: "block-format-bridge".to_string(),
-                package: "chubes4/html-to-blocks-converter".to_string(),
+                package: "example-org/html-to-blocks-converter".to_string(),
                 update: None,
                 rebuild: false,
                 post_update: vec!["composer build".to_string()],
@@ -191,8 +191,8 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
             vec![DependencyStackEdge {
                 upstream: "block-format-bridge".to_string(),
                 downstream: "static-site-importer".to_string(),
-                package: "chubes4/block-format-bridge".to_string(),
-                update: Some("composer update chubes4/block-format-bridge".to_string()),
+                package: "example-org/block-format-bridge".to_string(),
+                update: Some("composer update example-org/block-format-bridge".to_string()),
                 rebuild: false,
                 post_update: Vec::new(),
                 test: vec!["homeboy test --path . --extension wordpress".to_string()],
@@ -200,23 +200,23 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
         ),
     ];
 
-    let plan = deps::stack_plan_from_components("chubes4/html-to-blocks-converter", &components).unwrap();
+    let plan = deps::stack_plan_from_components("example-org/html-to-blocks-converter", &components).unwrap();
 
     let steps = plan.planned_steps();
 
     assert_eq!(plan.step_count(), 2);
     assert_eq!(plan.step_count(), plan.plan.steps.len());
     assert_eq!(steps[0].downstream, "block-format-bridge");
-    assert_eq!(steps[0].package, "chubes4/html-to-blocks-converter");
+    assert_eq!(steps[0].package, "example-org/html-to-blocks-converter");
     assert_eq!(
         steps[0].update_command,
-        "homeboy deps update chubes4/html-to-blocks-converter --path /repo/block-format-bridge"
+        "homeboy deps update example-org/html-to-blocks-converter --path /repo/block-format-bridge"
     );
     assert_eq!(steps[0].post_update, vec!["composer build"]);
     assert_eq!(steps[1].downstream, "static-site-importer");
     assert_eq!(
         steps[1].update_command,
-        "composer update chubes4/block-format-bridge"
+        "composer update example-org/block-format-bridge"
     );
 }
 

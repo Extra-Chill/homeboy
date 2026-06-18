@@ -604,7 +604,7 @@ mod tests {
             to_worktree: "homeboy@fix-runtime".to_string(),
             target: AgentTaskPromotionTarget {
                 worktree: "homeboy@fix-runtime".to_string(),
-                path: Some("/Users/chubes/Developer/homeboy@fix-runtime".to_string()),
+                path: Some("/Users/user/Developer/homeboy@fix-runtime".to_string()),
                 branch: Some("fix/runtime".to_string()),
                 head: Some("abc123".to_string()),
                 dirty: Some(true),
@@ -619,7 +619,7 @@ mod tests {
             command_evidence: Vec::<AgentTaskPromotionCommandReport>::new(),
             deterministic_gates: Vec::new(),
             gate_results: Vec::new(),
-            provenance: serde_json::json!({ "worktree_path": "/Users/chubes/Developer/homeboy@fix-runtime" }),
+            provenance: serde_json::json!({ "worktree_path": "/Users/user/Developer/homeboy@fix-runtime" }),
             operator_notification: AgentTaskPromotionNotification {
                 status: "completed".to_string(),
                 message: "patch promoted".to_string(),
@@ -637,7 +637,7 @@ mod tests {
         assert!(handoff["finalize_command"]
             .as_str()
             .expect("finalize command")
-            .contains("--path /Users/chubes/Developer/homeboy@fix-runtime"));
+            .contains("--path /Users/user/Developer/homeboy@fix-runtime"));
     }
 
     #[test]

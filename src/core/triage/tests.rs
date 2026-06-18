@@ -16,20 +16,22 @@ mod parsing {
         let mut project_ref = ComponentRef::new(
             "intelligence".to_string(),
             "/tmp/intelligence".to_string(),
-            Some("https://github.com/Automattic/intelligence.git".to_string()),
+            Some("https://github.com/example-org/intelligence.git".to_string()),
             None,
-            "project:intelligence-chubes4".to_string(),
+            "project:intelligence-example-org".to_string(),
         );
-        project_ref.usage.insert("intelligence-chubes4".to_string());
+        project_ref
+            .usage
+            .insert("intelligence-example-org".to_string());
 
         let mut rig_ref = ComponentRef::new(
             "intelligence-dev".to_string(),
             "/tmp/intelligence-dev".to_string(),
-            Some("git@github.com:Automattic/intelligence.git".to_string()),
+            Some("git@github.com:example-org/intelligence.git".to_string()),
             None,
-            "rig:intelligence-chubes4".to_string(),
+            "rig:intelligence-example-org".to_string(),
         );
-        rig_ref.usage.insert("intelligence-chubes4".to_string());
+        rig_ref.usage.insert("intelligence-example-org".to_string());
 
         let component_ref = ComponentRef::new(
             "standalone".to_string(),
@@ -49,13 +51,13 @@ mod parsing {
         assert_eq!(
             intelligence.sources.iter().cloned().collect::<Vec<_>>(),
             vec![
-                "project:intelligence-chubes4".to_string(),
-                "rig:intelligence-chubes4".to_string(),
+                "project:intelligence-example-org".to_string(),
+                "rig:intelligence-example-org".to_string(),
             ]
         );
         assert_eq!(
             intelligence.usage.iter().cloned().collect::<Vec<_>>(),
-            vec!["intelligence-chubes4".to_string()]
+            vec!["intelligence-example-org".to_string()]
         );
     }
 
@@ -109,7 +111,7 @@ mod parsing {
               "url": "https://github.com/o/r/issues/7",
               "state": "OPEN",
               "labels": [{"name":"P1"}],
-              "assignees": [{"login":"chubes4"}],
+              "assignees": [{"login":"example-org"}],
               "updatedAt": "2026-01-01T00:00:00Z"
             }
         ]"#;
@@ -121,7 +123,7 @@ mod parsing {
         let items = parse_issues(raw, cutoff).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].labels, vec!["P1"]);
-        assert_eq!(items[0].assignees, vec!["chubes4"]);
+        assert_eq!(items[0].assignees, vec!["example-org"]);
         assert!(items[0].stale);
         assert!(items[0].linked_prs.is_empty());
     }
@@ -289,7 +291,7 @@ mod pull_requests {
               "statusCheckRollup": [],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "comments": [{"createdAt":"2026-04-27T00:00:00Z","updatedAt":null}],
               "reviews": [{"submittedAt":"2026-04-28T00:00:00Z"}],
               "updatedAt": "2026-04-26T00:00:00Z"
@@ -297,7 +299,7 @@ mod pull_requests {
         ]"#;
         let items = parse_prs(raw, None, false).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].author.as_deref(), Some("chubes4"));
+        assert_eq!(items[0].author.as_deref(), Some("example-org"));
         assert!(items[0].signals.review_decision.is_none());
         assert!(items[0].signals.merge_state.is_none());
         assert!(items[0].check_failures.is_empty());
@@ -351,7 +353,7 @@ mod pull_requests {
               ],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             }
         ]"#;
@@ -392,7 +394,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"FAILURE"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -406,7 +408,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -420,7 +422,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -434,7 +436,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -448,7 +450,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"IN_PROGRESS","conclusion":null}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             }
         ]"#;
@@ -484,7 +486,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -498,7 +500,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             },
             {
@@ -512,7 +514,7 @@ mod pull_requests {
               "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
               "labels": [],
               "assignees": [],
-              "author": {"login":"chubes4"},
+              "author": {"login":"example-org"},
               "updatedAt": "2026-04-26T00:00:00Z"
             }
         ]"#;
@@ -925,7 +927,7 @@ mod targets {
         let component_ref = ComponentRef::new(
             "playground".to_string(),
             "/tmp/playground".to_string(),
-            Some("https://github.com/chubes4/wordpress-playground.git".to_string()),
+            Some("https://github.com/example-org/wordpress-playground.git".to_string()),
             Some("https://github.com/WordPress/wordpress-playground.git".to_string()),
             "component:playground".to_string(),
         );
@@ -939,7 +941,7 @@ mod targets {
             Some("https://github.com/WordPress/wordpress-playground.git")
         );
         let source = resolved.source_repo.expect("source repo differs");
-        assert_eq!(source.owner, "chubes4");
+        assert_eq!(source.owner, "example-org");
         assert_eq!(source.repo, "wordpress-playground");
     }
 
@@ -965,13 +967,13 @@ mod targets {
         let component_ref = ComponentRef::new(
             "playground".to_string(),
             "/tmp/playground".to_string(),
-            Some("https://github.com/chubes4/wordpress-playground.git".to_string()),
+            Some("https://github.com/example-org/wordpress-playground.git".to_string()),
             None,
             "component:playground".to_string(),
         );
 
         let resolved = resolve_repo_with_parent_resolver(&component_ref, |repo| {
-            assert_eq!(repo.owner, "chubes4");
+            assert_eq!(repo.owner, "example-org");
             assert_eq!(repo.repo, "wordpress-playground");
             Ok(Some(GitHubRepo {
                 host: "github.com".to_string(),
@@ -985,7 +987,7 @@ mod targets {
         assert_eq!(resolved.repo.repo, "wordpress-playground");
         assert!(resolved.triage_remote_url.is_none());
         let source = resolved.source_repo.expect("source repo is fork");
-        assert_eq!(source.owner, "chubes4");
+        assert_eq!(source.owner, "example-org");
         assert_eq!(source.repo, "wordpress-playground");
     }
 
@@ -1025,7 +1027,7 @@ mod targets {
         let component_ref = ComponentRef::new(
             "playground".to_string(),
             "/tmp/playground".to_string(),
-            Some("https://github.com/chubes4/wordpress-playground.git".to_string()),
+            Some("https://github.com/example-org/wordpress-playground.git".to_string()),
             Some("https://github.com/WordPress/wordpress-playground.git".to_string()),
             "rig:studio".to_string(),
         );
@@ -1051,9 +1053,9 @@ mod targets {
         assert_eq!(
             report.repo.source_repo,
             Some(TriageRepoRef {
-                owner: "chubes4".to_string(),
+                owner: "example-org".to_string(),
                 name: "wordpress-playground".to_string(),
-                url: "https://github.com/chubes4/wordpress-playground".to_string(),
+                url: "https://github.com/example-org/wordpress-playground".to_string(),
             })
         );
     }
@@ -1070,7 +1072,7 @@ mod targets {
                 format!(
                     r#"{{
                     "local_path": "{}",
-                    "remote_url": "https://github.com/chubes4/wordpress-playground.git",
+                    "remote_url": "https://github.com/example-org/wordpress-playground.git",
                     "triage_remote_url": "https://github.com/WordPress/wordpress-playground.git"
                 }}"#,
                     checkout.display()
@@ -1105,7 +1107,7 @@ mod targets {
                     "components": {
                         "playground": {
                             "path": "/tmp/playground",
-                            "remote_url": "https://github.com/chubes4/wordpress-playground.git",
+                            "remote_url": "https://github.com/example-org/wordpress-playground.git",
                             "triage_remote_url": "https://github.com/WordPress/wordpress-playground.git"
                         }
                     }

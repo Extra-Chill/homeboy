@@ -7,8 +7,8 @@ Use this when a one-off internal or external endpoint needs Homeboy's local tran
 ## Examples
 
 ```sh
-homeboy auth profile set-basic matticspace --username chubes4
-homeboy http get https://logstash.a8c.com/logstash/... --proxy socks5://127.0.0.1:8080 --auth-profile matticspace
+homeboy auth profile set-basic example-profile --username example-org
+homeboy http get https://logstash.example.com/logstash/... --proxy socks5://127.0.0.1:8080 --auth-profile example-profile
 ```
 
 ```sh

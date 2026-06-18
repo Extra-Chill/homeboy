@@ -1506,7 +1506,7 @@ mod tests {
 
         let existing = serde_json::json!({
             "local_path": "/old/path",
-            "remote_url": "/Users/chubes/Developer/homeboy"
+            "remote_url": "/Users/user/Developer/homeboy"
         });
         fs::write(
             config_components.join("my-comp.json"),

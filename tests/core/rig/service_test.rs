@@ -173,8 +173,8 @@ mod lifecycle {
         let now = 1_000;
         let ps_output = r#"
 101  00:00:50  node /Applications/Sample.app/app-server-child.mjs
-202  00:00:40  node /Users/chubes/Developer/sample-app@feature-a/preview-server-child.mjs app-server-child.mjs
-303  00:00:30  node /Users/chubes/Developer/sample-app@other/preview-server-child.mjs app-server-child.mjs
+202  00:00:40  node /Users/user/Developer/sample-app@feature-a/preview-server-child.mjs app-server-child.mjs
+303  00:00:30  node /Users/user/Developer/sample-app@other/preview-server-child.mjs app-server-child.mjs
 "#;
         let selectors = vec![
             "sample-app@feature-a".to_string(),

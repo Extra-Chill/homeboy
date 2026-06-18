@@ -120,7 +120,7 @@ mod tests {
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: format!(
-                "/home/chubes/.{}/bin/homeboy",
+                "/home/user/.{}/bin/homeboy",
                 homeboy::core::defaults::secondary_install_method_key()
             ),
             success: false,

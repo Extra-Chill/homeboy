@@ -144,7 +144,7 @@ fn test_extension_workloads_expand_package_root_when_available() {
         }"#,
     )
     .expect("parse rig spec");
-    let package = PathBuf::from("/tmp/homeboy-rigs/Automattic/studio");
+    let package = PathBuf::from("/tmp/homeboy-rigs/example-org/studio");
 
     assert_eq!(
         workloads_for_extension(
@@ -154,7 +154,7 @@ fn test_extension_workloads_expand_package_root_when_available() {
             "extension-a"
         ),
         vec![PathBuf::from(
-            "/tmp/homeboy-rigs/Automattic/studio/bench/studio-agent-runtime.bench.mjs"
+            "/tmp/homeboy-rigs/example-org/studio/bench/studio-agent-runtime.bench.mjs"
         )]
     );
     assert_eq!(
@@ -165,7 +165,7 @@ fn test_extension_workloads_expand_package_root_when_available() {
             "extension-a"
         ),
         vec![PathBuf::from(
-            "/tmp/homeboy-rigs/Automattic/studio/bench/studio-app-create-site.trace.mjs"
+            "/tmp/homeboy-rigs/example-org/studio/bench/studio-app-create-site.trace.mjs"
         )]
     );
 }

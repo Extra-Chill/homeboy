@@ -190,7 +190,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
         Some(vec![
             "Use https://github.com/<owner>/<repo>.git".to_string(),
             "Or use git@github.com:<owner>/<repo>.git".to_string(),
-            "GitHub Enterprise hosts such as github.a8c.com are also supported".to_string(),
+            "GitHub Enterprise hosts such as github.example.com are also supported".to_string(),
         ]),
     ))
 }
@@ -594,7 +594,7 @@ mod tests {
             String::new(),
             None,
         );
-        component.remote_url = Some("/Users/chubes/Developer/homeboy".to_string());
+        component.remote_url = Some("/Users/user/Developer/homeboy".to_string());
 
         let result = write_portable_config(dir.path(), &component);
 
@@ -650,7 +650,7 @@ mod tests {
             )
             .unwrap();
 
-            let patch = r#"{"remote_url":"/Users/chubes/Developer/homeboy"}"#;
+            let patch = r#"{"remote_url":"/Users/user/Developer/homeboy"}"#;
             let result = crate::core::component::mutations::merge(Some("my-comp"), patch, &[]);
 
             assert!(result.is_err());
@@ -703,9 +703,10 @@ mod tests {
             String::new(),
             None,
         );
-        component.remote_url = Some("git@github.a8c.com:Automattic/intelligence.git".to_string());
+        component.remote_url =
+            Some("git@github.example.com:example-org/intelligence.git".to_string());
         component.triage_remote_url =
-            Some("https://github.a8c.com/Automattic/intelligence.git".to_string());
+            Some("https://github.example.com/example-org/intelligence.git".to_string());
 
         write_portable_config(dir.path(), &component)
             .expect("GitHub Enterprise remotes should be valid");

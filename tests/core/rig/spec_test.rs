@@ -51,7 +51,7 @@ const STUDIO_PLAYGROUND_SPEC: &str = r#"{
             {
                 "kind": "check",
                 "label": "MDI db.php drop-in survived",
-                "file": "~/Studio/intelligence-chubes4/wp-content/db.php",
+                "file": "~/Studio/intelligence-example/wp-content/db.php",
                 "contains": "Markdown Database Integration"
             }
         ],

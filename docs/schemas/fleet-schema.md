@@ -31,7 +31,7 @@ Fleet configuration defines named groups of projects stored in `fleets/<id>.json
   "project_ids": [
     "extrachill",
     "sarai-chinwag",
-    "chubes-net"
+    "example-server"
   ],
   "description": "Production WordPress sites sharing common plugins"
 }

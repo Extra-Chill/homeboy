@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn test_detect_install_method_prefers_active_secondary_path_over_brew_list() {
         let secondary_path = format!(
-            "/Users/chubes/.{}/bin/homeboy",
+            "/Users/user/.{}/bin/homeboy",
             crate::core::defaults::secondary_install_method_key()
         );
         let method = helpers::detect_install_method_from_exe_path(&secondary_path, |cmd, args| {

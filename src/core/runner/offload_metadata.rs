@@ -285,7 +285,7 @@ mod tests {
             "workspaces": [
                 {
                     "role": "primary",
-                    "local_path": "/Users/chubes/Developer/app",
+                    "local_path": "/Users/user/Developer/app",
                     "remote_path": "/srv/homeboy/_lab_workspaces/app-abc",
                     "sync_mode": "snapshot",
                     "snapshot_identity": "snapshot:abc"

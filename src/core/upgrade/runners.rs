@@ -1481,7 +1481,7 @@ mod tests {
 
     #[test]
     fn upgrades_configured_runner_with_homeboy_path_and_skip_runner_guard() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.local/bin/homeboy"));
+        let runner = ssh_runner("lab", Some("/home/user/.local/bin/homeboy"));
         let mut commands = Vec::new();
         let (updated, skipped) = upgrade_runners_with_executor(
             &[runner],
@@ -1517,7 +1517,7 @@ mod tests {
         assert_eq!(
             commands[1].1,
             vec![
-                "/home/chubes/.local/bin/homeboy",
+                "/home/user/.local/bin/homeboy",
                 "upgrade",
                 "--no-restart",
                 "--skip-extensions",
@@ -1536,10 +1536,9 @@ mod tests {
 
     #[test]
     fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
-        let source_path = Path::new(
-            "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266",
-        );
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
+        let source_path =
+            Path::new("/Users/user/Developer/homeboy@fix-bench-selected-duplicate-validation-1266");
         let mut commands = Vec::new();
         let mut materialized = Vec::new();
 
@@ -1563,7 +1562,7 @@ mod tests {
             runner_status,
             |runner, path| {
                 materialized.push((runner.id.clone(), path.display().to_string()));
-                Ok("/home/chubes/Developer/_lab_workspaces/homeboy-source".to_string())
+                Ok("/home/user/Developer/_lab_workspaces/homeboy-source".to_string())
             },
         );
 
@@ -1575,14 +1574,14 @@ mod tests {
             materialized,
             vec![(
                 "lab".to_string(),
-                "/Users/chubes/Developer/homeboy@fix-bench-selected-duplicate-validation-1266"
+                "/Users/user/Developer/homeboy@fix-bench-selected-duplicate-validation-1266"
                     .to_string()
             )]
         );
         assert_eq!(
             commands[1],
             vec![
-                "/home/chubes/.cargo/bin/homeboy",
+                "/home/user/.cargo/bin/homeboy",
                 "upgrade",
                 "--no-restart",
                 "--skip-extensions",
@@ -1591,7 +1590,7 @@ mod tests {
                 "--method",
                 "source",
                 "--source-path",
-                "/home/chubes/Developer/_lab_workspaces/homeboy-source",
+                "/home/user/Developer/_lab_workspaces/homeboy-source",
             ]
         );
     }
@@ -1648,14 +1647,14 @@ mod tests {
 
     #[test]
     fn syncs_extension_revisions_after_runner_upgrade() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![ExtensionUpgradeEntry {
             extension_id: "wordpress".to_string(),
             old_version: "2.116.4".to_string(),
             new_version: "2.117.2".to_string(),
             linked: true,
-            source_path: Some("/Users/chubes/Developer/homeboy-extensions/wordpress".to_string()),
-            git_root: Some("/Users/chubes/Developer/homeboy-extensions".to_string()),
+            source_path: Some("/Users/user/Developer/homeboy-extensions/wordpress".to_string()),
+            git_root: Some("/Users/user/Developer/homeboy-extensions".to_string()),
             source_url: Some("https://github.com/Extra-Chill/homeboy-extensions.git".to_string()),
             source_revision: Some("48517ac3".to_string()),
             source_update: Default::default(),
@@ -1689,7 +1688,7 @@ mod tests {
         assert_eq!(
             commands[4],
             vec![
-                "/home/chubes/.cargo/bin/homeboy",
+                "/home/user/.cargo/bin/homeboy",
                 "extension",
                 "install",
                 "https://github.com/Extra-Chill/homeboy-extensions.git",
@@ -1704,14 +1703,14 @@ mod tests {
 
     #[test]
     fn installs_missing_runner_extension_without_replace_flag() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![ExtensionUpgradeEntry {
             extension_id: "swift".to_string(),
             old_version: "2.6.1".to_string(),
             new_version: "2.6.1".to_string(),
             linked: true,
-            source_path: Some("/Users/chubes/Developer/homeboy-extensions/swift".to_string()),
-            git_root: Some("/Users/chubes/Developer/homeboy-extensions".to_string()),
+            source_path: Some("/Users/user/Developer/homeboy-extensions/swift".to_string()),
+            git_root: Some("/Users/user/Developer/homeboy-extensions".to_string()),
             source_url: Some("https://github.com/Extra-Chill/homeboy-extensions.git".to_string()),
             source_revision: Some("98a61eda".to_string()),
             source_update: Default::default(),
@@ -1751,7 +1750,7 @@ mod tests {
         assert_eq!(
             commands[4],
             vec![
-                "/home/chubes/.cargo/bin/homeboy",
+                "/home/user/.cargo/bin/homeboy",
                 "extension",
                 "install",
                 "https://github.com/Extra-Chill/homeboy-extensions.git",
@@ -1765,7 +1764,7 @@ mod tests {
 
     #[test]
     fn isolates_runner_extension_sync_failures_and_continues_later_extensions() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![
             extension_update("swift", "98a61eda"),
             extension_update("wordpress", "48517ac3"),
@@ -1805,7 +1804,7 @@ mod tests {
         assert_eq!(skipped[0].extensions_failed[0].extension_id, "swift");
         assert_eq!(
             skipped[0].extensions_failed[0].recovery_commands,
-            vec!["homeboy runner exec lab --ssh -- /home/chubes/.cargo/bin/homeboy extension install https://github.com/Extra-Chill/homeboy-extensions.git --id swift --ref 98a61eda --replace"]
+            vec!["homeboy runner exec lab --ssh -- /home/user/.cargo/bin/homeboy extension install https://github.com/Extra-Chill/homeboy-extensions.git --id swift --ref 98a61eda --replace"]
         );
         assert_eq!(skipped[0].extensions_synced.len(), 1);
         assert_eq!(skipped[0].extensions_synced[0].extension_id, "wordpress");
@@ -1820,7 +1819,7 @@ mod tests {
 
     #[test]
     fn skips_runner_extensions_outside_supported_extension_policy() {
-        let mut runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let mut runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         runner.policy.supported_extensions = vec!["wordpress".to_string()];
         let extension_updates = vec![
             extension_update("swift", "98a61eda"),
@@ -1877,7 +1876,7 @@ mod tests {
 
     #[test]
     fn defers_extension_failures_when_runner_refresh_leaves_path_drift() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![
             extension_update("auxiliary-extension", "98a61eda"),
             extension_update("required-extension", "48517ac3"),
@@ -1949,7 +1948,7 @@ mod tests {
 
     #[test]
     fn upgrades_runner_binary_before_controller_scoped_extension_sync() {
-        let mut runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy"));
+        let mut runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         runner.policy.supported_extensions = vec!["required-extension".to_string()];
         let extension_updates = vec![
             extension_update("irrelevant-extension", "98a61eda"),
@@ -2015,7 +2014,7 @@ mod tests {
     fn repairs_stale_bare_homeboy_after_configured_runner_upgrade() {
         let runner = ssh_runner(
             "lab",
-            Some("/home/chubes/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
+            Some("/home/user/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
         );
         let mut commands = Vec::new();
 
@@ -2059,7 +2058,7 @@ mod tests {
     fn fails_when_managed_bare_homeboy_repair_leaves_path_drift() {
         let runner = ssh_runner(
             "lab",
-            Some("/home/chubes/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
+            Some("/home/user/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
         );
         let mut commands = Vec::new();
 
@@ -2104,7 +2103,7 @@ mod tests {
 
     #[test]
     fn updates_versioned_runner_homeboy_path_to_bare_homeboy_when_newer() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.1"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
         let extension_updates = vec![extension_update("required-extension", "48517ac3")];
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
@@ -2153,15 +2152,15 @@ mod tests {
             commands[4],
             vec!["homeboy", "extension", "show", "required-extension"]
         );
-        assert!(updated[0]
-            .detail
-            .contains("runner homeboy_path updated from `/home/chubes/.cargo/bin/homeboy-0.229.1` to `homeboy`"));
+        assert!(updated[0].detail.contains(
+            "runner homeboy_path updated from `/home/user/.cargo/bin/homeboy-0.229.1` to `homeboy`"
+        ));
     }
 
     #[test]
     fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
         let stale_path =
-            "/home/chubes/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy";
+            "/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy";
         let runner = ssh_runner("lab", Some(stale_path));
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
@@ -2223,9 +2222,9 @@ mod tests {
 
     #[test]
     fn source_runner_upgrade_realigns_to_materialized_source_build_when_path_shadows_old_homeboy() {
-        let stale_path = "/home/chubes/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
-        let source_path = Path::new("/Users/chubes/Developer/homeboy@current-main");
-        let remote_source = "/home/chubes/Developer/_lab_workspaces/homeboy-current-main";
+        let stale_path = "/home/user/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
+        let source_path = Path::new("/Users/user/Developer/homeboy@current-main");
+        let remote_source = "/home/user/Developer/_lab_workspaces/homeboy-current-main";
         let source_binary = format!("{remote_source}/target/release/homeboy");
         let runner = ssh_runner("lab", Some(stale_path));
         let mut commands = Vec::new();
@@ -2308,7 +2307,7 @@ mod tests {
 
     #[test]
     fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.1"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
 
@@ -2367,7 +2366,7 @@ mod tests {
 
     #[test]
     fn realigns_versioned_runner_homeboy_path_when_only_final_bare_probe_succeeds() {
-        let runner = ssh_runner("lab", Some("/home/chubes/.cargo/bin/homeboy-0.229.5"));
+        let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.5"));
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
 
@@ -2415,9 +2414,9 @@ mod tests {
         );
         assert_eq!(commands[3], vec!["homeboy", "--version"]);
         assert_eq!(commands[4], vec!["homeboy", "--version"]);
-        assert!(updated[0]
-            .detail
-            .contains("runner homeboy_path updated from `/home/chubes/.cargo/bin/homeboy-0.229.5` to `homeboy`"));
+        assert!(updated[0].detail.contains(
+            "runner homeboy_path updated from `/home/user/.cargo/bin/homeboy-0.229.5` to `homeboy`"
+        ));
         assert!(!updated[0].detail.contains("runner PATH drift detected"));
     }
 
@@ -2500,9 +2499,9 @@ mod tests {
             new_version: "1.0.0".to_string(),
             linked: true,
             source_path: Some(format!(
-                "/Users/chubes/Developer/homeboy-extensions/{extension_id}"
+                "/Users/user/Developer/homeboy-extensions/{extension_id}"
             )),
-            git_root: Some("/Users/chubes/Developer/homeboy-extensions".to_string()),
+            git_root: Some("/Users/user/Developer/homeboy-extensions".to_string()),
             source_url: Some("https://github.com/Extra-Chill/homeboy-extensions.git".to_string()),
             source_revision: Some(source_revision.to_string()),
             source_update: Default::default(),
@@ -2544,7 +2543,7 @@ mod tests {
             id: id.to_string(),
             kind: RunnerKind::Ssh,
             server_id: Some(format!("{id}-server")),
-            workspace_root: Some("/home/chubes/workspace".to_string()),
+            workspace_root: Some("/home/user/workspace".to_string()),
             settings: RunnerSettings {
                 homeboy_path: homeboy_path.map(str::to_string),
                 ..Default::default()
@@ -2569,7 +2568,7 @@ mod tests {
             dry_run: false,
             mode: RunnerExecMode::DiagnosticSsh,
             argv,
-            remote_cwd: "/home/chubes/workspace".to_string(),
+            remote_cwd: "/home/user/workspace".to_string(),
             exit_code,
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),

@@ -849,16 +849,16 @@ mod tests {
 
     #[test]
     fn deterministic_run_id_is_stable() {
-        let a = deterministic_run_id("chubes4/wc-site-generator", 12345);
-        let b = deterministic_run_id("chubes4/wc-site-generator", 12345);
+        let a = deterministic_run_id("example-org/wc-site-generator", 12345);
+        let b = deterministic_run_id("example-org/wc-site-generator", 12345);
         assert_eq!(a, b);
-        let c = deterministic_run_id("chubes4/wc-site-generator", 12346);
+        let c = deterministic_run_id("example-org/wc-site-generator", 12346);
         assert_ne!(a, c);
     }
 
     #[test]
     fn deterministic_artifact_id_is_stable_per_filename() {
-        let run_id = deterministic_run_id("chubes4/wc-site-generator", 12345);
+        let run_id = deterministic_run_id("example-org/wc-site-generator", 12345);
         let a = deterministic_artifact_id(&run_id, 9000, "design-distribution.json");
         let b = deterministic_artifact_id(&run_id, 9000, "design-distribution.json");
         assert_eq!(a, b);

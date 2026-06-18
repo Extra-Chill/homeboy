@@ -720,7 +720,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
                 },
                 extension_trace::TraceArtifact {
                     label: "Trace zip".to_string(),
-                    path: "/Users/chubes/private/trace.zip".to_string(),
+                    path: "/Users/user/private/trace.zip".to_string(),
                     kind: None,
                 },
             ],
@@ -770,7 +770,7 @@ fn trace_run_evidence_report_includes_refs_assertions_and_safe_artifacts() {
     assert!(report.contains("- **Status:** `partial`"));
     assert!(report.contains("- **Main log:** `artifacts/main.log`"));
     assert!(report.contains("- **Trace zip:** `[local path redacted: trace.zip]`"));
-    assert!(!report.contains("/Users/chubes/private"));
+    assert!(!report.contains("/Users/user/private"));
 }
 
 #[test]
@@ -864,7 +864,7 @@ fn trace_aggregate_evidence_report_summarizes_metrics_and_artifact_completeness(
 fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_status() {
     let compare = extension_trace::TraceCompareOutput {
         command: "trace.compare.spans",
-        before_path: "/Users/chubes/private/before.json".to_string(),
+        before_path: "/Users/user/private/before.json".to_string(),
         after_path: "artifacts/after.json".to_string(),
         before_target: None,
         after_target: None,
@@ -931,7 +931,7 @@ fn trace_compare_evidence_report_redacts_local_paths_and_reports_assertion_statu
     assert!(report.contains("- Focus regressions: `1`"));
     assert!(report.contains("behavior changed"));
     assert!(report.contains("- **Status:** `input-only`"));
-    assert!(!report.contains("/Users/chubes/private"));
+    assert!(!report.contains("/Users/user/private"));
 }
 
 fn rig_state_snapshot() -> homeboy::core::rig::RigStateSnapshot {
@@ -939,7 +939,7 @@ fn rig_state_snapshot() -> homeboy::core::rig::RigStateSnapshot {
     components.insert(
         "studio".to_string(),
         homeboy::core::rig::ComponentSnapshot {
-            path: "/Users/chubes/Developer/studio".to_string(),
+            path: "/Users/user/Developer/studio".to_string(),
             declared_path: None,
             sha: Some("abc123".to_string()),
             branch: Some("main".to_string()),

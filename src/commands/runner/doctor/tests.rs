@@ -55,8 +55,8 @@ fn overall_status_promotes_errors_over_warnings() {
 fn extension_parity_check_reports_missing_extension_with_remediation() {
     let check = extension_parity::check_from_probe(
         "remote",
-        "/home/chubes/.local/bin/homeboy",
-        Some("/home/chubes/Developer/component"),
+        "/home/user/.local/bin/homeboy",
+        Some("/home/user/Developer/component"),
         "rust",
         false,
         "first\nsecond\nthird\nfourth",
@@ -73,7 +73,7 @@ fn extension_parity_check_reports_missing_extension_with_remediation() {
         .contains("extension install <source> --id rust"));
     assert_eq!(
         check.details.get("cwd").map(String::as_str),
-        Some("/home/chubes/Developer/component")
+        Some("/home/user/Developer/component")
     );
     assert_eq!(
         check.details.get("diagnostics").map(String::as_str),
@@ -178,7 +178,7 @@ fn required_homeboy_tools_capture_versions() {
         &["--version"]
     );
     assert_eq!(
-        probes::required_tool_version_args("/home/chubes/.cargo/bin/homeboy"),
+        probes::required_tool_version_args("/home/user/.cargo/bin/homeboy"),
         &["--version"]
     );
     assert!(probes::required_tool_version_args("git").is_empty());
@@ -313,30 +313,30 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
     let mut details = BTreeMap::new();
     details.insert(
         "configured_command".to_string(),
-        "/home/chubes/.cargo/bin/homeboy".to_string(),
+        "/home/user/.cargo/bin/homeboy".to_string(),
     );
     details.insert(
         "configured_path".to_string(),
-        "/home/chubes/.cargo/bin/homeboy".to_string(),
+        "/home/user/.cargo/bin/homeboy".to_string(),
     );
     details.insert("configured_version".to_string(), "0.229.9".to_string());
     details.insert(
         "bare_path".to_string(),
-        "/home/chubes/.local/bin/homeboy".to_string(),
+        "/home/user/.local/bin/homeboy".to_string(),
     );
     details.insert("bare_version".to_string(), "0.228.22".to_string());
 
     let check = probes::homeboy_path_shadow_check(
         "homeboy-lab",
         "lab-server",
-        "/home/chubes/.cargo/bin/homeboy",
+        "/home/user/.cargo/bin/homeboy",
         "0.229.9",
         &HomeboyProbe {
             version: "0.229.9".to_string(),
-            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+            path: Some("/home/user/.cargo/bin/homeboy".to_string()),
         },
         &probes::RemoteHomeboyCandidateProbe {
-            path: Some("/home/chubes/.local/bin/homeboy".to_string()),
+            path: Some("/home/user/.local/bin/homeboy".to_string()),
             version: Some("0.228.22".to_string()),
         },
         details,
@@ -349,11 +349,11 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_is_older() {
     assert!(check.message.contains("0.228.22"));
     assert_eq!(
         check.details.get("configured_path").map(String::as_str),
-        Some("/home/chubes/.cargo/bin/homeboy")
+        Some("/home/user/.cargo/bin/homeboy")
     );
     assert_eq!(
         check.details.get("bare_path").map(String::as_str),
-        Some("/home/chubes/.local/bin/homeboy")
+        Some("/home/user/.local/bin/homeboy")
     );
     assert!(check
         .remediation
@@ -366,30 +366,30 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
     let mut details = BTreeMap::new();
     details.insert(
         "configured_command".to_string(),
-        "/home/chubes/.cargo/bin/homeboy".to_string(),
+        "/home/user/.cargo/bin/homeboy".to_string(),
     );
     details.insert(
         "configured_path".to_string(),
-        "/home/chubes/.cargo/bin/homeboy".to_string(),
+        "/home/user/.cargo/bin/homeboy".to_string(),
     );
     details.insert("configured_version".to_string(), "0.229.9".to_string());
     details.insert(
         "bare_path".to_string(),
-        "/home/chubes/.local/bin/homeboy".to_string(),
+        "/home/user/.local/bin/homeboy".to_string(),
     );
     details.insert("bare_version".to_string(), "0.229.9".to_string());
 
     let check = probes::homeboy_path_shadow_check(
         "homeboy-lab",
         "lab-server",
-        "/home/chubes/.cargo/bin/homeboy",
+        "/home/user/.cargo/bin/homeboy",
         "0.229.9",
         &HomeboyProbe {
             version: "0.229.9".to_string(),
-            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+            path: Some("/home/user/.cargo/bin/homeboy".to_string()),
         },
         &probes::RemoteHomeboyCandidateProbe {
-            path: Some("/home/chubes/.local/bin/homeboy".to_string()),
+            path: Some("/home/user/.local/bin/homeboy".to_string()),
             version: Some("0.229.9".to_string()),
         },
         details,
@@ -398,15 +398,15 @@ fn lab_homeboy_path_shadow_warns_when_bare_homeboy_resolves_different_path() {
 
     assert_eq!(check.id, "lab.homeboy.path_shadow");
     assert_eq!(check.status, RunnerDoctorStatus::Warning);
-    assert!(check.message.contains("/home/chubes/.cargo/bin/homeboy"));
-    assert!(check.message.contains("/home/chubes/.local/bin/homeboy"));
+    assert!(check.message.contains("/home/user/.cargo/bin/homeboy"));
+    assert!(check.message.contains("/home/user/.local/bin/homeboy"));
     assert_eq!(
         check.details.get("configured_path").map(String::as_str),
-        Some("/home/chubes/.cargo/bin/homeboy")
+        Some("/home/user/.cargo/bin/homeboy")
     );
     assert_eq!(
         check.details.get("bare_path").map(String::as_str),
-        Some("/home/chubes/.local/bin/homeboy")
+        Some("/home/user/.local/bin/homeboy")
     );
     assert!(check
         .remediation
@@ -419,14 +419,14 @@ fn lab_homeboy_path_shadow_accepts_matching_bare_homeboy() {
     let check = probes::homeboy_path_shadow_check(
         "homeboy-lab",
         "lab-server",
-        "/home/chubes/.cargo/bin/homeboy",
+        "/home/user/.cargo/bin/homeboy",
         "0.229.9",
         &HomeboyProbe {
             version: "0.229.9".to_string(),
-            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+            path: Some("/home/user/.cargo/bin/homeboy".to_string()),
         },
         &probes::RemoteHomeboyCandidateProbe {
-            path: Some("/home/chubes/.cargo/bin/homeboy".to_string()),
+            path: Some("/home/user/.cargo/bin/homeboy".to_string()),
             version: Some("0.229.9".to_string()),
         },
         BTreeMap::new(),
@@ -540,7 +540,7 @@ fn daemon_exec_probe_reports_structured_failure() {
 
     let check = probes::daemon_exec_check(
         "homeboy-lab",
-        "/home/chubes/Developer",
+        "/home/user/Developer",
         &format!("http://{addr}"),
     );
 
@@ -606,8 +606,8 @@ fn remote_default_artifact_root_expands_under_home() {
 #[test]
 fn remote_default_artifact_root_normalizes_trailing_home_slash() {
     assert_eq!(
-        remote::default_artifact_root_for_home("/Users/chubes/"),
-        Some("/Users/chubes/.local/share/homeboy/artifacts".to_string())
+        remote::default_artifact_root_for_home("/Users/user/"),
+        Some("/Users/user/.local/share/homeboy/artifacts".to_string())
     );
 }
 

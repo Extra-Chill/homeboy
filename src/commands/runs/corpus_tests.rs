@@ -225,7 +225,7 @@ fn import_from_gh_actions_requires_workflow_or_run_id() {
             input: None,
             from_gh_actions: true,
             component_id: Some("wp-site-generator".into()),
-            repo: Some("chubes4/wp-site-generator".into()),
+            repo: Some("example-org/wp-site-generator".into()),
             artifact_glob: Some("php-transformer-iterator-transcript-*".into()),
             ..RunsImportArgs::default()
         })

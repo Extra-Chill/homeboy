@@ -57,8 +57,8 @@ the current Extra Chill deployment, use these values:
 | `<controller-server-id>` | `extra-chill` |
 | `<controller-label>` | `extra-chill-vps` |
 | `<runner-id>` | `homeboy-lab` |
-| `<runner-workspace-root>` | `/home/chubes/Developer` |
-| `<runner-user>` | `chubes` |
+| `<runner-workspace-root>` | `/home/user/Developer` |
+| `<runner-user>` | `deploy` |
 
 ## 1. Controller broker setup
 

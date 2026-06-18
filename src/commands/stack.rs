@@ -54,7 +54,7 @@ enum StackCommand {
     AddPr {
         /// Stack ID.
         stack_id: String,
-        /// `<owner>/<repo>` coordinate (e.g. `Automattic/studio`).
+        /// `<owner>/<repo>` coordinate (e.g. `example-org/studio`).
         repo: String,
         /// PR number.
         number: u64,

@@ -154,7 +154,7 @@ mod tests {
         let policy = SourceMaterializationPolicy::default();
 
         assert_eq!(
-            private_proxied_source_host("git@github.a8c.com:Automattic/example.git", &policy),
+            private_proxied_source_host("git@github.example.com:example-org/example.git", &policy),
             None
         );
     }
@@ -162,16 +162,19 @@ mod tests {
     #[test]
     fn detects_configured_private_proxied_source_hosts() {
         let policy = SourceMaterializationPolicy {
-            private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            private_proxied_source_hosts: vec!["github.example.com".to_string()],
         };
 
         assert_eq!(
-            private_proxied_source_host("git@github.a8c.com:Automattic/example.git", &policy),
-            Some("github.a8c.com".to_string())
+            private_proxied_source_host("git@github.example.com:example-org/example.git", &policy),
+            Some("github.example.com".to_string())
         );
         assert_eq!(
-            private_proxied_source_host("https://github.a8c.com/Automattic/example.git", &policy),
-            Some("github.a8c.com".to_string())
+            private_proxied_source_host(
+                "https://github.example.com/example-org/example.git",
+                &policy
+            ),
+            Some("github.example.com".to_string())
         );
         assert_eq!(
             private_proxied_source_host("https://github.com/Extra-Chill/homeboy.git", &policy),
@@ -182,27 +185,27 @@ mod tests {
     #[test]
     fn rejects_runner_side_private_proxied_git_materialization() {
         let policy = SourceMaterializationPolicy {
-            private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            private_proxied_source_hosts: vec!["github.example.com".to_string()],
         };
         let err = validate_runner_git_materialization_with_policy(
-            "git@github.a8c.com:Automattic/example.git",
+            "git@github.example.com:example-org/example.git",
             "homeboy-lab",
             &policy,
         )
         .expect_err("private/proxied runner-side git materialization should fail");
 
         assert!(err.message.contains("--mode git"));
-        assert!(err.message.contains("github.a8c.com"));
+        assert!(err.message.contains("github.example.com"));
         assert!(err.message.contains("workspace sync"));
     }
 
     #[test]
     fn identifies_sources_that_need_controller_routed_workspace_sync() {
         let policy = SourceMaterializationPolicy {
-            private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            private_proxied_source_hosts: vec!["github.example.com".to_string()],
         };
         assert!(requires_controller_routed_workspace_sync_with_policy(
-            "git@github.a8c.com:Automattic/example.git",
+            "git@github.example.com:example-org/example.git",
             &policy
         ));
         assert!(!requires_controller_routed_workspace_sync_with_policy(
@@ -214,13 +217,13 @@ mod tests {
     #[test]
     fn rejects_runner_exec_private_proxied_git_fetches() {
         let policy = SourceMaterializationPolicy {
-            private_proxied_source_hosts: vec!["github.a8c.com".to_string()],
+            private_proxied_source_hosts: vec!["github.example.com".to_string()],
         };
         let err = validate_runner_exec_source_fetch_with_policy(
             &[
                 "sh".to_string(),
                 "-c".to_string(),
-                "git clone git@github.a8c.com:Automattic/example.git".to_string(),
+                "git clone git@github.example.com:example-org/example.git".to_string(),
             ],
             "homeboy-lab",
             &policy,
@@ -228,7 +231,7 @@ mod tests {
         .expect_err("private/proxied runner-side git clone should fail");
 
         assert!(err.message.contains("runner-side Git fetch"));
-        assert!(err.message.contains("github.a8c.com"));
+        assert!(err.message.contains("github.example.com"));
         assert!(err.message.contains("workspace sync"));
     }
 }

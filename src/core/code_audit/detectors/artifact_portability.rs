@@ -520,7 +520,7 @@ mod tests {
                                 "remote_artifact_manifest": [
                                     {
                                         "kind": "summary",
-                                        "path": "/home/chubes/.local/share/homeboy/artifacts/run/summary.json"
+                                        "path": "/home/user/.local/share/homeboy/artifacts/run/summary.json"
                                     }
                                 ]
                             }
