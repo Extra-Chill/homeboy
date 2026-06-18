@@ -6,6 +6,8 @@
 
 mod budget_findings;
 pub mod context;
+pub mod disk_budget;
+pub mod evidence_report;
 mod lifecycle;
 pub mod records;
 pub mod runs_service;
