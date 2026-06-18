@@ -37,9 +37,15 @@ on:
         type: string
         default: '[]'
       runtime_task:
-        description: JSON object with ability and input keys.
-        required: true
+        description: JSON object with ability and input keys. Use runtime_execution for generic bundle or workflow descriptors.
+        required: false
         type: string
+        default: '{}'
+      runtime_execution:
+        description: JSON object describing a generic ability, bundle, or workflow execution.
+        required: false
+        type: string
+        default: '{}'
       ability_requirements:
         description: JSON array of required ability/tool identifiers.
         required: false
@@ -88,6 +94,7 @@ jobs:
           RUNTIME_COMPONENT_PATHS: ${{ inputs.runtime_component_paths }}
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
           RUNTIME_TASK: ${{ inputs.runtime_task }}
+          RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
           ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           ARTIFACT_SLOTS: ${{ inputs.artifact_slots }}
@@ -109,6 +116,7 @@ jobs:
             return JSON.parse(value);
           }
 
+          const runtimeTask = parseJson('RUNTIME_TASK', {});
           const config = runtimeAgentCiTaskExecutorConfig({
             runtimeProvider: process.env.RUNTIME_PROVIDER,
             provider: process.env.PROVIDER || undefined,
@@ -117,8 +125,9 @@ jobs:
             runtimeProfiles: parseJson('RUNTIME_PROFILES', {}),
             runtimeComponentPaths: parseJson('RUNTIME_COMPONENT_PATHS', {}),
             ignoredWorkspacePaths: parseJson('IGNORED_WORKSPACE_PATHS', []),
-            abilityInput: parseJson('RUNTIME_TASK', {}).input || {},
-            ability: parseJson('RUNTIME_TASK', {}).ability,
+            runtimeExecution: parseJson('RUNTIME_EXECUTION', {}),
+            abilityInput: runtimeTask.input || {},
+            ability: runtimeTask.ability,
             abilityRequirements: parseJson('ABILITY_REQUIREMENTS', []),
             abilityTools: parseJson('ABILITY_TOOLS', []),
             artifactSlots: parseJson('ARTIFACT_SLOTS', []),

@@ -30,6 +30,8 @@ const runtimeProfile = {
   schema: 'homeboy/runtime-profile/v1',
   id: 'example-agent-ci',
   runtime_task_ability: 'example/run-task',
+  runtime_bundle_ability: 'runtime/run-agent-bundle',
+  runtime_workflow_ability: 'runtime/execute-workflow',
   component_path_defaults: {
     contract_slug_map: { 'example-runtime': 'agent_runtime' },
     path_aliases: { agent_runtime: ['contract:agent_runtime'] },
@@ -64,6 +66,38 @@ assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
 assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
 
+const genericBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  runtimeExecution: {
+    kind: 'bundle',
+    source: '/workspace/example-repo/bundles/example-agent',
+    workflow: { name: 'materialize-artifact' },
+    input: { prompt: 'Cook a packet.' },
+  },
+});
+
+assert.equal(genericBundleConfig.runtime_task.ability, 'runtime/run-agent-bundle');
+assert.equal(genericBundleConfig.runtime_task.input.source, '/workspace/example-repo/bundles/example-agent');
+assert.deepEqual(genericBundleConfig.runtime_task.input.workflow, { name: 'materialize-artifact' });
+assert.equal(genericBundleConfig.runtime_task.input.prompt, 'Cook a packet.');
+assert.equal(genericBundleConfig.runtime_execution.kind, 'bundle');
+assert.notEqual(genericBundleConfig.runtime_task.ability, 'datamachine/run-agent-bundle');
+
+const genericWorkflowConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  runtimeExecution: {
+    kind: 'workflow',
+    workflow: { path: '.ci/workflows/materialize.json' },
+    input: { dry_run: true },
+  },
+});
+
+assert.equal(genericWorkflowConfig.runtime_task.ability, 'runtime/execute-workflow');
+assert.deepEqual(genericWorkflowConfig.runtime_task.input.workflow, { path: '.ci/workflows/materialize.json' });
+assert.equal(genericWorkflowConfig.runtime_task.input.dry_run, true);
+
 const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
   taskId: 'task-1',
   runtimeProfile: runtimeProfile.id,
@@ -91,6 +125,8 @@ assert.equal(
   adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].runtime_task_ability,
   datamachineAgentCi.DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY
 );
+assert.equal(adapterConfig.runtime_execution.kind, 'bundle');
+assert.equal(adapterConfig.runtime_task.ability, datamachineAgentCi.DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY);
 assert.deepEqual(
   adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].component_path_defaults,
   datamachineAgentCi.DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS

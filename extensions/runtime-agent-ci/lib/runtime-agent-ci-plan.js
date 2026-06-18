@@ -14,15 +14,17 @@ const RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID = 'runtime-agent-ci';
 function runtimeAgentCiRuntimeTaskRequest(options = {}, context = {}) {
   const taskId = requiredString(options.taskId || options.task_id, 'taskId');
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
-  const runtimeTaskInput = stripUndefined({
+  const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtimeExecution || options.runtime_execution, runtimeProfile);
+  const runtimeTaskInput = runtimeExecution?.input || stripUndefined({
     ...(options.runtimeTaskInput || options.runtime_task_input || {}),
   });
 
   return runtimeAgentCiAbilityTaskRequest({
     ...options,
     taskId,
-    ability: options.ability || runtimeProfile.runtime_task_ability,
+    ability: runtimeExecution?.ability || options.ability || runtimeProfile.runtime_task_ability,
     abilityInput: runtimeTaskInput,
+    runtimeExecution: runtimeExecution || options.runtimeExecution || options.runtime_execution,
   }, context);
 }
 
@@ -69,9 +71,10 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
 
 function runtimeAgentCiTaskExecutorConfig(options = {}) {
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
-  const runtimeTaskInput = options.abilityInput || options.ability_input || {};
+  const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtimeExecution || options.runtime_execution, runtimeProfile);
+  const runtimeTaskInput = runtimeExecution?.input || options.abilityInput || options.ability_input || {};
   const runtimeTask = stripUndefined({
-    ability: options.ability || runtimeProfile.runtime_task_ability,
+    ability: runtimeExecution?.ability || options.ability || runtimeProfile.runtime_task_ability,
     input: runtimeTaskInput,
   });
   return stripUndefined({
@@ -91,6 +94,7 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     ability_requirements: options.abilityRequirements || options.ability_requirements || runtimeProfile.ability_requirements,
     artifact_slots: options.artifactSlots || options.artifact_slots,
     transcript_slots: options.transcriptSlots || options.transcript_slots,
+    runtime_execution: runtimeExecution,
     structured_artifacts: options.structuredArtifacts || options.structured_artifacts,
     task_timeout_seconds: options.taskTimeoutSeconds || options.task_timeout_seconds,
     max_turns: options.maxTurns || options.max_turns,
@@ -102,6 +106,64 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     provider_runtime_invocation: options.providerRuntimeInvocation || options.provider_runtime_invocation || options.runtimeInvocation || options.runtime_invocation,
     runtime_id: options.runtimeId || options.runtime_id,
     runtime_bin: options.runtimeBin || options.runtime_bin,
+  });
+}
+
+function normalizeRuntimeExecutionDescriptor(descriptor, runtimeProfile = {}) {
+  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+    return null;
+  }
+  if (Object.keys(descriptor).length === 0) {
+    return null;
+  }
+  const kind = descriptor.kind || descriptor.type || (descriptor.workflow ? 'workflow' : descriptor.bundle || descriptor.source || descriptor.path ? 'bundle' : 'ability');
+  const ability = descriptor.ability || abilityForRuntimeExecutionKind(kind, runtimeProfile);
+  const input = runtimeExecutionInput(descriptor, kind);
+  return stripUndefined({
+    schema: descriptor.schema,
+    kind,
+    ability,
+    input,
+    outputs: descriptor.outputs,
+    metadata: descriptor.metadata,
+  });
+}
+
+function abilityForRuntimeExecutionKind(kind, runtimeProfile = {}) {
+  if (kind === 'bundle') {
+    return runtimeProfile.runtime_bundle_ability || runtimeProfile.runtime_task_ability;
+  }
+  if (kind === 'workflow') {
+    return runtimeProfile.runtime_workflow_ability || runtimeProfile.runtime_task_ability;
+  }
+  return runtimeProfile.runtime_task_ability;
+}
+
+function runtimeExecutionInput(descriptor, kind) {
+  const explicitInput = descriptor.input && typeof descriptor.input === 'object' && !Array.isArray(descriptor.input)
+    ? descriptor.input
+    : {};
+  const bundle = descriptor.bundle && typeof descriptor.bundle === 'object' && !Array.isArray(descriptor.bundle)
+    ? descriptor.bundle
+    : {};
+  const workflow = descriptor.workflow && typeof descriptor.workflow === 'object' && !Array.isArray(descriptor.workflow)
+    ? descriptor.workflow
+    : descriptor.workflow;
+  const source = descriptor.source || descriptor.path || bundle.source || bundle.path || bundle.bundle_path;
+  const normalizedBundle = Object.keys(bundle).length > 0 ? bundle : undefined;
+  const normalizedWorkflow = workflow && (typeof workflow !== 'object' || Object.keys(workflow).length > 0) ? workflow : undefined;
+  return stripUndefined({
+    ...(kind === 'bundle' ? {
+      source,
+      bundle: normalizedBundle,
+      workflow: normalizedWorkflow,
+    } : {}),
+    ...(kind === 'workflow' ? {
+      source,
+      path: descriptor.path,
+      workflow: normalizedWorkflow,
+    } : {}),
+    ...explicitInput,
   });
 }
 
@@ -118,11 +180,13 @@ function resolveRuntimeAgentCiRuntimeProfile(options = {}) {
   return {
     ...profile,
     id,
-    runtime_task_ability: requiredString(
-      options.runtimeTaskAbility || options.runtime_task_ability || profile.runtime_task_ability,
-      'runtime task ability'
-    ),
+    runtime_task_ability: runtimeProfileAbility(options.runtimeTaskAbility || options.runtime_task_ability || profile.runtime_task_ability, profile),
   };
+}
+
+function runtimeProfileAbility(value, profile) {
+  const ability = value || profile.runtime_bundle_ability || profile.runtime_workflow_ability;
+  return requiredString(ability, 'runtime task ability');
 }
 
 function runtimeAgentCiRuntimeProfilesForOptions(options, runtimeProfile) {
@@ -182,6 +246,7 @@ module.exports = {
   runtimeAgentCiRuntimeTaskRequest,
   runtimeAgentCiRuntimeProfilesForOptions,
   runtimeAgentCiTaskExecutorConfig,
+  normalizeRuntimeExecutionDescriptor,
   resolveRuntimeAgentCiRuntimeProfile,
   validateAgentTaskRunnerSpec,
 };

@@ -64,6 +64,7 @@ assert.equal(bundleTask.schema, 'homeboy/agent-task-request/v1');
 assert.equal(bundleTask.executor.backend, 'codebox');
 assert.deepEqual(bundleTask.executor.secret_env, ['AI_PROVIDER_OPENAI_API_KEY']);
 assert.equal(bundleTask.executor.config.runtime_task.ability, 'datamachine/run-agent-bundle');
+assert.equal(bundleTask.executor.config.runtime_execution.kind, 'bundle');
 assert.deepEqual(bundleTask.executor.config.runtime_task.input, {
   source: '/workspace/example-repo/bundles/concept-agent',
   agent_slug: 'concept-agent',
@@ -116,6 +117,7 @@ const customBundleTask = datamachineAgentCiBundleTaskRequest({
 
 assert.equal(customBundleTask.executor.config.runtime_profile, 'example-agent-ci');
 assert.equal(customBundleTask.executor.config.runtime_task.ability, 'example/run-agent-bundle');
+assert.equal(customBundleTask.executor.config.runtime_execution.kind, 'bundle');
 assert.deepEqual(customBundleTask.executor.config.runtime_profiles['example-agent-ci'].component_path_defaults.contract_slug_map, {
   'example-agents': 'agent_runtime',
   'example-tools': 'agent_runtime_tools',
