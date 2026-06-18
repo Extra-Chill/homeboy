@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.7] - 2026-06-18
+
+### Changed
+- Add generic Codebox runtime invocation config
+
 ## [3.7.6] - 2026-06-18
 
 ### Fixed
