@@ -279,6 +279,8 @@ fn self_temp_artifact_candidates(
             if !is_detached_homeboy_temp_artifact(&path) {
                 if let Some(candidate) = temp_homeboy_checkout_target_candidate(&path)? {
                     candidates.push(candidate);
+                } else if let Some(candidate) = partial_homeboy_temp_target_candidate(&path)? {
+                    candidates.push(candidate);
                 }
                 continue;
             }
@@ -338,6 +340,119 @@ fn temp_homeboy_checkout_target_candidate(
         source_dirty: safety.source_dirty,
         unpushed_commits: safety.unpushed_commits,
     }))
+}
+
+fn partial_homeboy_temp_target_candidate(
+    temp_dir: &Path,
+) -> Result<Option<ArtifactCleanupCandidate>> {
+    let Ok(metadata) = fs::symlink_metadata(temp_dir) else {
+        return Ok(None);
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let Some(name) = temp_dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if !name.starts_with("homeboy-")
+        || temp_dir.join(".git").exists()
+        || temp_dir.join("Cargo.toml").exists()
+    {
+        return Ok(None);
+    }
+
+    let target = temp_dir.join("target");
+    let Ok(target_metadata) = fs::symlink_metadata(&target) else {
+        return Ok(None);
+    };
+    if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    if !partial_homeboy_temp_skeleton_is_safe(temp_dir)? {
+        return Ok(None);
+    }
+
+    let size_bytes = path_size(&target)?;
+    Ok(Some(ArtifactCleanupCandidate {
+        worktree: temp_dir.to_string_lossy().to_string(),
+        path: target.to_string_lossy().to_string(),
+        relative_path: "target".to_string(),
+        kind: "partial_homeboy_temp_target".to_string(),
+        declared_by: "self_temp_root".to_string(),
+        size_bytes,
+        source_dirty: false,
+        unpushed_commits: false,
+    }))
+}
+
+fn partial_homeboy_temp_skeleton_is_safe(temp_dir: &Path) -> Result<bool> {
+    let mut saw_target = false;
+    for entry in fs::read_dir(temp_dir).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read partial temp dir {}", temp_dir.display())),
+        )
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!(
+                    "read partial temp dir entry {}",
+                    temp_dir.display()
+                )),
+            )
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Ok(false);
+        };
+        match name {
+            "target" => saw_target = true,
+            ".github" | "docs" | "src" | "tests" => {
+                if !directory_tree_has_no_files(&entry.path())? {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(saw_target)
+}
+
+fn directory_tree_has_no_files(path: &Path) -> Result<bool> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("stat {}", path.display()))))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(path).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read directory {}", path.display())),
+        )
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("read directory entry {}", path.display())),
+            )
+        })?;
+        let entry_path = entry.path();
+        let entry_metadata = fs::symlink_metadata(&entry_path).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("stat {}", entry_path.display())),
+            )
+        })?;
+        if !entry_metadata.is_dir() || entry_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if !directory_tree_has_no_files(&entry_path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn is_homeboy_source_checkout(path: &Path) -> Result<bool> {
@@ -852,6 +967,76 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|row| row.kind == "temp_homeboy_checkout_target"));
+    }
+
+    #[test]
+    fn partial_homeboy_temp_target_is_detected_when_source_skeleton_is_empty() {
+        let temp_root = TempDir::new().expect("temp root");
+        let partial = temp_root.path().join("homeboy-upgrade-sync-main");
+        fs::create_dir_all(partial.join(".github")).expect("mkdir github");
+        fs::create_dir_all(partial.join("docs")).expect("mkdir docs");
+        fs::create_dir_all(partial.join("src")).expect("mkdir src");
+        fs::create_dir_all(partial.join("tests")).expect("mkdir tests");
+        write_file(&partial.join("target/debug/homeboy"), "binary");
+
+        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            path: None,
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("temp artifact candidates");
+
+        let candidate = candidates
+            .iter()
+            .find(|row| row.kind == "partial_homeboy_temp_target")
+            .expect("partial temp target candidate");
+        assert_eq!(candidate.worktree, partial.to_string_lossy());
+        assert_eq!(candidate.path, partial.join("target").to_string_lossy());
+        assert_eq!(candidate.relative_path, "target");
+    }
+
+    #[test]
+    fn partial_homeboy_temp_target_is_skipped_when_source_skeleton_has_content() {
+        let temp_root = TempDir::new().expect("temp root");
+        let partial = temp_root.path().join("homeboy-upgrade-sync-main");
+        write_file(&partial.join("src/lib.rs"), "source");
+        write_file(&partial.join("target/debug/homeboy"), "binary");
+
+        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            path: None,
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("temp artifact candidates");
+
+        assert!(!candidates
+            .iter()
+            .any(|row| row.kind == "partial_homeboy_temp_target"));
+    }
+
+    #[test]
+    fn apply_removes_only_target_from_partial_homeboy_temp() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        let partial = temp_root.path().join("homeboy-upgrade-sync-main");
+        fs::create_dir_all(partial.join("src")).expect("mkdir src");
+        write_file(&partial.join("target/debug/homeboy"), "binary");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("apply cleanup");
+
+        assert!(output.candidates.iter().any(|row| {
+            row.kind == "partial_homeboy_temp_target" && row.worktree == partial.to_string_lossy()
+        }));
+        assert!(!partial.join("target").exists());
+        assert!(partial.join("src").exists());
     }
 
     #[test]
