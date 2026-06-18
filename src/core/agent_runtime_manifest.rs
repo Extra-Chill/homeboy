@@ -3,11 +3,16 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::core::agent_task_provider::AgentTaskExecutorProvider;
+use crate::core::agent_task_provider::{
+    AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
+    AgentTaskProviderWorkspaceMaterialization,
+};
 use crate::core::extension::{load_all_extensions, ExtensionManifest};
 use crate::core::{config, paths};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
+pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
+    "homeboy/agent-runtime-materialization-plan/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeManifest {
@@ -17,6 +22,11 @@ pub struct AgentRuntimeManifest {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_task_executors: Vec<AgentTaskExecutorProvider>,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentRuntimeMaterializationContract::is_empty"
+    )]
+    pub materialization: AgentRuntimeMaterializationContract,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25,6 +35,110 @@ pub struct AgentRuntimeManifest {
     pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeMaterializationContract {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_roots: Vec<AgentTaskProviderRunnerSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executable_requirements: Vec<AgentRuntimeExecutableRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_passthrough: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl AgentRuntimeMaterializationContract {
+    fn is_empty(&self) -> bool {
+        self.source_roots.is_empty()
+            && self.dependencies.is_empty()
+            && self.executable_requirements.is_empty()
+            && self.readiness_checks.is_empty()
+            && self.env_passthrough.is_empty()
+            && self.workspace.is_none()
+            && self.extra.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeMaterializationDependency {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentRuntimeExecutableRequirement {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeMaterializationPlan {
+    pub schema: String,
+    pub runtime_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_roots: Vec<AgentTaskProviderRunnerSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executable_requirements: Vec<AgentRuntimeExecutableRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_passthrough: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
+}
+
+pub fn runtime_materialization_plan(
+    manifest: &AgentRuntimeManifest,
+) -> AgentRuntimeMaterializationPlan {
+    let mut env_passthrough = manifest.materialization.env_passthrough.clone();
+    env_passthrough.sort();
+    env_passthrough.dedup();
+
+    AgentRuntimeMaterializationPlan {
+        schema: AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA.to_string(),
+        runtime_id: manifest.id.clone(),
+        runtime_path: manifest.runtime_path.clone(),
+        source_roots: manifest.materialization.source_roots.clone(),
+        dependencies: manifest.materialization.dependencies.clone(),
+        executable_requirements: manifest.materialization.executable_requirements.clone(),
+        readiness_checks: manifest.materialization.readiness_checks.clone(),
+        env_passthrough,
+        workspace: manifest.materialization.workspace.clone(),
+    }
 }
 
 pub fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
@@ -99,10 +213,23 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
                 id: runtime.id.clone(),
                 label: runtime.label.clone(),
                 agent_task_executors: providers,
+                materialization: serde_json::from_value(
+                    runtime
+                        .extra
+                        .get("materialization")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                )
+                .unwrap_or_default(),
                 extension_id: Some(extension.id.clone()),
                 extension_path: extension.extension_path.clone(),
                 runtime_path: extension.extension_path.clone(),
-                extra: runtime.extra.clone().into_iter().collect(),
+                extra: runtime
+                    .extra
+                    .clone()
+                    .into_iter()
+                    .filter(|(key, _)| key != "materialization")
+                    .collect(),
             });
         }
     }
@@ -199,6 +326,36 @@ mod tests {
             serde_json::from_value(json!({
                 "id": "example-runtime",
                 "label": "Example Runtime",
+                "materialization": {
+                    "source_roots": [{
+                        "id": "example-runtime-source",
+                        "label": "Example Runtime Source",
+                        "path": "~/.cache/homeboy/example-runtime",
+                        "remote_url": "https://example.com/runtime.git",
+                        "git_ref": "main"
+                    }],
+                    "dependencies": [{
+                        "id": "example-runtime-package",
+                        "source_root": "example-runtime-source",
+                        "requirement": "runtime package checkout"
+                    }],
+                    "executable_requirements": [{
+                        "id": "example-runtime-cli",
+                        "env": ["EXAMPLE_RUNTIME_BIN"],
+                        "candidates": ["example-runtime"],
+                        "version_command": ["--version"]
+                    }],
+                    "readiness_checks": [{
+                        "id": "example-runtime.ready",
+                        "label": "Example Runtime Ready",
+                        "secret_env": ["EXAMPLE_RUNTIME_TOKEN"]
+                    }],
+                    "env_passthrough": ["EXAMPLE_RUNTIME_BIN", "EXAMPLE_RUNTIME_TOKEN", "EXAMPLE_RUNTIME_BIN"],
+                    "workspace": {
+                        "cwd": "git_checkout",
+                        "requires_git": true
+                    }
+                },
                 "runtime_metadata": { "owner": "extension" },
                 "agent_task_executors": [provider_json("example.default", "example")]
             }))
@@ -215,6 +372,36 @@ mod tests {
             Some("runtime-extension")
         );
         assert_eq!(manifests[0].agent_task_executors[0].backend, "example");
+        assert!(!manifests[0].extra.contains_key("materialization"));
+        let materialization_plan = runtime_materialization_plan(&manifests[0]);
+        assert_eq!(
+            materialization_plan.schema,
+            AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA
+        );
+        assert_eq!(materialization_plan.runtime_id, "example-runtime");
+        assert_eq!(
+            materialization_plan.source_roots[0].remote_url.as_deref(),
+            Some("https://example.com/runtime.git")
+        );
+        assert_eq!(
+            materialization_plan.executable_requirements[0].candidates,
+            vec!["example-runtime".to_string()]
+        );
+        assert_eq!(
+            materialization_plan.env_passthrough,
+            vec![
+                "EXAMPLE_RUNTIME_BIN".to_string(),
+                "EXAMPLE_RUNTIME_TOKEN".to_string()
+            ]
+        );
+        assert_eq!(
+            materialization_plan
+                .workspace
+                .as_ref()
+                .expect("workspace")
+                .requires_git,
+            Some(true)
+        );
         assert_eq!(
             manifests[0].runtime_path.as_deref(),
             Some("/extensions/runtime-extension")
@@ -245,6 +432,9 @@ mod tests {
                     "description": "Standalone runtime package fixture.",
                     "runtime_metadata": { "owner": "standalone" },
                     "label": "Standalone Example",
+                    "materialization": {
+                        "env_passthrough": ["STANDALONE_RUNTIME_HOME"]
+                    },
                     "agent_task_executors": [{
                         "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
                         "id": "standalone-example.default",
@@ -318,6 +508,45 @@ mod tests {
                 provider.provider_defaults["example-provider"]["secret_env"][0],
                 "EXAMPLE_RUNTIME_REFRESH_TOKEN"
             );
+            let materialization_plan = runtime_materialization_plan(&manifests[0]);
+            assert_eq!(
+                materialization_plan.env_passthrough,
+                vec!["STANDALONE_RUNTIME_HOME".to_string()]
+            );
         });
+    }
+
+    #[test]
+    fn wp_codebox_runtime_materialization_fixture_is_plain_data() {
+        let manifest: AgentRuntimeManifest = serde_json::from_str(include_str!(
+            "../../tests/fixtures/wp_codebox_runtime_materialization_manifest.json"
+        ))
+        .expect("wp-codebox fixture parses");
+
+        let materialization_plan = runtime_materialization_plan(&manifest);
+
+        assert_eq!(manifest.id, "wp-codebox");
+        assert_eq!(materialization_plan.runtime_id, "wp-codebox");
+        assert_eq!(materialization_plan.source_roots[0].id, "wp-codebox");
+        assert_eq!(
+            materialization_plan.source_roots[0].remote_url.as_deref(),
+            Some("https://github.com/Automattic/wp-codebox.git")
+        );
+        assert_eq!(
+            materialization_plan.executable_requirements[0].env,
+            vec!["WP_CODEBOX_BIN".to_string()]
+        );
+        assert_eq!(
+            materialization_plan.readiness_checks[0].label,
+            "WP Codebox runtime available"
+        );
+        assert_eq!(
+            materialization_plan.env_passthrough,
+            vec![
+                "AI_PROVIDER_OPENAI_CODEX_API_KEY".to_string(),
+                "WP_CODEBOX_BIN".to_string(),
+                "WP_CODEBOX_HOME".to_string()
+            ]
+        );
     }
 }
