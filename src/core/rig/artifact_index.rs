@@ -74,20 +74,30 @@ pub fn for_completed_rig_run(
 }
 
 pub fn for_run(store: &ObservationStore, run: &RunRecord) -> Option<RigRunArtifactIndex> {
+    if run.rig_id.is_none() || run.kind != "rig" {
+        return None;
+    }
+    let artifacts = store.list_artifacts(&run.id).unwrap_or_default();
+    for_run_with_artifacts(run, &artifacts)
+}
+
+pub fn for_run_with_artifacts(
+    run: &RunRecord,
+    artifacts: &[ArtifactRecord],
+) -> Option<RigRunArtifactIndex> {
     let rig_id = run.rig_id.as_ref()?;
     if run.kind != "rig" {
         return None;
     }
     let artifact_root = crate::core::artifact_root().ok()?;
     let artifact_index_path = artifact_root.join(&run.id).join("rig-artifact-index.json");
-    let artifacts = store.list_artifacts(&run.id).unwrap_or_default();
     Some(build(
         rig_id,
         &run.id,
         &run.status,
         &artifact_root,
         &artifact_index_path,
-        &artifacts,
+        artifacts,
         failed_step_refs_from_metadata(&run.metadata_json),
     ))
 }
