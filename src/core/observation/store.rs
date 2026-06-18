@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -707,6 +708,57 @@ impl ObservationStore {
             .map_err(sqlite_error("list artifact records"))?;
 
         collect_rows(rows, "collect artifact records")
+    }
+
+    pub fn list_artifacts_for_runs(
+        &self,
+        run_ids: &[String],
+    ) -> Result<BTreeMap<String, Vec<ArtifactRecord>>> {
+        let mut artifacts_by_run = run_ids
+            .iter()
+            .map(|run_id| {
+                validate_required("run_id", run_id)?;
+                Ok((run_id.clone(), Vec::new()))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        if run_ids.is_empty() {
+            return Ok(artifacts_by_run);
+        }
+
+        for chunk in run_ids.chunks(900) {
+            let placeholders = std::iter::repeat("?")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                r#"
+                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                FROM artifacts
+                WHERE run_id IN ({placeholders})
+                ORDER BY run_id ASC, created_at ASC
+                "#
+            );
+            let mut statement = self
+                .connection
+                .prepare(&sql)
+                .map_err(sqlite_error("prepare batch list artifact records"))?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params_from_iter(chunk.iter().map(String::as_str)),
+                    row_to_artifact_record,
+                )
+                .map_err(sqlite_error("batch list artifact records"))?;
+
+            for row in rows {
+                let artifact = row.map_err(sqlite_error("collect batch artifact records"))?;
+                artifacts_by_run
+                    .entry(artifact.run_id.clone())
+                    .or_default()
+                    .push(artifact);
+            }
+        }
+
+        Ok(artifacts_by_run)
     }
 
     pub fn get_artifact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
