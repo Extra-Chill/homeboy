@@ -404,7 +404,6 @@
           "src/commands/auth.rs",
           "src/commands/bench.rs",
           "src/commands/build.rs",
-          "src/commands/cargo.rs",
           "src/commands/changelog.rs",
           "src/commands/daemon.rs",
           "src/commands/db.rs",

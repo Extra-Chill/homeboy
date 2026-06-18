@@ -121,7 +121,6 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 ## Notes
 
-- The `update` command is an alias for `upgrade` with identical behavior.
 - Version checking queries the crates.io API. Network failures are handled gracefully.
 - On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
 

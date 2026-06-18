@@ -28,7 +28,6 @@
 - [issues](issues.md) — reconcile findings against issue trackers
 - [lab](lab.md) — remote Lab runner status and benchmark routing helpers
 - [lint](lint.md)
-- [list](list.md)
 - [logs](logs.md)
 - [observe](observe.md) — passive live observation into trace timeline evidence
 - [project](project.md)
