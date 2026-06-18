@@ -8,10 +8,13 @@ use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::core::api_jobs::{Job, RemoteRunnerJobClaim, RemoteRunnerJobResult};
+use crate::core::api_jobs::{
+    Job, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+};
 use crate::core::error::{Error, Result};
 
 use super::broker_http;
+use super::capabilities::RunnerCapabilityPreflight;
 use super::execution::{exec, RunnerExecOptions};
 
 #[derive(Debug, Clone)]
@@ -71,7 +74,7 @@ pub fn run_reverse_worker(
 ) -> Result<(ReverseRunnerWorkerOutput, i32)> {
     let stop = Arc::new(AtomicBool::new(false));
     if options.loop_mode {
-        install_shutdown_handler(stop.clone())?;
+        crate::core::process::install_shutdown_handler(stop.clone(), "runner worker")?;
     }
     run_reverse_worker_with_stop(options, stop)
 }
@@ -267,6 +270,23 @@ fn run_once_output(
     };
 
     append_progress(&client, &options.broker_url, &options.runner_id, &claim.job)?;
+    // Remote capability-parity preflight: validate that this runner can satisfy
+    // the claimed job's top-level command (and any required paths) before
+    // starting execution, so a missing tool fails before remote dispatch instead
+    // of mid-run (#5093). `exec` runs `preflight_runner_capability_plan` against
+    // this preflight before handing the command to the runtime.
+    let capability_preflight = reverse_worker_capability_preflight(&claim.request);
+    // Shared finisher so the exec-error and exec-success paths submit their
+    // terminal job result through identical broker plumbing (#5091).
+    let finish = |result: RemoteRunnerJobResult| {
+        finish_job(
+            &client,
+            &options.broker_url,
+            &options.runner_id,
+            &claim.job,
+            result,
+        )
+    };
     let exec_result = exec(
         &options.runner_id,
         RunnerExecOptions {
@@ -279,7 +299,7 @@ fn run_once_output(
             capture_patch: claim.request.capture_patch,
             raw_exec: false,
             source_snapshot: claim.request.source_snapshot.clone(),
-            capability_preflight: None,
+            capability_preflight,
             required_extensions: Vec::new(),
             require_paths: claim.request.require_paths.clone(),
         },
@@ -287,22 +307,16 @@ fn run_once_output(
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            let job = finish_job(
-                &client,
-                &options.broker_url,
-                &options.runner_id,
-                &claim.job,
-                RemoteRunnerJobResult {
-                    exit_code: 1,
-                    stdout: None,
-                    stderr: Some(err.to_string()),
-                    data: Some(json!({
-                        "error": err.to_string(),
-                    })),
-                    artifacts: Vec::new(),
-                    metrics: None,
-                },
-            )?;
+            let job = finish(RemoteRunnerJobResult {
+                exit_code: 1,
+                stdout: None,
+                stderr: Some(err.to_string()),
+                data: Some(json!({
+                    "error": err.to_string(),
+                })),
+                artifacts: Vec::new(),
+                metrics: None,
+            })?;
             let exit_code = 1;
             return Ok((
                 claimed_output(
@@ -318,23 +332,17 @@ fn run_once_output(
             ));
         }
     };
-    let job = finish_job(
-        &client,
-        &options.broker_url,
-        &options.runner_id,
-        &claim.job,
-        RemoteRunnerJobResult {
-            exit_code,
-            stdout: Some(exec_output.stdout),
-            stderr: Some(exec_output.stderr),
-            data: Some(json!({
-                "mode": exec_output.mode,
-                "remote_cwd": exec_output.remote_cwd,
-            })),
-            artifacts: Vec::new(),
-            metrics: exec_output.metrics.clone(),
-        },
-    )?;
+    let job = finish(RemoteRunnerJobResult {
+        exit_code,
+        stdout: Some(exec_output.stdout),
+        stderr: Some(exec_output.stderr),
+        data: Some(json!({
+            "mode": exec_output.mode,
+            "remote_cwd": exec_output.remote_cwd,
+        })),
+        artifacts: Vec::new(),
+        metrics: exec_output.metrics.clone(),
+    })?;
 
     Ok((
         claimed_output(
@@ -348,6 +356,30 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+/// Build the remote capability-parity preflight for a claimed reverse-runner
+/// job. The claimed command's executable (its first argv element) must be
+/// available on this runner before execution starts, mirroring the direct
+/// `runner exec` path's preflight contract (#5093).
+fn reverse_worker_capability_preflight(
+    request: &RemoteRunnerJobRequest,
+) -> Option<RunnerCapabilityPreflight> {
+    let required_commands: Vec<String> = request
+        .command
+        .first()
+        .filter(|program| !program.trim().is_empty())
+        .cloned()
+        .into_iter()
+        .collect();
+    if required_commands.is_empty() {
+        return None;
+    }
+    Some(RunnerCapabilityPreflight {
+        command: "runner.work".to_string(),
+        required_commands,
+        ..Default::default()
+    })
 }
 
 fn claimed_output(
@@ -384,15 +416,6 @@ fn claimed_output(
         job: Some(job),
         exit_code: Some(exit_code),
     }
-}
-
-fn install_shutdown_handler(stop: Arc<AtomicBool>) -> Result<()> {
-    ctrlc::set_handler(move || {
-        stop.store(true, Ordering::SeqCst);
-    })
-    .map_err(|err| {
-        Error::internal_unexpected(format!("install runner worker signal handler: {err}"))
-    })
 }
 
 fn log_worker_event(options: &ReverseRunnerWorkerOptions, event: &str, data: serde_json::Value) {

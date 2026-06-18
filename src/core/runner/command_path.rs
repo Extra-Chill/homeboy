@@ -3,6 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::core::error::{Error, Result};
+
 const HOME_BIN_DIRS: &[&str] = &[".local/bin"];
 const ABSOLUTE_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
@@ -38,6 +40,65 @@ pub(crate) fn quote_runner_env_value(key: &str, value: &str) -> String {
     }
 
     crate::core::engine::shell::quote_arg(value)
+}
+
+/// Explicit path-translation preflight for a remote dispatch argv.
+///
+/// Rejects any argument that still embeds the controller-local source-checkout
+/// root (`source_path`) without having been translated to the remote workspace
+/// (`remote_cwd`). This is the shared final gate before a remote `exec`, so a
+/// missed path remap fails loudly on the controller instead of handing a
+/// non-existent local path to the remote runner. `context` labels the calling
+/// dispatch path (Lab offload, rig source management, ...) in the error (#5093).
+pub fn preflight_remote_argv_path_translation(
+    context: &str,
+    runner_id: &str,
+    command: &[String],
+    source_path: &Path,
+    remote_cwd: &str,
+) -> Result<()> {
+    let local_root = source_path.display().to_string();
+    let local_root = local_root.trim_end_matches('/');
+    if local_root.is_empty() {
+        return Ok(());
+    }
+
+    let leaked: Vec<String> = command
+        .iter()
+        .filter(|arg| arg_embeds_untranslated_local_path(arg, local_root, remote_cwd))
+        .cloned()
+        .collect();
+    if leaked.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "command",
+        format!(
+            "{context} refused to dispatch to runner `{runner_id}`: {} remote argv argument(s) still reference the controller-local source path `{local_root}` instead of the remote workspace `{remote_cwd}`",
+            leaked.len()
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            format!("Untranslated argument(s): {}", leaked.join(", ")),
+            "This is a path-translation defect in the remote dispatch argv pipeline; the argument must be remapped to the remote workspace path before dispatch.".to_string(),
+        ]),
+    ))
+}
+
+/// True when `arg` embeds the controller-local source root but has not been
+/// translated to the remote workspace path. Arguments that already point at the
+/// remote workspace (or do not reference the local root at all) are accepted.
+fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &str) -> bool {
+    if !arg.contains(local_root) {
+        return false;
+    }
+    // A correctly translated argument addresses the remote workspace root; if it
+    // happens to share a prefix string with the local root that is fine.
+    if !remote_cwd.is_empty() && arg.contains(remote_cwd) {
+        return false;
+    }
+    true
 }
 
 fn escape_double_quoted_env_value(value: &str) -> String {

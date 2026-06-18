@@ -56,6 +56,7 @@ pub use capabilities::{
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
     PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
 };
+pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::{
     normalize_runner_command_env, quote_runner_env_value, remote_shell_path_preamble,
 };

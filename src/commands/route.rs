@@ -162,6 +162,38 @@ fn run_rig_source_management_on_runner(
     let runner = runners::load(runner_id)?;
     let homeboy_path = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let command = runner_rig_source_management_command(homeboy_path, normalized_args);
+
+    // Remote-execution preflight before dispatching caller-derived argv to the
+    // runner (#5093):
+    // 1. Path-translation: reject any forwarded argument that still embeds the
+    //    controller-local working directory instead of the runner-resident
+    //    workspace, so a controller-only path never reaches the remote runtime.
+    // 2. Capability parity: validate the runner can run the forwarded `homeboy`
+    //    binary before execution starts (enforced by `runners::exec` against the
+    //    supplied `RunnerCapabilityPreflight`).
+    let remote_cwd = runner.workspace_root.clone().unwrap_or_default();
+    if let Ok(local_cwd) = std::env::current_dir() {
+        runners::preflight_remote_argv_path_translation(
+            "Rig source management",
+            runner_id,
+            &command,
+            &local_cwd,
+            &remote_cwd,
+        )?;
+    }
+    let required_commands: Vec<String> = command
+        .first()
+        .filter(|program| !program.trim().is_empty())
+        .cloned()
+        .into_iter()
+        .collect();
+    let capability_preflight =
+        (!required_commands.is_empty()).then(|| runners::RunnerCapabilityPreflight {
+            command: "rig.source-management".to_string(),
+            required_commands,
+            ..Default::default()
+        });
+
     let (output, exit_code) = runners::exec(
         runner_id,
         RunnerExecOptions {
@@ -174,7 +206,7 @@ fn run_rig_source_management_on_runner(
             capture_patch: false,
             raw_exec: false,
             source_snapshot: None,
-            capability_preflight: None,
+            capability_preflight,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
         },
@@ -641,7 +673,7 @@ mod tests {
         assert_eq!(command.hot_label, "lint");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -659,11 +691,11 @@ mod tests {
 
         assert_eq!(command.hot_label, "extension update");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
         assert!(command.unsupported_reason.is_none());
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
         assert!(cli.command.supports_lab_runner());
     }
 
@@ -807,7 +839,7 @@ mod tests {
                 command.workspace_mode_policy,
                 runners::LabOffloadWorkspaceModePolicy::RunnerResident
             );
-            assert!(!command.default_lab_offload);
+            assert!(!command.routing_policy.default_lab_offload);
         }
     }
 
@@ -843,7 +875,7 @@ mod tests {
                 "agent-task dispatch/cook/loop/run-plan/retry --run"
             );
             assert!(command.portable);
-            assert!(command.default_lab_offload);
+            assert!(command.routing_policy.default_lab_offload);
         }
     }
 
@@ -862,10 +894,10 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "agent-task providers");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]
@@ -889,7 +921,7 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert_eq!(command.hot_label, "tunnel service start");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
         assert_eq!(
             command.source_path_mode,
             runners::LabOffloadSourcePathMode::RunnerResident
@@ -898,9 +930,9 @@ mod tests {
             command.workspace_mode_policy,
             runners::LabOffloadWorkspaceModePolicy::RunnerResident
         );
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
         assert!(command.required_extensions.is_empty());
-        assert!(!command.infer_source_path_tools);
+        assert!(!command.routing_policy.infer_source_path_tools);
     }
 
     #[test]
@@ -922,7 +954,7 @@ mod tests {
 
         assert_eq!(command.hot_label, "tunnel preview-consumer run");
         assert!(command.portable);
-        assert!(!command.default_lab_offload);
+        assert!(!command.routing_policy.default_lab_offload);
     }
 
     #[test]
@@ -934,7 +966,7 @@ mod tests {
         assert_eq!(command.hot_label, "audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -946,7 +978,7 @@ mod tests {
         assert_eq!(command.hot_label, "audit");
         assert!(command.portable);
         assert_eq!(command.unsupported_reason, None);
-        assert!(command.requires_extension_parity);
+        assert!(command.routing_policy.requires_extension_parity);
     }
 
     #[test]
@@ -958,6 +990,6 @@ mod tests {
         assert_eq!(command.hot_label, "rig up");
         assert!(!command.portable);
         assert!(command.unsupported_reason.is_some());
-        assert!(!command.requires_extension_parity);
+        assert!(!command.routing_policy.requires_extension_parity);
     }
 }

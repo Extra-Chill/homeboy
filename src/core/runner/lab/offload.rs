@@ -29,6 +29,7 @@ use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
+use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
 use super::super::lab_apply::apply_lab_offload_patch;
@@ -98,17 +99,15 @@ pub struct LabOffloadRequest<'a> {
 pub struct LabOffloadCommand {
     pub hot_label: &'static str,
     pub portable: bool,
-    pub default_lab_offload: bool,
     pub unsupported_reason: Option<&'static str>,
     pub source_path_mode: LabOffloadSourcePathMode,
     pub workspace_mode_policy: LabOffloadWorkspaceModePolicy,
-    pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
-    pub infer_source_path_tools: bool,
-    /// Whether this is a release-gate command (lint/test/audit) subject to the
-    /// `/release_gate/local_hot` fail-closed routing policy.
-    pub release_gate: bool,
+    /// Routing-policy flags shared across the Lab command layers
+    /// (`default_lab_offload`, `infer_source_path_tools`, `release_gate`,
+    /// `requires_extension_parity`).
+    pub routing_policy: crate::command_contract::LabRoutingPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,65 +295,6 @@ fn dirty_patch_provider_checkout_hints(source_path: &Path, status: &str) -> Vec<
     hints
 }
 
-/// Explicit path-translation preflight for the remote dispatch argv.
-///
-/// By the time this runs the argv has already passed through the Lab offload
-/// remap pipeline (`remap_path_settings_in_args`, `remap_provider_config_in_args`,
-/// `rewrite_lab_offload_args`, ...), which rewrites controller-local paths to
-/// their synced remote locations. This is the final gate before
-/// [`exec`]: it rejects any argument that still embeds the controller-local
-/// source-checkout root, so a missed remap fails loudly on the controller
-/// instead of handing a non-existent local path to the remote runner.
-fn preflight_remote_argv_path_translation(
-    runner_id: &str,
-    command: &[String],
-    source_path: &Path,
-    remote_cwd: &str,
-) -> Result<()> {
-    let local_root = source_path.display().to_string();
-    let local_root = local_root.trim_end_matches('/');
-    if local_root.is_empty() {
-        return Ok(());
-    }
-
-    let leaked: Vec<String> = command
-        .iter()
-        .filter(|arg| arg_embeds_untranslated_local_path(arg, local_root, remote_cwd))
-        .cloned()
-        .collect();
-    if leaked.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "command",
-        format!(
-            "Lab offload refused to dispatch to runner `{runner_id}`: {} remote argv argument(s) still reference the controller-local source path `{local_root}` instead of the remote workspace `{remote_cwd}`",
-            leaked.len()
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![
-            format!("Untranslated argument(s): {}", leaked.join(", ")),
-            "This is a path-translation defect in the Lab offload remap pipeline; the argument must be remapped to the remote workspace path before dispatch.".to_string(),
-        ]),
-    ))
-}
-
-/// True when `arg` embeds the controller-local source root but has not been
-/// translated to the remote workspace path. Arguments that already point at the
-/// remote workspace (or do not reference the local root at all) are accepted.
-fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &str) -> bool {
-    if !arg.contains(local_root) {
-        return false;
-    }
-    // A correctly translated argument addresses the remote workspace root; if it
-    // happens to share a prefix string with the local root that is fine.
-    if !remote_cwd.is_empty() && arg.contains(remote_cwd) {
-        return false;
-    }
-    true
-}
-
 /// Record a freshly synced, remapped agent-task workspace entry: append it to
 /// the workspace mapping and emit the matching Lab plan step. Shared by the
 /// inline tasks-arg and plan-arg materialization in `run_lab_offload_inner`.
@@ -434,7 +374,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         return Ok(skipped_automatic_run_local(plan, reason));
     }
 
-    if request.explicit_runner.is_none() && !contract.default_lab_offload {
+    if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
             metadata: None,
@@ -521,7 +461,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             // diagnostic that surfaces the underlying runner reason, rather
             // than letting a stale launcher route the gate to the controller.
             // The operator-only override is `/release_gate/local_hot: allowed`.
-            if contract.release_gate
+            if contract.routing_policy.release_gate
                 && matches!(selection.source, LabRunnerSelectionSource::Default)
                 && !crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed()
             {
@@ -626,6 +566,7 @@ fn run_runner_resident_lab_offload(
     // patch-provider offload path before its remote dispatch (#5071).
     let source_path = lab_offload_source_path(request.normalized_args)?;
     preflight_remote_argv_path_translation(
+        "Lab offload",
         runner_id,
         &command,
         &source_path,
@@ -1103,7 +1044,7 @@ fn run_lab_offload_inner(
         Some(&remote_cwd),
         "lab_offload",
     );
-    if contract.requires_extension_parity {
+    if contract.routing_policy.requires_extension_parity {
         plan = with_step(
             plan,
             PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -1304,7 +1245,13 @@ fn run_lab_offload_inner(
     // that no controller-local source-checkout path survived un-translated
     // before we dispatch the command to the remote runner, so a missed remap
     // fails loudly here instead of corrupting the remote run.
-    preflight_remote_argv_path_translation(runner_id, &command, &source_path, &remote_cwd)?;
+    preflight_remote_argv_path_translation(
+        "Lab offload",
+        runner_id,
+        &command,
+        &source_path,
+        &remote_cwd,
+    )?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {
@@ -2363,15 +2310,17 @@ mod tests {
         LabOffloadCommand {
             hot_label: label,
             portable: true,
-            default_lab_offload: true,
             unsupported_reason: None,
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-            requires_extension_parity: true,
             required_extensions: Vec::new(),
             requires_playwright: false,
-            infer_source_path_tools: true,
-            release_gate: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy {
+                default_lab_offload: true,
+                infer_source_path_tools: true,
+                release_gate: false,
+                requires_extension_parity: true,
+            },
         }
     }
 
@@ -2379,15 +2328,12 @@ mod tests {
         LabOffloadCommand {
             hot_label: "rig up",
             portable: false,
-            default_lab_offload: false,
             unsupported_reason: Some(reason),
             source_path_mode: LabOffloadSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-            requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
-            infer_source_path_tools: false,
-            release_gate: false,
+            routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
     }
 
@@ -2767,7 +2713,7 @@ mod tests {
         std::fs::write(dir.path().join("docker-compose.yml"), "services: {}")
             .expect("docker signal");
         let mut command = portable_lab_command("trace");
-        command.infer_source_path_tools = false;
+        command.routing_policy.infer_source_path_tools = false;
 
         let contract =
             lab_runner_capability_contract(&command, dir.path(), &[RunnerRequiredTool::Homeboy])
@@ -3214,7 +3160,7 @@ mod tests {
     #[test]
     fn lab_runner_selection_ignores_default_when_auto_offload_is_disabled() {
         let mut command = portable_lab_command("extension update");
-        command.default_lab_offload = false;
+        command.routing_policy.default_lab_offload = false;
 
         let selection = resolve_lab_runner_selection_from_default(
             &command,
@@ -3233,7 +3179,7 @@ mod tests {
     #[test]
     fn lab_runner_selection_honors_explicit_runner_when_auto_offload_is_disabled() {
         let mut command = portable_lab_command("extension update");
-        command.default_lab_offload = false;
+        command.routing_policy.default_lab_offload = false;
 
         let selection = resolve_lab_runner_selection_from_default(
             &command,
@@ -3378,7 +3324,7 @@ mod tests {
 
     fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
         let mut command = portable_lab_command(label);
-        command.release_gate = true;
+        command.routing_policy.release_gate = true;
         command
     }
 

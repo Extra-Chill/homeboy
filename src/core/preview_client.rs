@@ -113,7 +113,7 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
-    install_shutdown_handler(stop.clone())?;
+    crate::core::process::install_shutdown_handler(stop.clone(), "preview client")?;
     let client = Client::builder()
         .timeout(Duration::from_secs(spec.poll_timeout_secs.max(1) + 5))
         .build()
@@ -703,15 +703,6 @@ fn require_non_empty(field: &str, value: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn install_shutdown_handler(stop: Arc<AtomicBool>) -> Result<()> {
-    ctrlc::set_handler(move || {
-        stop.store(true, Ordering::SeqCst);
-    })
-    .map_err(|err| {
-        Error::internal_unexpected(format!("install preview client signal handler: {err}"))
-    })
 }
 
 #[cfg(test)]
