@@ -55,20 +55,6 @@ pub struct StatusArgs {
     pub unreleased: bool,
 }
 
-impl StatusArgs {
-    fn has_filter(&self) -> bool {
-        self.uncommitted || self.needs_release || self.ready || self.docs_only || self.unreleased
-    }
-
-    fn includes_upstream_drift(&self) -> bool {
-        !self.has_filter()
-    }
-
-    fn includes_unreleased_merges(&self) -> bool {
-        !self.has_filter() || self.unreleased
-    }
-}
-
 /// Per-component upstream drift info.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpstreamDrift {
@@ -309,15 +295,18 @@ fn summarize_components(
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
 
-    let include_upstream_drift = args.includes_upstream_drift();
-    let include_unreleased_merges = args.includes_unreleased_merges();
+    let has_filter =
+        args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
+    let include_upstream_drift = !has_filter;
+    let include_unreleased_merges = !has_filter || args.unreleased;
 
     if include_upstream_drift || include_unreleased_merges {
         for comp in &components {
             fetch_origin_tags(&comp.local_path);
 
             if include_upstream_drift {
-                if let Some(drift) = get_upstream_drift_for(&comp.local_path, &comp.id) {
+                if let Some(mut drift) = get_upstream_drift(&comp.local_path) {
+                    drift.component_id = comp.id.clone();
                     if drift.is_behind() {
                         behind_upstream.push(comp.id.clone());
                     }
@@ -351,8 +340,6 @@ fn summarize_components(
     }
 
     // Apply filters if any are set
-    let has_filter = args.has_filter();
-
     if has_filter {
         if !args.uncommitted {
             uncommitted.clear();
@@ -656,12 +643,6 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
 /// Like `fetch_upstream_drift` but sets the component ID in the result.
 fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
     let mut drift = fetch_upstream_drift(path)?;
-    drift.component_id = id.to_string();
-    Some(drift)
-}
-
-fn get_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
-    let mut drift = get_upstream_drift(path)?;
     drift.component_id = id.to_string();
     Some(drift)
 }
@@ -1008,32 +989,6 @@ mod tests {
             Commands::Status(args) => assert!(args.unreleased),
             _ => panic!("expected status command"),
         }
-    }
-
-    #[test]
-    fn unfiltered_summary_includes_origin_dependent_sections() {
-        let args = status_args(None, "/tmp/example".to_string(), false);
-
-        assert!(args.includes_upstream_drift());
-        assert!(args.includes_unreleased_merges());
-    }
-
-    #[test]
-    fn local_release_state_filters_skip_origin_dependent_sections() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.needs_release = true;
-
-        assert!(!args.includes_upstream_drift());
-        assert!(!args.includes_unreleased_merges());
-    }
-
-    #[test]
-    fn unreleased_filter_keeps_unreleased_origin_work_without_drift() {
-        let mut args = status_args(None, "/tmp/example".to_string(), false);
-        args.unreleased = true;
-
-        assert!(!args.includes_upstream_drift());
-        assert!(args.includes_unreleased_merges());
     }
 
     #[test]
