@@ -281,12 +281,16 @@ fn unsupported_repo_loop_spec_fields(spec: &AgentTaskRepoLoopSpec) -> Vec<String
             ));
         }
         for artifact_id in workflow.consumes.iter().chain(workflow.dependencies.iter()) {
-            let fanout_producers: Vec<String> =
-                repo_loop_artifact_producers(spec, workflow, artifact_id)
-                    .into_iter()
-                    .filter(|producer| !producer.entity_ids.is_empty())
-                    .map(|producer| producer.workflow_id.clone())
-                    .collect();
+            let fanout_producers: Vec<String> = repo_loop_artifact_producers(
+                spec,
+                workflow,
+                artifact_id,
+                RepoLoopProducerScope::All,
+            )
+            .into_iter()
+            .filter(|(producer, _task_id)| !producer.entity_ids.is_empty())
+            .map(|(producer, _task_id)| producer.workflow_id.clone())
+            .collect();
             if workflow.entity_ids.is_empty() && !fanout_producers.is_empty() {
                 unsupported.push(format!(
                     "workflows[{}].consumes: join over fan-out artifact '{}' from workflows [{}] requires the controller path",
@@ -565,9 +569,12 @@ fn repo_loop_workflow_output_dependencies(
     let mut depends_on = Vec::new();
     let mut bindings = HashMap::new();
     for artifact_id in workflow.consumes.iter().chain(workflow.dependencies.iter()) {
-        for (_producer, producer_task_id) in
-            repo_loop_artifact_producer_task_ids(spec, workflow, artifact_id, entity_id)
-        {
+        for (_producer, producer_task_id) in repo_loop_artifact_producers(
+            spec,
+            workflow,
+            artifact_id,
+            RepoLoopProducerScope::MatchingEntity(entity_id),
+        ) {
             if !depends_on.contains(&producer_task_id) {
                 depends_on.push(producer_task_id.clone());
             }
@@ -595,32 +602,6 @@ fn repo_loop_workflow_output_dependencies(
     }
 }
 
-fn repo_loop_artifact_producer_task_ids<'a>(
-    spec: &'a AgentTaskRepoLoopSpec,
-    consumer: &AgentTaskRepoLoopSpecWorkflow,
-    artifact_id: &str,
-    entity_id: Option<&str>,
-) -> Vec<(&'a AgentTaskRepoLoopSpecWorkflow, String)> {
-    repo_loop_artifact_producers(spec, consumer, artifact_id)
-        .into_iter()
-        .flat_map(|producer| {
-            if producer.entity_ids.is_empty() {
-                vec![(producer, repo_loop_task_id(producer, None))]
-            } else if let Some(entity_id) = entity_id {
-                producer
-                    .entity_ids
-                    .iter()
-                    .any(|producer_entity_id| producer_entity_id == entity_id)
-                    .then(|| (producer, repo_loop_task_id(producer, Some(entity_id))))
-                    .into_iter()
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        })
-        .collect()
-}
-
 fn repo_loop_artifact<'a>(
     spec: &'a AgentTaskRepoLoopSpec,
     artifact_id: &str,
@@ -630,17 +611,44 @@ fn repo_loop_artifact<'a>(
         .find(|artifact| artifact.artifact_id == artifact_id)
 }
 
+enum RepoLoopProducerScope<'a> {
+    All,
+    MatchingEntity(Option<&'a str>),
+}
+
 fn repo_loop_artifact_producers<'a>(
     spec: &'a AgentTaskRepoLoopSpec,
     consumer: &AgentTaskRepoLoopSpecWorkflow,
     artifact_id: &str,
-) -> Vec<&'a AgentTaskRepoLoopSpecWorkflow> {
+    scope: RepoLoopProducerScope<'_>,
+) -> Vec<(&'a AgentTaskRepoLoopSpecWorkflow, String)> {
     spec.workflows
         .iter()
         .filter(|producer| producer.workflow_id != consumer.workflow_id)
         .filter(|producer| {
             producer.artifacts.iter().any(|id| id == artifact_id)
                 || producer.emits.iter().any(|id| id == artifact_id)
+        })
+        .flat_map(|producer| match scope {
+            RepoLoopProducerScope::All if producer.entity_ids.is_empty() => {
+                vec![(producer, repo_loop_task_id(producer, None))]
+            }
+            RepoLoopProducerScope::All => producer
+                .entity_ids
+                .iter()
+                .map(|entity_id| (producer, repo_loop_task_id(producer, Some(entity_id))))
+                .collect(),
+            RepoLoopProducerScope::MatchingEntity(_) if producer.entity_ids.is_empty() => {
+                vec![(producer, repo_loop_task_id(producer, None))]
+            }
+            RepoLoopProducerScope::MatchingEntity(Some(entity_id)) => producer
+                .entity_ids
+                .iter()
+                .any(|producer_entity_id| producer_entity_id == entity_id)
+                .then(|| (producer, repo_loop_task_id(producer, Some(entity_id))))
+                .into_iter()
+                .collect(),
+            RepoLoopProducerScope::MatchingEntity(None) => Vec::new(),
         })
         .collect()
 }
