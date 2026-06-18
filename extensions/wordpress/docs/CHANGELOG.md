@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.10] - 2026-06-18
+
+### Changed
+- Add generic runtime output projections
+
 ## [3.7.9] - 2026-06-18
 
 ### Changed
