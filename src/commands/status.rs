@@ -295,22 +295,30 @@ fn summarize_components(
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
 
-    // Fetch from origin and detect upstream drift for each component
-    for comp in &components {
-        if let Some(drift) = fetch_upstream_drift_for(&comp.local_path, &comp.id) {
-            if drift.is_behind() {
-                behind_upstream.push(comp.id.clone());
-            }
-            upstream_drift.push(drift);
-        }
-    }
+    let include_upstream_drift = status_includes_upstream_drift(args);
+    let include_unreleased_merges = status_includes_unreleased_merges(args);
 
-    // Detect merged-but-unreleased work per component (issue #4996). This is
-    // measured against origin/<default-branch> (refreshed by the fetch above),
-    // so a stale local checkout does not hide unreleased merges.
-    for comp in &components {
-        if let Some(merge) = detect_unreleased_merges_for(comp) {
-            unreleased_merges.push(merge);
+    if include_upstream_drift || include_unreleased_merges {
+        for comp in &components {
+            fetch_origin_tags(&comp.local_path);
+
+            if include_upstream_drift {
+                if let Some(drift) = get_upstream_drift_for(&comp.local_path, &comp.id) {
+                    if drift.is_behind() {
+                        behind_upstream.push(comp.id.clone());
+                    }
+                    upstream_drift.push(drift);
+                }
+            }
+
+            // Detect merged-but-unreleased work per component (issue #4996). This is
+            // measured against origin/<default-branch> (refreshed above), so a stale
+            // local checkout does not hide unreleased merges.
+            if include_unreleased_merges {
+                if let Some(merge) = detect_unreleased_merges_for(comp) {
+                    unreleased_merges.push(merge);
+                }
+            }
         }
     }
 
@@ -329,8 +337,7 @@ fn summarize_components(
     }
 
     // Apply filters if any are set
-    let has_filter =
-        args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
+    let has_filter = status_has_filter(args);
 
     if has_filter {
         if !args.uncommitted {
@@ -381,6 +388,18 @@ fn summarize_components(
         }),
         0,
     ))
+}
+
+fn status_has_filter(args: &StatusArgs) -> bool {
+    args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased
+}
+
+fn status_includes_upstream_drift(args: &StatusArgs) -> bool {
+    !status_has_filter(args)
+}
+
+fn status_includes_unreleased_merges(args: &StatusArgs) -> bool {
+    !status_has_filter(args) || args.unreleased
 }
 
 /// Path override mode: inspect one checkout without requiring registry membership.
@@ -584,13 +603,21 @@ fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool
 ///
 /// Returns `None` if the path is not a git repo or has no upstream configured.
 fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
+    fetch_origin_tags(path);
+
+    get_upstream_drift(path)
+}
+
+fn fetch_origin_tags(path: &str) {
     // Best-effort fetch — silently proceeds if no remote or network issue.
     let _ = homeboy::core::engine::command::run_in_optional(
         path,
         "git",
         &["fetch", "--tags", "--quiet"],
     );
+}
 
+fn get_upstream_drift(path: &str) -> Option<UpstreamDrift> {
     let snapshot = git::get_repo_snapshot(path).ok()?;
 
     // After fetching tags, find the latest tag across ALL refs (not just HEAD).
@@ -627,6 +654,12 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
 /// Like `fetch_upstream_drift` but sets the component ID in the result.
 fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
     let mut drift = fetch_upstream_drift(path)?;
+    drift.component_id = id.to_string();
+    Some(drift)
+}
+
+fn get_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
+    let mut drift = get_upstream_drift(path)?;
     drift.component_id = id.to_string();
     Some(drift)
 }
@@ -973,6 +1006,32 @@ mod tests {
             Commands::Status(args) => assert!(args.unreleased),
             _ => panic!("expected status command"),
         }
+    }
+
+    #[test]
+    fn unfiltered_summary_includes_origin_dependent_sections() {
+        let args = status_args(None, "/tmp/example".to_string(), false);
+
+        assert!(status_includes_upstream_drift(&args));
+        assert!(status_includes_unreleased_merges(&args));
+    }
+
+    #[test]
+    fn local_release_state_filters_skip_origin_dependent_sections() {
+        let mut args = status_args(None, "/tmp/example".to_string(), false);
+        args.needs_release = true;
+
+        assert!(!status_includes_upstream_drift(&args));
+        assert!(!status_includes_unreleased_merges(&args));
+    }
+
+    #[test]
+    fn unreleased_filter_keeps_unreleased_origin_work_without_drift() {
+        let mut args = status_args(None, "/tmp/example".to_string(), false);
+        args.unreleased = true;
+
+        assert!(!status_includes_upstream_drift(&args));
+        assert!(status_includes_unreleased_merges(&args));
     }
 
     #[test]
