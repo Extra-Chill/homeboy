@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.12] - 2026-06-18
+
+### Fixed
+- honor changed-scope differential counts
+
 ## [2.7.11] - 2026-06-15
 
 ### Fixed
