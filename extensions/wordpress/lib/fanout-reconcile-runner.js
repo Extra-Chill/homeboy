@@ -84,6 +84,7 @@ async function executeFanoutReconcileRun(input) {
     : (record) => defaultTaskOrder(plan, taskId, record);
   const onProgress = typeof input.on_progress === 'function' ? input.on_progress : () => {};
   const concurrency = normalizeConcurrency(input.concurrency);
+  const taskIds = validateTaskIds(plan, taskId);
   const records = [];
   const running = new Map();
   const runSchema = input.run_schema || RUN_SCHEMA;
@@ -122,21 +123,26 @@ async function executeFanoutReconcileRun(input) {
       return false;
     }
     const taskRequest = plan.task_requests[nextIndex];
+    const id = taskIds[nextIndex];
     nextIndex += 1;
-    const id = taskId(taskRequest);
 
     running.set(id, runningEntry(taskRequest));
     writeIncompleteRun();
 
     onProgress(progressEvent('started', taskRequest, plan));
-    const promise = Promise.resolve(executeTaskRequest(taskRequest, input)).then((record) => {
-      running.delete(id);
-      records.push(record);
-      records.sort((left, right) => taskOrder(left) - taskOrder(right));
-      onProgress(progressEvent(record.status || (isRecordSuccessful(record) ? 'completed' : 'failed'), taskRequest, plan, record));
-      writeIncompleteRun();
-      startNext();
-    });
+    const promise = Promise.resolve()
+      .then(() => executeTaskRequest(taskRequest, input))
+      .catch((error) => failedTaskRecord(taskRequest, id, error))
+      .then((record) => {
+        records.push(record);
+        records.sort((left, right) => taskOrder(left) - taskOrder(right));
+        onProgress(progressEvent(record.status || (isRecordSuccessful(record) ? 'completed' : 'failed'), taskRequest, plan, record));
+      })
+      .finally(() => {
+        running.delete(id);
+        writeIncompleteRun();
+        startNext();
+      });
     running.get(id).promise = promise;
     return true;
   };
@@ -184,6 +190,48 @@ function normalizeConcurrency(value) {
     return DEFAULT_CONCURRENCY;
   }
   return Math.min(parsed, 16);
+}
+
+function validateTaskIds(plan, taskId) {
+  const seen = new Set();
+  return plan.task_requests.map((taskRequest, index) => {
+    const id = normalizeTaskId(taskId(taskRequest));
+    if (!id) {
+      throw new Error(`fanout reconcile runner requires a non-empty task id at index ${index}`);
+    }
+    if (seen.has(id)) {
+      throw new Error(`fanout reconcile runner requires unique task ids; duplicate task id "${id}"`);
+    }
+    seen.add(id);
+    return id;
+  });
+}
+
+function normalizeTaskId(value) {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return '';
+}
+
+function failedTaskRecord(taskRequest, id, error) {
+  return {
+    id,
+    ...(taskRequest.sandbox_session_id ? { sandbox_session_id: taskRequest.sandbox_session_id } : {}),
+    group_key: taskRequest.group_key || '',
+    status: 'failed',
+    error_message: errorMessage(error),
+  };
+}
+
+function errorMessage(error) {
+  if (error && typeof error.message === 'string' && error.message.trim()) {
+    return error.message;
+  }
+  return String(error || 'Task execution failed');
 }
 
 function defaultTaskId(taskRequest) {

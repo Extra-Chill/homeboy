@@ -105,7 +105,86 @@ async function main() {
     fs.rmSync(root, { recursive: true, force: true });
   }
 
+  await assertRejectedTaskPersistsFailedRecord(plan);
+  await assertTaskIdsAreRequiredAndUnique(plan);
+
   console.log('Homeboy fanout reconcile runner smoke passed');
+}
+
+async function assertRejectedTaskPersistsFailedRecord(plan) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-fanout-reconcile-runner-rejected-'));
+  const runsOutputPath = path.join(root, 'run.json');
+  const started = [];
+  try {
+    const run = await executeFanoutReconcileRun({
+      plan,
+      concurrency: 1,
+      runs_output_path: runsOutputPath,
+      on_progress: (event) => started.push(event),
+      execute_task_request: async (taskRequest) => {
+        if (taskRequest.group_key === 'alpha') {
+          throw new Error('provider rejected alpha');
+        }
+        return {
+          id: taskRequest.id,
+          group_key: taskRequest.group_key,
+          item_ids: taskRequest.item_ids,
+          status: 'completed',
+        };
+      },
+      is_record_successful: (record) => record.status === 'completed',
+    });
+
+    assert.equal(run.status, 'failed');
+    assert.deepEqual(run.records.map((record) => record.id), ['task-alpha', 'task-beta']);
+    assert.equal(run.records[0].status, 'failed');
+    assert.equal(run.records[0].error_message, 'provider rejected alpha');
+    assert.equal(run.records[1].status, 'completed');
+    assert.equal(started.filter((event) => event.status === 'started').length, 2);
+
+    const persisted = readJson(runsOutputPath);
+    assert.equal(persisted.status, 'failed');
+    assert.deepEqual(persisted.records.map((record) => record.status), ['failed', 'completed']);
+    assert.equal(Object.hasOwn(persisted, 'current_group'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function assertTaskIdsAreRequiredAndUnique(plan) {
+  let executeCount = 0;
+  await assert.rejects(
+    executeFanoutReconcileRun({
+      plan: {
+        ...plan,
+        task_requests: [
+          { ...plan.task_requests[0], id: '', sandbox_session_id: '', group_key: '' },
+        ],
+      },
+      execute_task_request: async () => {
+        executeCount += 1;
+      },
+    }),
+    /non-empty task id/
+  );
+  assert.equal(executeCount, 0);
+
+  await assert.rejects(
+    executeFanoutReconcileRun({
+      plan: {
+        ...plan,
+        task_requests: [
+          { ...plan.task_requests[0], id: 'duplicate-task' },
+          { ...plan.task_requests[1], id: 'duplicate-task' },
+        ],
+      },
+      execute_task_request: async () => {
+        executeCount += 1;
+      },
+    }),
+    /unique task ids/
+  );
+  assert.equal(executeCount, 0);
 }
 
 main().catch((error) => {
