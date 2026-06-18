@@ -19,6 +19,9 @@ documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md)
 They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
 helper contract.
 
+Generic fanout/reconcile JSON planning is documented in
+[`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
+
 ## Available Extensions
 
 | Extension | Description |
