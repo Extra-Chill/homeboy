@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use crate::command_contract::LabRoutingPolicy;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CommandExecutionPlan {
     pub label: String,
@@ -117,15 +119,16 @@ pub enum CommandOutputFormat {
 pub struct LabRoutePlan {
     pub label: String,
     pub portability: CommandPortability,
-    pub default_lab_offload: bool,
     pub source_policy: CommandSourcePolicy,
     pub workspace_policy: CommandWorkspacePolicy,
     pub output_contract: CommandOutputContract,
-    pub requires_extension_parity: bool,
     pub required_extensions: Vec<String>,
     pub requires_playwright: bool,
-    pub infer_source_path_tools: bool,
-    pub release_gate: bool,
+    /// Routing-policy flags shared across the Lab command layers. Flattened so
+    /// the serialized shape keeps `default_lab_offload`, `infer_source_path_tools`,
+    /// `release_gate`, and `requires_extension_parity` as top-level keys.
+    #[serde(flatten)]
+    pub routing_policy: LabRoutingPolicy,
 }
 
 impl LabRoutePlan {
@@ -133,15 +136,12 @@ impl LabRoutePlan {
         Self {
             label: label.into(),
             portability: CommandPortability::Portable,
-            default_lab_offload: false,
             source_policy: CommandSourcePolicy::ControllerCwdOrExplicitPath,
             workspace_policy: CommandWorkspacePolicy::ChangedSinceGitElseSnapshot,
             output_contract: CommandOutputContract::inherit(),
-            requires_extension_parity: false,
             required_extensions: Vec::new(),
             requires_playwright: false,
-            infer_source_path_tools: false,
-            release_gate: false,
+            routing_policy: LabRoutingPolicy::default(),
         }
     }
 

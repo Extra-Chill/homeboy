@@ -9,6 +9,7 @@
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore, RunRecord, RunStatus};
 use homeboy::test_support::with_isolated_home;
+use serde_json::Value;
 
 use super::bundle::{RunsExportArgs, RunsImportArgs};
 use super::{bundle::import_runs, drift, query, RunsOutput};
@@ -34,20 +35,24 @@ impl Drop for XdgGuard {
     }
 }
 
+fn sample_run(kind: &str, component_id: &str, rig_id: &str, metadata: Value) -> NewRunRecord {
+    NewRunRecord::builder(kind)
+        .component_id(component_id)
+        .rig_id(rig_id)
+        .metadata(metadata)
+        .build()
+}
+
 fn install_artifact(
     store: &ObservationStore,
     home: &std::path::Path,
     run_kind: &str,
     component: &str,
-    body: serde_json::Value,
+    body: Value,
     artifact_kind: &str,
 ) -> RunRecord {
     let run = store
-        .start_run(
-            NewRunRecord::builder(run_kind)
-                .component_id(component)
-                .build(),
-        )
+        .start_run(sample_run(run_kind, component, "corpus", Value::Null))
         .expect("start run");
     store
         .finish_run(&run.id, RunStatus::Pass, None)
