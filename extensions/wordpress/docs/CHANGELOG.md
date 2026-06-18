@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.1] - 2026-06-18
+
+### Changed
+- Add runtime provider resolver groundwork
+
+### Fixed
+- Fix fanout reconcile runner task determinism
+
 ## [3.7.0] - 2026-06-18
 
 ### Added
