@@ -138,8 +138,9 @@ fn alias_entries<T: ConfigEntity>() -> Vec<(String, String)> {
 pub(crate) fn load<T: ConfigEntity>(id: &str) -> Result<T> {
     let path = T::config_path(id)?;
     if !path.exists() {
+        let entities = list::<T>().unwrap_or_default();
         // Try alias resolution before giving up
-        if let Some(real_id) = resolve_alias::<T>(id) {
+        if let Some(real_id) = resolve_alias_in(id, &entities) {
             let alias_path = T::config_path(&real_id)?;
             let content = local_files::local().read(&alias_path)?;
             let mut entity: T = from_str(&content)?;
@@ -147,7 +148,7 @@ pub(crate) fn load<T: ConfigEntity>(id: &str) -> Result<T> {
             entity.post_load(&content);
             return Ok(entity);
         }
-        let suggestions = find_similar_ids::<T>(id);
+        let suggestions = find_similar_ids_in(id, &entities);
         return Err(T::not_found_error(id.to_string(), suggestions));
     }
     let content = local_files::local().read(&path)?;
@@ -157,11 +158,9 @@ pub(crate) fn load<T: ConfigEntity>(id: &str) -> Result<T> {
     Ok(entity)
 }
 
-/// Resolve an alias to the real entity ID by scanning all entities.
-fn resolve_alias<T: ConfigEntity>(alias: &str) -> Option<String> {
+fn resolve_alias_in<T: ConfigEntity>(alias: &str, entities: &[T]) -> Option<String> {
     let alias_lower = alias.to_lowercase();
-    let entities = list::<T>().ok()?;
-    for entity in &entities {
+    for entity in entities {
         for a in entity.aliases() {
             if a.to_lowercase() == alias_lower {
                 return Some(entity.id().to_string());
@@ -753,11 +752,15 @@ pub(crate) fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
         Err(_) => return vec![],
     };
 
+    find_similar_ids_in(target, &entities)
+}
+
+fn find_similar_ids_in<T: ConfigEntity>(target: &str, entities: &[T]) -> Vec<String> {
     let target_lower = target.to_lowercase();
     let mut matches: Vec<(String, usize)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for entity in &entities {
+    for entity in entities {
         let id = entity.id().to_string();
         // Collect the ID and all aliases as candidates
         let mut candidates = vec![id.clone()];
@@ -796,6 +799,67 @@ pub(crate) fn find_similar_ids<T: ConfigEntity>(target: &str) -> Vec<String> {
 
     matches.sort_by_key(|(_, priority)| *priority);
     matches.into_iter().take(3).map(|(id, _)| id).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Serialize)]
+    struct TestEntity {
+        id: String,
+        aliases: Vec<String>,
+    }
+
+    impl ConfigEntity for TestEntity {
+        const ENTITY_TYPE: &'static str = "test";
+        const DIR_NAME: &'static str = "tests";
+
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn set_id(&mut self, id: String) {
+            self.id = id;
+        }
+
+        fn not_found_error(id: String, suggestions: Vec<String>) -> Error {
+            Error::entity_not_found(
+                crate::core::error::ErrorCode::ConfigMissingKey,
+                "Test",
+                id,
+                suggestions,
+            )
+        }
+
+        fn aliases(&self) -> &[String] {
+            &self.aliases
+        }
+    }
+
+    #[test]
+    fn miss_helpers_reuse_loaded_entities_for_aliases_and_suggestions() {
+        let entities = vec![
+            TestEntity {
+                id: "alpha-project".to_string(),
+                aliases: vec!["prod".to_string()],
+            },
+            TestEntity {
+                id: "beta-project".to_string(),
+                aliases: vec!["staging".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            resolve_alias_in("PROD", &entities),
+            Some("alpha-project".to_string())
+        );
+        assert_eq!(
+            find_similar_ids_in("stag", &entities),
+            vec!["beta-project (alias: staging)".to_string()]
+        );
+    }
 }
 
 // ============================================================================
