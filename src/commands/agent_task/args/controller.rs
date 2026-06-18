@@ -8,6 +8,8 @@ pub enum AgentTaskControllerCommand {
     Init(AgentTaskControllerInitArgs),
     /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
     FromSpec(AgentTaskControllerFromSpecArgs),
+    /// Materialize a repo-authored loop spec with explicit run inputs.
+    Materialize(AgentTaskControllerMaterializeArgs),
     /// Compile a controller spec into a dry Homeboy plan without writing state.
     Plan(AgentTaskControllerPlanArgs),
     /// Read a durable loop controller record.
@@ -51,6 +53,17 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Execute pending actions after applying the spec.
     #[arg(long)]
     pub resume: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerMaterializeArgs {
+    /// Repo loop spec JSON, @file, or - for stdin.
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
+
+    /// Explicit run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
+    #[arg(long, value_name = "JSON")]
+    pub inputs: Option<String>,
 }
 
 #[derive(Args, Debug)]
