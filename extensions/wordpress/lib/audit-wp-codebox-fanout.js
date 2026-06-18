@@ -20,6 +20,9 @@ const {
   wpCodeboxApplyRequestFromBundle,
   wpCodeboxChangeArtifactFromBundle,
 } = require('./wp-codebox-apply-adapter');
+const {
+  executeFanoutReconcileRun,
+} = require('./fanout-reconcile-runner');
 const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
@@ -1138,79 +1141,26 @@ function wpCodeboxErrorMessage(parsed) {
 
 async function executeAuditWpCodeboxFanout(input) {
   const plan = input.plan || createAuditWpCodeboxFanoutPlan(input);
-  const onProgress = typeof input.on_progress === 'function' ? input.on_progress : () => {};
-  const records = [];
-  const running = new Map();
-  const concurrency = normalizeConcurrency(input.concurrency);
-  const baseRun = {
-    schema: 'homeboy/audit-wp-codebox-execution/v1',
-    plan_schema: plan.schema,
-    orchestrator: plan.orchestrator,
-    audit: plan.audit,
-  };
-  const writeRun = (run) => {
-    if (input.runsOutputPath) {
-      writeJson(input.runsOutputPath, run);
-    }
-  };
-
-  writeRun({
-    ...baseRun,
-    records,
-    status: 'incomplete',
-    current_group: null,
+  const run = await executeFanoutReconcileRun({
+    ...input,
+    plan,
+    run_schema: 'homeboy/audit-wp-codebox-execution/v1',
+    base_run: { audit: plan.audit },
+    include_summary: false,
+    include_reconciliation: false,
+    runs_output_path: input.runsOutputPath,
+    execute_task_request: (taskRequest) => executeWpCodeboxTaskRequestAsync(taskRequest, input),
+    classify_outcome: (record) => record.outcome,
+    reconcile: () => ({
+      apply_back: plan.apply_back || [],
+      issue_reports: plan.issue_reports || [],
+    }),
+    is_record_successful: (record) => record.status === 'completed',
+    task_id: (taskRequest) => taskRequest.sandbox_session_id,
+    running_entry: runningGroup,
+    progress_event: progressEvent,
+    task_order: (record) => taskOrder(plan, record),
   });
-
-  const writeIncompleteRun = () => {
-    writeRun({
-      ...baseRun,
-      records,
-      status: 'incomplete',
-      current_group: firstRunningGroup(running),
-      current_groups: runningGroups(running),
-    });
-  };
-
-  let nextIndex = 0;
-  const startNext = () => {
-    if (nextIndex >= plan.task_requests.length) {
-      return false;
-    }
-    const taskRequest = plan.task_requests[nextIndex];
-    nextIndex += 1;
-
-    running.set(taskRequest.sandbox_session_id, runningGroup(taskRequest));
-    writeIncompleteRun();
-
-    onProgress(progressEvent('started', taskRequest, plan));
-    const promise = executeWpCodeboxTaskRequestAsync(taskRequest, input).then((record) => {
-      running.delete(taskRequest.sandbox_session_id);
-      records.push(record);
-      records.sort((left, right) => taskOrder(plan, left) - taskOrder(plan, right));
-      onProgress(progressEvent(record.status, taskRequest, plan, record));
-      writeIncompleteRun();
-      startNext();
-    });
-    running.get(taskRequest.sandbox_session_id).promise = promise;
-    return true;
-  };
-
-  while (running.size < concurrency && startNext()) {
-    // Start the first batch.
-  }
-
-  while (running.size > 0) {
-    await Promise.race(Array.from(running.values()).map((group) => group.promise));
-  }
-
-  const run = {
-    ...baseRun,
-    records,
-    outcomes: records.flatMap((record) => record.outcome ? [record.outcome] : []),
-    status: records.every((record) => record.status === 'completed') ? 'completed' : 'failed',
-  };
-
-  writeRun(run);
 
   return run;
 }
@@ -1230,14 +1180,6 @@ function executeAuditWpCodeboxFanoutFromFiles(options) {
   });
 }
 
-function normalizeConcurrency(value) {
-  const parsed = Number.parseInt(value || DEFAULT_CONCURRENCY, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_CONCURRENCY;
-  }
-  return Math.min(parsed, 16);
-}
-
 function normalizeTaskTimeoutSeconds(value) {
   const parsed = Number.parseInt(value || DEFAULT_TASK_TIMEOUT_SECONDS, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
@@ -1253,21 +1195,6 @@ function runningGroup(taskRequest) {
     finding_id: taskRequest.finding_id || taskRequest.audit_findings[0]?.id || '',
     finding_ids: taskRequest.audit_findings.map((finding) => finding.id),
   };
-}
-
-function firstRunningGroup(running) {
-  const group = runningGroups(running)[0];
-  if (!group) {
-    return null;
-  }
-  return group;
-}
-
-function runningGroups(running) {
-  return Array.from(running.values()).map((group) => {
-    const { promise, ...serializable } = group;
-    return serializable;
-  });
 }
 
 function taskOrder(plan, record) {
