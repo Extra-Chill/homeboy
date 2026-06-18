@@ -799,7 +799,7 @@ function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
     return { input: taskInput, bridge: null };
   }
 
-  const pluginRoot = fs.mkdtempSync(path.join(artifacts, 'homeboy-runtime-tool-bridge-'));
+  const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-tool-bridge-'));
   const pluginDir = path.join(pluginRoot, 'homeboy-runtime-tool-bridge');
   fs.mkdirSync(pluginDir, { recursive: true });
   writeHomeboyRuntimeToolBridgePlugin(pluginDir);
