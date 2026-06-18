@@ -97,6 +97,25 @@ process.stdout.write(JSON.stringify({
   return { fixture, capture };
 }
 
+function writeCompletedJsonFailingTaskRunner(root) {
+  const fixture = path.join(root, 'completed-json-failing-task-runner.cjs');
+  fs.writeFileSync(fixture, `#!/usr/bin/env node
+'use strict';
+process.stdout.write(JSON.stringify({
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'Semantic output was produced before provider exit failure.',
+  outputs: { issue_url: 'https://github.com/example/repo/issues/456' },
+  artifacts: [{ id: 'semantic-artifact', kind: 'codebox-patch', path: '/tmp/semantic.patch' }],
+  session: { id: 'sandbox-session-failed-exit', status: 'completed' }
+}));
+process.exit(7);
+`);
+  fs.chmodSync(fixture, 0o755);
+  return fixture;
+}
+
 function writeHangingTaskRunner(root) {
   const fixture = path.join(root, 'hanging-task-runner.cjs');
   fs.writeFileSync(fixture, `#!/usr/bin/env node
@@ -1513,9 +1532,9 @@ const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   },
   session: { id: 'sandbox-session-1', status: 'completed' },
 }, { exitStatus: 1 });
-assert.equal(normalizedCompletedOutcome.status, 'succeeded');
+assert.equal(normalizedCompletedOutcome.status, 'failed');
 assert.equal(normalizedCompletedOutcome.outputs.issue_number, 123);
-assert.equal(normalizedCompletedOutcome.failure_classification, undefined);
+assert.equal(normalizedCompletedOutcome.failure_classification, 'execution_failed');
 
 const completedFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
@@ -2220,6 +2239,23 @@ try {
   assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'recipe-probe-result' && artifact.path === '/tmp/fixture-normalized/recipe-probe.json'), true);
   assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.normalizer'), true);
   assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.recipe_normalizer'), true);
+
+  const failingCompletedRunner = writeCompletedJsonFailingTaskRunner(root);
+  const failingCompletedResult = spawnSync(process.execPath, [
+    wpCodeboxRuntimeExecutor,
+    '--task-runner',
+    failingCompletedRunner,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify(request),
+    env: fixtureEnv({ HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCodeboxCoreModule }),
+  });
+  assert.equal(failingCompletedResult.status, 1, failingCompletedResult.stderr || failingCompletedResult.stdout);
+  const failingCompletedOutcome = JSON.parse(failingCompletedResult.stdout);
+  assert.equal(failingCompletedOutcome.status, 'failed');
+  assert.equal(failingCompletedOutcome.failure_classification, 'execution_failed');
+  assert.equal(failingCompletedOutcome.outputs.issue_url, 'https://github.com/example/repo/issues/456');
+  assert.equal(failingCompletedOutcome.artifacts.some((artifact) => artifact.path === '/tmp/semantic.patch'), true);
 
   const captured = JSON.parse(fs.readFileSync(capture, 'utf8'));
   assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');

@@ -32,17 +32,20 @@ assert.equal(legacyProviderError.diagnostics[0].class, 'provider.auth');
 assert.equal(legacyProviderError.metadata.provider, 'example.provider');
 assert.equal(legacyProviderError.metadata.integration_contract, 'example/provider-task/v1');
 
-const completedDespiteNonZeroExit = normalizeProviderTaskOutcome(request, {
+const completedWithNonZeroExit = normalizeProviderTaskOutcome(request, {
   success: true,
   status: 'completed',
   outputs: { issue_url: 'https://github.com/example/repo/issues/12' },
   evidence_refs: [{ kind: 'issue', uri: 'https://github.com/example/repo/issues/12', label: 'Issue' }],
 }, { exitStatus: 1 });
 
-assert.equal(completedDespiteNonZeroExit.status, 'succeeded');
-assert.equal(completedDespiteNonZeroExit.failure_classification, undefined);
-assert.equal(completedDespiteNonZeroExit.outputs.issue_url, 'https://github.com/example/repo/issues/12');
-assert.equal(completedDespiteNonZeroExit.evidence_refs[0].kind, 'issue');
+assert.equal(completedWithNonZeroExit.status, 'failed');
+assert.equal(completedWithNonZeroExit.failure_classification, 'execution_failed');
+assert.equal(completedWithNonZeroExit.outputs.issue_url, 'https://github.com/example/repo/issues/12');
+assert.equal(completedWithNonZeroExit.evidence_refs[0].kind, 'issue');
+
+assert.equal(normalizeProviderStatus({ success: true, status: 'completed' }, 1), 'failed');
+assert.equal(normalizeProviderStatus({ success: true, status: 'succeeded' }, 1), 'failed');
 
 const normalizedRuntimeFailure = normalizeProviderTaskOutcome(request, {
   success: false,
