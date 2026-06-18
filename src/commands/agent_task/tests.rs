@@ -175,6 +175,105 @@ fn compile_loop_command_emits_agent_task_plan() {
 }
 
 #[test]
+fn compile_loop_command_emits_plan_from_repo_loop_spec() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let definition_path = temp.path().join("repo-loop.json");
+    std::fs::write(
+        &definition_path,
+        serde_json::to_string(&json!({
+            "schema": "wpsg/loop-spec/v1",
+            "loop_id": "wpsg/site-loop",
+            "metadata": {
+                "group_key": "wpsg-site",
+                "dispatch_defaults": {
+                    "backend": "fixture",
+                    "selector": "local",
+                    "cwd": temp.path().display().to_string(),
+                    "repo": "wp-site-generator@fixture"
+                }
+            },
+            "agents": [
+                { "agent_id": "builder", "tools": ["write-file"], "abilities": ["render-blocks"] }
+            ],
+            "artifacts": [
+                { "artifact_id": "site_brief", "kind": "wpsg/SiteBrief/v1", "required": true },
+                { "artifact_id": "theme_patch", "kind": "homeboy/Patch/v1", "required": true }
+            ],
+            "workflows": [
+                {
+                    "workflow_id": "brief",
+                    "agent_id": "builder",
+                    "prompt": "Draft the site brief.",
+                    "emits": ["site_brief"]
+                },
+                {
+                    "workflow_id": "build",
+                    "prompt": "Build from the site brief.",
+                    "consumes": ["site_brief"],
+                    "emits": ["theme_patch"]
+                }
+            ]
+        }))
+        .expect("definition json"),
+    )
+    .expect("write definition");
+
+    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+        definition: format!("@{}", definition_path.display()),
+    })
+    .expect("compile loop");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["schema"], "homeboy/agent-task-plan/v1");
+    assert_eq!(value["plan_id"], "wpsg/site-loop");
+    assert_eq!(value["group_key"], "wpsg-site");
+    assert_eq!(value["tasks"][0]["task_id"], "brief");
+    assert_eq!(value["tasks"][0]["executor"]["backend"], "fixture");
+    assert_eq!(
+        value["tasks"][0]["executor"]["required_capabilities"],
+        json!(["tool:write-file", "ability:render-blocks"])
+    );
+    assert_eq!(
+        value["tasks"][0]["workspace"]["slug"],
+        "wp-site-generator@fixture"
+    );
+    assert_eq!(
+        value["output_dependencies"]["build"]["depends_on"],
+        json!(["brief"])
+    );
+    assert_eq!(
+        value["output_dependencies"]["build"]["bindings"]["site_brief"]["task_id"],
+        "brief"
+    );
+    assert_eq!(
+        value["artifact_outputs"]["brief"][0]["kind"],
+        "wpsg/SiteBrief/v1"
+    );
+}
+
+#[test]
+fn compile_loop_command_rejects_controller_only_sections() {
+    let error = loop_definition::compile_loop(CompileLoopArgs {
+        definition: serde_json::to_string(&json!({
+            "loop_id": "repo-loop-with-controller-policy",
+            "workflows": [
+                { "workflow_id": "brief", "prompt": "Draft the site brief." }
+            ],
+            "policy": { "policy_id": "runtime-policy", "transitions": [] }
+        }))
+        .expect("definition json"),
+    })
+    .expect_err("controller-only section is rejected");
+
+    assert!(error.message.contains("controller-only sections"));
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("diagnostics")
+        .iter()
+        .any(|diagnostic| diagnostic.as_str().unwrap_or_default().contains("policy")));
+}
+
+#[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {
     let repo = tempfile::tempdir().expect("repo dir");
     let git_status = Command::new("git")

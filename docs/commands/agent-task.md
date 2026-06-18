@@ -36,6 +36,19 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `auth` | Configure and inspect provider authentication secrets. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
+## Loop Spec Compilation
+
+`agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
+an executable `homeboy/agent-task-plan/v1` without submitting or running it. It
+accepts Homeboy's native `homeboy/agent-task-loop-definition/v1` shape and the
+repo-authored workflow-oriented loop spec shape used by WPSG-style controllers.
+
+Repo-style compilation is intentionally deterministic: workflow ids become task
+ids, artifact producers are wired to consumers through `output_dependencies`, and
+declared emitted artifacts become `artifact_outputs`. Controller-only sections
+such as transition policies, phases, arbitrary actions, initial events, and
+entity fan-out are rejected with explicit diagnostics instead of being ignored.
+
 ## Dispatch
 
 `agent-task dispatch` builds a durable task plan from common repo-cooking inputs
