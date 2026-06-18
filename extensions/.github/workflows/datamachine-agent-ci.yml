@@ -379,387 +379,91 @@ name: Data Machine Agent CI (reusable)
 
 jobs:
   run-agent:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-    outputs:
-      job_status: ${{ steps.extract.outputs.job_status || steps.extract_dry_run.outputs.job_status || steps.skipped.outputs.job_status }}
-      transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json || steps.skipped.outputs.transcript_json }}
-      transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary || steps.skipped.outputs.transcript_summary }}
-      engine_data_json: ${{ steps.engine-data.outputs.engine_data_json || steps.skipped.outputs.engine_data_json }}
-      auth_mode: ${{ steps.auth-mode.outputs.auth_mode || steps.skipped.outputs.auth_mode }}
-    steps:
-      - name: Record skipped agent run
-        id: skipped
-        if: ${{ ! inputs.run_agent }}
-        run: |
-          set -euo pipefail
-          printf 'job_status=skipped\n' >> "$GITHUB_OUTPUT"
-          printf 'transcript_json=\n' >> "$GITHUB_OUTPUT"
-          printf 'transcript_summary=\n' >> "$GITHUB_OUTPUT"
-          printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
-          printf 'auth_mode=skipped\n' >> "$GITHUB_OUTPUT"
-
-      - name: Checkout consumer repo
-        if: ${{ inputs.run_agent }}
-        uses: actions/checkout@v4
-
-      - name: Checkout homeboy-extensions
-        if: ${{ inputs.run_agent }}
-        uses: actions/checkout@v4
-        with:
-          repository: Extra-Chill/homeboy-extensions
-          ref: ${{ inputs.homeboy_extensions_ref }}
-          path: .ci/homeboy-extensions
-
-      - name: Set up Node.js
-        if: ${{ inputs.run_agent }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Detect Homeboy app credentials
-        id: homeboy-app-creds
-        if: ${{ inputs.run_agent }}
-        env:
-          HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
-          HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs detect-credentials
-
-      - name: Require Homeboy app credentials
-        if: ${{ inputs.run_agent && ! inputs.dry_run && inputs.require_homeboy_app_token && steps.homeboy-app-creds.outputs.available != 'true' }}
-        run: |
-          set -euo pipefail
-          cat >&2 <<'EOF'
-          HOMEBOY_APP_ID and HOMEBOY_APP_PRIVATE_KEY are required for this Data Machine agent run.
-          The workflow was configured with require_homeboy_app_token=true so repository-scoped
-          GITHUB_TOKEN fallback is not allowed. Add the Homeboy app secrets to the caller repo
-          or organization and rerun the workflow.
-          EOF
-          exit 1
-
-      - name: Resolve Homeboy app token scope
-        id: token-scope
-        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
-        env:
-          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs resolve-token-scope
-
-      - name: Generate Homeboy app token
-        id: app-token
-        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
-          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
-          owner: ${{ steps.token-scope.outputs.owner }}
-          repositories: ${{ steps.token-scope.outputs.repositories }}
-          permission-contents: write
-          permission-issues: write
-          permission-pull-requests: write
-
-      - name: Report GitHub auth mode
-        id: auth-mode
-        if: ${{ inputs.run_agent }}
-        env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_TOKEN_OWNER: ${{ steps.token-scope.outputs.owner }}
-          APP_TOKEN_REPOSITORIES: ${{ steps.token-scope.outputs.repositories }}
-          APP_TOKEN_REPOS_INPUT: ${{ inputs.app_token_repos }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
-          REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/auth.cjs report-mode
-
-      - name: Checkout validation dependencies
-        if: ${{ inputs.run_agent }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
-          INCLUDE_AGENT_RUNTIME_DEPENDENCIES: ${{ inputs.include_agent_runtime_dependencies }}
-          RUNTIME_DEPENDENCIES: ${{ inputs.runtime_dependencies }}
-          AGENT_RUNTIME: ${{ inputs.agent_runtime }}
-          AGENT_RUNTIME_REF: ${{ inputs.agent_runtime_ref }}
-          AGENTS_API_REF: ${{ inputs.agents_api_ref }}
-          DATA_MACHINE_REF: ${{ inputs.data_machine_ref }}
-          DATA_MACHINE_CODE_REF: ${{ inputs.data_machine_code_ref }}
-          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
-          PROVIDER: ${{ inputs.provider }}
-          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/materialize-dependencies.cjs
-
-      - name: Download workflow input artifacts
-        if: ${{ inputs.run_agent && inputs.actions_artifact_downloads != '[]' && inputs.actions_artifact_downloads != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ACTIONS_ARTIFACT_DOWNLOADS: ${{ inputs.actions_artifact_downloads }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -e 'type == "array"' >/dev/null
-          while IFS= read -r item; do
-            [ -n "$item" ] || continue
-            repo="$(jq -r '.repo // env.GITHUB_REPOSITORY' <<< "$item")"
-            run_id="$(jq -r '.run_id // .runId // ""' <<< "$item")"
-            name="$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")"
-            dir="$(jq -r '.dir // .destination // (".ci/actions-artifacts/" + $name)' --arg name "$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")" <<< "$item")"
-            [ -n "$repo" ] || { echo "Artifact download repo is required" >&2; exit 1; }
-            [ -n "$run_id" ] || { echo "Artifact download run_id is required" >&2; exit 1; }
-            [ -n "$name" ] || { echo "Artifact download name is required" >&2; exit 1; }
-            mkdir -p "$dir"
-            gh run download "$run_id" --repo "$repo" --name "$name" --dir "$dir"
-          done < <(printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -c '.[]')
-
-      - name: Build execute-workflow payload
-        if: ${{ inputs.run_agent && inputs.execute_workflow_builder_command != '' }}
-        shell: bash
-        env:
-          EXECUTE_WORKFLOW_BUILDER_COMMAND: ${{ inputs.execute_workflow_builder_command }}
-        run: |
-          set -euo pipefail
-          bash -lc "$EXECUTE_WORKFLOW_BUILDER_COMMAND"
-
-      - name: Install and build runtime dependencies
-        if: ${{ inputs.run_agent }}
-        env:
-          PROVIDER: ${{ inputs.provider }}
-          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/setup-runtime.cjs
-
-      - name: Pre-flight bundle validation
-        if: ${{ inputs.run_agent && inputs.bundle_validator_spec != '' }}
-        run: php .ci/homeboy-extensions/wordpress/scripts/agent/validate-bundle.php "${{ inputs.bundle_validator_spec }}"
-
-      - name: Build runner config
-        id: config
-        if: ${{ inputs.run_agent }}
-        env:
-          AGENT_SLUG: ${{ inputs.agent_slug }}
-          PIPELINE_SLUG: ${{ inputs.pipeline_slug }}
-          FLOW_SLUG: ${{ inputs.flow_slug }}
-          BUNDLE_PATH: ${{ inputs.bundle_path }}
-          BUNDLE_REPO: ${{ inputs.bundle_repo }}
-          BUNDLE_REF: ${{ inputs.bundle_ref }}
-          BUNDLE_PATH_IN_REPO: ${{ inputs.bundle_path_in_repo }}
-          TARGET_REPO: ${{ inputs.target_repo }}
-          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
-          VERIFICATION_COMMANDS: ${{ inputs.verification_commands }}
-          DRIFT_CHECKS: ${{ inputs.drift_checks }}
-          WRITABLE_PATHS: ${{ inputs.writable_paths }}
-          WORKSPACE_CONTRACT_CHECKS: ${{ inputs.workspace_contract_checks }}
-          PROMPT: ${{ inputs.prompt }}
-          PROVIDER: ${{ inputs.provider }}
-          MODEL: ${{ inputs.model }}
-          AGENT_RUNTIME: ${{ inputs.agent_runtime }}
-          AGENT_RUNTIME_REF: ${{ inputs.agent_runtime_ref }}
-          RUNTIME_WORDPRESS_VERSION: ${{ inputs.runtime_wordpress_version }}
-          EXECUTION_KIND: ${{ inputs.execution_kind }}
-          RUNTIME_TASK: ${{ inputs.runtime_task }}
-          ABILITY_REQUEST: ${{ inputs.ability_request }}
-          ABILITY_INPUT: ${{ inputs.ability_input }}
-          OUTPUT_MAPPINGS: ${{ inputs.output_mappings }}
-          COMPONENT_CONTRACTS: ${{ inputs.component_contracts }}
-          RUNTIME_COMPONENTS: ${{ inputs.runtime_components }}
-          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
-          SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
-          MAX_TURNS: ${{ inputs.max_turns }}
-          STEP_BUDGET: ${{ inputs.step_budget }}
-          TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
-          EXPECTED_ARTIFACTS: ${{ inputs.expected_artifacts }}
-          ARTIFACT_DECLARATIONS: ${{ inputs.artifact_declarations }}
-          ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}
-          RULES: ${{ inputs.rules }}
-          GENERAL_RULES: ${{ inputs.general_rules }}
-          TASK_RULES: ${{ inputs.task_rules }}
-          PROBES: ${{ inputs.probes }}
-          WP_GYM_BENCHMARK_MODE: ${{ inputs.wp_gym_benchmark_mode }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
-          RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}
-          RUNTIME_OVERLAYS: ${{ inputs.runtime_overlays }}
-          WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
-          WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
-          DAILY_MEMORY_ENABLED: ${{ inputs.daily_memory_enabled }}
-          DISABLE_DATAMACHINE_DIRECTIVES: ${{ inputs.disable_datamachine_directives }}
-          EXTRA_REQUIRED_ABILITIES: ${{ inputs.extra_required_abilities }}
-          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
-          ALLOWED_REPOS: ${{ inputs.allowed_repos }}
-          ENGINE_KEY: ${{ inputs.engine_key }}
-          TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
-          ABILITY_TOOLS: ${{ inputs.ability_tools }}
-          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
-          EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
-          TOOL_RECORDERS: ${{ inputs.tool_recorders }}
-          ENABLE_TERMINAL_ACTIONS: ${{ inputs.enable_terminal_actions }}
-          WP_CLI_TOOL_NAME: ${{ inputs.wp_cli_tool_name }}
-          PIPELINE_STEP_PATCHES: ${{ inputs.pipeline_step_patches }}
-          FLOW_STEP_PATCHES: ${{ inputs.flow_step_patches }}
-          RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
-          EXECUTE_WORKFLOW_PATH: ${{ inputs.execute_workflow_path }}
-          GITHUB_APP_TOKEN_VALUE: ${{ steps.app-token.outputs.token }}
-          GITHUB_REPOSITORY_TOKEN_VALUE: ${{ github.token }}
-          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
-          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
-          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
-          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
-          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
-          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/build-runner-config.cjs
-
-      - name: Run Data Machine agent
-        if: ${{ inputs.run_agent }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
-          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
-          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
-          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
-          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
-          HOMEBOY_DATAMACHINE_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/agent-task-outcome.json
-          HOMEBOY_DATAMACHINE_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/datamachine-agent-replay-bundles', runner.temp) || '' }}
-        run: node .ci/homeboy-extensions/wordpress/scripts/agent/run-datamachine-agent-task.cjs "${{ steps.config.outputs.config_path }}"
-
-      - name: Run host runner lifecycle
-        if: ${{ inputs.run_agent && ! inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
-        run: |
-          set -euo pipefail
-          node .ci/homeboy-extensions/wordpress/scripts/agent/run-host-runner-lifecycle.cjs \
-            --results "$RESULTS_FILE" \
-            --config "$CONFIG_FILE" \
-            --scenario "${{ inputs.flow_slug }}" \
-            --workspace "$GITHUB_WORKSPACE"
-
-      - name: Extract scenario outputs
-        id: extract
-        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
-        env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-        run: |
-          set -euo pipefail
-          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
-            --results "$RESULTS_FILE" \
-            --scenario "${{ inputs.flow_slug }}" \
-            --field job_status=metadata.job_status \
-            --field transcript_json='(.metadata.evidence_references.references.transcript_artifact.path // "")' \
-            --field transcript_summary='(.metadata.evidence_references.references.transcript_artifact.label // "")' \
-            --required-status "" \
-            --to-github-output
-
-      - name: Update runner workspace PR summary
-        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
-        run: |
-          set -euo pipefail
-          node .ci/homeboy-extensions/wordpress/scripts/agent/update-runner-workspace-pr.cjs \
-            --results "$RESULTS_FILE" \
-            --config "$CONFIG_FILE" \
-            --scenario "${{ inputs.flow_slug }}"
-
-      - name: Extract dry-run outputs
-        id: extract_dry_run
-        if: ${{ always() && inputs.run_agent && inputs.dry_run }}
-        env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-        run: |
-          set -euo pipefail
-          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
-            --results "$RESULTS_FILE" \
-            --scenario "${{ inputs.flow_slug }}" \
-            --field job_status=metadata.agent_slug \
-            --field transcript_json=metadata.bundle_path \
-            --field transcript_summary=metadata.flow_slug \
-            --required-status "" \
-            --to-github-output
-          printf 'job_status=completed\n' >> "$GITHUB_OUTPUT"
-
-      - name: Project engine_data outputs
-        id: engine-data
-        if: ${{ inputs.run_agent }}
-        env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
-          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
-          FLOW_SLUG: ${{ inputs.flow_slug }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/project-engine-data.cjs
-
-      - name: Assert success
-        if: ${{ inputs.run_agent && ! inputs.dry_run }}
-        env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          FLOW_SLUG: ${{ inputs.flow_slug }}
-          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/assert-success.cjs
-
-      - name: Resolve transcript artifact path
-        id: transcript-artifact
-        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
-        env:
-          RESULTS_FILE: ${{ runner.temp }}/run-results.json
-          FLOW_SLUG: ${{ inputs.flow_slug }}
-          TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
-          TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/artifacts-and-comments.cjs resolve-transcript
-
-      - name: Upload transcript artifact
-        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.transcript_artifact_name }}
-          path: ${{ steps.transcript-artifact.outputs.path }}
-          if-no-files-found: error
-
-      - name: Upload agent results artifact
-        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.transcript_artifact_name }}-results
-          path: ${{ runner.temp }}/run-results.json
-          if-no-files-found: warn
-
-      - name: Upload replay bundle artifact
-        if: ${{ always() && inputs.run_agent && inputs.replay_bundle_artifact_name != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.replay_bundle_artifact_name }}
-          path: ${{ runner.temp }}/datamachine-agent-replay-bundles
-          if-no-files-found: error
-
-      - name: Comment PR summary
-        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          AGENT_SLUG: ${{ inputs.agent_slug }}
-          FLOW_SLUG: ${{ inputs.flow_slug }}
-          JOB_STATUS: ${{ steps.extract.outputs.job_status }}
-          TRANSCRIPT_ARTIFACT_NAME: ${{ inputs.transcript_artifact_name }}
-          ENGINE_DATA_JSON: ${{ steps.engine-data.outputs.engine_data_json }}
-        run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/artifacts-and-comments.cjs prepare-pr-comment
-
-      - name: Comment prepared PR summary
-        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: |
-          set -euo pipefail
-          gh pr comment "${{ github.event.pull_request.number }}" --body-file "${RUNNER_TEMP}/datamachine-agent-comment.md"
+    uses: ./.github/workflows/runtime-agent-full-run.yml
+    with:
+      homeboy_extensions_ref: ${{ inputs.homeboy_extensions_ref }}
+      run_agent: ${{ inputs.run_agent }}
+      runtime_provider: ${{ inputs.agent_runtime }}
+      runtime_ref: ${{ inputs.agent_runtime_ref }}
+      runtime_wordpress_version: ${{ inputs.runtime_wordpress_version }}
+      runtime_profile: datamachine-agent-ci
+      runtime_profiles: |
+        {
+          "datamachine-agent-ci": {
+            "id": "datamachine-agent-ci",
+            "runtime_task_ability": "datamachine/run-agent-bundle",
+            "runtime_bundle_ability": "datamachine/run-agent-bundle",
+            "runtime_workflow_ability": "datamachine/execute-workflow",
+            "ability_requirements": ["datamachine/run-agent-bundle"]
+          }
+        }
+      runtime_dependencies: ${{ inputs.include_agent_runtime_dependencies && (inputs.runtime_dependencies != '' && inputs.runtime_dependencies || format('["Automattic/agents-api@{0}","Extra-Chill/data-machine@{1}","Extra-Chill/data-machine-code@{2}"]', inputs.agents_api_ref, inputs.data_machine_ref, inputs.data_machine_code_ref)) || '[]' }}
+      validation_dependencies: ${{ inputs.validation_dependencies }}
+      context_repositories: ${{ inputs.context_repositories }}
+      workload_id: ${{ inputs.flow_slug }}
+      workload_label: Run ${{ inputs.agent_slug }} Data Machine agent
+      component_id: datamachine-agent-ci-driver
+      target_repo: ${{ inputs.target_repo }}
+      prompt: ${{ inputs.prompt }}
+      provider: ${{ inputs.provider }}
+      provider_plugin: ${{ inputs.provider_plugin }}
+      openai_provider_ref: ${{ inputs.openai_provider_ref }}
+      model: ${{ inputs.model }}
+      execution_kind: ${{ inputs.execution_kind }}
+      runtime_task: ${{ inputs.runtime_task }}
+      runtime_execution: ${{ inputs.execute_workflow_path != '' && format('{{"kind":"workflow","path":"{0}"}}', inputs.execute_workflow_path) || (inputs.bundle_path != '' && format('{{"kind":"bundle","source":"{0}"}}', inputs.bundle_path) || '{}') }}
+      ability_request: ${{ inputs.ability_request }}
+      ability_input: ${{ inputs.ability_input }}
+      runtime_components: ${{ inputs.runtime_components }}
+      component_contracts: ${{ inputs.component_contracts }}
+      required_abilities: ${{ inputs.execute_workflow_path != '' && '["datamachine/import-agent","datamachine/execute-workflow","datamachine/drain-job"]' || '["datamachine/import-agent","datamachine/run-flow","datamachine/drain-job"]' }}
+      ability_tools: ${{ inputs.ability_tools }}
+      success_requires_pr: ${{ inputs.success_requires_pr }}
+      success_completion_outcomes: ${{ inputs.success_completion_outcomes }}
+      max_turns: ${{ inputs.max_turns }}
+      step_budget: ${{ inputs.step_budget }}
+      time_budget_ms: ${{ inputs.time_budget_ms }}
+      output_mappings: ${{ inputs.output_mappings }}
+      engine_data_outputs: ${{ inputs.engine_data_outputs }}
+      runtime_output_projections: ${{ inputs.runtime_output_projections }}
+      evidence_projections: ${{ inputs.evidence_projections }}
+      tool_recorders: ${{ inputs.tool_recorders }}
+      expected_artifacts: ${{ inputs.expected_artifacts }}
+      artifact_declarations: ${{ inputs.artifact_declarations }}
+      transcript_artifact_name: ${{ inputs.transcript_artifact_name }}
+      replay_bundle_artifact_name: ${{ inputs.replay_bundle_artifact_name }}
+      artifact_export_config: ${{ inputs.artifact_export_config }}
+      rules: ${{ inputs.rules }}
+      general_rules: ${{ inputs.general_rules }}
+      task_rules: ${{ inputs.task_rules }}
+      probes: ${{ inputs.probes }}
+      callback_data: ${{ format('{{"agent_slug":"{0}","pipeline_slug":"{1}","flow_slug":"{2}","bundle_path":"{3}","target_repo":"{4}"}}', inputs.agent_slug, inputs.pipeline_slug, inputs.flow_slug, inputs.bundle_path, inputs.target_repo) }}
+      comment_pr_summary: ${{ inputs.comment_pr_summary }}
+      app_token_repos: ${{ inputs.app_token_repos }}
+      require_homeboy_app_token: ${{ inputs.require_homeboy_app_token }}
+      allowed_repos: ${{ inputs.allowed_repos }}
+      engine_key: ${{ inputs.engine_key }}
+      tool_results_key: ${{ inputs.tool_results_key }}
+      dry_run: ${{ inputs.dry_run }}
+      extra_wp_config_defines: ${{ inputs.extra_wp_config_defines }}
+      runtime_mounts: ${{ inputs.runtime_mounts }}
+      runtime_overlays: ${{ inputs.runtime_overlays }}
+      runtime_config: ${{ format('{{"daily_memory_enabled":{0},"disable_datamachine_directives":{1},"enable_terminal_actions":{2},"wp_cli_tool_name":"{3}","pipeline_step_patches":{4},"flow_step_patches":{5},"wp_gym_eval":{{"benchmark_mode":{6}}}}}', inputs.daily_memory_enabled, inputs.disable_datamachine_directives, inputs.enable_terminal_actions, inputs.wp_cli_tool_name, inputs.pipeline_step_patches, inputs.flow_step_patches, inputs.wp_gym_benchmark_mode) }}
+      workload_run_before: ${{ inputs.workload_run_before }}
+      workload_run_after: ${{ inputs.workload_run_after }}
+      runner_workspace: ${{ inputs.runner_workspace }}
+      workspace_contract_checks: ${{ inputs.workspace_contract_checks }}
+      verification_commands: ${{ inputs.verification_commands }}
+      drift_checks: ${{ inputs.drift_checks }}
+      writable_paths: ${{ inputs.writable_paths }}
+      actions_artifact_downloads: ${{ inputs.actions_artifact_downloads }}
+      prepare_payload_command: ${{ inputs.execute_workflow_builder_command }}
+    secrets:
+      HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
+      HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+      PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
+      PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
+      PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
+      PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}

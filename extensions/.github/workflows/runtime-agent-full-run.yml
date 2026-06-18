@@ -1,0 +1,692 @@
+name: Runtime Agent Full Run (reusable)
+
+'on':
+  workflow_call:
+    inputs:
+      homeboy_extensions_ref:
+        description: Ref of Extra-Chill/homeboy-extensions to check out for runner scripts.
+        type: string
+        default: main
+      run_agent:
+        description: When false, record a skipped run and bypass runtime setup/execution.
+        type: boolean
+        default: true
+      runtime_provider:
+        description: Runtime provider backend identifier.
+        type: string
+        default: wp-codebox
+      runtime_ref:
+        description: Runtime provider ref.
+        type: string
+        default: main
+      runtime_wordpress_version:
+        description: WordPress version used by WordPress-capable runtimes.
+        type: string
+        default: '7.0'
+      runtime_profile:
+        description: Runtime profile id selected from runtime_profiles.
+        type: string
+        required: true
+      runtime_profiles:
+        description: JSON object keyed by runtime profile id.
+        type: string
+        required: true
+      runtime_dependencies:
+        description: JSON array or comma-separated OWNER/REPO@REF entries checked out under .ci.
+        type: string
+        default: ''
+      validation_dependencies:
+        description: Comma-separated additional OWNER/REPO or OWNER/REPO@REF entries checked out under .ci.
+        type: string
+        default: ''
+      context_repositories:
+        description: JSON array of read-only context repositories.
+        type: string
+        default: '[]'
+      workload_id:
+        description: Stable scenario/workload id used for result extraction.
+        type: string
+        required: true
+      workload_label:
+        description: Human-readable workload label.
+        type: string
+        default: ''
+      component_id:
+        description: Component id for runtime artifact paths. Defaults to the checkout basename.
+        type: string
+        default: ''
+      target_repo:
+        type: string
+        required: true
+      prompt:
+        type: string
+        default: ''
+      provider:
+        type: string
+        default: ''
+      provider_plugin:
+        description: JSON object describing an optional provider plugin checkout and credential env mapping.
+        type: string
+        default: '{}'
+      openai_provider_ref:
+        description: Ref for WordPress/ai-provider-for-openai when using the built-in OpenAI provider checkout.
+        type: string
+        default: trunk
+      model:
+        type: string
+        default: ''
+      execution_kind:
+        description: Optional execution kind recorded in the runner config.
+        type: string
+        default: ''
+      runtime_task:
+        description: JSON object forwarded to the runtime task executor, typically {"ability":"example/process","input":{}}.
+        type: string
+        default: '{}'
+      runtime_execution:
+        description: JSON object describing a generic ability, bundle, or workflow execution.
+        type: string
+        default: '{}'
+      ability_request:
+        description: JSON object shorthand for runtime_task.
+        type: string
+        default: '{}'
+      ability_input:
+        description: JSON object merged into ability_request.input.
+        type: string
+        default: '{}'
+      runtime_components:
+        description: JSON object of runtime component paths forwarded to the provider.
+        type: string
+        default: '{}'
+      component_contracts:
+        description: JSON array of runtime component contracts forwarded to WP Codebox.
+        type: string
+        default: '[]'
+      required_abilities:
+        description: JSON array of required ability/tool identifiers asserted before invocation.
+        type: string
+        default: '[]'
+      ability_requirements:
+        description: JSON array of declarative runtime requirements.
+        type: string
+        default: '[]'
+      ability_tools:
+        description: JSON array of ability-backed tool definitions.
+        type: string
+        default: '[]'
+      success_requires_pr:
+        type: boolean
+        default: true
+      success_completion_outcomes:
+        description: JSON array of completion outcome names that may satisfy success without a PR.
+        type: string
+        default: '[]'
+      max_turns:
+        type: number
+        default: 12
+      step_budget:
+        type: number
+        default: 16
+      time_budget_ms:
+        type: number
+        default: 600000
+      output_mappings:
+        description: JSON object mapping workflow output names to dotted paths in the runtime task result.
+        type: string
+        default: '{}'
+      engine_data_outputs:
+        description: Legacy JSON map of output_name to result path, collected into engine_data_json.
+        type: string
+        default: '{}'
+      runtime_output_projections:
+        description: JSON map of output_name to provider runtime result path, collected into engine_data_json.
+        type: string
+        default: '{}'
+      evidence_projections:
+        description: JSON array mapping provider operation results to named runtime outputs or artifact refs.
+        type: string
+        default: '[]'
+      tool_recorders:
+        description: Legacy JSON array of tool recorder configs.
+        type: string
+        default: '[]'
+      expected_artifacts:
+        description: JSON array of expected artifact names.
+        type: string
+        default: '[]'
+      artifact_declarations:
+        description: JSON array of typed artifact declarations.
+        type: string
+        default: '[]'
+      transcript_artifact_name:
+        description: Empty string disables transcript artifact upload.
+        type: string
+        default: ''
+      replay_bundle_artifact_name:
+        description: Empty string disables replay bundle upload.
+        type: string
+        default: ''
+      artifact_export_config:
+        description: JSON config for exporting artifacts back to the target repo.
+        type: string
+        default: '{}'
+      rules:
+        type: string
+        default: '{}'
+      general_rules:
+        type: string
+        default: '[]'
+      task_rules:
+        type: string
+        default: '[]'
+      probes:
+        type: string
+        default: '{}'
+      callback_data:
+        description: JSON object preserved in the runner config and exposed as callback_data_json.
+        type: string
+        default: '{}'
+      comment_pr_summary:
+        type: boolean
+        default: false
+      app_token_repos:
+        description: Comma-separated OWNER/REPO entries for the Homeboy app token. Defaults to target_repo.
+        type: string
+        default: ''
+      require_homeboy_app_token:
+        description: Fail before running when Homeboy app credentials are unavailable.
+        type: boolean
+        default: false
+      allowed_repos:
+        description: JSON array of OWNER/REPO strings exposed to the injected GitHub profile.
+        type: string
+        default: '[]'
+      engine_key:
+        type: string
+        default: ''
+      tool_results_key:
+        type: string
+        default: tool_results
+      dry_run:
+        description: Build runner config and exercise the runner dry-run path without a live provider call.
+        type: boolean
+        default: false
+      extra_wp_config_defines:
+        description: JSON object merged into the runner config wp_config_defines.
+        type: string
+        default: '{}'
+      runtime_mounts:
+        description: JSON array appended to selected runtime mounts.
+        type: string
+        default: '[]'
+      runtime_overlays:
+        description: JSON array of runtime overlay entries forwarded to the runner config.
+        type: string
+        default: '[]'
+      runtime_env:
+        description: JSON object forwarded to runtime profile construction.
+        type: string
+        default: '{}'
+      runtime_config:
+        description: JSON object merged into the generated runner config for caller-owned runtime fields.
+        type: string
+        default: '{}'
+      workload_run_before:
+        description: JSON array of pre-run hooks executed before the main workload.
+        type: string
+        default: '[]'
+      workload_run_after:
+        description: JSON array of post-run hooks executed after the main workload.
+        type: string
+        default: '[]'
+      runner_workspace:
+        description: JSON object for runner-owned workspace/worktree provisioning before execution.
+        type: string
+        default: '{}'
+      workspace_contract_checks:
+        description: JSON object of generic host-side post-run workspace checks.
+        type: string
+        default: '{}'
+      verification_commands:
+        description: JSON array of deterministic shell commands to run after execution.
+        type: string
+        default: '[]'
+      drift_checks:
+        description: JSON array of generated-output drift checks to run after verification.
+        type: string
+        default: '[]'
+      writable_paths:
+        description: Comma-separated or JSON array of target workspace paths the agent may change.
+        type: string
+        default: ''
+      ignored_workspace_paths:
+        description: JSON array of workspace paths ignored by drift/status checks.
+        type: string
+        default: '[]'
+      actions_artifact_downloads:
+        description: JSON array of GitHub Actions artifacts to download before the run.
+        type: string
+        default: '[]'
+      prepare_payload_command:
+        description: Optional shell command run after artifact downloads to build a runtime payload.
+        type: string
+        default: ''
+    secrets:
+      HOMEBOY_APP_ID:
+        required: false
+      HOMEBOY_APP_PRIVATE_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      PROVIDER_SECRET_1:
+        required: false
+      PROVIDER_SECRET_2:
+        required: false
+      PROVIDER_SECRET_3:
+        required: false
+      PROVIDER_SECRET_4:
+        required: false
+      PROVIDER_SECRET_5:
+        required: false
+    outputs:
+      job_status:
+        value: ${{ jobs.run-agent.outputs.job_status }}
+      transcript_json:
+        value: ${{ jobs.run-agent.outputs.transcript_json }}
+      transcript_summary:
+        value: ${{ jobs.run-agent.outputs.transcript_summary }}
+      engine_data_json:
+        value: ${{ jobs.run-agent.outputs.engine_data_json }}
+      callback_data_json:
+        value: ${{ jobs.run-agent.outputs.callback_data_json }}
+      auth_mode:
+        value: ${{ jobs.run-agent.outputs.auth_mode }}
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    outputs:
+      job_status: ${{ steps.extract.outputs.job_status || steps.extract_dry_run.outputs.job_status || steps.skipped.outputs.job_status }}
+      transcript_json: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json || steps.skipped.outputs.transcript_json }}
+      transcript_summary: ${{ steps.extract.outputs.transcript_summary || steps.extract_dry_run.outputs.transcript_summary || steps.skipped.outputs.transcript_summary }}
+      engine_data_json: ${{ steps.engine-data.outputs.engine_data_json || steps.skipped.outputs.engine_data_json }}
+      callback_data_json: ${{ steps.callback-data.outputs.callback_data_json || steps.skipped.outputs.callback_data_json }}
+      auth_mode: ${{ steps.auth-mode.outputs.auth_mode || steps.skipped.outputs.auth_mode }}
+    steps:
+      - name: Record skipped agent run
+        id: skipped
+        if: ${{ ! inputs.run_agent }}
+        run: |
+          set -euo pipefail
+          printf 'job_status=skipped\n' >> "$GITHUB_OUTPUT"
+          printf 'transcript_json=\n' >> "$GITHUB_OUTPUT"
+          printf 'transcript_summary=\n' >> "$GITHUB_OUTPUT"
+          printf 'engine_data_json={}\n' >> "$GITHUB_OUTPUT"
+          printf 'callback_data_json={}\n' >> "$GITHUB_OUTPUT"
+          printf 'auth_mode=skipped\n' >> "$GITHUB_OUTPUT"
+
+      - name: Checkout consumer repo
+        if: ${{ inputs.run_agent }}
+        uses: actions/checkout@v4
+
+      - name: Checkout homeboy-extensions
+        if: ${{ inputs.run_agent }}
+        uses: actions/checkout@v4
+        with:
+          repository: Extra-Chill/homeboy-extensions
+          ref: ${{ inputs.homeboy_extensions_ref }}
+          path: .ci/homeboy-extensions
+
+      - name: Set up Node.js
+        if: ${{ inputs.run_agent }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Detect Homeboy app credentials
+        id: homeboy-app-creds
+        if: ${{ inputs.run_agent }}
+        env:
+          HOMEBOY_APP_ID: ${{ secrets.HOMEBOY_APP_ID }}
+          HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs detect-credentials
+
+      - name: Require Homeboy app credentials
+        if: ${{ inputs.run_agent && ! inputs.dry_run && inputs.require_homeboy_app_token && steps.homeboy-app-creds.outputs.available != 'true' }}
+        run: |
+          set -euo pipefail
+          cat >&2 <<'EOF'
+          HOMEBOY_APP_ID and HOMEBOY_APP_PRIVATE_KEY are required for this runtime agent run.
+          The workflow was configured with require_homeboy_app_token=true so repository-scoped
+          GITHUB_TOKEN fallback is not allowed.
+          EOF
+          exit 1
+
+      - name: Resolve Homeboy app token scope
+        id: token-scope
+        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
+        env:
+          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs resolve-token-scope
+
+      - name: Generate Homeboy app token
+        id: app-token
+        if: ${{ inputs.run_agent && ! inputs.dry_run && steps.homeboy-app-creds.outputs.available == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+          owner: ${{ steps.token-scope.outputs.owner }}
+          repositories: ${{ steps.token-scope.outputs.repositories }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Report GitHub auth mode
+        id: auth-mode
+        if: ${{ inputs.run_agent }}
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_TOKEN_OWNER: ${{ steps.token-scope.outputs.owner }}
+          APP_TOKEN_REPOSITORIES: ${{ steps.token-scope.outputs.repositories }}
+          APP_TOKEN_REPOS_INPUT: ${{ inputs.app_token_repos }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+          REQUIRE_HOMEBOY_APP_TOKEN: ${{ inputs.require_homeboy_app_token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/auth.cjs report-mode
+
+      - name: Checkout runtime dependencies
+        if: ${{ inputs.run_agent }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
+          RUNTIME_DEPENDENCIES: ${{ inputs.runtime_dependencies }}
+          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
+          PROVIDER: ${{ inputs.provider }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
+          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs
+
+      - name: Download workflow input artifacts
+        if: ${{ inputs.run_agent && inputs.actions_artifact_downloads != '[]' && inputs.actions_artifact_downloads != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTIONS_ARTIFACT_DOWNLOADS: ${{ inputs.actions_artifact_downloads }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -e 'type == "array"' >/dev/null
+          while IFS= read -r item; do
+            [ -n "$item" ] || continue
+            repo="$(jq -r '.repo // env.GITHUB_REPOSITORY' <<< "$item")"
+            run_id="$(jq -r '.run_id // .runId // ""' <<< "$item")"
+            name="$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")"
+            dir="$(jq -r '.dir // .destination // (".ci/actions-artifacts/" + $name)' --arg name "$(jq -r '.name // .artifact_name // .artifactName // ""' <<< "$item")" <<< "$item")"
+            [ -n "$repo" ] || { echo "Artifact download repo is required" >&2; exit 1; }
+            [ -n "$run_id" ] || { echo "Artifact download run_id is required" >&2; exit 1; }
+            [ -n "$name" ] || { echo "Artifact download name is required" >&2; exit 1; }
+            mkdir -p "$dir"
+            gh run download "$run_id" --repo "$repo" --name "$name" --dir "$dir"
+          done < <(printf '%s' "$ACTIONS_ARTIFACT_DOWNLOADS" | jq -c '.[]')
+
+      - name: Prepare runtime payload
+        if: ${{ inputs.run_agent && inputs.prepare_payload_command != '' }}
+        shell: bash
+        env:
+          PREPARE_PAYLOAD_COMMAND: ${{ inputs.prepare_payload_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$PREPARE_PAYLOAD_COMMAND"
+
+      - name: Install and build runtime dependencies
+        if: ${{ inputs.run_agent }}
+        env:
+          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
+          PROVIDER: ${{ inputs.provider }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/setup-runtime.cjs
+
+      - name: Build runner config
+        id: config
+        if: ${{ inputs.run_agent }}
+        env:
+          WORKLOAD_ID: ${{ inputs.workload_id }}
+          WORKLOAD_LABEL: ${{ inputs.workload_label }}
+          COMPONENT_ID: ${{ inputs.component_id }}
+          TARGET_REPO: ${{ inputs.target_repo }}
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+          VERIFICATION_COMMANDS: ${{ inputs.verification_commands }}
+          DRIFT_CHECKS: ${{ inputs.drift_checks }}
+          WRITABLE_PATHS: ${{ inputs.writable_paths }}
+          WORKSPACE_CONTRACT_CHECKS: ${{ inputs.workspace_contract_checks }}
+          PROMPT: ${{ inputs.prompt }}
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
+          RUNTIME_REF: ${{ inputs.runtime_ref }}
+          RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
+          RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
+          RUNTIME_WORDPRESS_VERSION: ${{ inputs.runtime_wordpress_version }}
+          EXECUTION_KIND: ${{ inputs.execution_kind }}
+          RUNTIME_TASK: ${{ inputs.runtime_task }}
+          RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
+          ABILITY_REQUEST: ${{ inputs.ability_request }}
+          ABILITY_INPUT: ${{ inputs.ability_input }}
+          OUTPUT_MAPPINGS: ${{ inputs.output_mappings }}
+          COMPONENT_CONTRACTS: ${{ inputs.component_contracts }}
+          RUNTIME_COMPONENTS: ${{ inputs.runtime_components }}
+          REQUIRED_ABILITIES: ${{ inputs.required_abilities }}
+          ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
+          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+          SUCCESS_COMPLETION_OUTCOMES: ${{ inputs.success_completion_outcomes }}
+          MAX_TURNS: ${{ inputs.max_turns }}
+          STEP_BUDGET: ${{ inputs.step_budget }}
+          TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
+          EXPECTED_ARTIFACTS: ${{ inputs.expected_artifacts }}
+          ARTIFACT_DECLARATIONS: ${{ inputs.artifact_declarations }}
+          ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}
+          RULES: ${{ inputs.rules }}
+          GENERAL_RULES: ${{ inputs.general_rules }}
+          TASK_RULES: ${{ inputs.task_rules }}
+          PROBES: ${{ inputs.probes }}
+          CALLBACK_DATA: ${{ inputs.callback_data }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          EXTRA_WP_CONFIG_DEFINES: ${{ inputs.extra_wp_config_defines }}
+          RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}
+          RUNTIME_OVERLAYS: ${{ inputs.runtime_overlays }}
+          RUNTIME_ENV: ${{ inputs.runtime_env }}
+          RUNTIME_CONFIG: ${{ inputs.runtime_config }}
+          WORKLOAD_RUN_BEFORE: ${{ inputs.workload_run_before }}
+          WORKLOAD_RUN_AFTER: ${{ inputs.workload_run_after }}
+          APP_TOKEN_REPOS: ${{ inputs.app_token_repos }}
+          ALLOWED_REPOS: ${{ inputs.allowed_repos }}
+          ENGINE_KEY: ${{ inputs.engine_key }}
+          TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
+          ABILITY_TOOLS: ${{ inputs.ability_tools }}
+          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
+          EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
+          TOOL_RECORDERS: ${{ inputs.tool_recorders }}
+          RUNNER_WORKSPACE_CONFIG: ${{ inputs.runner_workspace }}
+          IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
+          GITHUB_APP_TOKEN_VALUE: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY_TOKEN_VALUE: ${{ github.token }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
+          PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
+          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
+          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
+          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/build-runner-config.cjs
+
+      - name: Run runtime agent
+        if: ${{ inputs.run_agent }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
+          PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
+          PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
+          PROVIDER_SECRET_4: ${{ secrets.PROVIDER_SECRET_4 }}
+          PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
+          HOMEBOY_RUNTIME_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/agent-task-outcome.json
+          HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/runtime-agent-replay-bundles', runner.temp) || '' }}
+        run: node .ci/homeboy-extensions/wordpress/scripts/agent/run-runtime-agent-task.cjs "${{ steps.config.outputs.config_path }}"
+
+      - name: Run host runner lifecycle
+        if: ${{ inputs.run_agent && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
+        run: |
+          set -euo pipefail
+          node .ci/homeboy-extensions/wordpress/scripts/agent/run-host-runner-lifecycle.cjs \
+            --results "$RESULTS_FILE" \
+            --config "$CONFIG_FILE" \
+            --scenario "${{ inputs.workload_id }}" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Extract scenario outputs
+        id: extract
+        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: |
+          set -euo pipefail
+          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+            --results "$RESULTS_FILE" \
+            --scenario "${{ inputs.workload_id }}" \
+            --field job_status=metadata.job_status \
+            --field transcript_json='(.metadata.evidence_references.references.transcript_artifact.path // "")' \
+            --field transcript_summary='(.metadata.evidence_references.references.transcript_artifact.label // "")' \
+            --required-status "" \
+            --to-github-output
+
+      - name: Update runner workspace PR summary
+        if: ${{ always() && inputs.run_agent && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          CONFIG_FILE: ${{ steps.config.outputs.config_path }}
+        run: |
+          set -euo pipefail
+          node .ci/homeboy-extensions/wordpress/scripts/agent/update-runner-workspace-pr.cjs \
+            --results "$RESULTS_FILE" \
+            --config "$CONFIG_FILE" \
+            --scenario "${{ inputs.workload_id }}"
+
+      - name: Extract dry-run outputs
+        id: extract_dry_run
+        if: ${{ always() && inputs.run_agent && inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+        run: |
+          set -euo pipefail
+          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+            --results "$RESULTS_FILE" \
+            --scenario "${{ inputs.workload_id }}" \
+            --field job_status=metadata.job_status \
+            --field transcript_json='(.metadata.evidence_references.references.transcript_artifact.path // "")' \
+            --field transcript_summary='(.metadata.evidence_references.references.transcript_artifact.label // "")' \
+            --required-status "" \
+            --to-github-output
+          printf 'job_status=completed\n' >> "$GITHUB_OUTPUT"
+
+      - name: Project engine_data outputs
+        id: engine-data
+        if: ${{ inputs.run_agent }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
+          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
+          FLOW_SLUG: ${{ inputs.workload_id }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/project-engine-data.cjs
+
+      - name: Project callback data
+        id: callback-data
+        if: ${{ inputs.run_agent }}
+        env:
+          CALLBACK_DATA: ${{ inputs.callback_data }}
+        run: |
+          set -euo pipefail
+          json="$(printf '%s' "$CALLBACK_DATA" | jq -c '. // {}')"
+          printf 'callback_data_json=%s\n' "$json" >> "$GITHUB_OUTPUT"
+
+      - name: Assert success
+        if: ${{ inputs.run_agent && ! inputs.dry_run }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          FLOW_SLUG: ${{ inputs.workload_id }}
+          SUCCESS_REQUIRES_PR: ${{ inputs.success_requires_pr }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/assert-success.cjs
+
+      - name: Resolve transcript artifact path
+        id: transcript-artifact
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && (steps.extract.outputs.transcript_json != '' || steps.extract_dry_run.outputs.transcript_json != '') }}
+        env:
+          RESULTS_FILE: ${{ runner.temp }}/run-results.json
+          FLOW_SLUG: ${{ inputs.workload_id }}
+          TRANSCRIPT_JSON: ${{ steps.extract.outputs.transcript_json || steps.extract_dry_run.outputs.transcript_json }}
+          TRANSCRIPT_HOST_DIR: ${{ steps.config.outputs.transcript_host_dir }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs resolve-transcript
+
+      - name: Upload transcript artifact
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' && steps.transcript-artifact.outputs.path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.transcript_artifact_name }}
+          path: ${{ steps.transcript-artifact.outputs.path }}
+          if-no-files-found: error
+
+      - name: Upload agent results artifact
+        if: ${{ always() && inputs.run_agent && inputs.transcript_artifact_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.transcript_artifact_name }}-results
+          path: ${{ runner.temp }}/run-results.json
+          if-no-files-found: warn
+
+      - name: Upload replay bundle artifact
+        if: ${{ always() && inputs.run_agent && inputs.replay_bundle_artifact_name != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.replay_bundle_artifact_name }}
+          path: ${{ runner.temp }}/runtime-agent-replay-bundles
+          if-no-files-found: error
+
+      - name: Comment PR summary
+        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AGENT_SLUG: ${{ inputs.workload_id }}
+          FLOW_SLUG: ${{ inputs.workload_id }}
+          JOB_STATUS: ${{ steps.extract.outputs.job_status }}
+          TRANSCRIPT_ARTIFACT_NAME: ${{ inputs.transcript_artifact_name }}
+          ENGINE_DATA_JSON: ${{ steps.engine-data.outputs.engine_data_json }}
+        run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs prepare-pr-comment
+
+      - name: Comment prepared PR summary
+        if: ${{ inputs.run_agent && inputs.comment_pr_summary && github.event_name == 'pull_request' && ! inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file "${RUNNER_TEMP}/runtime-agent-comment.md"

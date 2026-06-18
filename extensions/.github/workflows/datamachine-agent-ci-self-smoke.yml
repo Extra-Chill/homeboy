@@ -9,6 +9,29 @@ permissions:
   issues: write
 
 jobs:
+  runtime-agent-full-run-generic-boundary:
+    uses: ./.github/workflows/runtime-agent-full-run.yml
+    with:
+      homeboy_extensions_ref: ${{ github.sha }}
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: generic-self-smoke
+      runtime_profiles: |
+        {
+          "generic-self-smoke": {
+            "id": "generic-self-smoke",
+            "runtime_task_ability": "example/acknowledge",
+            "ability_requirements": ["example/acknowledge"]
+          }
+        }
+      workload_id: generic-self-smoke
+      target_repo: Extra-Chill/homeboy-extensions
+      prompt: Exercise the generic runtime full-run dry-run path.
+      runtime_task: '{"ability":"example/acknowledge","input":{"message":"hello"}}'
+      success_requires_pr: false
+      dry_run: true
+      callback_data: '{"source":"self-smoke"}'
+
   self-smoke:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:

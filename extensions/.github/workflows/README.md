@@ -43,6 +43,86 @@ success. If the caller wants one validation attempt per immutable evidence key,
 mark with `if: always()` after the validation job starts producing reviewer
 evidence.
 
+## Runtime Agent Full Run
+
+`runtime-agent-full-run.yml` is the generic reusable workflow for a complete
+runtime-backed agent run. It owns the GitHub Actions orchestration that callers
+should not repeat: dependency materialization, provider/runtime setup, Codebox
+execution, runner workspace lifecycle, transcript/replay artifact upload,
+success gating, PR comments, output/evidence projections, `callback_data_json`,
+before/after workload hooks, extra mounts, and runtime config defines.
+
+The generic workflow requires callers to provide their domain runtime profile,
+runtime component dependencies, required abilities, and runtime task/execution
+descriptor. Homeboy Extensions only assumes the runtime provider contract and the
+WP Codebox provider surface; domain ability names and component stacks are caller
+inputs.
+
+```yaml
+jobs:
+  run-agent:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    with:
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: example-agent
+      runtime_profiles: |
+        {
+          "example-agent": {
+            "id": "example-agent",
+            "runtime_task_ability": "example/run-task",
+            "ability_requirements": ["example/run-task"]
+          }
+        }
+      runtime_dependencies: '["Example/example-runtime@main"]'
+      workload_id: example-agent
+      target_repo: Example/example-target
+      prompt: ${{ inputs.prompt }}
+      runtime_task: '{"ability":"example/run-task","input":{"mode":"review"}}'
+      runtime_output_projections: '{"pr_url":"metadata.engine_data.example.pr_url"}'
+      callback_data: '{"source":"manual-dispatch"}'
+      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
+    secrets: inherit
+```
+
+### Legacy Data Machine Wrapper Mapping
+
+`datamachine-agent-ci.yml` remains as a compatibility wrapper and delegates to
+`runtime-agent-full-run.yml`. New consumers should call the generic workflow
+directly and supply the equivalent generic inputs:
+
+| Legacy `datamachine-agent-ci.yml` input | Generic `runtime-agent-full-run.yml` input |
+| --- | --- |
+| `agent_runtime` | `runtime_provider` |
+| `agent_runtime_ref` | `runtime_ref` |
+| `runtime_wordpress_version` | `runtime_wordpress_version` |
+| `flow_slug` | `workload_id` |
+| `agent_slug`, `flow_slug` | `workload_label` / `callback_data` |
+| `target_repo` | `target_repo` |
+| `prompt` | `prompt` |
+| `provider`, `model`, `provider_plugin` | `provider`, `model`, `provider_plugin` |
+| `include_agent_runtime_dependencies`, `runtime_dependencies`, `agents_api_ref`, `data_machine_ref`, `data_machine_code_ref` | `runtime_dependencies` supplied explicitly by the caller |
+| `validation_dependencies` | `validation_dependencies` |
+| `context_repositories` | `context_repositories` |
+| `bundle_path` | `runtime_execution: {"kind":"bundle","source":"..."}` |
+| `execute_workflow_path` | `runtime_execution: {"kind":"workflow","path":"..."}` |
+| `runtime_task`, `ability_request`, `ability_input` | same generic inputs |
+| `component_contracts`, `runtime_components` | same generic inputs |
+| `extra_required_abilities` | `required_abilities` |
+| `success_requires_pr`, `success_completion_outcomes` | same generic inputs |
+| `max_turns`, `step_budget`, `time_budget_ms` | same generic inputs |
+| `engine_data_outputs`, `runtime_output_projections`, `output_mappings` | same generic inputs; prefer `runtime_output_projections` |
+| `evidence_projections`, `tool_recorders` | same generic inputs; prefer `evidence_projections` |
+| `expected_artifacts`, `artifact_declarations`, `artifact_export_config` | same generic inputs |
+| `transcript_artifact_name`, `replay_bundle_artifact_name` | same generic inputs |
+| `extra_wp_config_defines`, `runtime_mounts`, `runtime_overlays` | same generic inputs |
+| `workload_run_before`, `workload_run_after` | same generic inputs |
+| `runner_workspace`, `verification_commands`, `drift_checks`, `writable_paths`, `workspace_contract_checks` | same generic inputs |
+| `actions_artifact_downloads` | `actions_artifact_downloads` |
+| `execute_workflow_builder_command` | `prepare_payload_command` |
+| `app_token_repos`, `require_homeboy_app_token`, `allowed_repos` | same generic inputs |
+| `rules`, `general_rules`, `task_rules`, `probes` | same generic inputs |
+
 `datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
 Data Machine agent bundle or a direct runtime task in a disposable WordPress
 execution substrate. Bundle consumers provide bundle and flow identifiers, a
