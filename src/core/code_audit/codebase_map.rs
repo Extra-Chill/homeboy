@@ -124,7 +124,9 @@ pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
         }
     };
 
-    // Walk and fingerprint all source files
+    // Walk and fingerprint all source files. Collapse nested source dirs first
+    // because walking `src` already covers `src/foo`.
+    let source_dirs = effective_source_dirs(source_dirs);
     let mut all_fingerprints: Vec<FileFingerprint> = Vec::new();
     for dir in &source_dirs {
         let dir_path = root.join(dir);
@@ -132,16 +134,10 @@ pub fn build_map(config: &MapConfig) -> Result<CodebaseMap, Error> {
             continue;
         }
 
-        let scan_config = ScanConfig {
-            extra_skip_dirs: vec!["tests".into(), "test".into()],
-            extensions: ExtensionFilter::All,
-            skip_hidden: true,
-            ..Default::default()
-        };
-        let files = codebase_scan::walk_files(&dir_path, &scan_config);
+        let snapshot = codebase_scan::CodebaseSnapshot::build(&dir_path, &map_scan_config());
 
-        for file_path in files {
-            if let Some(fp) = fingerprint::fingerprint_file(&file_path, root) {
+        for (file_path, content) in snapshot.iter() {
+            if let Some(fp) = fingerprint::fingerprint_content(file_path, root, content) {
                 all_fingerprints.push(fp);
             }
         }
@@ -946,6 +942,40 @@ fn default_source_extensions() -> Vec<String> {
     ]
 }
 
+fn map_scan_config() -> ScanConfig {
+    ScanConfig {
+        extra_skip_dirs: vec!["tests".into(), "test".into()],
+        extensions: ExtensionFilter::All,
+        skip_hidden: true,
+        ..Default::default()
+    }
+}
+
+fn effective_source_dirs(mut dirs: Vec<String>) -> Vec<String> {
+    dirs.sort();
+    dirs.dedup();
+
+    let mut effective = Vec::new();
+    for dir in dirs {
+        if effective
+            .iter()
+            .any(|parent: &String| is_nested_source_dir(&dir, parent))
+        {
+            continue;
+        }
+        effective.push(dir);
+    }
+
+    effective
+}
+
+fn is_nested_source_dir(dir: &str, parent: &str) -> bool {
+    parent == "."
+        || dir
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn find_source_directories(source_path: &Path) -> Vec<String> {
     let mut dirs = Vec::new();
     let source_dir_names = [
@@ -977,6 +1007,31 @@ fn find_source_directories(source_path: &Path) -> Vec<String> {
 
     dirs.sort();
     dirs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_source_dirs_collapses_nested_directories() {
+        let dirs = vec![
+            "src/core".to_string(),
+            "src".to_string(),
+            "lib".to_string(),
+            "src/core".to_string(),
+            "lib/internal".to_string(),
+        ];
+
+        assert_eq!(effective_source_dirs(dirs), vec!["lib", "src"]);
+    }
+
+    #[test]
+    fn effective_source_dirs_keeps_prefix_siblings() {
+        let dirs = vec!["src-extra".to_string(), "src".to_string()];
+
+        assert_eq!(effective_source_dirs(dirs), vec!["src", "src-extra"]);
+    }
 }
 
 fn find_source_directories_by_extension(source_path: &Path, extensions: &[String]) -> Vec<String> {
