@@ -495,6 +495,43 @@ try {
   assert.equal(runtimeTaskCaptured.input.artifact_declarations[0].required, false);
   assert.equal(runtimeTaskCaptured.input.workspaces[0].target, '/workspace/codebox-canary');
 
+  const bridgeCapturePath = path.join(root, 'capture-runtime-tool-bridge.json');
+  const bridgeResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      sandbox_tool_policy: {
+        schema: 'wp-codebox/sandbox-tool-policy/v1',
+        version: 1,
+        tools: [{
+          id: 'github_issue_publish',
+          runtime_tool_id: 'github_issue_publish',
+          execution_location: 'control_plane',
+          allowed: false,
+          runtime: { environment: 'control_plane', capability_scope: 'control_plane' },
+        }],
+        metadata: { source: 'homeboy_agent_tool_policy' },
+      },
+      runtime_env: {
+        HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA: 'homeboy/agent-tool-request/v1',
+        HOMEBOY_AGENT_TOOL_RESULT_SCHEMA: 'homeboy/agent-tool-result/v1',
+      },
+      runtime_task: {
+        ability: 'example/parent-tool',
+        input: {},
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: bridgeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(bridgeResult.status, 0, bridgeResult.stderr || bridgeResult.stdout);
+  const bridgeCaptured = readJson(bridgeCapturePath);
+  assert.equal(bridgeCaptured.input.extra_plugins.some((plugin) => plugin.slug === 'homeboy-runtime-tool-bridge' && plugin.loadAs === 'mu-plugin'), true);
+  assert.match(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TOOL_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TASK_ID, 'agent-task-123');
+
   const abilityBridgeResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
     '--wp-codebox-bin', fixtureWpCodebox,

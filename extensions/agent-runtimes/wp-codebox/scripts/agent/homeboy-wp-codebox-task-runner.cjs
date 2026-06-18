@@ -11,7 +11,7 @@ const http = require('node:http');
 const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { URLSearchParams } = require('node:url');
 
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
@@ -463,6 +463,13 @@ function writeJsonFile(prefix, value) {
   return filePath;
 }
 
+function writeTextFile(prefix, fileName, contents) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const filePath = path.join(directory, fileName);
+  fs.writeFileSync(filePath, contents);
+  return filePath;
+}
+
 function writePreflightEvidence(artifacts, evidence) {
   try {
     fs.mkdirSync(artifacts, { recursive: true });
@@ -590,6 +597,262 @@ function prepareStableTaskInput(taskInput, artifacts) {
     },
     prepared_plugins: [...preparedBySource.values()].filter((item) => item.prepared),
   };
+}
+
+function homeboyPolicyHasParentTools(taskInput) {
+  const tools = taskInput?.sandbox_tool_policy?.tools;
+  return Array.isArray(tools) && tools.some((tool) => (
+    tool?.transport_visibility === 'parent'
+      || tool?.execution_location === 'parent'
+      || tool?.execution_location === 'control_plane'
+  ));
+}
+
+function homeboyRuntimeToolBridgePluginSource() {
+  return `<?php
+/**
+ * Homeboy parent runtime-tool bridge for Data Machine client tools.
+ *
+ * @package HomeboyCodeboxRuntime
+ */
+
+add_filter(
+	'datamachine_runtime_tool_result',
+	static function ( $result, array $request, array $payload ) {
+		if ( null !== $result ) {
+			return $result;
+		}
+
+		$endpoint = getenv( 'HOMEBOY_AGENT_TOOL_BRIDGE_URL' );
+		if ( ! is_string( $endpoint ) || '' === $endpoint ) {
+			return null;
+		}
+
+		$tool_name = isset( $request['tool_name'] ) && is_scalar( $request['tool_name'] ) ? (string) $request['tool_name'] : '';
+		$call_id   = isset( $request['call_id'] ) && is_scalar( $request['call_id'] ) ? (string) $request['call_id'] : '';
+		$body      = array(
+			'schema'     => getenv( 'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA' ) ?: 'homeboy/agent-tool-request/v1',
+			'request_id' => '' !== $call_id ? $call_id : uniqid( 'runtime-tool-', true ),
+			'task_id'    => getenv( 'HOMEBOY_AGENT_TASK_ID' ) ?: ( is_scalar( $request['job_id'] ?? null ) ? (string) $request['job_id'] : '' ),
+			'tool'       => $tool_name,
+			'input'      => is_array( $request['parameters'] ?? null ) ? $request['parameters'] : array(),
+			'metadata'   => array(
+				'source'        => 'wp-codebox-datamachine-runtime-tool-bridge',
+				'session_id'    => $request['session_id'] ?? null,
+				'turn_count'    => $request['turn_count'] ?? null,
+				'mode'          => $request['mode'] ?? null,
+				'agent_id'      => $request['agent_id'] ?? null,
+				'tool_def'      => is_array( $request['tool_def'] ?? null ) ? $request['tool_def'] : array(),
+				'payload_scope' => array(
+					'job_id'     => $payload['job_id'] ?? null,
+					'session_id' => $payload['session_id'] ?? null,
+				),
+			),
+		);
+
+		$response = wp_remote_post(
+			$endpoint,
+			array(
+				'timeout' => 120,
+				'headers' => array( 'content-type' => 'application/json' ),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$decoded = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( ! is_array( $decoded ) ) {
+			return new WP_Error( 'homeboy_agent_tool_bridge_invalid_response', 'Homeboy agent tool bridge returned an invalid JSON response.' );
+		}
+
+		$status      = isset( $decoded['status'] ) && is_scalar( $decoded['status'] ) ? (string) $decoded['status'] : 'failed';
+		$diagnostics = is_array( $decoded['diagnostics'] ?? null ) ? $decoded['diagnostics'] : array();
+		$error       = '';
+		if ( ! empty( $diagnostics[0]['message'] ) && is_scalar( $diagnostics[0]['message'] ) ) {
+			$error = (string) $diagnostics[0]['message'];
+		}
+
+		return array(
+			'success'   => 'succeeded' === $status,
+			'tool_name' => isset( $decoded['tool'] ) && is_scalar( $decoded['tool'] ) ? (string) $decoded['tool'] : $tool_name,
+			'executor'  => 'client',
+			'result'    => $decoded['output'] ?? null,
+			'error'     => '' !== $error ? $error : 'Homeboy agent tool bridge returned a failed result.',
+			'code'      => 'succeeded' === $status ? '' : 'homeboy_agent_tool_bridge_failed',
+			'metadata'  => array(
+				'homeboy_agent_tool_result' => $decoded,
+			),
+		);
+	},
+	10,
+	3
+);
+`;
+}
+
+function homeboyRuntimeToolBridgeServerSource() {
+  return `#!/usr/bin/env node
+'use strict';
+const http = require('node:http');
+const { spawnSync } = require('node:child_process');
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+function unsupported(request) {
+  return {
+    schema: process.env.HOMEBOY_AGENT_TOOL_RESULT_SCHEMA || 'homeboy/agent-tool-result/v1',
+    request_id: request.request_id || '',
+    task_id: request.task_id || '',
+    tool: request.tool || '',
+    status: 'failed',
+    output: null,
+    diagnostics: [{
+      class: 'agent_tool.control_plane_dispatch_unsupported',
+      message: 'control-plane tool dispatch is selected by policy, but no dispatcher command is registered for this provider execution',
+      data: { tool: request.tool || '' },
+    }],
+    metadata: { execution_location: 'control_plane' },
+  };
+}
+
+function dispatch(request) {
+  const command = process.env.HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND || '';
+  if (!command) {
+    return unsupported(request);
+  }
+  const result = spawnSync(command, [], {
+    input: JSON.stringify(request),
+    encoding: 'utf8',
+    shell: true,
+    maxBuffer: 1024 * 1024 * 10,
+    timeout: Number.parseInt(process.env.HOMEBOY_AGENT_TOOL_DISPATCH_TIMEOUT_MS || request.timeout_ms || 120000, 10),
+  });
+  if (result.error || result.status !== 0) {
+    return {
+      ...unsupported(request),
+      diagnostics: [{
+        class: 'agent_tool.control_plane_dispatch_failed',
+        message: result.error ? result.error.message : (result.stderr || 'control-plane dispatcher command failed'),
+        data: { status: result.status, signal: result.signal, tool: request.tool || '' },
+      }],
+    };
+  }
+  try {
+    return JSON.parse(result.stdout || '{}');
+  } catch {
+    return {
+      ...unsupported(request),
+      diagnostics: [{
+        class: 'agent_tool.control_plane_dispatch_invalid_result',
+        message: 'control-plane dispatcher command returned invalid JSON',
+        data: { tool: request.tool || '' },
+      }],
+    };
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'method_not_allowed' }));
+    return;
+  }
+  try {
+    const request = JSON.parse(await readBody(req));
+    const result = dispatch(request);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(result));
+  } catch (error) {
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+});
+
+server.listen(0, '127.0.0.1', () => {
+  const address = server.address();
+  const payload = JSON.stringify({ url: 'http://127.0.0.1:' + address.port });
+  if (process.env.HOMEBOY_AGENT_TOOL_BRIDGE_READY_FILE) {
+    require('node:fs').writeFileSync(process.env.HOMEBOY_AGENT_TOOL_BRIDGE_READY_FILE, payload);
+  }
+  process.stdout.write(payload + '\\n');
+});
+`;
+}
+
+function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
+  if (!homeboyPolicyHasParentTools(taskInput)) {
+    return { input: taskInput, bridge: null };
+  }
+
+  const pluginRoot = fs.mkdtempSync(path.join(artifacts, 'homeboy-runtime-tool-bridge-'));
+  const pluginDir = path.join(pluginRoot, 'homeboy-runtime-tool-bridge');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-tool-bridge.php'), homeboyRuntimeToolBridgePluginSource());
+
+  return {
+    input: {
+      ...taskInput,
+      extra_plugins: [
+        ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins : []),
+        {
+          source: pluginDir,
+          slug: 'homeboy-runtime-tool-bridge',
+          loadAs: 'mu-plugin',
+          activate: false,
+          metadata: { source: 'homeboy-runtime-tool-bridge' },
+        },
+      ],
+      runtime_env: {
+        ...(plainObject(taskInput.runtime_env) ? taskInput.runtime_env : {}),
+        HOMEBOY_AGENT_TASK_ID: taskInput.orchestrator?.agent_task_id || taskInput.parent_request?.task_id || '',
+      },
+    },
+    bridge: {
+      plugin_dir: pluginDir,
+      server_script: writeTextFile('homeboy-runtime-tool-bridge-server-', 'server.js', homeboyRuntimeToolBridgeServerSource()),
+    },
+  };
+}
+
+function startHomeboyRuntimeToolBridge(bridge) {
+  if (!bridge) {
+    return null;
+  }
+  const readyFile = writeTextFile('homeboy-runtime-tool-bridge-ready-', 'ready.json', '');
+  const child = spawn(process.execPath, [bridge.server_script], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: {
+      ...process.env,
+      HOMEBOY_AGENT_TOOL_BRIDGE_READY_FILE: readyFile,
+    },
+  });
+  const start = Date.now();
+  while (Date.now() - start < 5000) {
+    const contents = fs.existsSync(readyFile) ? fs.readFileSync(readyFile, 'utf8') : '';
+    if (contents.trim()) {
+      const parsed = JSON.parse(contents);
+      return { child, url: parsed.url };
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+  child.kill();
+  throw new Error('Timed out starting Homeboy runtime tool bridge server.');
+}
+
+function stopHomeboyRuntimeToolBridge(server) {
+  if (server?.child && !server.child.killed) {
+    server.child.kill();
+  }
 }
 
 function secretEnvValues(secretNames) {
@@ -1800,7 +2063,15 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     return 1;
   }
 
-  const preparedInput = prepareStableTaskInput(stableTaskInput(input), artifacts);
+  const bridgedInput = injectHomeboyRuntimeToolBridge(stableTaskInput(input), artifacts);
+  const bridgeServer = startHomeboyRuntimeToolBridge(bridgedInput.bridge);
+  const preparedInput = prepareStableTaskInput({
+    ...bridgedInput.input,
+    runtime_env: {
+      ...(plainObject(bridgedInput.input.runtime_env) ? bridgedInput.input.runtime_env : {}),
+      ...(bridgeServer ? { HOMEBOY_AGENT_TOOL_BRIDGE_URL: bridgeServer.url } : {}),
+    },
+  }, artifacts);
   const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', preparedInput.input);
   const args = ['agent-task-run', `--input-file=${inputPath}`, '--json'];
   const previewHold = argValue('--preview-hold');
@@ -1830,15 +2101,20 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     console.error(JSON.stringify({ command: resolved.command, args: resolved.args, input }, null, 2));
   }
 
-  const result = spawnSync(resolved.command, resolved.args, {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ...envOverrides,
-    },
-    maxBuffer: 1024 * 1024 * 20,
-    timeout: timeoutMs,
-  });
+  let result;
+  try {
+    result = spawnSync(resolved.command, resolved.args, {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...envOverrides,
+      },
+      maxBuffer: 1024 * 1024 * 20,
+      timeout: timeoutMs,
+    });
+  } finally {
+    stopHomeboyRuntimeToolBridge(bridgeServer);
+  }
   const shouldPreserveEvidence = Boolean(result.error) || result.status !== 0;
   const failureEvidence = shouldPreserveEvidence ? preserveWpCodeboxFailureEvidence({
     artifacts,
