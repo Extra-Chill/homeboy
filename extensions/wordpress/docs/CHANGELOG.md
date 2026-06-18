@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.4] - 2026-06-18
+
+### Fixed
+- repair DB-activation PHPUnit smoke canary on main
+
 ## [3.7.3] - 2026-06-18
 
 ### Changed
