@@ -5,6 +5,7 @@
 //!
 //! Zero domain knowledge — all language-specific behavior comes from callers.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -97,12 +98,9 @@ fn walk_recursive(dir: &Path, root: &Path, config: &ScanConfig, files: &mut Vec<
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = path_name(&path);
 
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if should_skip_dir(&name, is_root, config) {
                 continue;
             }
@@ -157,12 +155,9 @@ where
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = path_name(&path);
 
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if should_skip_dir(&name, is_root, config) {
                 continue;
             }
@@ -210,12 +205,9 @@ where
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = path_name(&path);
 
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if should_skip_dir(&name, is_root, config) {
                 continue;
             }
@@ -277,12 +269,9 @@ fn walk_entries_recursive<F>(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = path_name(&path);
 
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if should_skip_dir(&name, is_root, config) {
                 continue;
             }
@@ -304,6 +293,19 @@ fn walk_entries_recursive<F>(
 // ============================================================================
 // Shared skip-dir logic
 // ============================================================================
+
+fn path_name(path: &Path) -> Cow<'_, str> {
+    path.file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or(Cow::Borrowed(""))
+}
+
+fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
+    match entry.file_type() {
+        Ok(file_type) => file_type.is_dir() || (file_type.is_symlink() && path.is_dir()),
+        Err(_) => path.is_dir(),
+    }
+}
 
 /// Check if a directory should be skipped based on config.
 ///
