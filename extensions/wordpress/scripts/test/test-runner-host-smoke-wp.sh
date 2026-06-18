@@ -322,7 +322,16 @@ echo "  WordPress: ${WP_VERSION:-default}"
 echo "  Per-file timeout: ${HOST_SMOKE_TIMEOUT_SECONDS}s"
 echo ""
 
+# Run every requested smoke even when one fails, so a single CI run surfaces
+# the complete per-smoke pass/fail picture instead of stopping at the first
+# failing smoke. Each smoke runs in its own wp-codebox recipe process via
+# run_one_smoke, so a fatal bootstrap/redeclare error in one smoke cannot abort
+# the others. Failures are collected and reported as an aggregated summary; the
+# phase still exits non-zero if ANY smoke failed so CI goes red. (#4682)
 passed=0
+failed=0
+failed_smokes=()
+last_failure_exit=0
 for smoke_file in "${smoke_files[@]}"; do
     rel_path="${smoke_file#"${PLUGIN_PATH}/"}"
     echo "HOST_SMOKE_BEGIN:${rel_path}"
@@ -334,10 +343,21 @@ for smoke_file in "${smoke_files[@]}"; do
         echo "HOST_SMOKE_FAIL:${rel_path}:exit=${exit_code}"
         echo ""
         echo "Real-WordPress smoke test failed: ${rel_path}"
-        exit "$exit_code"
+        failed=$((failed + 1))
+        failed_smokes+=("${rel_path}:exit=${exit_code}")
+        last_failure_exit="$exit_code"
     fi
 done
 
 echo ""
-echo "HOST_SMOKE_SUMMARY:passed=${passed} failed=0"
+echo "HOST_SMOKE_SUMMARY:passed=${passed} failed=${failed}"
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Real-WordPress smoke tests failed (${failed} of $((passed + failed))):"
+    for entry in "${failed_smokes[@]}"; do
+        echo "  - ${entry%%:exit=*} (exit ${entry##*:exit=})"
+    done
+    exit "$last_failure_exit"
+fi
+
 echo "Real-WordPress smoke test run complete."

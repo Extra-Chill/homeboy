@@ -133,6 +133,55 @@ assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_OUTPUT_BEGIN:tests/alpha
 assert_contains "${TMPDIR}/direct-fail.out" "smoke threw"
 assert_contains "${TMPDIR}/direct-fail.out" "HOST_SMOKE_OUTPUT_END:tests/alpha-smoke.php:artifacts="
 
+# --- Aggregation (#4682): when several smokes run and one fails in the middle,
+# the runner must keep going and report EVERY smoke's pass/fail in ONE run
+# rather than bailing at the first failure. A fake codebox fails only beta; the
+# run must still execute gamma, surface both pass and fail markers, emit an
+# aggregated summary (failed != 0), list the failing smoke, and exit non-zero.
+multi_component="${TMPDIR}/multi-component"
+mkdir -p "${multi_component}/tests"
+printf '<?php echo "alpha ok\\n";\n' > "${multi_component}/tests/alpha-smoke.php"
+printf '<?php echo "beta ok\\n";\n'  > "${multi_component}/tests/beta-smoke.php"
+printf '<?php echo "gamma ok\\n";\n' > "${multi_component}/tests/gamma-smoke.php"
+
+FAKE_CODEBOX_BETA_FAIL="${TMPDIR}/fake-wp-codebox-beta-fail.cjs"
+cat > "$FAKE_CODEBOX_BETA_FAIL" <<'JS'
+#!/usr/bin/env node
+'use strict';
+const fs = require('fs');
+const args = process.argv.slice(2);
+const recipe = JSON.parse(fs.readFileSync(args[args.indexOf('--recipe') + 1], 'utf8'));
+const codeFileArg = recipe.workflow.steps[0].args.find((arg) => arg.startsWith('code-file='));
+const wrapper = fs.readFileSync(codeFileArg.slice('code-file='.length), 'utf8');
+const fail = wrapper.includes('beta-smoke.php');
+process.stdout.write(JSON.stringify({
+  success: !fail,
+  executions: [{ command: 'wordpress.run-php', exitCode: fail ? 1 : 0, stdout: fail ? '' : 'OK\n', stderr: fail ? 'beta blew up\n' : '' }],
+}));
+JS
+
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="multi-component" \
+HOMEBOY_COMPONENT_PATH="$multi_component" \
+HOMEBOY_WP_CODEBOX_BIN="$FAKE_CODEBOX_BETA_FAIL" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILES=$'tests/alpha-smoke.php\ntests/beta-smoke.php\ntests/gamma-smoke.php' \
+FAKE_CODEBOX_CAPTURE_DIR="$CAPTURE_DIR" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner-host-smoke-wp.sh" > "${TMPDIR}/aggregate.out" 2>&1
+aggregate_exit=$?
+set -e
+if [ "$aggregate_exit" -eq 0 ]; then
+    echo "Expected aggregated host-smoke run to exit non-zero when a smoke fails" >&2
+    sed 's/^/  /' "${TMPDIR}/aggregate.out" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/aggregate.out" "HOST_SMOKE_OK:tests/alpha-smoke.php"
+assert_contains "${TMPDIR}/aggregate.out" "HOST_SMOKE_FAIL:tests/beta-smoke.php:exit=1"
+# gamma running proves the runner did NOT bail at beta's failure.
+assert_contains "${TMPDIR}/aggregate.out" "HOST_SMOKE_OK:tests/gamma-smoke.php"
+assert_contains "${TMPDIR}/aggregate.out" "HOST_SMOKE_SUMMARY:passed=2 failed=1"
+assert_contains "${TMPDIR}/aggregate.out" "tests/beta-smoke.php (exit 1)"
+
 # --- Timeout diagnostics: a hung recipe-run is bounded per file and reports the
 # phase/artifact directory before returning the conventional timeout status.
 FAKE_CODEBOX_HANG="${TMPDIR}/fake-wp-codebox-hang.cjs"
