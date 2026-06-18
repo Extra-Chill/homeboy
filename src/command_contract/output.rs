@@ -166,13 +166,14 @@ pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchF
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandDescriptor {
-    pub response_mode: CommandResponseMode,
-    pub output_file_mode: CommandOutputFileMode,
-    pub json_family: CommandJsonFamily,
+    /// Shared output-routing spec (response mode, output-file mode, JSON family,
+    /// output contract). Factored out of the per-struct field group so the same
+    /// shape is reused by [`CommandOutputDescriptor`] and the command adapter
+    /// contract.
+    pub output: CommandOutputDescriptor,
     pub supports_lab_runner: bool,
     pub lab_runner_unsupported_reason: Option<&'static str>,
     pub lab_offload_mutation_flag: Option<&'static str>,
-    pub output_contract: CommandOutputContractKind,
 }
 
 impl CommandOutputDescriptor {
@@ -181,13 +182,10 @@ impl CommandOutputDescriptor {
         contract: Option<super::lab::LabCommandContract>,
     ) -> CommandDescriptor {
         let mut descriptor = CommandDescriptor {
-            response_mode: self.response_mode,
-            output_file_mode: self.output_file_mode,
-            json_family: self.json_family,
+            output: self,
             supports_lab_runner: false,
             lab_runner_unsupported_reason: None,
             lab_offload_mutation_flag: None,
-            output_contract: self.output_contract,
         };
         apply_lab_contract_to_descriptor(&mut descriptor, contract);
         descriptor
@@ -457,34 +455,49 @@ mod tests {
     fn test_command_descriptor_drives_behavioral_routing() {
         let bench = parsed_command(&["homeboy", "bench"]);
         let bench_descriptor = bench.descriptor(false);
-        assert_eq!(bench_descriptor.json_family, CommandJsonFamily::Quality);
+        assert_eq!(
+            bench_descriptor.output.json_family,
+            CommandJsonFamily::Quality
+        );
         assert!(bench_descriptor.supports_lab_runner);
         assert_eq!(
-            bench_descriptor.output_contract,
+            bench_descriptor.output.output_contract,
             CommandOutputContractKind::JsonEnvelope
         );
 
         let runs = parsed_command(&["homeboy", "runs", "list"]);
         let runs_descriptor = runs.descriptor(false);
-        assert_eq!(runs_descriptor.json_family, CommandJsonFamily::Workspace);
-        assert_eq!(runs_descriptor.response_mode, CommandResponseMode::Json);
         assert_eq!(
-            runs_descriptor.output_contract,
+            runs_descriptor.output.json_family,
+            CommandJsonFamily::Workspace
+        );
+        assert_eq!(
+            runs_descriptor.output.response_mode,
+            CommandResponseMode::Json
+        );
+        assert_eq!(
+            runs_descriptor.output.output_contract,
             CommandOutputContractKind::JsonEnvelope
         );
 
         let fleet_descriptor = parsed_command(&["homeboy", "fleet", "list"]).descriptor(false);
-        assert_eq!(fleet_descriptor.json_family, CommandJsonFamily::Ops);
-        assert_eq!(fleet_descriptor.response_mode, CommandResponseMode::Json);
+        assert_eq!(fleet_descriptor.output.json_family, CommandJsonFamily::Ops);
         assert_eq!(
-            fleet_descriptor.output_contract,
+            fleet_descriptor.output.response_mode,
+            CommandResponseMode::Json
+        );
+        assert_eq!(
+            fleet_descriptor.output.output_contract,
             CommandOutputContractKind::JsonEnvelope
         );
 
         let list_descriptor = Commands::List.descriptor(false);
-        assert_eq!(list_descriptor.json_family, CommandJsonFamily::RawOnly);
         assert_eq!(
-            list_descriptor.response_mode,
+            list_descriptor.output.json_family,
+            CommandJsonFamily::RawOnly
+        );
+        assert_eq!(
+            list_descriptor.output.response_mode,
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
     }
