@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.12] - 2026-06-18
+
+### Changed
+- Generalize runtime profile defaults
+
 ## [3.7.11] - 2026-06-18
 
 ### Changed
