@@ -295,22 +295,33 @@ fn summarize_components(
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
 
-    // Fetch from origin and detect upstream drift for each component
-    for comp in &components {
-        if let Some(drift) = fetch_upstream_drift_for(&comp.local_path, &comp.id) {
-            if drift.is_behind() {
-                behind_upstream.push(comp.id.clone());
-            }
-            upstream_drift.push(drift);
-        }
-    }
+    let has_filter =
+        args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
+    let include_upstream_drift = !has_filter;
+    let include_unreleased_merges = !has_filter || args.unreleased;
 
-    // Detect merged-but-unreleased work per component (issue #4996). This is
-    // measured against origin/<default-branch> (refreshed by the fetch above),
-    // so a stale local checkout does not hide unreleased merges.
-    for comp in &components {
-        if let Some(merge) = detect_unreleased_merges_for(comp) {
-            unreleased_merges.push(merge);
+    if include_upstream_drift || include_unreleased_merges {
+        for comp in &components {
+            fetch_origin_tags(&comp.local_path);
+
+            if include_upstream_drift {
+                if let Some(mut drift) = get_upstream_drift(&comp.local_path) {
+                    drift.component_id = comp.id.clone();
+                    if drift.is_behind() {
+                        behind_upstream.push(comp.id.clone());
+                    }
+                    upstream_drift.push(drift);
+                }
+            }
+
+            // Detect merged-but-unreleased work per component (issue #4996). This is
+            // measured against origin/<default-branch> (refreshed above), so a stale
+            // local checkout does not hide unreleased merges.
+            if include_unreleased_merges {
+                if let Some(merge) = detect_unreleased_merges_for(comp) {
+                    unreleased_merges.push(merge);
+                }
+            }
         }
     }
 
@@ -329,9 +340,6 @@ fn summarize_components(
     }
 
     // Apply filters if any are set
-    let has_filter =
-        args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
-
     if has_filter {
         if !args.uncommitted {
             uncommitted.clear();
@@ -584,13 +592,21 @@ fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool
 ///
 /// Returns `None` if the path is not a git repo or has no upstream configured.
 fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
+    fetch_origin_tags(path);
+
+    get_upstream_drift(path)
+}
+
+fn fetch_origin_tags(path: &str) {
     // Best-effort fetch — silently proceeds if no remote or network issue.
     let _ = homeboy::core::engine::command::run_in_optional(
         path,
         "git",
         &["fetch", "--tags", "--quiet"],
     );
+}
 
+fn get_upstream_drift(path: &str) -> Option<UpstreamDrift> {
     let snapshot = git::get_repo_snapshot(path).ok()?;
 
     // After fetching tags, find the latest tag across ALL refs (not just HEAD).
