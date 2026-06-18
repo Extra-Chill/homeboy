@@ -13,6 +13,7 @@ use crate::core::agent_task::{
     AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
     AGENT_TOOL_RESULT_SCHEMA,
 };
+use crate::core::agent_task_gate_executor::{is_repo_local_gate_request, run_repo_local_gate_task};
 use crate::core::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
@@ -1259,6 +1260,9 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         if request.executor.backend == "fixture" {
             return run_fixture_provider(&request);
         }
+        if is_repo_local_gate_request(&request) {
+            return run_repo_local_gate_task(&request);
+        }
 
         let Some(provider) = select_provider(&self.providers, &request) else {
             return failure_outcome(
@@ -2250,9 +2254,11 @@ mod tests {
     use super::*;
     use crate::core::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
-        AgentToolExecutionLocation, AgentToolPolicyRule,
+        AgentTaskWorkspaceMode, AgentToolExecutionLocation, AgentToolPolicyRule,
     };
-    use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskScheduler};
+    use crate::core::agent_task_scheduler::{
+        AgentTaskCancellationToken, AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduler,
+    };
     use std::fs;
 
     #[test]
@@ -2750,6 +2756,45 @@ mod tests {
         ));
 
         assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
+    }
+
+    #[test]
+    fn repo_local_gate_execution_kind_runs_without_extension_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("gate.mjs"),
+            "import fs from 'node:fs'; fs.writeFileSync(process.env.RESULT_PATH, JSON.stringify({ok:true}));",
+        )
+        .expect("write script");
+        let (mut request, _) = request("repo-local-gate", "unused".to_string());
+        request.executor.backend = "agent-task".to_string();
+        request.executor.config = json!({
+            "execution_kind": "repo_local_gate",
+            "script": "gate.mjs",
+            "artifact_outputs": {
+                "result": { "schema": "example/Result/v1" }
+            }
+        });
+        request.workspace = AgentTaskWorkspace {
+            mode: AgentTaskWorkspaceMode::Existing,
+            root: Some(temp.path().display().to_string()),
+            ..AgentTaskWorkspace::default()
+        };
+        let executor = ExtensionProviderAgentTaskExecutor::with_providers(Vec::new());
+
+        let outcome = executor.execute(
+            request,
+            AgentTaskExecutionContext {
+                plan_id: "gate-plan".to_string(),
+                attempt: 1,
+                cancellation: AgentTaskCancellationToken::default(),
+            },
+        );
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.outputs["result"]["ok"], true);
+        assert_eq!(outcome.typed_artifacts.len(), 1);
+        assert_eq!(outcome.typed_artifacts[0].name, "result");
     }
 
     #[test]
