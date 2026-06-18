@@ -1692,7 +1692,18 @@ fn is_transient_provider_error(text: &str) -> bool {
 /// while leaving permanent 4xx codes (400/401/403/404/422) non-retryable.
 fn transient_status_code(lowered: &str) -> bool {
     const TRANSIENT_CODES: [&str; 7] = ["429", "500", "502", "503", "504", "522", "524"];
-    TRANSIENT_CODES.iter().any(|code| lowered.contains(code))
+    TRANSIENT_CODES
+        .iter()
+        .any(|code| contains_status_code_token(lowered, code))
+}
+
+fn contains_status_code_token(text: &str, code: &str) -> bool {
+    text.match_indices(code).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + code.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && !after.is_some_and(|ch| ch.is_ascii_alphanumeric())
+    })
 }
 
 /// Record the transient retry history on the final outcome so operators can see
@@ -4198,6 +4209,9 @@ process.stdout.write(JSON.stringify({
         assert!(!is_transient_provider_error("404 Not Found"));
         assert!(!is_transient_provider_error(
             "malformed JSON in provider output"
+        ));
+        assert!(!is_transient_provider_error(
+            "provider output path /tmp/homeboy-500abc/stdout.json was malformed"
         ));
     }
 
