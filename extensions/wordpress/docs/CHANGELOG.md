@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.8] - 2026-06-18
+
+### Fixed
+- fix(wp-codebox): preserve provider failure outcomes
+
 ## [3.4.7] - 2026-06-17
 
 ### Fixed
