@@ -5,7 +5,7 @@ use crate::command_contract::{registered_command_dispatch_family, CommandDispatc
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, JsonCommandRun};
-use super::{runner, GlobalArgs};
+use super::{adapter, runner, GlobalArgs};
 
 mod ops;
 mod quality;
@@ -67,6 +67,14 @@ fn agent_task_summary_kind_for_output_mode(
 }
 
 fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Value>, i32) {
+    let command = match adapter::command_adapter(
+        command,
+        crate::command_contract::CommandOutputFileMode::None,
+    ) {
+        Ok(adapter) => return adapter.execute_json(global),
+        Err(command) => command,
+    };
+
     match dispatch_family(&command) {
         CommandDispatchFamily::Quality => quality::dispatch(command, global),
         CommandDispatchFamily::Workspace => workspace::dispatch(command, global),

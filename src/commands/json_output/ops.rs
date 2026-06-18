@@ -2,8 +2,8 @@ use crate::cli_surface::Commands;
 
 use super::{map, JsonRun};
 use crate::commands::{
-    api, auth, ci, daemon, db, deploy, deps, doctor, file, fleet, git, http, issues, logs,
-    self_cmd, server, ssh, status, triage, upgrade, GlobalArgs,
+    api, auth, ci, daemon, db, deploy, deps, doctor, file, git, http, issues, logs, self_cmd,
+    server, ssh, status, triage, upgrade, GlobalArgs,
 };
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
@@ -16,11 +16,6 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Deps(args) => map(deps::run(args, global)),
         Commands::Doctor(args) => map(doctor::run(args, global)),
         Commands::File(args) => map(file::run(args, global)),
-        Commands::Fleet(args) => {
-            fleet::adapter(crate::command_contract::CommandOutputFileMode::None)
-                .execute_json
-                .expect("fleet adapter supports JSON execution")(args, global)
-        }
         Commands::Logs(args) => map(logs::run(args, global)),
         Commands::Triage(args) => map(triage::run(args, global)),
         Commands::Deploy(args) => map(deploy::run(args, global)),

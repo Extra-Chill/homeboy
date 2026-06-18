@@ -4,7 +4,7 @@ use super::{map, JsonRun};
 use crate::commands::{
     agent_task, build, changelog, changes, cleanup, component, config, docs, extension, lab,
     project, refactor, refs, release, report, rig, runner, runs, runtime, stack, tunnel, undo,
-    version, worktree, GlobalArgs,
+    worktree, GlobalArgs,
 };
 
 pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
@@ -17,11 +17,6 @@ pub(super) fn dispatch(command: Commands, global: &GlobalArgs) -> JsonRun {
         Commands::Docs(args) => map(docs::run(args, global)),
         Commands::Changelog(args) => map(changelog::run(args, global)),
         Commands::Cleanup(args) => map(cleanup::run(args, global)),
-        Commands::Version(args) => {
-            version::adapter(crate::command_contract::CommandOutputFileMode::None)
-                .execute_json
-                .expect("version adapter supports JSON execution")(args, global)
-        }
         Commands::Build(args) => map(build::run(args, global)),
         Commands::Changes(args) => map(changes::run(args, global)),
         Commands::Release(args) => map(release::run(args, global)),
