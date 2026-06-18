@@ -31,6 +31,76 @@ const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
+const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = 'wp-codebox/provider-runtime-invocation-contract/v1';
+
+const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
+  workspaceCapture: 'wp-codebox.runner-workspace.capture',
+  workspaceCommand: 'wp-codebox.runner-workspace.command',
+  workspacePublish: 'wp-codebox.runner-workspace.publish',
+  toolCallTranscriptRecord: 'wp-codebox.tool-call-transcript.record',
+  artifactHandoff: 'wp-codebox.artifact-handoff',
+};
+
+const WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES = {
+  workspaceCapture: 'wp-codebox/runner-workspace-capture',
+  workspaceCommand: 'wp-codebox/runner-workspace-command',
+  workspacePublish: 'wp-codebox/runner-workspace-publish',
+  toolCallTranscriptRecord: 'wp-codebox/record-tool-call-transcript',
+  artifactHandoff: 'wp-codebox/handoff-artifacts',
+};
+
+const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS = {
+  workspace_capture: 'wp-codebox/runner-workspace-capture-result/v1',
+  workspace_command: 'wp-codebox/runner-workspace-command-result/v1',
+  workspace_publication: 'wp-codebox/runner-workspace-publication-result/v1',
+  tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
+  evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
+};
+
+const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS = {
+  workspaceCapture: 'workspace_capture',
+  workspaceCommand: 'workspace_command',
+  workspacePublish: 'workspace_publication',
+  toolCallTranscriptRecord: 'tool_call_transcript',
+  artifactHandoff: 'evidence_artifact_envelope',
+};
+
+const WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES = Object.fromEntries(Object.entries({
+  workspaceCapture: [
+    'workspaceCapture',
+    'workspace_capture',
+    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspaceCapture,
+    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspaceCapture,
+  ],
+  workspaceCommand: [
+    'workspaceCommand',
+    'workspace_command',
+    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspaceCommand,
+    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspaceCommand,
+  ],
+  workspacePublish: [
+    'workspacePublish',
+    'workspace_publish',
+    'workspacePublication',
+    'workspace_publication',
+    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspacePublish,
+    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspacePublish,
+  ],
+  toolCallTranscriptRecord: [
+    'toolCallTranscriptRecord',
+    'tool_call_transcript_record',
+    'toolCallTranscript',
+    'tool_call_transcript',
+    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.toolCallTranscriptRecord,
+    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.toolCallTranscriptRecord,
+  ],
+  artifactHandoff: [
+    'artifactHandoff',
+    'artifact_handoff',
+    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.artifactHandoff,
+    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.artifactHandoff,
+  ],
+}).flatMap(([key, aliases]) => aliases.map((alias) => [alias, key])));
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects with a non-empty string kind, for example { "kind": "bundled-library", "library": "php-ai-client", "source": "/path/to/php-ai-client" }. The legacy type field is not accepted.';
@@ -141,6 +211,7 @@ function providerContract(options = {}) {
     component_path_defaults: runtimeComponentPathDefaults(options),
     provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
     provider_preflight: runtimeProviderPreflight(),
+    provider_runtime_invocation: providerRuntimeInvocationContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
@@ -188,6 +259,98 @@ function runtimeComponentDiscovery(options = {}) {
   return firstObject(options.componentDiscovery, runtimeComponentPathDefaults(options).discovery) || {};
 }
 
+function providerRuntimeInvocationContract() {
+  return {
+    schema: WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
+    version: 1,
+    tasks: { ...WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES },
+    abilities: { ...WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES },
+    result_schemas: { ...WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS },
+  };
+}
+
+function providerRuntimeInvocationFromConfig(config = {}, inputs = {}, options = {}) {
+  const requested = firstDefined(
+    inputs.provider_runtime_invocation,
+    inputs.providerRuntimeInvocation,
+    inputs.runtime_invocation,
+    inputs.runtimeInvocation,
+    config.provider_runtime_invocation,
+    config.providerRuntimeInvocation,
+    config.runtime_invocation,
+    config.runtimeInvocation,
+    options.providerRuntimeInvocation,
+    options.provider_runtime_invocation,
+    options.runtimeInvocation,
+    options.runtime_invocation,
+  );
+  if (requested === undefined) {
+    return providerRuntimeInvocationContract();
+  }
+
+  const contract = providerRuntimeInvocationContract();
+  const operationEntries = providerRuntimeOperationEntries(requested);
+  if (operationEntries.length === 0) {
+    return contract;
+  }
+
+  return {
+    ...contract,
+    operations: Object.fromEntries(operationEntries),
+  };
+}
+
+function providerRuntimeOperationEntries(requested) {
+  if (Array.isArray(requested)) {
+    return requested
+      .map((operation) => providerRuntimeOperationEntry(operation))
+      .filter(Boolean);
+  }
+  if (!requested || typeof requested !== 'object') {
+    return [];
+  }
+  const operations = requested.operations || requested.provider_operations || requested.providerOperations || requested.tasks || requested.abilities || requested;
+  if (Array.isArray(operations)) {
+    return operations
+      .map((operation) => providerRuntimeOperationEntry(operation))
+      .filter(Boolean);
+  }
+  if (!operations || typeof operations !== 'object') {
+    return [];
+  }
+  return Object.entries(operations)
+    .map(([key, operation]) => providerRuntimeOperationEntry(operation, key))
+    .filter(Boolean);
+}
+
+function providerRuntimeOperationEntry(operation, fallbackKey = '') {
+  const rawName = typeof operation === 'string'
+    ? operation
+    : firstValue(operation?.key, operation?.operation, operation?.task, operation?.ability, fallbackKey);
+  const key = WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES[rawName] || WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES[fallbackKey];
+  if (!key) {
+    return null;
+  }
+  return [key, providerRuntimeOperationConfig(key, operation)];
+}
+
+function providerRuntimeOperationConfig(key, operation) {
+  const resultSchemaKey = WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS[key];
+  const explicitConfig = operation && typeof operation === 'object' && !Array.isArray(operation)
+    ? firstObject(operation.config, operation.input, operation.args) || {}
+    : {};
+  return withoutUndefinedValues({
+    task: WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES[key],
+    ability: WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES[key],
+    result_schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS[resultSchemaKey],
+    config: Object.keys(explicitConfig).length > 0 ? explicitConfig : undefined,
+  });
+}
+
+function withoutUndefinedValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 function runtimeProviderDefaults() {
   return firstObject(runtimeExecutorManifest().provider_defaults) || {};
 }
@@ -233,6 +396,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     inputs.runtime_task || inputs.runtimeTask || config.runtime_task || config.runtimeTask || abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) || runtimeOptions.runtimeTask,
     { provider, model, agentBundles }
   );
+  const providerRuntimeInvocation = providerRuntimeInvocationFromConfig(config, inputs, runtimeOptions);
   const explicitSecretEnv = [
     ...(plannedSecretEnv.length > 0 ? plannedSecretEnv : normalizeArray(request.executor?.secret_env)),
     ...normalizeArray(config.secret_env),
@@ -265,6 +429,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    provider_runtime_invocation: providerRuntimeInvocation,
     ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, runtimeOptions.abilityTools, []),
     structured_artifacts: structuredArtifacts,
     sandbox_session_id: config.sandbox_session_id || request.task_id,
@@ -2494,7 +2659,12 @@ module.exports = {
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_REDACTED_METADATA_KEYS,
   WP_CODEBOX_BACKEND,
+  WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES,
+  WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
+  WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
+  WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
   providerContract,
+  providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,
   agentTaskOutcomeFromCodeboxResult,
 };

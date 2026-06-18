@@ -50,6 +50,7 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   abilityTools: [{ name: 'example_tool' }],
   artifactSlots: [{ name: 'packet', required: true }],
   transcriptSlots: [{ name: 'main', required: true }],
+  runtimeInvocation: { operations: ['workspaceCommand'] },
 });
 
 assert.equal(genericConfig.runtime_provider, 'codebox');
@@ -61,6 +62,7 @@ assert.deepEqual(genericConfig.ability_requirements, ['example/run-task', 'examp
 assert.deepEqual(genericConfig.ability_tools, [{ name: 'example_tool' }]);
 assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true }]);
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
+assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
 
 const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
   taskId: 'task-1',

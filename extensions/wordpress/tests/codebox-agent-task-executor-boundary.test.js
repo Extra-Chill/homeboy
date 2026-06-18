@@ -8,6 +8,7 @@ const path = require('node:path');
 const {
   codeboxTaskRequestFromAgentTaskRequest,
   providerContract,
+  providerRuntimeInvocationContract,
 } = require('../../agent-runtimes/wp-codebox');
 const {
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
@@ -48,6 +49,10 @@ assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
+assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
+assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
+assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
+assert.doesNotMatch(JSON.stringify(provider.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
@@ -58,6 +63,7 @@ assert.equal(manifest.agent_task.runtime_requirements.integration_contract, 'hom
 const runtime = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox', 'wp-codebox.json'), 'utf8'));
 assert.equal(runtime.agent_task_executors.length, 1);
 assert.deepEqual(runtime.agent_task_executors[0], providerContract());
+assert.deepEqual(runtime.agent_task_executors[0].provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.deepEqual(provider.runner_readiness, [{
   id: 'wp-codebox.executable',
   label: 'WP Codebox executable',
@@ -245,6 +251,36 @@ assert.deepEqual(customRuntimePolicyTaskInput.allowed_tools, [
 ]);
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(customRuntimePolicyTaskInput.runtime_component_paths.agent_runtime_tools, '/components/example-tools');
+
+const runtimeInvocationTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'generic-provider-runtime-invocation-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'codex',
+      provider_runtime_invocation: {
+        operations: {
+          workspaceCommand: { config: { timeout_ms: 30000 } },
+          artifactHandoff: true,
+          'wp-codebox/runner-workspace-capture': {},
+        },
+      },
+    },
+  },
+  instructions: 'Run with generic WP Codebox provider runtime invocation names.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+});
+assert.equal(runtimeInvocationTaskInput.provider_runtime_invocation.schema, 'wp-codebox/provider-runtime-invocation-contract/v1');
+assert.deepEqual(runtimeInvocationTaskInput.provider_runtime_invocation.operations.workspaceCommand, {
+  task: 'wp-codebox.runner-workspace.command',
+  ability: 'wp-codebox/runner-workspace-command',
+  result_schema: 'wp-codebox/runner-workspace-command-result/v1',
+  config: { timeout_ms: 30000 },
+});
+assert.equal(runtimeInvocationTaskInput.provider_runtime_invocation.operations.artifactHandoff.ability, 'wp-codebox/handoff-artifacts');
+assert.equal(runtimeInvocationTaskInput.provider_runtime_invocation.operations.workspaceCapture.task, 'wp-codebox.runner-workspace.capture');
+assert.doesNotMatch(JSON.stringify(runtimeInvocationTaskInput.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 
 const customRuntimeProfileTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

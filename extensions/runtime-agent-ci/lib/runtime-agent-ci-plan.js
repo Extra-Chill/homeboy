@@ -99,6 +99,7 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     runtime_env: options.runtimeEnv || options.runtime_env,
     runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
     runtime_state_mounts: options.runtimeStateMounts || options.runtime_state_mounts,
+    provider_runtime_invocation: options.providerRuntimeInvocation || options.provider_runtime_invocation || options.runtimeInvocation || options.runtime_invocation,
     runtime_id: options.runtimeId || options.runtime_id,
     runtime_bin: options.runtimeBin || options.runtime_bin,
   });
