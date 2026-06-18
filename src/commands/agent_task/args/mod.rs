@@ -77,6 +77,8 @@ pub enum AgentTaskCommand {
     Providers(ProvidersArgs),
     /// Export Homeboy's machine-readable agent-task core contract metadata.
     Contract(ContractArgs),
+    /// Compile a declarative loop definition into an agent-task plan.
+    CompileLoop(CompileLoopArgs),
     /// Configure and inspect agent-task provider authentication secrets.
     Auth(AgentTaskAuthArgs),
     /// Create, inspect, and resume durable multi-agent loop controller state.
@@ -144,6 +146,13 @@ pub struct ContractArgs {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ContractFormat {
     Json,
+}
+
+#[derive(Args, Debug)]
+pub struct CompileLoopArgs {
+    /// AgentTaskLoopDefinition JSON file, @file, inline JSON, or - for stdin.
+    #[arg(long, value_name = "SPEC")]
+    pub definition: String,
 }
 
 #[derive(Args, Debug)]
