@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.5.0] - 2026-06-18
+
+### Added
+- support runtime component profiles
+
 ## [3.4.10] - 2026-06-18
 
 ### Changed
