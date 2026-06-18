@@ -163,7 +163,11 @@ name: Data Machine Agent CI (reusable)
         type: number
         default: 600000
       engine_data_outputs:
-        description: JSON map of output_name to jq path, collected into engine_data_json.
+        description: Legacy JSON map of output_name to jq path, collected into engine_data_json. Prefer runtime_output_projections.
+        type: string
+        default: "{}"
+      runtime_output_projections:
+        description: JSON map of output_name to provider runtime result path, collected into engine_data_json and enforced as required outputs.
         type: string
         default: "{}"
       expected_artifacts:
@@ -297,7 +301,11 @@ name: Data Machine Agent CI (reusable)
         type: string
         default: "[]"
       tool_recorders:
-        description: JSON array of existing tool recorder configs for field projection, forced parameters, and tool result capture.
+        description: Legacy JSON array of tool recorder configs. Prefer evidence_projections for provider operation result capture.
+        type: string
+        default: "[]"
+      evidence_projections:
+        description: JSON array mapping provider operation results to named runtime outputs or artifact refs.
         type: string
         default: "[]"
       enable_terminal_actions:
@@ -575,6 +583,8 @@ jobs:
           ENGINE_KEY: ${{ inputs.engine_key }}
           TOOL_RESULTS_KEY: ${{ inputs.tool_results_key }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
+          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
+          EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
           TOOL_RECORDERS: ${{ inputs.tool_recorders }}
           ENABLE_TERMINAL_ACTIONS: ${{ inputs.enable_terminal_actions }}
           WP_CLI_TOOL_NAME: ${{ inputs.wp_cli_tool_name }}
@@ -679,6 +689,7 @@ jobs:
         env:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
           ENGINE_DATA_OUTPUTS: ${{ inputs.engine_data_outputs }}
+          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           FLOW_SLUG: ${{ inputs.flow_slug }}
         run: node .ci/homeboy-extensions/.github/scripts/datamachine-agent-ci/project-engine-data.cjs
 

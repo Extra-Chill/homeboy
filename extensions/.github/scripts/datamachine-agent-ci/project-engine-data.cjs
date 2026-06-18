@@ -4,7 +4,10 @@
 const { findScenario, getByPath, parseJsonInput, readJsonFile, writeGithubOutput } = require('./lib/common.cjs');
 
 function main() {
-  const outputs = parseJsonInput('engine_data_outputs', process.env.ENGINE_DATA_OUTPUTS || '{}', 'object', {});
+  const runtimeOutputProjections = parseJsonInput('runtime_output_projections', process.env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {});
+  const outputs = Object.keys(runtimeOutputProjections).length > 0
+    ? runtimeOutputProjections
+    : parseJsonInput('engine_data_outputs', process.env.ENGINE_DATA_OUTPUTS || '{}', 'object', {});
   if (Object.keys(outputs).length === 0) {
     writeGithubOutput({ engine_data_json: '{}' });
     return;

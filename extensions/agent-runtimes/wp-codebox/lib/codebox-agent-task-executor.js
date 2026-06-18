@@ -126,8 +126,10 @@ const AGENT_BUNDLE_CONFIG_FIELDS = [
   'pipeline_step_patches',
   'flow_step_patches',
   'tool_recorders',
+  'evidence_projections',
   'ability_tools',
   'engine_data_outputs',
+  'runtime_output_projections',
   'engine_key',
   'tool_results_key',
   'artifact_export_config',
@@ -2267,6 +2269,10 @@ function pathValue(source, dottedPath) {
   return String(dottedPath || '').split('.').filter(Boolean).reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), source);
 }
 
+function firstPlainObject(...candidates) {
+  return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
+}
+
 function normalizeOutputs(result) {
   const workload = agentRuntimeWorkload(result) || {};
   const typedArtifacts = typedArtifactsFromResult(result);
@@ -2281,7 +2287,7 @@ function normalizeOutputs(result) {
     : outputs;
 
   const bundle = result.metadata?.agent_runtime?.bundle || result.task_input?.agent_bundle || {};
-  const configuredOutputs = bundle.engine_data_outputs && typeof bundle.engine_data_outputs === 'object' ? bundle.engine_data_outputs : {};
+  const configuredOutputs = firstPlainObject(bundle.runtime_output_projections, bundle.runtimeOutputProjections, bundle.engine_data_outputs, bundle.engineDataOutputs) || {};
   if (Object.keys(configuredOutputs).length === 0 && workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
     return sanitizePublicMetadata(appendTypedArtifacts(workload.outputs));
   }

@@ -155,7 +155,8 @@ run('build-runner-config.cjs', [], {
   ABILITY_REQUEST: '{"ability":"example/process-artifact","input":{"source_artifact":"/workspace/input/example-packet.json"}}',
   ABILITY_INPUT: '{"mode":"typed-artifact"}',
   RUNTIME_TASK: '{}',
-  OUTPUT_MAPPINGS: '{"processed_packet":"result.processed_packet"}',
+  OUTPUT_MAPPINGS: '{}',
+  RUNTIME_OUTPUT_PROJECTIONS: '{"processed_packet":"result.processed_packet"}',
   COMPONENT_CONTRACTS: '[{"slug":"example-fixture-plugin","path":"/workspace/plugins/example-fixture-plugin","activate":true}]',
   SUCCESS_REQUIRES_PR: 'false',
   SUCCESS_COMPLETION_OUTCOMES: '[]',
@@ -183,6 +184,7 @@ run('build-runner-config.cjs', [], {
   ALLOWED_REPOS: '[]',
   TOOL_RESULTS_KEY: 'github_tool_results',
   ABILITY_TOOLS: '[]',
+  EVIDENCE_PROJECTIONS: '[{"operation":"example/publish","outputs":{"url":"data.url"}}]',
   TOOL_RECORDERS: '[]',
   ENABLE_TERMINAL_ACTIONS: 'false',
   WP_CLI_TOOL_NAME: 'run_wp_cli',
@@ -200,7 +202,8 @@ assert.deepEqual(runtimeTaskConfig.runtime_task, {
     mode: 'typed-artifact',
   },
 });
-assert.deepEqual(runtimeTaskConfig.output_mappings, { processed_packet: 'result.processed_packet' });
+assert.deepEqual(runtimeTaskConfig.runtime_output_projections, { processed_packet: 'result.processed_packet' });
+assert.deepEqual(runtimeTaskConfig.evidence_projections, [{ operation: 'example/publish', outputs: { url: 'data.url' } }]);
 assert.deepEqual(runtimeTaskConfig.component_contracts, [{ slug: 'example-fixture-plugin', path: '/workspace/plugins/example-fixture-plugin', activate: true }]);
 assert.deepEqual(runtimeTaskConfig.runtime_requirements.component_contracts, runtimeTaskConfig.component_contracts);
 assert.deepEqual(runtimeTaskConfig.runtime_requirements.extra_plugins, runtimeTaskConfig.component_contracts);
@@ -297,7 +300,8 @@ run('project-engine-data.cjs', [], {
   GITHUB_OUTPUT: githubOutput,
   RESULTS_FILE: resultsFile,
   FLOW_SLUG: 'flow',
-  ENGINE_DATA_OUTPUTS: '{"value":"metadata.engine_data.value"}',
+  RUNTIME_OUTPUT_PROJECTIONS: '{"value":"metadata.engine_data.value"}',
+  ENGINE_DATA_OUTPUTS: '{}',
 });
 assert.match(readOutput(githubOutput), /engine_data_json=\{"value":7\}/);
 

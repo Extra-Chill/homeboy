@@ -146,7 +146,7 @@ jobs:
       extra_required_abilities: |
         ["datamachine/create-or-update-github-file", "datamachine/daily-memory-write"]
       success_requires_pr: true
-      engine_data_outputs: '{"world_creator_pr_url":"metadata.engine_data.world_creator.pr_url"}'
+      runtime_output_projections: '{"world_creator_pr_url":"metadata.engine_data.world_creator.pr_url"}'
       transcript_artifact_name: world-creator-transcript-${{ github.run_id }}
     secrets: inherit
 ```
@@ -158,7 +158,7 @@ jobs:
 - `execution_kind` defaults to `agent_bundle`; when `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
-- `output_mappings` maps named outputs to dotted paths in the runtime task result, and those outputs are validated when they are also listed in `engine_data_outputs`.
+- `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result. `output_mappings` and `engine_data_outputs` remain legacy aliases for existing callers.
 - `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the default Data Machine stack.
 - Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Data Machine Agent CI policy lives in this reusable workflow and runner adapter, not in the generic WP Codebox provider manifest.
 - `include_agent_runtime_dependencies` defaults to `true` and checks out the Data Machine Agent CI stack: `Automattic/agents-api`, `Extra-Chill/data-machine`, `Extra-Chill/data-machine-code`, and the provider plugin. The runner adapter forwards those paths to WP Codebox as explicit runtime component requirements.
@@ -179,7 +179,7 @@ jobs:
 - `workload_run_before`, `workload_run_after`, and `extra_required_abilities` must be JSON arrays.
 - `workload_run_after` runs post-agent verifier hooks in the same WordPress scenario, so consumers can assert the agent left WordPress in a valid state.
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
-- `tool_recorders` configures tool-result projection, forced parameters, and engine-data capture. It must be a JSON array.
+- `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. `tool_recorders` remains a legacy alias for existing Data Machine bundle callers that also need forced parameters.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
 - `runner_workspace` provisions a WP Codebox-managed runner workspace before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the WP Codebox runner publication API after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
@@ -210,16 +210,11 @@ jobs:
       allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
       engine_key: docs_agent
       tool_results_key: github_tool_results
-      tool_recorders: |
+      evidence_projections: |
         [
           {
-            "tool": "create_or_update_github_file",
-            "engine_data_key": "github_tool_results",
-            "forced_parameters": {
-              "repo": "Automattic/agents-api",
-              "branch": "${{ github.ref_name }}"
-            },
-            "fields": {
+            "operation": "create_or_update_github_file",
+            "outputs": {
               "path": "parameters.path",
               "commit_sha": "result.commit.sha"
             }
@@ -230,9 +225,10 @@ jobs:
     secrets: inherit
 ```
 
-Use tool recorders when a consumer currently has a custom bootstrap file whose
-only job is to force GitHub tool parameters or copy selected tool results into
-`metadata.engine_data`.
+Use `evidence_projections` when a consumer currently has a custom bootstrap file
+whose only job is to copy selected provider operation results into stable runner
+outputs. Keep `tool_recorders` only when a legacy Data Machine bundle also needs
+forced tool parameters.
 
 ## Provider plugin examples
 

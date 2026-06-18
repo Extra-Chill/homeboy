@@ -554,13 +554,9 @@ try {
         executor: {
           config: {
             ability: 'example/validate-artifact',
-            output_mappings: {
+            runtime_output_projections: {
               import_validation_result: 'result.import_validation_result',
               finding_packets: 'result.finding_packets',
-            },
-            engine_data_outputs: {
-              import_validation_result: 'outputs.import_validation_result',
-              finding_packets: 'outputs.finding_packets',
             },
           },
         },
@@ -591,11 +587,8 @@ try {
         executor: {
           config: {
             ability: 'example/validate-artifact',
-            output_mappings: {
-              import_validation_result: 'result.import_validation_result',
-            },
-            engine_data_outputs: {
-              missing_validation_output: 'outputs.missing_validation_output',
+            runtime_output_projections: {
+              missing_validation_output: 'result.missing_validation_output',
             },
           },
         },
@@ -1112,6 +1105,47 @@ try {
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_number, 123);
   assert.equal(recorderBundleRunOutput.run.agentResult.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
 
+  const projectionBundleRunCapturePath = path.join(root, 'capture-projection-bundle-run.json');
+  const projectionBundleRunResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin',
+    fixtureWpCodebox,
+    '--artifacts',
+    path.join(root, 'projection-bundle-run-artifacts'),
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      agent_bundle: {
+        bundle_path: '/workspace/example-repo/bundles/example-agent',
+        runtime_output_projections: {
+          issue_number: 'metadata.engine_data.example_agent.issue_number',
+          issue_url: 'metadata.engine_data.example_agent.issue_url',
+        },
+        evidence_projections: [{
+          operation: 'github_issue_publish',
+          outputs: {
+            issue_number: 'data.issue_number',
+            issue_url: 'data.issue_url',
+          },
+        }],
+      },
+      provider_plugin_paths: [],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: projectionBundleRunCapturePath,
+      FIXTURE_WP_CODEBOX_BUNDLE_RUN: '1',
+      FIXTURE_WP_CODEBOX_BUNDLE_RUN_TOOL_RECORDERS: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(projectionBundleRunResult.status, 0, projectionBundleRunResult.stderr || projectionBundleRunResult.stdout);
+  const projectionBundleRunOutput = JSON.parse(projectionBundleRunResult.stdout);
+  assert.equal(projectionBundleRunOutput.success, true);
+  assert.equal(projectionBundleRunOutput.outputs.issue_number, 123);
+  assert.equal(projectionBundleRunOutput.outputs.issue_url, 'https://github.com/example-org/example-repo/issues/123');
+
   const completedBundleNonzeroExitCapturePath = path.join(root, 'capture-completed-bundle-nonzero-exit.json');
   const completedBundleNonzeroExitResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
@@ -1187,7 +1221,7 @@ try {
   assert.equal(incompleteDatamachineOutput.success, false);
   assert.equal(incompleteDatamachineOutput.session.status, 'failed');
   assert.equal(incompleteDatamachineOutput.diagnostics[0].class, 'agent_runtime.workload.incomplete');
-  assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_engine_data_outputs');
+  assert.equal(incompleteDatamachineOutput.diagnostics[0].data.reason, 'missing_runtime_output_projections');
   assert.match(incompleteDatamachineOutput.diagnostics[0].message, /issue_number/);
 
   const failedDatamachineCapturePath = path.join(root, 'capture-failed-datamachine.json');

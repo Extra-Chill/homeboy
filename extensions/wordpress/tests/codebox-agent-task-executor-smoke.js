@@ -1364,8 +1364,8 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
       target_repo: 'example-org/example-repo',
       pipeline_step_patches: [{ slug: 'generate', config: { max_turns: 4 } }],
       flow_step_patches: [{ slug: 'run-pipeline', config: { step_budget: 12 } }],
-      tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }],
-      engine_data_outputs: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
+      evidence_projections: [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }],
+      runtime_output_projections: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
       transcript_artifact_name: 'example-agent-transcript',
       replay_bundle_artifact_name: 'example-agent-replay',
       runner_workspace: { handle: 'example-repo@example-loop', expose_to_agent: false },
@@ -1378,8 +1378,10 @@ assert.equal(agentBundleRequest.agent_bundle.pipeline_slug, 'example-pipeline');
 assert.equal(agentBundleRequest.agent_bundle.flow_slug, 'example-manual-flow');
 assert.deepEqual(agentBundleRequest.agent_bundle.pipeline_step_patches, [{ slug: 'generate', config: { max_turns: 4 } }]);
 assert.deepEqual(agentBundleRequest.agent_bundle.flow_step_patches, [{ slug: 'run-pipeline', config: { step_budget: 12 } }]);
-assert.deepEqual(agentBundleRequest.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }]);
-assert.deepEqual(agentBundleRequest.agent_bundle.engine_data_outputs, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
+assert.deepEqual(agentBundleRequest.agent_bundle.evidence_projections, [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }]);
+assert.deepEqual(agentBundleRequest.agent_bundle.runtime_output_projections, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
+assert.equal(Object.hasOwn(agentBundleRequest.agent_bundle, 'tool_recorders'), false);
+assert.equal(Object.hasOwn(agentBundleRequest.agent_bundle, 'engine_data_outputs'), false);
 assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
 assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
 assert.equal(agentBundleRequest.homeboy_extensions_path, '/components/homeboy-extensions/wordpress');
@@ -2588,8 +2590,8 @@ try {
         agent_slug: 'example-agent',
         pipeline_slug: 'example-pipeline',
         flow_slug: 'example-manual-flow',
-        tool_recorders: [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }],
-        engine_data_outputs: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
+        evidence_projections: [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }],
+        runtime_output_projections: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
       },
     },
   };
@@ -2616,7 +2618,10 @@ try {
   assert.equal(capturedAgentBundleRun.input.agent_bundle.bundle_path, bundle);
   assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'example-agent');
   assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'example-pipeline');
-  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.tool_recorders, [{ tool: 'github/create-pull-request', engine_data_path: 'example_agent.pr_url' }]);
+  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.evidence_projections, [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }]);
+  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.runtime_output_projections, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'tool_recorders'), false);
+  assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'engine_data_outputs'), false);
 
   const recipeWpCodeboxRoot = fs.mkdtempSync(path.join(root, 'recipe-wp-codebox-'));
   const { fixture: recipeFakeWpCodebox, capture: recipeFakeWpCodeboxCapture } = writeFakeWpCodebox(recipeWpCodeboxRoot);

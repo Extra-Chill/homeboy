@@ -1589,7 +1589,7 @@ function agentRuntimeWorkloadFromExecutionStdout(execution, config) {
 }
 
 function agentRuntimeWorkloadFromRuntimeTask(agentRuntime, config) {
-  const outputs = outputMappingsFromSource(agentRuntime, config.output_mappings || config.outputMappings || {});
+  const outputs = outputMappingsFromSource(agentRuntime, runtimeOutputProjections(config));
   return Object.fromEntries(Object.entries({
     id: config.workload_id || config.ability || config.ability_name || 'runtime-task',
     success: agentRuntime.success,
@@ -1608,6 +1608,35 @@ function agentRuntimeWorkloadFromRuntimeTask(agentRuntime, config) {
       result: agentRuntime.result,
     },
   }).filter(([, value]) => value !== undefined && !(Array.isArray(value) && value.length === 0)));
+}
+
+function runtimeOutputProjections(config) {
+  return firstPlainObject(config.runtime_output_projections, config.runtimeOutputProjections, config.output_mappings, config.outputMappings) || {};
+}
+
+function requiredOutputProjections(config) {
+  return firstPlainObject(config.runtime_output_projections, config.runtimeOutputProjections, config.engine_data_outputs, config.engineDataOutputs) || {};
+}
+
+function configuredEvidenceProjections(config) {
+  const projections = [];
+  if (Array.isArray(config.evidence_projections)) {
+    projections.push(...config.evidence_projections);
+  }
+  if (Array.isArray(config.evidenceProjections)) {
+    projections.push(...config.evidenceProjections);
+  }
+  if (Array.isArray(config.tool_recorders)) {
+    projections.push(...config.tool_recorders);
+  }
+  if (Array.isArray(config.toolRecorders)) {
+    projections.push(...config.toolRecorders);
+  }
+  return projections;
+}
+
+function firstPlainObject(...candidates) {
+  return candidates.find(plainObject);
 }
 
 function outputMappingsFromSource(source, mappings) {
@@ -1672,7 +1701,7 @@ function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
   const outputs = mergeTypedArtifactOutputs({
     ...(plainObject(bundleRun.outputs) ? bundleRun.outputs : {}),
-    ...toolRecorderOutputs(bundleRun.engine_data, config),
+    ...evidenceProjectionOutputs(bundleRun.engine_data, config),
   }, bundleRun.typed_artifacts, bundleRun.typedArtifacts, bundleRun.outputs?.typed_artifacts, bundleRun.outputs?.typedArtifacts);
   return {
     outputs,
@@ -1713,27 +1742,37 @@ function stepDataPackets(engineData) {
   return Object.values(packetsByStep).flatMap((packets) => (Array.isArray(packets) ? packets : []));
 }
 
-function toolRecorderOutputs(engineData, config) {
-  if (!plainObject(engineData) || !Array.isArray(config.tool_recorders)) {
+function evidenceProjectionOutputs(engineData, config) {
+  if (!plainObject(engineData)) {
+    return {};
+  }
+
+  const projections = configuredEvidenceProjections(config);
+  if (projections.length === 0) {
     return {};
   }
 
   const outputs = {};
   const packets = stepDataPackets(engineData);
-  for (const recorder of config.tool_recorders) {
-    if (!plainObject(recorder) || typeof recorder.tool !== 'string') {
+  for (const projection of projections) {
+    if (!plainObject(projection)) {
       continue;
     }
 
-    const record = plainObject(recorder.record) ? recorder.record : {};
-    const fields = plainObject(record.fields) ? record.fields : {};
+    const operation = projection.operation || projection.tool || projection.provider_operation;
+    if (typeof operation !== 'string' || operation === '') {
+      continue;
+    }
+
+    const record = plainObject(projection.record) ? projection.record : {};
+    const fields = firstPlainObject(projection.outputs, projection.fields, record.outputs, record.fields) || {};
     if (Object.keys(fields).length === 0) {
       continue;
     }
 
     const packet = packets.find((candidate) => {
       const metadata = plainObject(candidate?.metadata) ? candidate.metadata : {};
-      return metadata.tool_name === recorder.tool && metadata.step_execution_success === true;
+      return metadata.tool_name === operation && metadata.step_execution_success === true;
     });
     if (!packet) {
       continue;
@@ -1774,7 +1813,7 @@ function validateAgentRuntimeWorkload(workload, config) {
     };
   }
 
-  const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
+  const outputs = requiredOutputProjections(config);
   const missing = [];
   for (const [name, outputPath] of Object.entries(outputs)) {
     if (workload?.outputs?.[name] !== undefined && workload.outputs[name] !== null && workload.outputs[name] !== '') {
@@ -1793,7 +1832,7 @@ function validateAgentRuntimeWorkload(workload, config) {
     return {
       class: 'agent_runtime.workload.incomplete',
       message: `Agent bundle workload did not produce required semantic outputs: ${missing.map((item) => item.name).join(', ')}.`,
-      data: { reason: 'missing_engine_data_outputs', missing },
+      data: { reason: 'missing_runtime_output_projections', missing },
     };
   }
 
@@ -1878,7 +1917,7 @@ function validateRuntimeTaskWorkload(workload, config) {
       data: { reason: 'runtime_task_failed', diagnostics: workload.diagnostics || [] },
     };
   }
-  const outputs = config.engine_data_outputs && typeof config.engine_data_outputs === 'object' ? config.engine_data_outputs : {};
+  const outputs = requiredOutputProjections(config);
   const missing = [];
   for (const name of Object.keys(outputs)) {
     if (workload?.outputs?.[name] !== undefined && workload.outputs[name] !== null && workload.outputs[name] !== '') {

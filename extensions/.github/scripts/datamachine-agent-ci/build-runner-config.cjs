@@ -78,6 +78,18 @@ function buildConfig(env) {
   const extraRequiredAbilities = parseJsonInput('extra_required_abilities', env.EXTRA_REQUIRED_ABILITIES || '[]', 'array', []);
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeTaskAbility = env.RUNTIME_TASK_ABILITY || runtimeProfiles[runtimeProfile]?.runtime_task_ability || 'datamachine/run-agent-bundle';
+  const runtimeOutputProjections = parseJsonInputWithLegacyObject(
+    'runtime_output_projections',
+    env.RUNTIME_OUTPUT_PROJECTIONS || '{}',
+    'engine_data_outputs',
+    env.ENGINE_DATA_OUTPUTS || '{}'
+  );
+  const evidenceProjections = parseJsonInputWithLegacyArray(
+    'evidence_projections',
+    env.EVIDENCE_PROJECTIONS || '[]',
+    'tool_recorders',
+    env.TOOL_RECORDERS || '[]'
+  );
   const runtimeAbilityRequirements = Array.isArray(runtimeProfiles[runtimeProfile]?.ability_requirements)
     ? runtimeProfiles[runtimeProfile].ability_requirements
     : [runtimeTaskAbility];
@@ -192,9 +204,11 @@ function buildConfig(env) {
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []),
     output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
+    runtime_output_projections: runtimeOutputProjections,
     component_contracts: componentContracts,
     ...(runtimeTask ? { runtime_task: runtimeTask } : {}),
     ability_tools: parseJsonInput('ability_tools', env.ABILITY_TOOLS || '[]', 'array', []),
+    evidence_projections: evidenceProjections,
     tool_recorders: parseJsonInput('tool_recorders', env.TOOL_RECORDERS || '[]', 'array', []),
     pipeline_step_patches: parseJsonInput('pipeline_step_patches', env.PIPELINE_STEP_PATCHES || '[]', 'array', []),
     flow_step_patches: parseJsonInput('flow_step_patches', env.FLOW_STEP_PATCHES || '[]', 'array', []),
@@ -335,6 +349,16 @@ function withoutEmptyObjectValues(value) {
 
 function withoutInternalKeys(config) {
   return Object.fromEntries(Object.entries(config).filter(([key]) => !key.startsWith('_')));
+}
+
+function parseJsonInputWithLegacyObject(name, value, legacyName, legacyValue) {
+  const parsed = parseJsonInput(name, value, 'object', {});
+  return Object.keys(parsed).length > 0 ? parsed : parseJsonInput(legacyName, legacyValue, 'object', {});
+}
+
+function parseJsonInputWithLegacyArray(name, value, legacyName, legacyValue) {
+  const parsed = parseJsonInput(name, value, 'array', []);
+  return parsed.length > 0 ? parsed : parseJsonInput(legacyName, legacyValue, 'array', []);
 }
 
 function required(value, name) {
