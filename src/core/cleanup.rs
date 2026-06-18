@@ -277,6 +277,9 @@ fn self_temp_artifact_candidates(
             })?;
             let path = entry.path();
             if !is_detached_homeboy_temp_artifact(&path) {
+                if let Some(candidate) = temp_homeboy_checkout_target_candidate(&path)? {
+                    candidates.push(candidate);
+                }
                 continue;
             }
             let size_bytes = path_size(&path)?;
@@ -299,6 +302,87 @@ fn self_temp_artifact_candidates(
     }
 
     Ok(candidates)
+}
+
+fn temp_homeboy_checkout_target_candidate(
+    checkout: &Path,
+) -> Result<Option<ArtifactCleanupCandidate>> {
+    if !is_homeboy_source_checkout(checkout)? {
+        return Ok(None);
+    }
+
+    let target = checkout.join("target");
+    let Ok(metadata) = fs::symlink_metadata(&target) else {
+        return Ok(None);
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+
+    let safety = match git_safety(checkout) {
+        Ok(safety) => safety,
+        Err(_) => return Ok(None),
+    };
+    if has_tracked_changes_under(&safety.dirty_paths, "target") {
+        return Ok(None);
+    }
+
+    let size_bytes = path_size(&target)?;
+    Ok(Some(ArtifactCleanupCandidate {
+        worktree: checkout.to_string_lossy().to_string(),
+        path: target.to_string_lossy().to_string(),
+        relative_path: "target".to_string(),
+        kind: "temp_homeboy_checkout_target".to_string(),
+        declared_by: "self_temp_root".to_string(),
+        size_bytes,
+        source_dirty: safety.source_dirty,
+        unpushed_commits: safety.unpushed_commits,
+    }))
+}
+
+fn is_homeboy_source_checkout(path: &Path) -> Result<bool> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(false);
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if !path.join(".git").exists() || !path.join("Cargo.toml").is_file() {
+        return Ok(false);
+    }
+    if !cargo_manifest_package_is_homeboy(&path.join("Cargo.toml"))? {
+        return Ok(false);
+    }
+
+    let remotes = match git::run_git(path, &["remote", "-v"], "git remote -v") {
+        Ok(output) => output,
+        Err(_) => return Ok(false),
+    };
+    Ok(remotes.lines().any(|line| {
+        line.contains("Extra-Chill/homeboy.git") || line.contains("Extra-Chill/homeboy ")
+    }))
+}
+
+fn cargo_manifest_package_is_homeboy(cargo_toml: &Path) -> Result<bool> {
+    let raw = fs::read_to_string(cargo_toml).map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("read {}", cargo_toml.display())),
+        )
+    })?;
+
+    let mut in_package = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if in_package && trimmed == "name = \"homeboy\"" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn default_self_temp_roots() -> Vec<PathBuf> {
@@ -686,6 +770,91 @@ mod tests {
     }
 
     #[test]
+    fn temp_homeboy_source_checkout_targets_are_detected_conservatively() {
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-source-28703209");
+        write_file(&checkout.join("target/debug/homeboy"), "binary");
+
+        let non_homeboy = temp_root.path().join("homeboy-runtime-helper-path");
+        fs::create_dir_all(non_homeboy.join(".git")).expect("mkdir git");
+        write_file(
+            &non_homeboy.join("Cargo.toml"),
+            "[package]\nname = \"other\"\n",
+        );
+        write_file(&non_homeboy.join("target/debug/other"), "binary");
+
+        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            path: None,
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("temp artifact candidates");
+
+        let candidate = candidates
+            .iter()
+            .find(|row| row.kind == "temp_homeboy_checkout_target")
+            .expect("homeboy checkout target candidate");
+        assert_eq!(candidate.worktree, checkout.to_string_lossy());
+        assert_eq!(candidate.path, checkout.join("target").to_string_lossy());
+        assert_eq!(candidate.relative_path, "target");
+        assert_eq!(candidate.declared_by, "self_temp_root");
+        assert!(!candidates
+            .iter()
+            .any(|row| row.worktree == non_homeboy.to_string_lossy()));
+    }
+
+    #[test]
+    fn apply_removes_only_target_from_temp_homeboy_source_checkout() {
+        let repo = git_repo();
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-4447-upgrade-full");
+        write_file(&checkout.join("target/debug/homeboy"), "binary");
+        write_file(&checkout.join("src/lib.rs"), "changed source");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("apply cleanup");
+
+        assert!(output.candidates.iter().any(|row| {
+            row.kind == "temp_homeboy_checkout_target" && row.worktree == checkout.to_string_lossy()
+        }));
+        assert!(!checkout.join("target").exists());
+        assert!(checkout.join(".git").exists());
+        assert_eq!(
+            fs::read_to_string(checkout.join("src/lib.rs")).expect("read source"),
+            "changed source"
+        );
+    }
+
+    #[test]
+    fn temp_homeboy_source_checkout_target_with_tracked_changes_is_skipped() {
+        let temp_root = TempDir::new().expect("temp root");
+        let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-4447-upgrade");
+        write_file(
+            &checkout.join("target/generated.rs"),
+            "tracked target source",
+        );
+        git(&checkout, &["add", "target/generated.rs"]);
+
+        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
+            path: None,
+            apply: false,
+            self_artifacts: false,
+            temp_roots: vec![temp_root.path().to_path_buf()],
+        })
+        .expect("temp artifact candidates");
+
+        assert!(!candidates
+            .iter()
+            .any(|row| row.kind == "temp_homeboy_checkout_target"));
+    }
+
+    #[test]
     fn dry_run_reports_artifact_candidates_across_worktrees() {
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
@@ -802,6 +971,40 @@ mod tests {
             ],
         );
         repo
+    }
+
+    fn temp_homeboy_checkout(temp_root: &Path, name: &str) -> PathBuf {
+        let checkout = temp_root.join(name);
+        fs::create_dir_all(&checkout).expect("mkdir checkout");
+        git(&checkout, &["init", "-b", "main"]);
+        git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ],
+        );
+        write_file(
+            &checkout.join("Cargo.toml"),
+            "[package]\nname = \"homeboy\"\n",
+        );
+        write_file(&checkout.join("src/lib.rs"), "source");
+        git(&checkout, &["add", "Cargo.toml", "src/lib.rs"]);
+        git(
+            &checkout,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        checkout
     }
 
     fn write_file(path: &Path, content: &str) {
