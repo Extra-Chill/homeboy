@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.6.0] - 2026-06-18
+
+### Added
+- add generic fanout reconcile runner
+
 ## [3.5.0] - 2026-06-18
 
 ### Added
