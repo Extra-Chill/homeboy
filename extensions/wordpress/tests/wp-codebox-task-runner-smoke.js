@@ -528,9 +528,16 @@ try {
   });
   assert.equal(bridgeResult.status, 0, bridgeResult.stderr || bridgeResult.stdout);
   const bridgeCaptured = readJson(bridgeCapturePath);
-  assert.equal(bridgeCaptured.input.extra_plugins.some((plugin) => plugin.slug === 'homeboy-runtime-tool-bridge' && plugin.loadAs === 'mu-plugin'), true);
+  const bridgePlugin = bridgeCaptured.input.extra_plugins.find((plugin) => plugin.slug === 'homeboy-runtime-tool-bridge');
+  assert.equal(Boolean(bridgePlugin), true);
+  assert.equal(bridgePlugin.loadAs, 'mu-plugin');
+  assert.equal(bridgePlugin.pluginFile, 'homeboy-runtime-tool-bridge/homeboy-runtime-tool-bridge.php');
   assert.match(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TOOL_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
   assert.equal(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TASK_ID, 'agent-task-123');
+  const bridgePluginSource = fs.readFileSync(path.join(bridgePlugin.source, 'homeboy-runtime-tool-bridge.php'), 'utf8');
+  assert.match(bridgePluginSource, /Plugin Name: Homeboy Runtime Tool Bridge/);
+  assert.match(bridgePluginSource, /add_filter\(\s*'datamachine_runtime_tool_result'/);
+  assert.match(bridgePluginSource, new RegExp(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TOOL_BRIDGE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
   const abilityBridgeResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,

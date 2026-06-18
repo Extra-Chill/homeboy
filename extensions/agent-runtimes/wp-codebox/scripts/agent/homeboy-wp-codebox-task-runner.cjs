@@ -613,6 +613,9 @@ function homeboyRuntimeToolBridgePluginSource(endpoint = '') {
 /**
  * Homeboy parent runtime-tool bridge for Data Machine client tools.
  *
+ * Plugin Name: Homeboy Runtime Tool Bridge
+ * Description: Bridges Data Machine client runtime tools back to the Homeboy control plane.
+ *
  * @package HomeboyCodeboxRuntime
  */
 
@@ -812,6 +815,7 @@ function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
         {
           source: pluginDir,
           slug: 'homeboy-runtime-tool-bridge',
+          pluginFile: 'homeboy-runtime-tool-bridge/homeboy-runtime-tool-bridge.php',
           loadAs: 'mu-plugin',
           activate: false,
           metadata: { source: 'homeboy-runtime-tool-bridge' },
