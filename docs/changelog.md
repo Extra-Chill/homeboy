@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.241.0] - 2026-06-18
+
+### Added
+- auto-clean self artifacts during cleanup
+
+### Changed
+- extract Lab orchestration and extension inference into core
+- extract observation and artifact logic into core services
+
+### Fixed
+- catch partial Homeboy temp targets
+
 ## [0.240.0] - 2026-06-18
 
 ### Added
