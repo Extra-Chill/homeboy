@@ -52,6 +52,25 @@ pub enum CommandJsonFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDispatchFamily {
+    Quality,
+    Workspace,
+    Ops,
+    RawOnly,
+}
+
+impl From<CommandJsonFamily> for CommandDispatchFamily {
+    fn from(json_family: CommandJsonFamily) -> Self {
+        match json_family {
+            CommandJsonFamily::Quality => CommandDispatchFamily::Quality,
+            CommandJsonFamily::Workspace => CommandDispatchFamily::Workspace,
+            CommandJsonFamily::Ops => CommandDispatchFamily::Ops,
+            CommandJsonFamily::RawOnly => CommandDispatchFamily::RawOnly,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutputContractKind {
     JsonEnvelope,
     RawOnly,
@@ -139,6 +158,10 @@ pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
         .iter()
         .find(|entry| entry.name == name)
         .map(|entry| entry.json_family)
+}
+
+pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {
+    registered_command_json_family(name).map(Into::into)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
