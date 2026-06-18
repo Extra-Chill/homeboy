@@ -182,6 +182,7 @@ function buildConfig(env) {
     pipeline_step_patches: parseJsonInput('pipeline_step_patches', env.PIPELINE_STEP_PATCHES || '[]', 'array', []),
     flow_step_patches: parseJsonInput('flow_step_patches', env.FLOW_STEP_PATCHES || '[]', 'array', []),
     runner_workspace: effectiveRunnerWorkspace,
+    ignored_workspace_paths: ['datamachine-agent-artifacts'],
     rules: parseJsonInput('rules', env.RULES || '{}', 'object', {}),
     general_rules: parseJsonInput('general_rules', env.GENERAL_RULES || '[]', 'array', []),
     task_rules: parseJsonInput('task_rules', env.TASK_RULES || '[]', 'array', []),

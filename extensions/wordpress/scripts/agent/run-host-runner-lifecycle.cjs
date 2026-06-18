@@ -122,12 +122,26 @@ function gh(workspace, args, options = {}) {
   return result;
 }
 
-function changedFiles(workspace) {
+function ignoredWorkspacePathPrefixes(config = {}) {
+  let configured = [];
+  if (Array.isArray(config.ignored_workspace_paths)) {
+    configured = config.ignored_workspace_paths;
+  } else if (Array.isArray(config.ignoredWorkspacePaths)) {
+    configured = config.ignoredWorkspacePaths;
+  }
+  return ['.ci', 'runtime-agent-artifacts', ...configured]
+    .map(normalizePathPattern)
+    .filter(Boolean)
+    .map((entry) => (entry.endsWith('/') ? entry : `${entry}/`));
+}
+
+function changedFiles(workspace, config = {}) {
   const status = git(workspace, ['status', '--porcelain', '--untracked-files=all']).stdout || '';
+  const ignoredPrefixes = ignoredWorkspacePathPrefixes(config);
   return status.split('\n')
     .filter(Boolean)
     .map((line) => line.slice(3).trim())
-    .filter((file) => file && !file.startsWith('.ci/') && !file.startsWith('datamachine-agent-artifacts/'));
+    .filter((file) => file && !ignoredPrefixes.some((prefix) => file.startsWith(prefix)));
 }
 
 function normalizePathPattern(value) {
@@ -273,9 +287,15 @@ function safeWorkspacePath(workspace, relativePath) {
   return resolved;
 }
 
-function workspaceFileList(workspace) {
+function workspaceFileList(workspace, config = {}) {
   const files = [];
-  const excludedDirectories = new Set(['.git', '.ci', 'datamachine-agent-artifacts']);
+  const excludedDirectories = new Set(['.git']);
+  for (const prefix of ignoredWorkspacePathPrefixes(config)) {
+    const segment = prefix.replace(/\/$/, '').split('/')[0];
+    if (segment) {
+      excludedDirectories.add(segment);
+    }
+  }
   function visit(directory, prefix = '') {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       if (entry.isDirectory() && excludedDirectories.has(entry.name)) {
@@ -401,7 +421,7 @@ function evaluateWorkspaceContract(config, workspace) {
     return { ...entry, exists, success: exists };
   });
   const needsWorkspaceFiles = globChecks.length > 0 || forbiddenPhraseChecks.length > 0;
-  const workspaceFiles = needsWorkspaceFiles ? workspaceFileList(workspace) : [];
+  const workspaceFiles = needsWorkspaceFiles ? workspaceFileList(workspace, config) : [];
   const globMinCount = globChecks.map((entry) => {
     const matcher = globPatternToRegExp(entry.glob);
     const matches = workspaceFiles.filter((file) => matcher.test(file));
@@ -486,15 +506,15 @@ function publicationTemplates(config, values) {
       values,
     ),
     commitMessage: renderTemplate(
-      workspaceConfig.commit_message || artifactExport.commit_message_template || 'chore: persist Data Machine agent workspace changes',
+      workspaceConfig.commit_message || artifactExport.commit_message_template || 'chore: persist runtime agent workspace changes',
       values,
     ),
     title: renderTemplate(
-      artifactExport.pr_title_template || 'Persist Data Machine agent workspace changes',
+      artifactExport.pr_title_template || 'Persist runtime agent workspace changes',
       values,
     ),
     body: renderTemplate(
-      artifactExport.pr_body_template || '## Result\n\nData Machine agent workspace changes are ready for review.\n',
+      artifactExport.pr_body_template || '## Result\n\nRuntime agent workspace changes are ready for review.\n',
       values,
     ),
     base: publicationBase(config),
@@ -639,7 +659,7 @@ function publishWorkspace(config, results, scenario, workspace, files) {
 
   const metadata = scenario.metadata || {};
   const values = {
-    agent_slug: config.agent_slug || 'datamachine-agent',
+    agent_slug: config.agent_slug || 'runtime-agent',
     run_id: process.env.GITHUB_RUN_ID || metadata.run_id || metadata.job_id || 'run',
     provider: config.provider || '',
     model: config.model || '',
@@ -660,7 +680,7 @@ function publishWorkspace(config, results, scenario, workspace, files) {
   }
 
   resetPublicationBranch(workspace, branch, templates.base, files);
-  files = changedFiles(workspace);
+  files = changedFiles(workspace, config);
 
   git(workspace, ['add', '--', ...files]);
   const staged = git(workspace, ['diff', '--cached', '--name-only'], { check: false }).stdout.trim().split('\n').filter(Boolean);
@@ -774,7 +794,7 @@ function main() {
     throw new Error(`Scenario not found in results: ${scenarioId || '(first scenario)'}`);
   }
 
-  const agentFiles = changedFiles(workspace);
+  const agentFiles = changedFiles(workspace, config);
   const verification = runCommandChecks(config, workspace, 'verification_commands');
   if ((!verification.enabled || verification.success) && agentFiles.length > 0 && hasCommandChecks(config, 'drift_checks')) {
     git(workspace, ['add', '--', ...agentFiles]);
@@ -782,7 +802,7 @@ function main() {
   const drift = verification.enabled && !verification.success
     ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
     : runCommandChecks(config, workspace, 'drift_checks');
-  const workspaceFiles = changedFiles(workspace);
+  const workspaceFiles = changedFiles(workspace, config);
   const files = agentFiles;
   const writablePaths = validateWritablePaths(config, files);
   const workspaceContract = evaluateWorkspaceContract(config, workspace);

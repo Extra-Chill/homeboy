@@ -90,6 +90,7 @@ function makeRunFiles(tmp, config) {
     provider: 'openai',
     model: 'gpt-5.5',
     workload_id: 'developer-docs',
+    ignored_workspace_paths: ['datamachine-agent-artifacts'],
     runner_workspace: { branch: 'agent-artifacts/docs-agent-host-lifecycle', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist generated docs',

@@ -10,9 +10,6 @@ const {
   executeFanoutReconcileRun,
   groupFanoutItems,
 } = require('./fanout-reconcile-runner');
-const {
-  datamachineAgentCiBundleTaskRequest,
-} = require('./datamachine-agent-ci-plan');
 
 const PLAN_SCHEMA = 'homeboy/static-site-fanout-plan/v1';
 const RUN_SCHEMA = 'homeboy/static-site-fanout-run/v1';
@@ -21,10 +18,8 @@ const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const WP_CODEBOX_TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const DEFAULT_PRESET = 'static-site/import-validation';
 const DEFAULT_AGENT_TASK_PRESET = {
-  source: 'bundles/static-site-import-validation-agent',
-  agent_slug: 'static-site-import-validation-agent',
-  pipeline_slug: 'static-site-import-validation-pipeline',
-  flow_slug: 'static-site-import-validation-flow',
+  runtime_task: 'static-site/import-validation',
+  backend: 'codebox',
 };
 
 function createStaticSiteFanoutPlan(input = {}) {
@@ -150,25 +145,37 @@ function createAgentTaskRequest(group, orchestrator, options = {}) {
     ...(options.agent_task || options.agentTask || {}),
   };
   const taskId = taskIdForGroup(group, orchestrator, 'static-site');
-  return datamachineAgentCiBundleTaskRequest({
-    taskId,
-    groupKey: group.key,
-    parentPlanId: orchestrator.parent_plan_id || orchestrator.plan_id,
-    source: runtime.source || runtime.bundle,
-    agentSlug: runtime.agent_slug || runtime.agentSlug,
-    pipelineSlug: runtime.pipeline_slug || runtime.pipelineSlug,
-    flowSlug: runtime.flow_slug || runtime.flowSlug,
-    provider: orchestrator.provider,
-    model: orchestrator.model,
-    provider_plugin_paths: orchestrator.provider_plugin_paths,
-    secret_env: orchestrator.secret_env,
+  const runtimeTaskInput = {
+    task: runtime.runtime_task || runtime.runtimeTask || DEFAULT_AGENT_TASK_PRESET.runtime_task,
     prompt: staticSitePrompt(group),
-    instructions: options.instructions || staticSiteInstructions(group),
-    expectedArtifacts: options.expected_artifacts || options.expectedArtifacts || ['typed-artifact-refs', 'datamachine-transcript'],
-    artifactOutputs: options.artifact_outputs || options.artifactOutputs || [
+    artifact_outputs: options.artifact_outputs || options.artifactOutputs || [
       { schema: 'homeboy/static-site-revalidation-outcome/v1', path: '/artifacts/static-site-revalidation-outcome.json' },
     ],
-    inputs: {
+    ...(runtime.runtime_task_input || runtime.runtimeTaskInput || {}),
+  };
+  return stripUndefined({
+    schema: AGENT_TASK_REQUEST_SCHEMA,
+    task_id: taskId,
+    group_key: group.key,
+    parent_plan_id: orchestrator.parent_plan_id || orchestrator.plan_id,
+    executor: stripUndefined({
+      backend: runtime.backend || 'codebox',
+      secret_env: orchestrator.secret_env.length > 0 ? orchestrator.secret_env : undefined,
+      config: stripUndefined({
+        provider: orchestrator.provider || undefined,
+        model: orchestrator.model || undefined,
+        provider_plugin_paths: orchestrator.provider_plugin_paths.length > 0 ? orchestrator.provider_plugin_paths : undefined,
+        runtime_task: runtimeTaskInput,
+        ...(runtime.config || {}),
+      }),
+    }),
+    instructions: options.instructions || staticSiteInstructions(group),
+    expected_artifacts: options.expected_artifacts || options.expectedArtifacts || ['typed-artifact-refs', 'runtime-transcript'],
+    limits: stripUndefined({
+      task_timeout_seconds: runtime.task_timeout_seconds || runtime.taskTimeoutSeconds || options.task_timeout_seconds || options.taskTimeoutSeconds || 900,
+      ...(options.limits || {}),
+    }),
+    inputs: stripUndefined({
       title: `Resolve static-site validation group ${group.key}`,
       preset: orchestrator.preset,
       controller_id: orchestrator.controller_id,
@@ -176,11 +183,7 @@ function createAgentTaskRequest(group, orchestrator, options = {}) {
       findings: group.items.map(publicFinding),
       artifact_refs: groupArtifactRefs(group),
       ...(options.inputs || {}),
-    },
-    runtimeTaskInput: {
-      prompt: staticSitePrompt(group),
-      ...(runtime.runtime_task_input || runtime.runtimeTaskInput || {}),
-    },
+    }),
   });
 }
 

@@ -47,21 +47,14 @@
         "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
       ],
       "runtime_task": {
-        "ability": "datamachine/run-agent-bundle",
-        "input": {
-          "source": "bundles/php-transformer-iterator-agent",
-          "agent_slug": "php-transformer-iterator-agent",
-          "pipeline_slug": "php-transformer-iterator-pipeline",
-          "flow_slug": "php-transformer-iterator-manual-flow",
-          "prompt": "Process static-site import validation group converter-support.\n\nFindings:\n\n[\n  {\n    \"id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"unsupported_html_fallback\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"home.html\",\n    \"source_path\": \"home.html\",\n    \"selector\": \".hero fancy-card\",\n    \"reason\": \"Unsupported custom element fell back during DOM-to-block conversion.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  },\n  {\n    \"id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"core_html_block\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"patterns/page-home.php\",\n    \"source_path\": \"patterns/page-home.php\",\n    \"selector\": \".product-card\",\n    \"reason\": \"Generated block document contains core/html for product-card markup.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-002-core-html-block-product-card\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      },\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"asset-map-product-card\",\n        \"kind\": \"asset_map\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  }\n]\n\nArtifact refs:\n\n[\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"asset-map-product-card\",\n    \"kind\": \"asset_map\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  }\n]",
-          "wait_for_completion": true,
-          "artifact_outputs": [
-            {
-              "schema": "homeboy/static-site-revalidation-outcome/v1",
-              "path": "/artifacts/static-site-revalidation-outcome.json"
-            }
-          ]
-        }
+        "task": "static-site/import-validation",
+        "prompt": "Process static-site import validation group converter-support.\n\nFindings:\n\n[\n  {\n    \"id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"unsupported_html_fallback\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"home.html\",\n    \"source_path\": \"home.html\",\n    \"selector\": \".hero fancy-card\",\n    \"reason\": \"Unsupported custom element fell back during DOM-to-block conversion.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  },\n  {\n    \"id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"core_html_block\",\n    \"category\": \"fallback_block\",\n    \"severity\": \"warning\",\n    \"path\": \"patterns/page-home.php\",\n    \"source_path\": \"patterns/page-home.php\",\n    \"selector\": \".product-card\",\n    \"reason\": \"Generated block document contains core/html for product-card markup.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": [\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"diag-002-core-html-block-product-card\",\n        \"kind\": \"diagnostic\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      },\n      {\n        \"schema\": \"homeboy/artifact-ref/v1\",\n        \"artifact_id\": \"asset-map-product-card\",\n        \"kind\": \"asset_map\",\n        \"path\": \"\",\n        \"url\": \"\",\n        \"source\": \"\",\n        \"role\": \"\"\n      }\n    ]\n  }\n]\n\nArtifact refs:\n\n[\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-001-unsupported-html-fallback-home-html\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"diag-002-core-html-block-product-card\",\n    \"kind\": \"diagnostic\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  },\n  {\n    \"schema\": \"homeboy/artifact-ref/v1\",\n    \"artifact_id\": \"asset-map-product-card\",\n    \"kind\": \"asset_map\",\n    \"path\": \"\",\n    \"url\": \"\",\n    \"source\": \"\",\n    \"role\": \"\"\n  }\n]",
+        "artifact_outputs": [
+          {
+            "schema": "homeboy/static-site-revalidation-outcome/v1",
+            "path": "/artifacts/static-site-revalidation-outcome.json"
+          }
+        ]
       },
       "instructions": "Resolve static-site import validation group converter-support.\nReturn typed artifact references for every issue, pull request, patch, revalidation result, or no-op decision produced by the task.\nIf the group has no actionable findings, return the no_actionable_findings outcome with a concise justification.",
       "inputs": {
@@ -162,7 +155,7 @@
       },
       "expected_artifacts": [
         "typed-artifact-refs",
-        "datamachine-transcript"
+        "runtime-transcript"
       ]
     },
     {
@@ -175,21 +168,14 @@
         "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
       ],
       "runtime_task": {
-        "ability": "datamachine/run-agent-bundle",
-        "input": {
-          "source": "bundles/php-transformer-iterator-agent",
-          "agent_slug": "php-transformer-iterator-agent",
-          "pipeline_slug": "php-transformer-iterator-pipeline",
-          "flow_slug": "php-transformer-iterator-manual-flow",
-          "prompt": "Process static-site import validation group visual-parity-policy.\n\nFindings:\n\n[\n  {\n    \"id\": \"visual-parity-demo-store\",\n    \"kind\": \"visual_parity_mismatch\",\n    \"category\": \"visual_parity\",\n    \"severity\": \"warning\",\n    \"path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"source_path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"selector\": \"section.hero\",\n    \"reason\": \"Imported WordPress screenshot differs from source static HTML screenshot.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": []\n  }\n]\n\nArtifact refs:\n\n[]",
-          "wait_for_completion": true,
-          "artifact_outputs": [
-            {
-              "schema": "homeboy/static-site-revalidation-outcome/v1",
-              "path": "/artifacts/static-site-revalidation-outcome.json"
-            }
-          ]
-        }
+        "task": "static-site/import-validation",
+        "prompt": "Process static-site import validation group visual-parity-policy.\n\nFindings:\n\n[\n  {\n    \"id\": \"visual-parity-demo-store\",\n    \"kind\": \"visual_parity_mismatch\",\n    \"category\": \"visual_parity\",\n    \"severity\": \"warning\",\n    \"path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"source_path\": \"visual-parity-artifacts/demo-store/visual-diff.json\",\n    \"selector\": \"section.hero\",\n    \"reason\": \"Imported WordPress screenshot differs from source static HTML screenshot.\",\n    \"repair_mode\": \"\",\n    \"artifact_refs\": []\n  }\n]\n\nArtifact refs:\n\n[]",
+        "artifact_outputs": [
+          {
+            "schema": "homeboy/static-site-revalidation-outcome/v1",
+            "path": "/artifacts/static-site-revalidation-outcome.json"
+          }
+        ]
       },
       "instructions": "Resolve static-site import validation group visual-parity-policy.\nReturn typed artifact references for every issue, pull request, patch, revalidation result, or no-op decision produced by the task.\nIf the group has no actionable findings, return the no_actionable_findings outcome with a concise justification.",
       "inputs": {
@@ -220,7 +206,7 @@
       },
       "expected_artifacts": [
         "typed-artifact-refs",
-        "datamachine-transcript"
+        "runtime-transcript"
       ]
     }
   ],
