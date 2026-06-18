@@ -618,6 +618,10 @@ pub enum AgentTaskOutcomeStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskFailureClassification {
     Provider,
+    /// Transient provider/network failure (timeouts, connection resets, cURL
+    /// error 28, 5xx, temporarily-unavailable). These are safe to retry with
+    /// bounded backoff because the same request can succeed on a later attempt.
+    Transient,
     Timeout,
     PolicyDenied,
     CapabilityMissing,
