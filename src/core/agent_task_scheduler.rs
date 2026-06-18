@@ -342,7 +342,7 @@ where
                 continue;
             }
 
-            let scheduler_event = match scheduler_result_wait_timeout(&running) {
+            let scheduler_event = match AgentTaskScheduleSupport::result_wait_timeout(&running) {
                 Some(timeout) => rx.recv_timeout(timeout).map_err(Some),
                 None => rx.recv().map_err(|_| None),
             };
@@ -464,20 +464,6 @@ enum SchedulerEvent {
     Cancellation,
 }
 
-fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Option<Duration> {
-    running
-        .iter()
-        .filter_map(|task| {
-            task.timeout_ms.map(|timeout_ms| {
-                let timeout = timeout_with_grace(timeout_ms);
-                timeout
-                    .checked_sub(task.started_at.elapsed())
-                    .unwrap_or_default()
-            })
-        })
-        .min()
-}
-
 /// Record a finalized outcome in the completed-by-task index and the ordered
 /// outcomes list. Shared by the scheduler's dependency-block, dependency-render,
 /// and task-completion paths to keep recording behavior identical.
@@ -493,6 +479,20 @@ fn record_completed_outcome(
 struct AgentTaskScheduleSupport;
 
 impl AgentTaskScheduleSupport {
+    fn result_wait_timeout(running: &[RunningTask]) -> Option<Duration> {
+        running
+            .iter()
+            .filter_map(|task| {
+                task.timeout_ms.map(|timeout_ms| {
+                    let timeout = timeout_with_grace(timeout_ms);
+                    timeout
+                        .checked_sub(task.started_at.elapsed())
+                        .unwrap_or_default()
+                })
+            })
+            .min()
+    }
+
     fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
@@ -2103,7 +2103,10 @@ mod tests {
     fn scheduler_result_wait_timeout_blocks_without_task_timeouts() {
         let running = vec![running_task("task-1", None, Duration::from_millis(0))];
 
-        assert_eq!(scheduler_result_wait_timeout(&running), None);
+        assert_eq!(
+            AgentTaskScheduleSupport::result_wait_timeout(&running),
+            None
+        );
     }
 
     #[test]
@@ -2114,7 +2117,7 @@ mod tests {
         ];
 
         assert_eq!(
-            scheduler_result_wait_timeout(&running),
+            AgentTaskScheduleSupport::result_wait_timeout(&running),
             Some(Duration::ZERO)
         );
     }
@@ -2128,7 +2131,8 @@ mod tests {
         )];
 
         assert!(
-            scheduler_result_wait_timeout(&running).expect("deadline") > Duration::from_secs(1)
+            AgentTaskScheduleSupport::result_wait_timeout(&running).expect("deadline")
+                > Duration::from_secs(1)
         );
     }
 
