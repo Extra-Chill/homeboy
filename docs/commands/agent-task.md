@@ -122,6 +122,42 @@ constants, instead of copying schema strings into downstream code. Provider
 manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
 defaults them to the current core contract ids.
 
+## Repo-Local Gate Tasks
+
+Use `execution_kind: repo_local_gate` for deterministic, repo-local gate
+evaluation that should run inside the task workspace without selecting an AI
+runtime. The gate executor runs direct `argv` or a relative `script` path without
+a shell, rejects paths that escape `workspace.root`, materializes JSON inputs as
+`<INPUT_KEY>_PATH` files, materializes declared JSON outputs as
+`<OUTPUT_KEY>_PATH` files, and returns `homeboy/agent-task-outcome/v1` with
+typed artifacts and `outputs.<key>` payloads.
+
+Minimal task config:
+
+```json
+{
+  "execution_kind": "repo_local_gate",
+  "script": ".github/scripts/evaluate-publish-gate.mjs",
+  "inputs": {
+    "import_validation_result": "{{outputs.import_validation_result}}",
+    "visual_parity_artifact": "{{outputs.visual_parity_artifact}}"
+  },
+  "artifact_outputs": {
+    "static_site_publish_gate": {
+      "schema": "example/StaticSitePublishGate/v1",
+      "type": "StaticSitePublishGate"
+    }
+  }
+}
+```
+
+Gate scripts should read JSON from the generated input path env vars and write
+JSON to the generated output path env vars. For example,
+`IMPORT_VALIDATION_RESULT_PATH`, `VISUAL_PARITY_ARTIFACT_PATH`, and
+`STATIC_SITE_PUBLISH_GATE_PATH`. `node_script` is accepted only as a legacy alias
+for existing plans; new plans should use `repo_local_gate` so the contract stays
+portable beyond Node.
+
 `agent-task contract --format=json` returns `homeboy/agent-task-core-contract/v1`,
 the machine-readable Homeboy-owned contract export for downstream integrations.
 It includes schema ids, provider capability metadata, status/failure enum values,
