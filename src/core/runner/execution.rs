@@ -926,7 +926,7 @@ fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
         .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
-fn result_event_data(events: &[JobEvent]) -> Option<Value> {
+pub(super) fn result_event_data(events: &[JobEvent]) -> Option<Value> {
     events
         .iter()
         .rev()

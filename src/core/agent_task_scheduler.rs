@@ -175,14 +175,15 @@ where
             if effective_concurrency == 0 && running.is_empty() && !queued.is_empty() {
                 while let Some(task) = queued.pop_front() {
                     let message = "adaptive concurrency paused dispatch".to_string();
-                    outcomes.push(AgentTaskScheduleSupport::block_scheduled_task(
+                    AgentTaskScheduleSupport::block_and_record_scheduled_task(
                         &task,
                         "adaptive_concurrency",
                         message,
                         &mut backpressure,
                         &mut events,
-                    ));
-                    blocked_count += 1;
+                        &mut outcomes,
+                        &mut blocked_count,
+                    );
                 }
                 break;
             }
@@ -235,14 +236,15 @@ where
                             let message = format!(
                                 "task requires resource_units={task_units} over max_active_units={max_active_units}"
                             );
-                            outcomes.push(AgentTaskScheduleSupport::block_scheduled_task(
+                            AgentTaskScheduleSupport::block_and_record_scheduled_task(
                                 &task,
                                 "resource_budget",
                                 message,
                                 &mut backpressure,
                                 &mut events,
-                            ));
-                            blocked_count += 1;
+                                &mut outcomes,
+                                &mut blocked_count,
+                            );
                             continue;
                         }
                         break;
@@ -564,6 +566,28 @@ impl AgentTaskScheduleSupport {
             Some(message.clone()),
         ));
         Self::blocked_outcome(task.request.task_id.clone(), message)
+    }
+
+    /// Block a scheduled task, record its blocked outcome, and bump the blocked
+    /// counter. Shared by the adaptive-concurrency and resource-budget dispatch
+    /// paths so both emit identical bookkeeping (#5091).
+    fn block_and_record_scheduled_task(
+        task: &ScheduledTask,
+        kind: &str,
+        message: String,
+        backpressure: &mut Vec<AgentTaskBackpressureStatus>,
+        events: &mut Vec<AgentTaskProgressEvent>,
+        outcomes: &mut Vec<AgentTaskOutcome>,
+        blocked_count: &mut usize,
+    ) {
+        outcomes.push(Self::block_scheduled_task(
+            task,
+            kind,
+            message,
+            backpressure,
+            events,
+        ));
+        *blocked_count += 1;
     }
 
     fn dependency_task_ids(
