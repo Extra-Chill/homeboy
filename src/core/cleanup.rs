@@ -13,7 +13,7 @@ use self_artifacts::validate_homeboy_manifest_dir;
 use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
-    ("target", "rust_target"),
+    ("target", "build_target"),
     ("node_modules", "node_modules"),
     ("dist", "generated_dist"),
 ];
