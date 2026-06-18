@@ -432,6 +432,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
+    callback_data: firstDefined(inputs.callback_data, inputs.callbackData, config.callback_data, config.callbackData, runtimeOptions.callbackData),
     provider_runtime_invocation: providerRuntimeInvocation,
     ability_tools: firstDefined(inputs.ability_tools, inputs.abilityTools, config.ability_tools, config.abilityTools, runtimeOptions.abilityTools, []),
     structured_artifacts: structuredArtifacts,
@@ -512,6 +513,7 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
     runtimeEnv: firstNonEmptyObject(runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, options.runtime_env),
     runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, options.runtime_state_mounts),
     runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, options.runtime_config_mounts),
+    callbackData: firstDefined(runtimeRequirements.callback_data, runtimeRequirements.callbackData, runtimeProfile.callback_data, runtimeProfile.callbackData, options.callbackData, options.callback_data),
   };
 }
 

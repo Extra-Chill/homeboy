@@ -675,6 +675,113 @@ function writeHomeboyRuntimeToolBridgePlugin(pluginDir, endpoint = '') {
   fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-tool-bridge.php'), homeboyRuntimeToolBridgePluginSource(endpoint));
 }
 
+function homeboyCallbackDataPluginSource() {
+  return `<?php
+/**
+ * Homeboy runtime callback data helper.
+ *
+ * Plugin Name: Homeboy Runtime Callback Data
+ * Description: Lets runtime code exchange structured callback data with the Homeboy task runner.
+ *
+ * @package HomeboyCodeboxRuntime
+ */
+
+if ( ! function_exists( 'homeboy_callback_data_path' ) ) {
+	function homeboy_callback_data_path() {
+		$path = getenv( 'HOMEBOY_CALLBACK_DATA_PATH' );
+		return is_string( $path ) ? $path : '';
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_read_all' ) ) {
+	function homeboy_callback_data_read_all() {
+		$path = homeboy_callback_data_path();
+		if ( '' === $path || ! is_readable( $path ) ) {
+			return array( 'data' => array(), 'events' => array() );
+		}
+		$decoded = json_decode( (string) file_get_contents( $path ), true );
+		if ( ! is_array( $decoded ) ) {
+			return array( 'data' => array(), 'events' => array() );
+		}
+		return array(
+			'data'   => isset( $decoded['data'] ) && is_array( $decoded['data'] ) ? $decoded['data'] : array(),
+			'events' => isset( $decoded['events'] ) && is_array( $decoded['events'] ) ? $decoded['events'] : array(),
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_write_all' ) ) {
+	function homeboy_callback_data_write_all( array $payload ) {
+		$path = homeboy_callback_data_path();
+		if ( '' === $path ) {
+			return false;
+		}
+		$dir = dirname( $path );
+		if ( ! is_dir( $dir ) ) {
+			wp_mkdir_p( $dir );
+		}
+		return false !== file_put_contents( $path, wp_json_encode( $payload, JSON_PRETTY_PRINT ) . "\n", LOCK_EX );
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_get' ) ) {
+	function homeboy_callback_data_get( $key = null, $default = null ) {
+		$data = homeboy_callback_data_read_all()['data'];
+		if ( null === $key || '' === $key ) {
+			return $data;
+		}
+		return array_key_exists( $key, $data ) ? $data[ $key ] : $default;
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_set' ) ) {
+	function homeboy_callback_data_set( $key, $value ) {
+		$payload = homeboy_callback_data_read_all();
+		$payload['data'][ (string) $key ] = $value;
+		return homeboy_callback_data_write_all( $payload );
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_merge' ) ) {
+	function homeboy_callback_data_merge( array $values ) {
+		$payload = homeboy_callback_data_read_all();
+		$payload['data'] = array_merge( $payload['data'], $values );
+		return homeboy_callback_data_write_all( $payload );
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_append' ) ) {
+	function homeboy_callback_data_append( $key, $value ) {
+		$payload = homeboy_callback_data_read_all();
+		$key     = (string) $key;
+		if ( ! isset( $payload['data'][ $key ] ) || ! is_array( $payload['data'][ $key ] ) ) {
+			$payload['data'][ $key ] = array();
+		}
+		$payload['data'][ $key ][] = $value;
+		return homeboy_callback_data_write_all( $payload );
+	}
+}
+
+if ( ! function_exists( 'homeboy_callback_data_output_event' ) ) {
+	function homeboy_callback_data_output_event( $name, $payload = array(), array $metadata = array() ) {
+		$envelope = homeboy_callback_data_read_all();
+		$envelope['events'][] = array(
+			'schema'     => 'homeboy/runtime-callback-event/v1',
+			'name'       => (string) $name,
+			'payload'    => $payload,
+			'metadata'   => $metadata,
+			'created_at' => gmdate( 'c' ),
+		);
+		return homeboy_callback_data_write_all( $envelope );
+	}
+}
+`;
+}
+
+function writeHomeboyCallbackDataPlugin(pluginDir) {
+  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-callback-data.php'), homeboyCallbackDataPluginSource());
+}
+
 function homeboyRuntimeToolBridgeServerSource() {
   return `#!/usr/bin/env node
 'use strict';
@@ -803,6 +910,107 @@ function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
     bridge: {
       plugin_dir: pluginDir,
       server_script: writeTextFile('homeboy-runtime-tool-bridge-server-', 'server.js', homeboyRuntimeToolBridgeServerSource()),
+    },
+  };
+}
+
+function callbackDataConfig(taskInput) {
+  const configured = taskInput.callback_data || taskInput.callbackData || taskInput.parent_request?.callback_data || taskInput.parent_request?.callbackData;
+  if (configured === false || configured?.enabled === false) {
+    return { enabled: false };
+  }
+  return { enabled: true, ...(plainObject(configured) ? configured : {}) };
+}
+
+function callbackDataPath(artifacts, config = {}) {
+  return config.path || config.file || path.join(artifacts, 'homeboy-runtime-callback-data.json');
+}
+
+function injectHomeboyCallbackDataHelper(taskInput, artifacts) {
+  const config = callbackDataConfig(taskInput);
+  if (!config.enabled) {
+    return { input: taskInput, callback_data: null };
+  }
+
+  const callbackPath = callbackDataPath(artifacts, config);
+  fs.mkdirSync(path.dirname(callbackPath), { recursive: true });
+  fs.writeFileSync(callbackPath, `${JSON.stringify({ data: plainObject(config.initial) ? config.initial : {}, events: [] }, null, 2)}\n`);
+
+  const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-callback-data-'));
+  const pluginDir = path.join(pluginRoot, 'homeboy-runtime-callback-data');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  writeHomeboyCallbackDataPlugin(pluginDir);
+
+  return {
+    input: {
+      ...taskInput,
+      extra_plugins: [
+        ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins : []),
+        {
+          source: pluginDir,
+          slug: 'homeboy-runtime-callback-data',
+          pluginFile: 'homeboy-runtime-callback-data/homeboy-runtime-callback-data.php',
+          loadAs: 'mu-plugin',
+          activate: false,
+          metadata: { source: 'homeboy-runtime-callback-data' },
+        },
+      ],
+      runtime_env: {
+        ...(plainObject(taskInput.runtime_env) ? taskInput.runtime_env : {}),
+        HOMEBOY_CALLBACK_DATA_PATH: callbackPath,
+      },
+    },
+    callback_data: {
+      path: callbackPath,
+      plugin_dir: pluginDir,
+    },
+  };
+}
+
+function readCallbackData(callbackData) {
+  if (!callbackData?.path) {
+    return null;
+  }
+  const payload = readJsonIfAvailable(callbackData.path);
+  if (!plainObject(payload)) {
+    return null;
+  }
+  return {
+    path: callbackData.path,
+    data: plainObject(payload.data) ? payload.data : {},
+    events: Array.isArray(payload.events) ? payload.events : [],
+  };
+}
+
+function withCallbackDataEnvelope(payload, callbackData) {
+  if (!callbackData || (Object.keys(callbackData.data).length === 0 && callbackData.events.length === 0)) {
+    return payload;
+  }
+  const artifact = {
+    id: 'homeboy-runtime-callback-data',
+    kind: 'runtime-callback-data',
+    path: callbackData.path,
+  };
+  return {
+    ...payload,
+    outputs: {
+      ...(plainObject(payload.outputs) ? payload.outputs : {}),
+      callback_data: callbackData.data,
+      callback_events: callbackData.events,
+    },
+    artifacts: [
+      ...(Array.isArray(payload.artifacts) ? payload.artifacts : []),
+      artifact,
+    ],
+    evidence_refs: [
+      ...(Array.isArray(payload.evidence_refs) ? payload.evidence_refs : []),
+      { kind: artifact.kind, uri: artifact.path, label: 'Runtime callback data' },
+    ],
+    metadata: {
+      ...(plainObject(payload.metadata) ? payload.metadata : {}),
+      callback_data: callbackData.data,
+      callback_events: callbackData.events,
+      callback_data_path: callbackData.path,
     },
   };
 }
@@ -1114,6 +1322,7 @@ function runnerInput(request, artifacts) {
     ability_tools: request.ability_tools || request.abilityTools || [],
     runtime_state_mounts: request.runtime_state_mounts || request.runtimeStateMounts || [],
     runtime_config_mounts: request.runtime_config_mounts || request.runtimeConfigMounts || [],
+    callback_data: request.callback_data || request.callbackData,
     max_turns: Number.parseInt(argValue('--max-turns') || request.max_turns || request.maxTurns || 0, 10) || undefined,
     task_timeout_seconds: Number.parseInt(argValue('--task-timeout-seconds') || request.task_timeout_seconds || request.taskTimeoutSeconds || 0, 10) || undefined,
     sandbox_session_id: request.sandbox_session_id || '',
@@ -1269,6 +1478,7 @@ function stableTaskInput(input) {
     ability_tools: input.ability_tools || [],
     runtime_state_mounts: input.runtime_state_mounts || [],
     runtime_config_mounts: input.runtime_config_mounts || [],
+    callback_data: input.callback_data || input.parent_request?.callback_data || input.parent_request?.callbackData,
     max_turns: input.max_turns,
     task_timeout_seconds: input.task_timeout_seconds,
     sandbox_session_id: input.sandbox_session_id,
@@ -2085,7 +2295,8 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     return 1;
   }
 
-  const bridgedInput = injectHomeboyRuntimeToolBridge(stableTaskInput(input), artifacts);
+  const callbackInput = injectHomeboyCallbackDataHelper(stableTaskInput(input), artifacts);
+  const bridgedInput = injectHomeboyRuntimeToolBridge(callbackInput.input, artifacts);
   const bridgeServer = startHomeboyRuntimeToolBridge(bridgedInput.bridge);
   if (bridgeServer && bridgedInput.bridge?.plugin_dir) {
     writeHomeboyRuntimeToolBridgePlugin(bridgedInput.bridge.plugin_dir, bridgeServer.url);
@@ -2169,9 +2380,10 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
         args: resolved.args,
         secretNames: input.secret_env || [],
       }) : null);
-      const enrichedPayload = payloadEvidence ? attachFailureEvidence(normalizedPayload, payloadEvidence) : normalizedPayload;
+      const callbackPayload = withCallbackDataEnvelope(normalizedPayload, readCallbackData(callbackInput.callback_data));
+      const enrichedPayload = payloadEvidence ? attachFailureEvidence(callbackPayload, payloadEvidence) : callbackPayload;
       process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
-      return normalizedPayload.success === false ? 1 : 0;
+      return callbackPayload.success === false ? 1 : 0;
     } catch {
       if (failureEvidence) {
         process.stdout.write(`${JSON.stringify(commandFailurePayload(result, artifacts, failureEvidence), null, 2)}\n`);

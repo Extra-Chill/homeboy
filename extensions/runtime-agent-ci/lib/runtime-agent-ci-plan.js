@@ -96,6 +96,7 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     transcript_slots: options.transcriptSlots || options.transcript_slots,
     runtime_execution: runtimeExecution,
     runtime_output_projections: options.runtimeOutputProjections || options.runtime_output_projections,
+    callback_data: options.callbackData || options.callback_data,
     evidence_projections: options.evidenceProjections || options.evidence_projections,
     structured_artifacts: options.structuredArtifacts || options.structured_artifacts,
     task_timeout_seconds: options.taskTimeoutSeconds || options.task_timeout_seconds,

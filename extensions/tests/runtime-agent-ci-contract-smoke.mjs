@@ -51,6 +51,7 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   abilityInput: { prompt: 'Cook.' },
   abilityTools: [{ name: 'example_tool' }],
   runtimeOutputProjections: { packet_url: 'metadata.artifacts.packet.url' },
+  callbackData: { initial: { seed: 'value' } },
   evidenceProjections: [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }],
   artifactSlots: [{ name: 'packet', required: true }],
   transcriptSlots: [{ name: 'main', required: true }],
@@ -65,6 +66,7 @@ assert.deepEqual(genericConfig.runtime_task, { ability: 'example/run-task', inpu
 assert.deepEqual(genericConfig.ability_requirements, ['example/run-task', 'example/read-state']);
 assert.deepEqual(genericConfig.ability_tools, [{ name: 'example_tool' }]);
 assert.deepEqual(genericConfig.runtime_output_projections, { packet_url: 'metadata.artifacts.packet.url' });
+assert.deepEqual(genericConfig.callback_data, { initial: { seed: 'value' } });
 assert.deepEqual(genericConfig.evidence_projections, [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }]);
 assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true }]);
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
