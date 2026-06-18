@@ -14,6 +14,8 @@ pub struct SecretEnvPlan {
     pub public_env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<SecretEnvRequirement>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_credentials: BTreeMap<String, SecretEnvProviderCredentialMapping>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -22,6 +24,46 @@ pub struct SecretEnvPlan {
     pub status: Vec<SecretEnvStatus>,
     #[serde(default, skip_serializing_if = "SecretEnvRedactionPolicy::is_default")]
     pub redaction: SecretEnvRedactionPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvRequirement {
+    pub name: String,
+    #[serde(default = "default_required")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<SecretEnvRefreshHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvRefreshHint {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvPlanDiagnostics {
+    pub passthrough_secret_env_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub status: Vec<SecretEnvDiagnosticStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvDiagnosticStatus {
+    pub name: String,
+    pub required: bool,
+    pub configured: bool,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<SecretEnvRefreshHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretEnvPlanDiagnosticError {
+    pub missing_required_secret_env: Vec<String>,
+    pub message: String,
+    pub diagnostics: SecretEnvPlanDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,9 +89,11 @@ pub struct SecretEnvResolutionError {
     pub status: Vec<SecretEnvStatus>,
 }
 
+type SecretEnvResolverFn<'a> = dyn FnMut(&str) -> Option<String> + 'a;
+
 pub struct SecretEnvValueProvider<'a> {
     source: String,
-    resolve: Box<dyn FnMut(&str) -> Option<String> + 'a>,
+    resolve: Box<SecretEnvResolverFn<'a>>,
 }
 
 impl<'a> SecretEnvValueProvider<'a> {
@@ -127,6 +171,7 @@ impl Default for SecretEnvPlan {
             schema: SECRET_ENV_PLAN_SCHEMA.to_string(),
             public_env: BTreeMap::new(),
             secret_env_names: Vec::new(),
+            requirements: Vec::new(),
             provider_credentials: BTreeMap::new(),
             env_name_mapping: BTreeMap::new(),
             status: Vec::new(),
@@ -137,8 +182,20 @@ impl Default for SecretEnvPlan {
 
 impl SecretEnvPlan {
     pub fn from_secret_env_names(names: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            secret_env_names: normalize_names(names),
+            ..Self::default()
+        }
+    }
+
+    pub fn from_requirements(requirements: impl IntoIterator<Item = SecretEnvRequirement>) -> Self {
         let mut plan = Self::default();
-        plan.secret_env_names = normalize_names(names);
+        plan.requirements = normalize_requirements(requirements);
+        plan.secret_env_names = plan
+            .requirements
+            .iter()
+            .map(|requirement| requirement.name.clone())
+            .collect();
         plan
     }
 
@@ -155,9 +212,92 @@ impl SecretEnvPlan {
             self.secret_env_names
                 .iter()
                 .cloned()
+                .chain(
+                    self.requirements
+                        .iter()
+                        .map(|requirement| requirement.name.clone()),
+                )
                 .chain(mapped_names)
                 .chain(env_name_mapping_names),
         )
+    }
+
+    pub fn diagnose(
+        &self,
+        status: impl IntoIterator<Item = SecretEnvStatus>,
+    ) -> Result<SecretEnvPlanDiagnostics, SecretEnvPlanDiagnosticError> {
+        let status_by_name = status
+            .into_iter()
+            .map(|status| (status.name.clone(), status))
+            .collect::<BTreeMap<_, _>>();
+        let requirements = self.secret_env_requirements();
+        let passthrough_secret_env_names = requirements
+            .iter()
+            .map(|requirement| requirement.name.clone())
+            .collect::<Vec<_>>();
+        let mut missing_required_secret_env = Vec::new();
+        let mut diagnostic_status = Vec::new();
+
+        for requirement in requirements {
+            let status = status_by_name
+                .get(&requirement.name)
+                .cloned()
+                .unwrap_or_else(|| secret_env_status(requirement.name.clone(), false, "missing"));
+            if requirement.required && !status.configured {
+                missing_required_secret_env.push(requirement.name.clone());
+            }
+            diagnostic_status.push(SecretEnvDiagnosticStatus {
+                name: requirement.name,
+                required: requirement.required,
+                configured: status.configured,
+                source: status.source,
+                refresh: requirement.refresh,
+            });
+        }
+
+        let diagnostics = SecretEnvPlanDiagnostics {
+            passthrough_secret_env_names,
+            status: diagnostic_status,
+        };
+
+        if missing_required_secret_env.is_empty() {
+            Ok(diagnostics)
+        } else {
+            Err(SecretEnvPlanDiagnosticError {
+                message: format!(
+                    "missing required secret env: {}",
+                    missing_required_secret_env.join(", ")
+                ),
+                missing_required_secret_env,
+                diagnostics,
+            })
+        }
+    }
+
+    fn secret_env_requirements(&self) -> Vec<SecretEnvRequirement> {
+        let mut requirements = self
+            .requirements
+            .iter()
+            .cloned()
+            .map(|mut requirement| {
+                requirement.name = requirement.name.trim().to_string();
+                requirement
+            })
+            .filter(|requirement| !requirement.name.is_empty())
+            .map(|requirement| (requirement.name.clone(), requirement))
+            .collect::<BTreeMap<_, _>>();
+
+        for name in self.secret_env_names() {
+            requirements
+                .entry(name.clone())
+                .or_insert_with(|| SecretEnvRequirement {
+                    name,
+                    required: true,
+                    refresh: None,
+                });
+        }
+
+        requirements.into_values().collect()
     }
 
     pub fn extend_secret_env_names(&mut self, names: impl IntoIterator<Item = String>) {
@@ -278,6 +418,22 @@ pub fn normalize_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
+fn normalize_requirements(
+    requirements: impl IntoIterator<Item = SecretEnvRequirement>,
+) -> Vec<SecretEnvRequirement> {
+    requirements
+        .into_iter()
+        .map(|mut requirement| {
+            requirement.name = requirement.name.trim().to_string();
+            requirement
+        })
+        .filter(|requirement| !requirement.name.is_empty())
+        .map(|requirement| (requirement.name.clone(), requirement))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
+}
+
 fn secret_env_status(name: String, configured: bool, source: impl Into<String>) -> SecretEnvStatus {
     SecretEnvStatus {
         name,
@@ -304,6 +460,10 @@ fn default_secret_env_source() -> String {
 
 fn default_replacement() -> String {
     "[REDACTED]".to_string()
+}
+
+fn default_required() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -477,5 +637,114 @@ mod tests {
         assert!(!serde_json::to_string(&error)
             .expect("error json")
             .contains("secret-value"));
+    }
+
+    #[test]
+    fn diagnostics_fail_for_missing_required_secret_env() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "PROVIDER_TOKEN".to_string(),
+            required: true,
+            refresh: None,
+        }]);
+
+        let error = plan
+            .diagnose([secret_env_status(
+                "PROVIDER_TOKEN".to_string(),
+                false,
+                "missing",
+            )])
+            .expect_err("required secret env is missing");
+
+        assert_eq!(
+            error.missing_required_secret_env,
+            vec!["PROVIDER_TOKEN".to_string()]
+        );
+        assert_eq!(
+            error.diagnostics.passthrough_secret_env_names,
+            vec!["PROVIDER_TOKEN".to_string()]
+        );
+    }
+
+    #[test]
+    fn diagnostics_allow_missing_optional_secret_env() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "OPTIONAL_PROVIDER_TOKEN".to_string(),
+            required: false,
+            refresh: None,
+        }]);
+
+        let diagnostics = plan
+            .diagnose([])
+            .expect("optional secret env can be absent");
+
+        assert_eq!(
+            diagnostics.passthrough_secret_env_names,
+            vec!["OPTIONAL_PROVIDER_TOKEN".to_string()]
+        );
+        assert_eq!(
+            diagnostics.status,
+            vec![SecretEnvDiagnosticStatus {
+                name: "OPTIONAL_PROVIDER_TOKEN".to_string(),
+                required: false,
+                configured: false,
+                source: "missing".to_string(),
+                refresh: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_redacted_and_expose_passthrough_names_only() {
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
+            required: true,
+            refresh: None,
+        }]);
+
+        let diagnostics = plan
+            .diagnose([secret_env_status(
+                "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
+                true,
+                "test-source",
+            )])
+            .expect("required secret env is configured");
+        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics json");
+
+        assert_eq!(
+            diagnostics.passthrough_secret_env_names,
+            vec!["FIXTURE_PROVIDER_ACCESS_TOKEN".to_string()]
+        );
+        assert!(!serialized.contains("secret-value"));
+        assert!(!serialized.contains("access-token-value"));
+    }
+
+    #[test]
+    fn diagnostics_preserve_provider_refresh_metadata() {
+        let refresh = SecretEnvRefreshHint {
+            provider: "fixture-provider".to_string(),
+            metadata: BTreeMap::from([
+                ("credential_kind".to_string(), "oauth".to_string()),
+                (
+                    "refresh_env".to_string(),
+                    "FIXTURE_PROVIDER_REFRESH_TOKEN".to_string(),
+                ),
+            ]),
+        };
+        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+            name: "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
+            required: true,
+            refresh: Some(refresh.clone()),
+        }]);
+
+        let diagnostics = plan
+            .diagnose([secret_env_status(
+                "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
+                false,
+                "missing",
+            )])
+            .expect_err("missing required secret env")
+            .diagnostics;
+
+        assert_eq!(diagnostics.status[0].refresh, Some(refresh));
     }
 }
