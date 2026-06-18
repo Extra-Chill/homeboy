@@ -21,8 +21,9 @@ use crate::core::agent_task_loop_controller::{
     AgentTaskLoopControllerRecord, AgentTaskLoopControllerState, AgentTaskLoopEntity,
     AgentTaskLoopExternalEvent, AgentTaskLoopHistoryEvent, AgentTaskLoopPolicy,
     AgentTaskLoopPolicyAction, AgentTaskLoopPolicyActionRecord, AgentTaskLoopProvenanceRef,
-    AgentTaskLoopRunRef, AgentTaskLoopTaskLineage, AgentTaskLoopTransition,
-    AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState, AgentTaskPrOwnershipStatusUpdate,
+    AgentTaskLoopRunRef, AgentTaskLoopTaskLineage, AgentTaskLoopTerminalStatus,
+    AgentTaskLoopTransition, AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState,
+    AgentTaskPrOwnershipStatusUpdate,
 };
 use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
@@ -1990,6 +1991,13 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
+    if entity_ids.is_empty() {
+        return Ok((
+            serde_json::json!({ "mode": "fan_out", "item_count": 0, "results": [] }),
+            0,
+        ));
+    }
+
     let mut results = Vec::new();
     let mut exit_code = 0;
     for entity_id in entity_ids {
@@ -2023,7 +2031,7 @@ where
         results.push(result);
     }
     Ok((
-        serde_json::json!({ "mode": "fan_out", "results": results }),
+        serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "results": results }),
         exit_code,
     ))
 }
@@ -2633,12 +2641,30 @@ fn complete_controller_action(
     execution: &Value,
     exit_code: i32,
 ) -> Result<()> {
+    let action = record
+        .next_actions
+        .iter()
+        .find(|action| action.action_id == action_id)
+        .cloned();
     let status = if exit_code == 0 {
         AgentTaskLoopActionStatus::Completed
     } else {
         AgentTaskLoopActionStatus::Failed
     };
     set_controller_action_status(record, action_id, status)?;
+    if let Some(action) = action {
+        if let Some((status, reason, details)) =
+            infer_terminal_outcome(&action, execution, exit_code)
+        {
+            record.record_terminal_outcome(
+                status,
+                reason,
+                Some(action_id.to_string()),
+                action_entity_id(&action.action),
+                details,
+            );
+        }
+    }
     push_controller_history(
         record,
         if exit_code == 0 {
@@ -2658,6 +2684,13 @@ fn fail_controller_action(
     message: &str,
 ) -> Result<()> {
     set_controller_action_status(record, action_id, AgentTaskLoopActionStatus::Failed)?;
+    record.record_terminal_outcome(
+        AgentTaskLoopTerminalStatus::Failed,
+        message.to_string(),
+        Some(action_id.to_string()),
+        action_entity_id_for_record(record, action_id),
+        serde_json::json!({ "error": message }),
+    );
     push_controller_history(
         record,
         "controller.action.failed",
@@ -2692,6 +2725,22 @@ fn fail_controller_action_with_diagnostics(
     action.status = AgentTaskLoopActionStatus::Failed;
     action.reason = message.clone();
     action.diagnostics.extend(diagnostics.clone());
+    let terminal_status = if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "required_workflow_artifacts_missing")
+    {
+        AgentTaskLoopTerminalStatus::NeedsRevalidation
+    } else {
+        AgentTaskLoopTerminalStatus::Failed
+    };
+    let entity_id = action_entity_id(&action.action);
+    record.record_terminal_outcome(
+        terminal_status,
+        message.clone(),
+        Some(action_id.to_string()),
+        entity_id,
+        serde_json::json!({ "diagnostics": diagnostics.clone(), "execution": execution }),
+    );
     push_controller_history(
         record,
         "controller.action.failed",
@@ -2704,6 +2753,114 @@ fn fail_controller_action_with_diagnostics(
         }),
     );
     Ok(())
+}
+
+fn infer_terminal_outcome(
+    action: &AgentTaskLoopPolicyActionRecord,
+    execution: &Value,
+    exit_code: i32,
+) -> Option<(AgentTaskLoopTerminalStatus, String, Value)> {
+    match &action.action {
+        AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } if entity_ids.is_empty() => Some((
+            AgentTaskLoopTerminalStatus::NoActionableFindings,
+            "fan-out completed with zero target entities".to_string(),
+            serde_json::json!({ "mode": "fan_out", "item_count": 0 }),
+        )),
+        AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } if exit_code == 0 => Some((
+            AgentTaskLoopTerminalStatus::Passed,
+            format!("fan-out completed for {} target entities", entity_ids.len()),
+            serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "execution": execution }),
+        )),
+        AgentTaskLoopPolicyAction::FanOut { entity_ids, .. } => Some((
+            AgentTaskLoopTerminalStatus::Failed,
+            format!(
+                "fan-out failed for one or more of {} target entities",
+                entity_ids.len()
+            ),
+            serde_json::json!({ "mode": "fan_out", "item_count": entity_ids.len(), "execution": execution }),
+        )),
+        AgentTaskLoopPolicyAction::RunGates { .. } => {
+            let result = execution.get("result")?;
+            let status = gate_terminal_status(result, exit_code);
+            Some((
+                status,
+                gate_terminal_reason(status),
+                serde_json::json!({ "mode": "run_gates", "result": result }),
+            ))
+        }
+        AgentTaskLoopPolicyAction::Complete { reason } if exit_code == 0 => Some((
+            AgentTaskLoopTerminalStatus::Passed,
+            reason
+                .clone()
+                .unwrap_or_else(|| "controller completed".to_string()),
+            serde_json::json!({ "mode": "complete" }),
+        )),
+        _ if exit_code != 0 => Some((
+            AgentTaskLoopTerminalStatus::Failed,
+            "controller action failed".to_string(),
+            serde_json::json!({ "execution": execution }),
+        )),
+        _ => None,
+    }
+}
+
+fn gate_terminal_status(result: &Value, exit_code: i32) -> AgentTaskLoopTerminalStatus {
+    if exit_code == 0 {
+        return match result.get("status").and_then(Value::as_str) {
+            Some("warn") => AgentTaskLoopTerminalStatus::NoPublication,
+            _ => AgentTaskLoopTerminalStatus::Passed,
+        };
+    }
+    let needs_upstream_fix = result
+        .get("checks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|check| check.get("classification").and_then(Value::as_str))
+        .any(|classification| classification == "needs_upstream_fix");
+    if needs_upstream_fix {
+        AgentTaskLoopTerminalStatus::NeedsUpstreamFix
+    } else {
+        AgentTaskLoopTerminalStatus::BlockedByGate
+    }
+}
+
+fn gate_terminal_reason(status: AgentTaskLoopTerminalStatus) -> String {
+    match status {
+        AgentTaskLoopTerminalStatus::Passed => "gate bundle passed".to_string(),
+        AgentTaskLoopTerminalStatus::NoPublication => {
+            "gate bundle returned warnings; no publication performed".to_string()
+        }
+        AgentTaskLoopTerminalStatus::NeedsUpstreamFix => {
+            "gate bundle identified an upstream fix requirement".to_string()
+        }
+        _ => "gate bundle blocked the loop".to_string(),
+    }
+}
+
+fn action_entity_id_for_record(
+    record: &AgentTaskLoopControllerRecord,
+    action_id: &str,
+) -> Option<String> {
+    record
+        .next_actions
+        .iter()
+        .find(|action| action.action_id == action_id)
+        .and_then(|action| action_entity_id(&action.action))
+}
+
+fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
+    match action {
+        AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
+        | AgentTaskLoopPolicyAction::SpawnController { entity_id, .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { entity_id, .. }
+        | AgentTaskLoopPolicyAction::WaitForController { entity_id, .. }
+        | AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. }
+        | AgentTaskLoopPolicyAction::RunGates { entity_id, .. }
+        | AgentTaskLoopPolicyAction::OwnPrUntilGreen { entity_id, .. } => entity_id.clone(),
+        AgentTaskLoopPolicyAction::MarkHumanReady { entity_id, .. } => Some(entity_id.clone()),
+        _ => None,
+    }
 }
 
 fn set_controller_action_status(
@@ -3154,7 +3311,7 @@ mod tests {
     use crate::core::agent_task_loop_controller::{
         AgentTaskGateBundle, AgentTaskGateBundleCheck, AgentTaskGateBundleCheckKind,
         AgentTaskGateBundleStatus, AgentTaskLoopFindingPacket, AgentTaskLoopPolicyAction,
-        AgentTaskLoopWait, AgentTaskLoopWaitStatus,
+        AgentTaskLoopTerminalStatus, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
     };
     use crate::core::agent_task_scheduler::AgentTaskExecutionContext;
     use crate::test_support::with_isolated_home;
@@ -4135,6 +4292,134 @@ mod tests {
                 .clone()
                 .expect("provider saw request");
             assert_eq!(observed.task_id, "controller-service-task");
+        });
+    }
+
+    #[test]
+    fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-empty-fanout".to_string(),
+                phase: "collect".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+
+            record.record_action(
+                AgentTaskLoopPolicyAction::FanOut {
+                    dedupe_key: "workflow:empty".to_string(),
+                    entity_ids: Vec::new(),
+                    request_template: json!({ "mode": "dispatch" }),
+                },
+                "no findings emitted",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-empty-fanout",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("fan-out action executed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status.as_deref(), Some("completed"));
+            assert_eq!(
+                result.value.execution.as_ref().unwrap()["item_count"],
+                json!(0)
+            );
+
+            let loaded = controller::load_controller("loop-service-empty-fanout")
+                .expect("controller loaded");
+            assert_eq!(
+                loaded.next_actions[0].status,
+                AgentTaskLoopActionStatus::Completed
+            );
+            assert_eq!(loaded.task_lineage.len(), 0);
+            assert_eq!(loaded.terminal_outcomes.len(), 1);
+            assert_eq!(
+                loaded.terminal_outcomes[0].status,
+                AgentTaskLoopTerminalStatus::NoActionableFindings
+            );
+            assert_eq!(loaded.terminal_outcomes[0].details["item_count"], json!(0));
+        });
+    }
+
+    #[test]
+    fn run_gates_records_generic_terminal_outcomes() {
+        with_isolated_home(|_| {
+            let mut passed = init(ControllerInitRequest {
+                loop_id: "loop-service-gate-passed".to_string(),
+                phase: "verify".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            passed.gate_bundles.push(AgentTaskGateBundle {
+                bundle_id: "green".to_string(),
+                description: String::new(),
+                checks: Vec::new(),
+            });
+            passed.record_action(
+                AgentTaskLoopPolicyAction::RunGates {
+                    bundle_id: "green".to_string(),
+                    entity_id: None,
+                },
+                "run green gate",
+            );
+            controller::write_controller(&passed).expect("passed controller written");
+
+            let passed_result = run_next(
+                "loop-service-gate-passed",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("gate action executed");
+            assert_eq!(passed_result.exit_code, 0);
+            let passed_loaded = controller::load_controller("loop-service-gate-passed")
+                .expect("passed controller loaded");
+            assert_eq!(
+                passed_loaded.terminal_outcomes[0].status,
+                AgentTaskLoopTerminalStatus::Passed
+            );
+
+            let mut blocked = init(ControllerInitRequest {
+                loop_id: "loop-service-gate-blocked".to_string(),
+                phase: "verify".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            blocked.gate_bundles.push(AgentTaskGateBundle {
+                bundle_id: "red".to_string(),
+                description: String::new(),
+                checks: vec![AgentTaskGateBundleCheck {
+                    check_id: "api-check".to_string(),
+                    kind: AgentTaskGateBundleCheckKind::Api,
+                    input: Value::Null,
+                    retryable: false,
+                }],
+            });
+            blocked.record_action(
+                AgentTaskLoopPolicyAction::RunGates {
+                    bundle_id: "red".to_string(),
+                    entity_id: None,
+                },
+                "run red gate",
+            );
+            controller::write_controller(&blocked).expect("blocked controller written");
+
+            let blocked_result = run_next(
+                "loop-service-gate-blocked",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("gate action executed");
+            assert_eq!(blocked_result.exit_code, 1);
+            let blocked_loaded = controller::load_controller("loop-service-gate-blocked")
+                .expect("blocked controller loaded");
+            assert_eq!(
+                blocked_loaded.terminal_outcomes[0].status,
+                AgentTaskLoopTerminalStatus::BlockedByGate
+            );
         });
     }
 
