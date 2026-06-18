@@ -78,12 +78,26 @@ def test_count(payload: dict[str, Any] | None) -> int | None:
     return None
 
 
+def changed_scope_introduced_count(command: str, payload: dict[str, Any] | None) -> int | None:
+    data = unwrap(payload)
+    changed_since = data.get("changed_since", {}) if isinstance(data, dict) else {}
+    if not isinstance(changed_since, dict):
+        return None
+
+    key = "introduced_findings" if command == "audit" else "introduced_failures"
+    value = changed_since.get(key)
+    return int(value) if isinstance(value, int) else None
+
+
 def output_stem(command: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in command).strip("-") or "homeboy-output"
 
 
 def metric_for(command: str, directory: str) -> int | None:
     payload = read_json(os.path.join(directory, f"{output_stem(command)}.json"))
+    scoped_count = changed_scope_introduced_count(command, payload)
+    if scoped_count is not None:
+        return scoped_count
     if command == "audit":
         return audit_count(payload)
     if command == "test":
