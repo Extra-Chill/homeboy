@@ -84,6 +84,47 @@ assert.equal(bundleTask.executor.config.runtime_profiles['datamachine-agent-ci']
 assert.equal(bundleTask.limits.task_timeout_seconds, 1200);
 assert.deepEqual(bundleTask.expected_artifacts, ['datamachine-transcript', 'ConceptPacket']);
 
+const customRuntimeProfile = {
+  schema: 'homeboy/runtime-profile/v1',
+  id: 'example-agent-ci',
+  runtime_task_ability: 'example/run-agent-bundle',
+  component_path_defaults: {
+    contract_slug_map: {
+      'example-agents': 'agent_runtime',
+      'example-tools': 'agent_runtime_tools',
+    },
+    path_aliases: {
+      agent_runtime: ['contract:agent_runtime'],
+      agent_runtime_tools: ['contract:agent_runtime_tools'],
+    },
+  },
+  ability_requirements: ['example/run-agent-bundle'],
+};
+const customBundleTask = datamachineAgentCiBundleTaskRequest({
+  taskId: 'example-agent',
+  source: '/workspace/example-repo/bundles/example-agent',
+  agentSlug: 'example-agent',
+  pipelineSlug: 'example-pipeline',
+  flowSlug: 'example-flow',
+  runtimeProfile: 'example-agent-ci',
+  runtimeProfiles: { 'example-agent-ci': customRuntimeProfile },
+  componentContracts: [
+    { slug: 'example-agents', path: '/components/example-agents' },
+    { slug: 'example-tools', path: '/components/example-tools' },
+  ],
+});
+
+assert.equal(customBundleTask.executor.config.runtime_profile, 'example-agent-ci');
+assert.equal(customBundleTask.executor.config.runtime_task.ability, 'example/run-agent-bundle');
+assert.deepEqual(customBundleTask.executor.config.runtime_profiles['example-agent-ci'].component_path_defaults.contract_slug_map, {
+  'example-agents': 'agent_runtime',
+  'example-tools': 'agent_runtime_tools',
+});
+assert.deepEqual(customBundleTask.executor.config.component_contracts, [
+  { slug: 'example-agents', path: '/components/example-agents' },
+  { slug: 'example-tools', path: '/components/example-tools' },
+]);
+
 const bundleRunnerSpec = datamachineAgentCiRunnerSpec({
   taskId: 'concept-agent',
   source: '/workspace/example-repo/bundles/concept-agent',

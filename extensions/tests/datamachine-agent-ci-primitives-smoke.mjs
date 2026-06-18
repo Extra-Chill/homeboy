@@ -117,6 +117,9 @@ assert.equal(config.runtime_id, 'wp-codebox');
 assert.equal(config.runner_workspace.checkout_path, '/workspace/homeboy-extensions');
 assert.deepEqual(config.writable_paths, ['src', 'tests']);
 assert.equal(config.provider_credentials.connectors_ai_openai_api_key, 'OPENAI_API_KEY');
+assert.equal(config.runtime_profile, 'datamachine-agent-ci');
+assert.equal(config.runtime_components.data_machine, path.join(workspace, '.ci/data-machine'));
+assert.deepEqual(config.required_abilities, ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job']);
 
 fs.writeFileSync(githubOutput, '');
 run('build-runner-config.cjs', [], {
@@ -193,6 +196,84 @@ assert.deepEqual(runtimeTaskConfig.component_contracts, [{ slug: 'example-fixtur
 assert.equal(runtimeTaskConfig.runtime_mounts.some((mount) => mount.target === '/workspace/input' && mount.mode === 'readonly'), true);
 assert.deepEqual(runtimeTaskConfig.artifact_declarations, [{ name: 'processed_packet', type: 'example-packet', schema: 'example/processed-packet/v1', required: true }]);
 assert.deepEqual(runtimeTaskConfig.required_abilities, ['example/process-artifact']);
+
+fs.writeFileSync(githubOutput, '');
+run('build-runner-config.cjs', [], {
+  GITHUB_OUTPUT: githubOutput,
+  GITHUB_WORKSPACE: workspace,
+  RUNNER_TEMP: runnerTemp,
+  GITHUB_SHA: 'abc123',
+  AGENT_SLUG: 'example-agent',
+  PIPELINE_SLUG: 'example-pipeline',
+  FLOW_SLUG: 'example-flow',
+  BUNDLE_PATH: 'bundle',
+  TARGET_REPO: 'Extra-Chill/homeboy-extensions',
+  PROVIDER: 'openai',
+  MODEL: 'gpt-5.5',
+  AGENT_RUNTIME: 'wp-codebox',
+  AGENT_RUNTIME_REF: 'main',
+  RUNTIME_PROFILE: 'example-agent-ci',
+  RUNTIME_PROFILES: JSON.stringify({
+    'example-agent-ci': {
+      schema: 'homeboy/runtime-profile/v1',
+      id: 'example-agent-ci',
+      runtime_task_ability: 'example/run-agent-bundle',
+      component_path_defaults: {
+        contract_slug_map: { 'example-agents': 'agent_runtime' },
+        path_aliases: { agent_runtime: ['contract:agent_runtime'] },
+      },
+      ability_requirements: ['example/run-agent-bundle'],
+    },
+  }),
+  RUNTIME_COMPONENTS: JSON.stringify({
+    example_agents: '/workspace/components/example-agents',
+  }),
+  COMPONENT_CONTRACTS: '[{"slug":"example-agents","path":"/workspace/components/example-agents","activate":true}]',
+  CONTEXT_REPOSITORIES: '[]',
+  VERIFICATION_COMMANDS: '[]',
+  DRIFT_CHECKS: '[]',
+  WRITABLE_PATHS: '',
+  WORKSPACE_CONTRACT_CHECKS: '{}',
+  SUCCESS_REQUIRES_PR: 'false',
+  SUCCESS_COMPLETION_OUTCOMES: '[]',
+  MAX_TURNS: '1',
+  STEP_BUDGET: '1',
+  TIME_BUDGET_MS: '60000',
+  EXPECTED_ARTIFACTS: '[]',
+  ARTIFACT_DECLARATIONS: '[]',
+  ARTIFACT_EXPORT_CONFIG: '{}',
+  RULES: '{}',
+  GENERAL_RULES: '[]',
+  TASK_RULES: '[]',
+  PROBES: '{}',
+  WP_GYM_BENCHMARK_MODE: 'false',
+  DRY_RUN: 'true',
+  EXTRA_WP_CONFIG_DEFINES: '{}',
+  RUNTIME_MOUNTS: '[]',
+  RUNTIME_OVERLAYS: '[]',
+  WORKLOAD_RUN_BEFORE: '[]',
+  WORKLOAD_RUN_AFTER: '[]',
+  DAILY_MEMORY_ENABLED: 'false',
+  DISABLE_DATAMACHINE_DIRECTIVES: 'false',
+  EXTRA_REQUIRED_ABILITIES: '[]',
+  APP_TOKEN_REPOS: '',
+  ALLOWED_REPOS: '[]',
+  TOOL_RESULTS_KEY: 'github_tool_results',
+  ABILITY_TOOLS: '[]',
+  TOOL_RECORDERS: '[]',
+  ENABLE_TERMINAL_ACTIONS: 'false',
+  WP_CLI_TOOL_NAME: 'run_wp_cli',
+  PIPELINE_STEP_PATCHES: '[]',
+  FLOW_STEP_PATCHES: '[]',
+  RUNNER_WORKSPACE_CONFIG: '{}',
+  PROVIDER_PLUGIN: '{}',
+});
+const customProfileConfig = JSON.parse(fs.readFileSync(path.join(runnerTemp, 'datamachine-agent-config.json'), 'utf8'));
+assert.equal(customProfileConfig.runtime_profile, 'example-agent-ci');
+assert.equal(customProfileConfig.runtime_profiles['example-agent-ci'].runtime_task_ability, 'example/run-agent-bundle');
+assert.equal(customProfileConfig.runtime_components.example_agents, '/workspace/components/example-agents');
+assert.deepEqual(customProfileConfig.component_contracts, [{ slug: 'example-agents', path: '/workspace/components/example-agents', activate: true }]);
+assert.deepEqual(customProfileConfig.required_abilities, ['example/run-agent-bundle']);
 
 const resultsFile = path.join(tempRoot, 'results.json');
 fs.writeFileSync(resultsFile, JSON.stringify({ scenarios: [{ id: 'flow', metadata: { job_status: 'completed', engine_data: { value: 7 } } }] }));

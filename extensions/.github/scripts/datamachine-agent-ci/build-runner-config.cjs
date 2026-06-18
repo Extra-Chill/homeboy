@@ -32,6 +32,8 @@ function buildConfig(env) {
   const transcriptHostDir = path.join(workspace, 'datamachine-agent-artifacts', agentSlug);
   const transcriptGuestDir = `/wordpress/wp-content/plugins/${componentSlug}/datamachine-agent-artifacts/${agentSlug}`;
   const runtimeId = env.AGENT_RUNTIME || 'wp-codebox';
+  const runtimeProfile = env.RUNTIME_PROFILE || 'datamachine-agent-ci';
+  const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
 
   if (runtimeId !== 'wp-codebox') {
     throw new Error(`Unsupported agent_runtime: ${runtimeId}. Only wp-codebox is currently supported.`);
@@ -77,6 +79,10 @@ function buildConfig(env) {
   const workloadRunAfter = parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []);
   const extraRequiredAbilities = parseJsonInput('extra_required_abilities', env.EXTRA_REQUIRED_ABILITIES || '[]', 'array', []);
   const runtimeTask = runtimeTaskFromEnv(env);
+  const runtimeTaskAbility = env.RUNTIME_TASK_ABILITY || runtimeProfiles[runtimeProfile]?.runtime_task_ability || 'datamachine/run-agent-bundle';
+  const runtimeAbilityRequirements = Array.isArray(runtimeProfiles[runtimeProfile]?.ability_requirements)
+    ? runtimeProfiles[runtimeProfile].ability_requirements
+    : [runtimeTaskAbility];
   const executionKind = env.EXECUTION_KIND || (runtimeTask ? 'runtime_task' : 'agent_bundle');
   if (executionKind === 'agent_bundle' && !bundlePath) {
     throw new Error('BUNDLE_PATH is required for agent_bundle execution. Set execution_kind=runtime_task with runtime_task or ability_request for direct ability execution.');
@@ -85,7 +91,10 @@ function buildConfig(env) {
     ? [runtimeTask.ability]
     : executeWorkflow.path
       ? ['datamachine/import-agent', 'datamachine/execute-workflow', 'datamachine/drain-job']
-      : ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job'];
+      : runtimeProfile === 'datamachine-agent-ci'
+        ? ['datamachine/import-agent', 'datamachine/run-flow', 'datamachine/drain-job']
+        : runtimeAbilityRequirements;
+  const runtimeComponents = parseJsonInput('runtime_components', env.RUNTIME_COMPONENTS || '{}', 'object', {});
 
   return {
     _configPath: path.join(runnerTemp, 'datamachine-agent-config.json'),
@@ -95,6 +104,8 @@ function buildConfig(env) {
     workload_label: `Run ${agentSlug} Data Machine agent`,
     validation_dependencies: validationDependencies.paths,
     runtime_id: runtimeId,
+    runtime_profile: runtimeProfile,
+    ...(Object.keys(runtimeProfiles).length > 0 ? { runtime_profiles: runtimeProfiles } : {}),
     execution_kind: executionKind,
     runtime_ref: env.AGENT_RUNTIME_REF || 'main',
     runtime_wordpress_version: env.RUNTIME_WORDPRESS_VERSION || '7.0',
@@ -131,6 +142,7 @@ function buildConfig(env) {
       agents_api: path.join(workspace, '.ci/agents-api'),
       data_machine: path.join(workspace, '.ci/data-machine'),
       data_machine_code: path.join(workspace, '.ci/data-machine-code'),
+      ...runtimeComponents,
     },
     provider_plugin_paths: validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [],
     github_token_env: 'HOMEBOY_GITHUB_APP_TOKEN',

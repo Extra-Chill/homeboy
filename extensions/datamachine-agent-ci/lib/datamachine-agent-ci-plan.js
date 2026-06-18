@@ -11,6 +11,7 @@ const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY = 'datamachine/run-agent-bundle';
 const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID = 'datamachine-agent-ci';
+const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESET = 'datamachine';
 
 const DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS = {
   contract_slug_map: {
@@ -114,10 +115,17 @@ const DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS = [
 const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE = {
   schema: 'homeboy/runtime-profile/v1',
   id: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
+  preset: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESET,
+  runtime_task_ability: DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
   component_path_defaults: DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
   workspace_tools: DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
   capabilities: DATAMACHINE_AGENT_CI_CAPABILITIES,
   ability_requirements: DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS,
+};
+
+const DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESETS = {
+  [DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESET]: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
+  [DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID]: DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
 };
 
 function datamachineAgentCiBundleTaskRequest(options = {}, context = {}) {
@@ -150,10 +158,12 @@ function datamachineAgentCiBundleTaskRequest(options = {}, context = {}) {
     ...stripUndefined(options.runtimeTaskInput || options.runtime_task_input || {}),
   });
 
+  const runtimeProfile = resolveDatamachineAgentCiRuntimeProfile(options);
+
   return datamachineAgentCiAbilityTaskRequest({
     ...options,
     taskId,
-    ability: DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
+    ability: runtimeProfile.runtime_task_ability,
     abilityInput: runtimeTaskInput,
   }, context);
 }
@@ -200,15 +210,18 @@ function datamachineAgentCiRunnerSpec(options = {}, context = {}) {
 }
 
 function datamachineAgentCiTaskExecutorConfig(options = {}) {
+  const runtimeProfile = resolveDatamachineAgentCiRuntimeProfile(options);
   const runtimeTaskInput = options.abilityInput || options.ability_input || {};
   const runtimeTask = stripUndefined({
-    ability: options.ability,
+    ability: options.ability || runtimeProfile.runtime_task_ability,
     input: runtimeTaskInput,
   });
   return stripUndefined({
     ...(options.config || {}),
     provider: options.provider,
     model: options.model,
+    runtime_profile: runtimeProfile.id,
+    runtime_profiles: runtimeProfilesForOptions(options, runtimeProfile),
     runtime_component_paths: options.runtimeComponentPaths || options.runtime_component_paths,
     component_contracts: options.componentContracts || options.component_contracts,
     homeboy_extensions: options.homeboyExtensions || options.homeboy_extensions,
@@ -226,6 +239,34 @@ function datamachineAgentCiTaskExecutorConfig(options = {}) {
     runtime_id: options.runtimeId || options.runtime_id,
     runtime_bin: options.runtimeBin || options.runtime_bin,
   });
+}
+
+function resolveDatamachineAgentCiRuntimeProfile(options = {}) {
+  const runtimeProfiles = options.runtimeProfiles || options.runtime_profiles || options.config?.runtime_profiles || options.config?.runtimeProfiles || {};
+  const requestedProfile = options.runtimeProfile || options.runtime_profile || options.config?.runtime_profile || options.config?.runtimeProfile || DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID;
+  const presetProfile = DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESETS[requestedProfile];
+  const profile = runtimeProfiles[requestedProfile] || presetProfile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    throw new Error(`runtime profile ${requestedProfile} is not configured.`);
+  }
+
+  const id = requiredString(profile.id || requestedProfile, 'runtime profile id');
+  return {
+    ...profile,
+    id,
+    runtime_task_ability: requiredString(
+      options.runtimeTaskAbility || options.runtime_task_ability || profile.runtime_task_ability || DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
+      'runtime task ability'
+    ),
+  };
+}
+
+function runtimeProfilesForOptions(options, runtimeProfile) {
+  return {
+    ...(options.config?.runtime_profiles || options.config?.runtimeProfiles || {}),
+    ...(options.runtimeProfiles || options.runtime_profiles || {}),
+    [runtimeProfile.id]: runtimeProfile,
+  };
 }
 
 function datamachineAgentCiPlan(options = {}) {
@@ -272,6 +313,8 @@ module.exports = {
   DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
   DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESET,
+  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_PRESETS,
   DATAMACHINE_AGENT_CI_WORKSPACE_TOOLS,
   DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY,
   agentTaskRequestFromRunnerSpec,
