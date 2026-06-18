@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.4.9] - 2026-06-18
+
+### Fixed
+- fix(wp-codebox): normalize agent task outcomes
+
 ## [3.4.8] - 2026-06-18
 
 ### Fixed
