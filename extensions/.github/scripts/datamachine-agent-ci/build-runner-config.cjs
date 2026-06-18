@@ -14,6 +14,7 @@ const {
   writeGithubOutput,
 } = require('./lib/common.cjs');
 const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
 
 function main() {
   const config = buildConfig(process.env);
@@ -308,43 +309,6 @@ function runtimeTaskFromEnv(env) {
       ...abilityInput,
     },
   };
-}
-
-function codeboxRuntimeProfilePayload({ id, profile = {}, componentContracts = [], runtimeOverlays = [], runtimeEnv = {}, providerPluginPaths = [] }) {
-  return withoutEmptyObjectValues({
-    ...profile,
-    schema: 'wp-codebox/runtime-profile/v1',
-    id: profile.id || id,
-    homeboy_profile_schema: profile.schema && profile.schema !== 'wp-codebox/runtime-profile/v1' ? profile.schema : undefined,
-    component_contracts: componentContracts,
-    extra_plugins: componentContracts,
-    runtime_overlays: runtimeOverlays,
-    env: runtimeEnv,
-    provider_plugins: providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
-    homeboy_parent_tool_bridge: {
-      schema: 'wp-codebox/parent-tool-bridge/v1',
-      status: 'declared-compatibility-bridge',
-      env: [
-        'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-        'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-        'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-        'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-      ],
-      upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
-    },
-  });
-}
-
-function withoutEmptyObjectValues(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => {
-    if (Array.isArray(entry)) {
-      return entry.length > 0;
-    }
-    if (entry && typeof entry === 'object') {
-      return Object.keys(entry).length > 0;
-    }
-    return entry !== undefined && entry !== '';
-  }));
 }
 
 function withoutInternalKeys(config) {

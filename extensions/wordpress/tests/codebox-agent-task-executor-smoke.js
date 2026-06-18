@@ -782,6 +782,25 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
 
+const codeboxOwnedParentToolBridgeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'codebox-owned-parent-tool-bridge-task-123',
+  executor: {
+    backend: 'codebox',
+    config: {
+      runtime_profile: {
+        schema: 'wp-codebox/runtime-profile/v1',
+        parent_tool_bridge: {
+          schema: 'wp-codebox/parent-tool-bridge/v1',
+          mode: 'codebox-owned',
+        },
+      },
+    },
+  },
+});
+assert.equal(codeboxOwnedParentToolBridgeRequest.runtime_requirements.parent_tool_bridge.mode, 'codebox-owned');
+assert.equal(codeboxOwnedParentToolBridgeRequest.runtime_requirements.homeboy_parent_tool_bridge, undefined);
+
 const optionsRuntimeRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'options-runtime-env-task-123',
@@ -2612,7 +2631,11 @@ try {
   assert.equal(capturedAgentBundleRun.input.schema, 'wp-codebox/task-input/v1');
   assert.equal(Object.hasOwn(capturedAgentBundleRun.input, 'agent'), false);
   assert.equal(Object.hasOwn(capturedAgentBundleRun.input.parent_request, 'agent'), false);
-  assert.deepEqual(capturedAgentBundleRun.input.runtime_env, fullRunnerRuntimeEnv);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(capturedAgentBundleRun.input.runtime_env).filter(([key]) => key !== 'HOMEBOY_CALLBACK_DATA_PATH')),
+    fullRunnerRuntimeEnv
+  );
+  assert.match(capturedAgentBundleRun.input.runtime_env.HOMEBOY_CALLBACK_DATA_PATH, /homeboy-runtime-callback-data\.json$/);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_state_mounts, fullRunnerRuntimeStateMounts);
   assert.deepEqual(capturedAgentBundleRun.input.runtime_config_mounts, fullRunnerRuntimeConfigMounts);
   assert.equal(capturedAgentBundleRun.input.agent_bundle.bundle_path, bundle);

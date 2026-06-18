@@ -26,6 +26,9 @@ const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,
 } = require('./provider-outcome-normalizer');
+const {
+  codeboxRuntimeProfilePayload,
+} = require('./codebox-runtime-profile');
 
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
@@ -714,20 +717,16 @@ function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, de
     defaults.providerPluginPaths,
     []
   );
-  return withoutEmptyObjectValues({
-    ...runtimeProfile,
-    ...runtimeRequirements,
-    schema: 'wp-codebox/runtime-profile/v1',
-    id: runtimeRequirements.id || runtimeProfile.id || config.runtime_profile || config.runtimeProfile,
-    homeboy_profile_schema: runtimeProfile.schema && runtimeProfile.schema !== 'wp-codebox/runtime-profile/v1' ? runtimeProfile.schema : undefined,
-    component_contracts: componentContracts,
-    extra_plugins: componentContracts,
-    runtime_overlays: runtimeOverlays,
-    env: runtimeEnv,
-    provider_plugins: providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
-    runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts),
-    runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts),
-    homeboy_parent_tool_bridge: homeboyParentToolBridgeRequirement(),
+  return codeboxRuntimeProfilePayload({
+    id: config.runtime_profile || config.runtimeProfile,
+    profile: runtimeProfile,
+    runtimeRequirements,
+    componentContracts,
+    runtimeOverlays,
+    runtimeEnv,
+    providerPluginPaths,
+    runtimeStateMounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts),
+    runtimeConfigMounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts),
   });
 }
 
@@ -750,20 +749,6 @@ function providerPluginPathEntries(value) {
     }
     return [entry.path, entry.source].filter(Boolean);
   });
-}
-
-function homeboyParentToolBridgeRequirement() {
-  return {
-    schema: 'wp-codebox/parent-tool-bridge/v1',
-    status: 'declared-compatibility-bridge',
-    env: [
-      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-    ],
-    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
-  };
 }
 
 function uniqueComponentContracts(contracts) {

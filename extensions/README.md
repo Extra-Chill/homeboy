@@ -169,11 +169,12 @@ task contract.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 `component_contracts`, `extra_plugins`, `runtime_overlays`, `env`, and
-`provider_plugins`. Homeboy Extensions also declares the temporary
-`wp-codebox/parent-tool-bridge/v1` compatibility component in that payload; the
-expected upstream primitive is a Codebox-owned parent-tool bridge that maps
-parent-owned tools into sandbox-visible descriptors without Homeboy injecting the
-bridge env directly.
+`provider_plugins`. Homeboy Extensions declares the temporary
+`homeboy_parent_tool_bridge` compatibility field in that payload only when a
+profile does not already expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
+component or `parent_tool_bridge` declaration. The expected upstream primitive is
+a Codebox-owned parent-tool bridge that maps parent-owned tools into
+sandbox-visible descriptors without Homeboy injecting the bridge env directly.
 
 Each extension also exposes a CLI binding for direct use against a project or component:
 
