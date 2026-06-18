@@ -55,6 +55,20 @@ pub struct StatusArgs {
     pub unreleased: bool,
 }
 
+impl StatusArgs {
+    fn has_filter(&self) -> bool {
+        self.uncommitted || self.needs_release || self.ready || self.docs_only || self.unreleased
+    }
+
+    fn includes_upstream_drift(&self) -> bool {
+        !self.has_filter()
+    }
+
+    fn includes_unreleased_merges(&self) -> bool {
+        !self.has_filter() || self.unreleased
+    }
+}
+
 /// Per-component upstream drift info.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpstreamDrift {
@@ -295,8 +309,8 @@ fn summarize_components(
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
 
-    let include_upstream_drift = status_includes_upstream_drift(args);
-    let include_unreleased_merges = status_includes_unreleased_merges(args);
+    let include_upstream_drift = args.includes_upstream_drift();
+    let include_unreleased_merges = args.includes_unreleased_merges();
 
     if include_upstream_drift || include_unreleased_merges {
         for comp in &components {
@@ -337,7 +351,7 @@ fn summarize_components(
     }
 
     // Apply filters if any are set
-    let has_filter = status_has_filter(args);
+    let has_filter = args.has_filter();
 
     if has_filter {
         if !args.uncommitted {
@@ -388,18 +402,6 @@ fn summarize_components(
         }),
         0,
     ))
-}
-
-fn status_has_filter(args: &StatusArgs) -> bool {
-    args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased
-}
-
-fn status_includes_upstream_drift(args: &StatusArgs) -> bool {
-    !status_has_filter(args)
-}
-
-fn status_includes_unreleased_merges(args: &StatusArgs) -> bool {
-    !status_has_filter(args) || args.unreleased
 }
 
 /// Path override mode: inspect one checkout without requiring registry membership.
@@ -1012,8 +1014,8 @@ mod tests {
     fn unfiltered_summary_includes_origin_dependent_sections() {
         let args = status_args(None, "/tmp/example".to_string(), false);
 
-        assert!(status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
+        assert!(args.includes_upstream_drift());
+        assert!(args.includes_unreleased_merges());
     }
 
     #[test]
@@ -1021,8 +1023,8 @@ mod tests {
         let mut args = status_args(None, "/tmp/example".to_string(), false);
         args.needs_release = true;
 
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(!status_includes_unreleased_merges(&args));
+        assert!(!args.includes_upstream_drift());
+        assert!(!args.includes_unreleased_merges());
     }
 
     #[test]
@@ -1030,8 +1032,8 @@ mod tests {
         let mut args = status_args(None, "/tmp/example".to_string(), false);
         args.unreleased = true;
 
-        assert!(!status_includes_upstream_drift(&args));
-        assert!(status_includes_unreleased_merges(&args));
+        assert!(!args.includes_upstream_drift());
+        assert!(args.includes_unreleased_merges());
     }
 
     #[test]
