@@ -7,11 +7,12 @@ use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use crate::commands::GlobalArgs;
-use crate::core::extension::load_all_extensions;
+use crate::core::extension::{list_summaries, load_all_extensions};
 use crate::core::upgrade;
 
 pub struct CliRuntime {
     extension_info: Vec<ExtensionCliInfo>,
+    extension_health: ExtensionCliHealth,
 }
 
 struct ExtensionCliCommand {
@@ -29,10 +30,23 @@ struct ExtensionCliInfo {
     examples: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ExtensionCliHealth {
+    load_error: Option<String>,
+    broken_link_ids: Vec<String>,
+}
+
+struct ExtensionCliDiscovery {
+    info: Vec<ExtensionCliInfo>,
+    health: ExtensionCliHealth,
+}
+
 impl CliRuntime {
     pub fn new() -> Self {
+        let discovery = collect_extension_cli_info();
         Self {
-            extension_info: collect_extension_cli_info(),
+            extension_info: discovery.info,
+            extension_health: discovery.health,
         }
     }
 
@@ -54,7 +68,7 @@ impl CliRuntime {
         {
             Ok(matches) => matches,
             Err(err) => {
-                if let Some(output) = try_augment_clap_error(&err) {
+                if let Some(output) = try_augment_clap_error(&err, &self.extension_health) {
                     eprintln!("{}", output);
                     std::process::exit(2);
                 }
@@ -166,7 +180,7 @@ impl CliRuntime {
     }
 
     fn build_augmented_command(&self) -> Command {
-        build_augmented_command(&self.extension_info)
+        build_augmented_command(&self.extension_info, &self.extension_health)
     }
 
     fn try_parse_extension_cli_command(&self, matches: &ArgMatches) -> Option<ExtensionCliCommand> {
@@ -184,9 +198,21 @@ impl Default for CliRuntime {
     }
 }
 
-fn collect_extension_cli_info() -> Vec<ExtensionCliInfo> {
-    load_all_extensions()
-        .unwrap_or_default()
+fn collect_extension_cli_info() -> ExtensionCliDiscovery {
+    let summaries = list_summaries(None);
+    let mut broken_link_ids: Vec<String> = summaries
+        .iter()
+        .filter(|summary| summary.error.as_deref() == Some("target_missing"))
+        .map(|summary| summary.id.clone())
+        .collect();
+    broken_link_ids.sort();
+
+    let (extensions, load_error) = match load_all_extensions() {
+        Ok(extensions) => (extensions, None),
+        Err(error) => (Vec::new(), Some(error.message)),
+    };
+
+    let info = extensions
         .into_iter()
         .filter_map(|m| {
             m.cli.map(|cli| {
@@ -201,10 +227,21 @@ fn collect_extension_cli_info() -> Vec<ExtensionCliInfo> {
                 }
             })
         })
-        .collect()
+        .collect();
+
+    ExtensionCliDiscovery {
+        info,
+        health: ExtensionCliHealth {
+            load_error,
+            broken_link_ids,
+        },
+    }
 }
 
-fn build_augmented_command(extension_info: &[ExtensionCliInfo]) -> Command {
+fn build_augmented_command(
+    extension_info: &[ExtensionCliInfo],
+    extension_health: &ExtensionCliHealth,
+) -> Command {
     let mut cmd = Cli::command();
 
     for info in extension_info {
@@ -245,7 +282,47 @@ fn build_augmented_command(extension_info: &[ExtensionCliInfo]) -> Command {
         cmd = cmd.subcommand(subcommand);
     }
 
+    if let Some(after_help) = extension_after_help(extension_info, extension_health) {
+        cmd = cmd.after_help(after_help);
+    }
+
     cmd
+}
+
+fn extension_after_help(
+    extension_info: &[ExtensionCliInfo],
+    extension_health: &ExtensionCliHealth,
+) -> Option<String> {
+    let mut lines = Vec::new();
+
+    if !extension_info.is_empty() {
+        let commands = extension_info
+            .iter()
+            .map(|info| info.tool.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Extension-provided commands: {commands}"));
+    }
+
+    if let Some(error) = &extension_health.load_error {
+        lines.push(format!(
+            "Extension discovery warning: {error}. Run `homeboy extension list` for details."
+        ));
+    }
+
+    if !extension_health.broken_link_ids.is_empty() {
+        lines.push(format!(
+            "Extension health warning: {} broken extension link(s): {}. Run `homeboy extension list` for details or `homeboy extension relink <id> <path>` to repair.",
+            extension_health.broken_link_ids.len(),
+            extension_health.broken_link_ids.join(", ")
+        ));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 fn try_parse_extension_cli_command(
@@ -382,36 +459,56 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
 
 /// Attempt to augment a clap error with entity suggestions.
 /// Returns Some(augmented_message) if the unrecognized string matches a known entity.
-fn try_augment_clap_error(e: &clap::Error) -> Option<String> {
-    use clap::error::ErrorKind;
-
-    // Only handle InvalidSubcommand errors.
-    if e.kind() != ErrorKind::InvalidSubcommand {
-        return None;
-    }
-
+fn try_augment_clap_error(
+    e: &clap::Error,
+    extension_health: &ExtensionCliHealth,
+) -> Option<String> {
     // Extract unrecognized subcommand and parent command from error.
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
 
-    // Check if it matches a known entity.
-    let entity_match = entity_suggest::find_entity_match(&unrecognized)?;
+    let mut hints = entity_suggest::find_entity_match(&unrecognized)
+        .map(|entity_match| {
+            entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized)
+        })
+        .unwrap_or_default();
 
-    // Generate hints.
-    let hints =
-        entity_suggest::generate_entity_hints(&entity_match, &parent_command, &unrecognized);
+    append_extension_health_hints(&mut hints, extension_health);
+
+    if hints.is_empty() {
+        return None;
+    }
 
     // Build augmented output.
     let mut output = format!("error: unrecognized subcommand '{}'\n\n", unrecognized);
     for hint in hints {
         output.push_str(&format!("hint: {}\n", hint));
     }
-    output.push_str(&format!(
-        "\nFor more information, try 'homeboy {} --help'",
-        parent_command
-    ));
+    if parent_command.is_empty() {
+        output.push_str("\nFor more information, try 'homeboy --help'");
+    } else {
+        output.push_str(&format!(
+            "\nFor more information, try 'homeboy {} --help'",
+            parent_command
+        ));
+    }
 
     Some(output)
+}
+
+fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &ExtensionCliHealth) {
+    if extension_health.load_error.is_some() || !extension_health.broken_link_ids.is_empty() {
+        hints.push(
+            "extension-provided commands may be unavailable; run `homeboy extension list` to inspect extension health".to_string(),
+        );
+    }
+
+    if !extension_health.broken_link_ids.is_empty() {
+        hints.push(format!(
+            "broken extension link(s): {}; repair with `homeboy extension relink <id> <path>`",
+            extension_health.broken_link_ids.join(", ")
+        ));
+    }
 }
 
 /// Extract the unrecognized subcommand string from a clap error.
@@ -425,13 +522,23 @@ fn extract_unrecognized_from_error(e: &clap::Error) -> Option<String> {
         }
     }
 
-    // Fallback: parse from error message.
-    // Format: "error: unrecognized subcommand 'xyz'"
+    // Fallback: parse from error message. Clap wording varies between
+    // contexts and versions.
     let msg = e.to_string();
-    if let Some(start) = msg.find("unrecognized subcommand '") {
-        let rest = &msg[start + 25..];
-        if let Some(end) = rest.find('\'') {
-            return Some(rest[..end].to_string());
+    for marker in ["unrecognized subcommand '", "subcommand '"] {
+        if let Some(start) = msg.find(marker) {
+            let rest = &msg[start + marker.len()..];
+            if let Some(end) = rest.find('\'') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    for marker in ["unrecognized subcommand `", "subcommand `"] {
+        if let Some(start) = msg.find(marker) {
+            let rest = &msg[start + marker.len()..];
+            if let Some(end) = rest.find('`') {
+                return Some(rest[..end].to_string());
+            }
         }
     }
 
@@ -470,7 +577,7 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
         }
     }
 
-    None
+    Some(String::new())
 }
 
 #[cfg(test)]
@@ -513,6 +620,36 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn sample_extension_info(tool: &str) -> ExtensionCliInfo {
+        ExtensionCliInfo {
+            tool: tool.to_string(),
+            display_name: "Sample CLI".to_string(),
+            extension_name: "Sample Extension".to_string(),
+            project_id_help: None,
+            args_help: None,
+            examples: Vec::new(),
+        }
+    }
+
+    fn write_cli_extension(home: &std::path::Path, id: &str, tool: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "WordPress Extension",
+                "version": "0.0.0",
+                "cli": {
+                    "tool": tool,
+                    "display_name": "WordPress CLI",
+                    "command_template": "{{cliPath}} {{args}}"
+                }
+            })
+            .to_string(),
+        )
+        .expect("extension manifest");
+    }
+
     #[test]
     fn output_format_names_are_rejected_as_global_output_paths() {
         let err = output_runtime::validate_output_file_path("json")
@@ -525,6 +662,72 @@ mod tests {
     #[test]
     fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
+    }
+
+    #[test]
+    fn root_help_lists_extension_provided_commands() {
+        let mut command = build_augmented_command(
+            &[sample_extension_info("wp")],
+            &ExtensionCliHealth::default(),
+        );
+
+        let help = command.render_help().to_string();
+
+        assert!(help.contains("Extension-provided commands: wp"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_help_warns_about_broken_extension_links_without_paths() {
+        let health = ExtensionCliHealth {
+            load_error: None,
+            broken_link_ids: vec!["wordpress".to_string()],
+        };
+        let mut command = build_augmented_command(&[], &health);
+
+        let help = command.render_help().to_string();
+
+        assert!(help.contains("Extension health warning: 1 broken extension link(s): wordpress"));
+        assert!(help.contains("homeboy extension list"));
+        assert!(help.contains("homeboy extension relink <id> <path>"));
+        assert!(!help.contains("/missing-wordpress"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_dynamic_command_points_to_extension_health_when_links_are_broken() {
+        let command = build_augmented_command(&[], &ExtensionCliHealth::default());
+        let err = command
+            .try_get_matches_from(["homeboy", "wp"])
+            .expect_err("wp should not parse without extension command metadata");
+        let health = ExtensionCliHealth {
+            load_error: None,
+            broken_link_ids: vec!["wordpress".to_string()],
+        };
+
+        let output = try_augment_clap_error(&err, &health).expect("extension health hint");
+
+        assert!(output.contains("extension-provided commands may be unavailable"));
+        assert!(output.contains("broken extension link(s): wordpress"));
+        assert!(output.contains("homeboy extension list"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extension_discovery_reports_dynamic_commands_and_broken_links() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "wordpress", "wp");
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            let link = extensions_dir.join("nodejs");
+            let target = extensions_dir.join("missing-nodejs");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let discovery = collect_extension_cli_info();
+
+            assert_eq!(discovery.info.len(), 1);
+            assert_eq!(discovery.info[0].tool, "wp");
+            assert_eq!(discovery.health.broken_link_ids, vec!["nodejs"]);
+        });
     }
 
     #[test]
