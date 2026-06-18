@@ -88,6 +88,52 @@ struct ProcessWatchState {
     last_poll: Option<Instant>,
 }
 
+impl ProcessWatchState {
+    fn is_due(&mut self, start: Instant, interval: Duration) -> bool {
+        let now = Instant::now();
+        if self.last_poll.is_none()
+            || now
+                .duration_since(self.last_poll.unwrap_or(start))
+                .ge(&interval)
+        {
+            self.last_poll = Some(now);
+            return true;
+        }
+        false
+    }
+
+    fn poll_due<F>(
+        process_watches: &mut [ProcessWatchState],
+        start: Instant,
+        interval: Duration,
+        t_ms: u64,
+        mut capture_snapshot: F,
+    ) -> homeboy::core::Result<Vec<TraceEvent>>
+    where
+        F: FnMut() -> homeboy::core::Result<String>,
+    {
+        let mut process_snapshot = None;
+        let mut events = Vec::new();
+
+        for watch in process_watches {
+            if watch.is_due(start, interval) {
+                if process_snapshot.is_none() {
+                    process_snapshot = Some(capture_snapshot()?);
+                }
+                events.extend(poll_process_watch_from_snapshot(
+                    watch,
+                    t_ms,
+                    process_snapshot
+                        .as_deref()
+                        .expect("process snapshot should be captured before polling watches"),
+                ));
+            }
+        }
+
+        Ok(events)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProcessInfo {
     ppid: u32,
@@ -241,7 +287,7 @@ fn collect_timeline(args: &ObserveArgs) -> homeboy::core::Result<Vec<TraceEvent>
         for tail in &mut tail_logs {
             timeline.extend(poll_tail_log(tail, t_ms)?);
         }
-        timeline.extend(poll_due_process_watches(
+        timeline.extend(ProcessWatchState::poll_due(
             &mut process_watches,
             start,
             args.watch_process_interval,
@@ -316,50 +362,6 @@ fn build_process_watch_states(args: &ObserveArgs) -> homeboy::core::Result<Vec<P
             })
         })
         .collect()
-}
-
-fn watch_process_is_due(state: &mut ProcessWatchState, start: Instant, interval: Duration) -> bool {
-    let now = Instant::now();
-    if state.last_poll.is_none()
-        || now
-            .duration_since(state.last_poll.unwrap_or(start))
-            .ge(&interval)
-    {
-        state.last_poll = Some(now);
-        return true;
-    }
-    false
-}
-
-fn poll_due_process_watches<F>(
-    process_watches: &mut [ProcessWatchState],
-    start: Instant,
-    interval: Duration,
-    t_ms: u64,
-    mut capture_snapshot: F,
-) -> homeboy::core::Result<Vec<TraceEvent>>
-where
-    F: FnMut() -> homeboy::core::Result<String>,
-{
-    let mut process_snapshot = None;
-    let mut events = Vec::new();
-
-    for watch in process_watches {
-        if watch_process_is_due(watch, start, interval) {
-            if process_snapshot.is_none() {
-                process_snapshot = Some(capture_snapshot()?);
-            }
-            events.extend(poll_process_watch_from_snapshot(
-                watch,
-                t_ms,
-                process_snapshot
-                    .as_deref()
-                    .expect("process snapshot should be captured before polling watches"),
-            ));
-        }
-    }
-
-    Ok(events)
 }
 
 fn poll_tail_log(state: &mut TailLogState, t_ms: u64) -> homeboy::core::Result<Vec<TraceEvent>> {
@@ -775,7 +777,7 @@ mod tests {
         ];
         let mut captures = 0;
 
-        let events = poll_due_process_watches(
+        let events = ProcessWatchState::poll_due(
             &mut watches,
             Instant::now(),
             Duration::from_secs(1),
