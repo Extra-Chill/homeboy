@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.8] - 2026-06-18
+
+### Changed
+- Forward Codebox runtime profiles
+
 ## [3.7.7] - 2026-06-18
 
 ### Changed
