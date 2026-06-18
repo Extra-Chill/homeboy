@@ -155,7 +155,7 @@ during build).
   schema.
 
 - **WP version pinning.** The WordPress test runner defaults to `6.9`, and
-  the `wp_codebox_wordpress_version` setting can pass a different WordPress version.
+  the `wordpress_runtime_version` setting can pass a different WordPress version.
   The selected WordPress version must
   match the `wp-phpunit` package version. Don't forget to update both when
   bumping WordPress. A mismatch often manifests as missing `WP_UnitTestCase`

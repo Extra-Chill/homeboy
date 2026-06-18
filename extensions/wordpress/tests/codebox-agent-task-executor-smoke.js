@@ -888,7 +888,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
     config: datamachineAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       runtime_bin: '/bin/wp-codebox-runtime',
-      runtime_wordpress_version: 'beta',
+      wordpress_runtime_version: 'beta',
       runtime_mounts: [{
         type: 'file',
         source: '/host/driver.php',
@@ -918,6 +918,19 @@ assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime, '
 assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
 assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine'), false);
 assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine_code'), false);
+
+const deprecatedWordPressRuntimeVersionRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'runtime-contract-task-deprecated-wordpress-version',
+  executor: {
+    backend: 'codebox',
+    config: datamachineAgentCiCodeboxExecutorConfig({
+      provider: 'codex',
+      wp_codebox_wordpress_version: '6.9',
+    }),
+  },
+});
+assert.equal(deprecatedWordPressRuntimeVersionRequest.wp, '6.9');
 
 const defaultsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-defaults-'));
 try {

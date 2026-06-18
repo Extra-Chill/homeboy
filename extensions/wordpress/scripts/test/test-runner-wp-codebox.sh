@@ -639,7 +639,7 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.phpunit_no_tests // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && PHPUNIT_NO_TESTS="$extracted"
 
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_multisite // empty' 2>/dev/null || true)

@@ -302,7 +302,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     homeboy_path: config.homeboy || config.homeboy_path || runtimeOptions.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || runtimeOptions.homeboyExtensions || '',
     wp_codebox_bin: firstValue(config.runtime_bin, config.wp_codebox_bin, config.wpCodeboxBin, runtimeOptions.wpCodeboxBin, defaults.wpCodeboxBin, ''),
-    wp: config.runtime_wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || config.wordpress_version || runtimeOptions.wpCodeboxWordpressVersion || '',
+    wp: config.runtime_wordpress_version || config.wordpress_runtime_version || config.wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || runtimeOptions.wpCodeboxWordpressVersion || '',
     artifacts_path: config.artifacts || config.artifacts_path || runtimeOptions.artifacts || '',
     max_turns: config.max_turns || runtimeOptions.maxTurns,
     task_timeout_seconds: config.task_timeout_seconds || timeoutSeconds || timeoutFromMs || runtimeOptions.taskTimeoutSeconds,

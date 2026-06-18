@@ -368,7 +368,7 @@ knobs to `homeboy-codebox-agent-task-executor.cjs` through the quarantined
 - Bundle location: `bundle_path`, `bundle_repo`, `bundle_ref`, `bundle_path_in_repo`.
 - Agent selection: `agent_slug`, `pipeline_slug`, `flow_slug`, `prompt`, `provider`, `model`.
 - Provider plugin: `provider_plugin`, with OpenAI defaults preserved when omitted for `provider: openai`.
-- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `wp_codebox_wordpress_version`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`.
+- WordPress runtime: `include_agent_runtime_dependencies`, runtime dependency refs, `wordpress_runtime_version`, `wp_codebox_ref`, `extra_wp_config_defines`, `extra_wp_codebox_mounts`, `workload_run_before`, `workload_run_after`.
 - GitHub access: `target_repo`, `app_token_repos`, `require_homeboy_app_token`, `allowed_repos`, `engine_key`, `tool_results_key`.
 - Agent limits: `max_turns`, `step_budget`, `time_budget_ms`.
 - Assertions and outputs: `success_requires_pr`, `success_completion_outcomes`, `engine_data_outputs`, `artifact_export_config`, `transcript_artifact_name`, `replay_bundle_artifact_name`.

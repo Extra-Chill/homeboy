@@ -1041,11 +1041,11 @@
       "description": "Optional browser bench target descriptor. Set {\"enabled\": true} to write HOMEBOY_BENCH_SHARED_STATE/browser-target.json. Include baseUrl/adminUrl for an already-running site; otherwise the file is metadata-only because the WP Codebox bench command exits after workloads complete. Login supports method plus username/password or password_env; raw target files are handoff artifacts and must not be published in reports."
     },
     {
-      "id": "wp_codebox_wordpress_version",
+      "id": "wordpress_runtime_version",
       "label": "WordPress runtime version",
       "type": "string",
       "default": "",
-      "description": "Optional WordPress core version passed to WP Codebox test and bench runners. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
+      "description": "Optional WordPress core version passed to WordPress test and bench runtime providers. Leave empty for the runner default. Use this when a component needs classes or behavior from a newer WordPress core build."
     },
     {
       "id": "wp_codebox_php_memory_limit",

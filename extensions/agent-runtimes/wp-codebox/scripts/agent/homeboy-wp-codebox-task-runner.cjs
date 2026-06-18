@@ -1129,7 +1129,7 @@ function runnerInput(request, artifacts) {
     component_contracts: uniqueComponentContracts((request.component_contracts || []).map(remapRuntimeComponentContract)),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
-    wp_version: request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
+    wp_version: request.wordpress_runtime_version || request.wordpress_version || request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
     agent_bundle: requestAgentBundle(request),
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }

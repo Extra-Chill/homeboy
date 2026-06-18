@@ -829,7 +829,7 @@ homeboy_wp_codebox_filter_scoped_validation_dependencies
 
 WP_CODEBOX_WORDPRESS_VERSION=""
 if [ "$settings_json" != "{}" ]; then
-    extracted=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+    extracted=$(printf '%s' "$settings_json" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 fi
 

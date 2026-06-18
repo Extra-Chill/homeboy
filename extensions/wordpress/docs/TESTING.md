@@ -565,7 +565,7 @@ if (result.status === 'process_exited') {
 
 ## Known gaps
 
-- **WP version defaults to 6.9.** Override `wp_codebox_wordpress_version` to pass
+- **WP version defaults to 6.9.** Override `wordpress_runtime_version` to pass
   a different WordPress version to WP Codebox. Mismatched versions produce
   missing-class errors.
 - **Multisite is opt-in.** Set `HOMEBOY_WORDPRESS_MULTISITE=1` or
