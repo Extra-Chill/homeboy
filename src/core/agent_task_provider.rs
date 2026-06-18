@@ -1550,7 +1550,166 @@ fn required_extension_ids_for_plan_with_providers(
     extension_ids.into_iter().collect()
 }
 
+/// Maximum number of attempts (1 initial + retries) for a transient provider
+/// or network failure. Mirrors the bounded-retry pattern already used for
+/// transient SSH failures (`server::client`) and SQLite-lock contention
+/// (`observation::store`).
+const PROVIDER_TRANSIENT_MAX_ATTEMPTS: u32 = 3;
+
+/// Base backoff between transient retries; doubles each attempt
+/// (250ms, 500ms, ...). Keeps a single network blip from failing a whole cook
+/// task without introducing unbounded delay.
+const PROVIDER_TRANSIENT_BASE_BACKOFF_MS: u64 = 250;
+
+/// Run the provider command with a bounded retry on transient provider/network
+/// failures.
+///
+/// Transient failures (timeouts, connection resets, cURL error 28, 5xx,
+/// temporarily-unavailable) are classified as retryable and retried with
+/// escalating backoff. Permanent failures (auth, validation, malformed input,
+/// capability gaps) fail fast on the first attempt. Each retry is surfaced in
+/// the returned outcome diagnostics so the behaviour is visible in run output.
 fn run_provider_command(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+) -> AgentTaskOutcome {
+    let mut attempt = 1;
+    loop {
+        let mut outcome = run_provider_command_once(request, provider);
+        classify_transient_provider_outcome(&mut outcome);
+
+        let retryable = outcome_is_transient(&outcome);
+        if !retryable || attempt >= PROVIDER_TRANSIENT_MAX_ATTEMPTS {
+            if attempt > 1 {
+                annotate_transient_retry(&mut outcome, attempt, retryable);
+            }
+            return outcome;
+        }
+
+        let backoff_ms = PROVIDER_TRANSIENT_BASE_BACKOFF_MS.saturating_mul(1u64 << (attempt - 1));
+        if backoff_ms > 0 {
+            std::thread::sleep(Duration::from_millis(backoff_ms));
+        }
+        attempt += 1;
+    }
+}
+
+/// True when an outcome represents a transient provider/network failure that is
+/// safe to retry.
+fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
+    outcome.failure_classification == Some(AgentTaskFailureClassification::Transient)
+}
+
+/// Promote a `ProviderError`/`Provider` outcome to the `Transient`
+/// classification when its surfaced text looks like a transient network or
+/// provider blip. Leaves permanent provider failures untouched so they keep
+/// failing fast.
+fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
+    let already_transient =
+        outcome.failure_classification == Some(AgentTaskFailureClassification::Transient);
+    let provider_failure = matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Failed
+    ) && matches!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Provider) | None
+    );
+
+    if already_transient {
+        return;
+    }
+    if !provider_failure {
+        return;
+    }
+
+    if outcome_text_is_transient(outcome) {
+        outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
+    }
+}
+
+/// Gather the human-facing text of an outcome (summary, diagnostic messages,
+/// diagnostic data) and check it for transient-failure signatures.
+fn outcome_text_is_transient(outcome: &AgentTaskOutcome) -> bool {
+    if let Some(summary) = outcome.summary.as_deref() {
+        if is_transient_provider_error(summary) {
+            return true;
+        }
+    }
+    for diagnostic in &outcome.diagnostics {
+        if is_transient_provider_error(&diagnostic.message) {
+            return true;
+        }
+        if is_transient_provider_error(&diagnostic.data.to_string()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Classify provider/network error text as transient (retryable) vs permanent.
+///
+/// Mirrors `server::client::is_transient_ssh_error`: matches on a curated set
+/// of substrings that indicate a transient blip rather than a deterministic
+/// failure. Matching is case-insensitive.
+fn is_transient_provider_error(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    const TRANSIENT_PATTERNS: [&str; 16] = [
+        "curl error 28",
+        "operation timed out",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "broken pipe",
+        "network error",
+        "network is unreachable",
+        "temporary failure",
+        "temporarily unavailable",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "too many requests",
+    ];
+
+    if TRANSIENT_PATTERNS
+        .iter()
+        .any(|pattern| lowered.contains(pattern))
+    {
+        return true;
+    }
+
+    // HTTP 5xx and 429 status codes are transient; 4xx (except 429) are not.
+    transient_status_code(&lowered)
+}
+
+/// Detect a transient HTTP status code (5xx or 429) mentioned in error text,
+/// while leaving permanent 4xx codes (400/401/403/404/422) non-retryable.
+fn transient_status_code(lowered: &str) -> bool {
+    const TRANSIENT_CODES: [&str; 7] = ["429", "500", "502", "503", "504", "522", "524"];
+    TRANSIENT_CODES.iter().any(|code| lowered.contains(code))
+}
+
+/// Record the transient retry history on the final outcome so operators can see
+/// that a cook task recovered from (or exhausted retries on) a transient blip.
+fn annotate_transient_retry(outcome: &mut AgentTaskOutcome, attempts: u32, exhausted: bool) {
+    let message = if exhausted {
+        format!(
+            "transient provider/network failure persisted after {attempts} attempt(s); retries exhausted"
+        )
+    } else {
+        format!(
+            "recovered after retrying transient provider/network failure ({attempts} attempt(s))"
+        )
+    };
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "agent_task.provider_transient_retry".to_string(),
+        message,
+        data: json!({ "attempts": attempts, "retries_exhausted": exhausted }),
+    });
+}
+
+fn run_provider_command_once(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> AgentTaskOutcome {
@@ -3945,5 +4104,167 @@ process.stdout.write(JSON.stringify({
             .artifacts
             .iter()
             .any(|artifact| artifact.kind == "runtime_bundle"));
+    }
+
+    #[test]
+    fn is_transient_provider_error_classifies_transient_and_permanent_text() {
+        // Transient network/provider blips.
+        assert!(is_transient_provider_error(
+            "Network error ... cURL error 28: Operation timed out after 15000ms"
+        ));
+        assert!(is_transient_provider_error("connection reset by peer"));
+        assert!(is_transient_provider_error("503 Service Unavailable"));
+        assert!(is_transient_provider_error("HTTP 502 Bad Gateway"));
+        assert!(is_transient_provider_error("429 Too Many Requests"));
+
+        // Permanent failures must not be treated as transient.
+        assert!(!is_transient_provider_error(
+            "401 Unauthorized: invalid token"
+        ));
+        assert!(!is_transient_provider_error(
+            "400 Bad Request: validation failed"
+        ));
+        assert!(!is_transient_provider_error("404 Not Found"));
+        assert!(!is_transient_provider_error(
+            "malformed JSON in provider output"
+        ));
+    }
+
+    /// Node script that increments a counter file and emits a transient cURL-28
+    /// provider error for the first `fail_until` attempts, then a success
+    /// outcome. Used to prove transient retries recover.
+    fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
+        let state = state_path.to_string_lossy().replace('\\', "\\\\");
+        script(&format!(
+            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+             let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
+             n+=1; fs.writeFileSync(p, String(n)); \
+             if (n <= {fail_until}) {{ \
+               process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'Network error ... cURL error 28: Operation timed out after 15000ms',failure_classification:'provider'}})); \
+             }} else {{ \
+               process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'recovered'}})); \
+             }}",
+        ))
+    }
+
+    /// Node script that increments a counter file and always emits a permanent
+    /// auth/validation provider error. Used to prove permanent errors fail fast.
+    fn permanent_error_script(state_path: &Path) -> String {
+        let state = state_path.to_string_lossy().replace('\\', "\\\\");
+        script(&format!(
+            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+             let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
+             n+=1; fs.writeFileSync(p, String(n)); \
+             process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'401 Unauthorized: invalid token',failure_classification:'provider'}}));",
+        ))
+    }
+
+    fn unique_state_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "homeboy-transient-retry-{}-{}-{}.count",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    #[test]
+    fn provider_retries_transient_error_then_succeeds() {
+        let state_path = unique_state_path("recover");
+        let _ = fs::remove_file(&state_path);
+        let command = format!("node {}", transient_then_success_script(&state_path, 2));
+        let (request, provider) = request("task-transient-recover", command);
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "transient blip should be retried until it recovers"
+        );
+        let attempts: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(attempts, 3, "two transient failures plus one success");
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.provider_transient_retry"),
+            "recovery should be surfaced as a diagnostic"
+        );
+        let _ = fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn provider_does_not_retry_permanent_error() {
+        let state_path = unique_state_path("permanent");
+        let _ = fs::remove_file(&state_path);
+        let command = format!("node {}", permanent_error_script(&state_path));
+        let (request, provider) = request("task-permanent", command);
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Provider),
+            "permanent auth/validation failures stay non-retryable"
+        );
+        let attempts: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(attempts, 1, "permanent error must fail fast, no retry");
+        assert!(
+            !outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.provider_transient_retry"),
+            "permanent failures should not record retry history"
+        );
+        let _ = fs::remove_file(&state_path);
+    }
+
+    #[test]
+    fn provider_exhausts_bounded_transient_retries() {
+        let state_path = unique_state_path("exhaust");
+        let _ = fs::remove_file(&state_path);
+        // Always transient: never recovers within the bounded attempt budget.
+        let command = format!("node {}", transient_then_success_script(&state_path, 999));
+        let (request, provider) = request("task-transient-exhaust", command);
+
+        let outcome = run_provider_command(&request, &provider);
+
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::ProviderError,
+            "persistent transient failure still fails after the bounded budget"
+        );
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Transient),
+            "exhausted transient failures stay classified as transient/retryable"
+        );
+        let attempts: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(
+            attempts, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+            "retry budget is bounded to PROVIDER_TRANSIENT_MAX_ATTEMPTS"
+        );
+        assert!(
+            outcome.diagnostics.iter().any(|d| {
+                d.class == "agent_task.provider_transient_retry"
+                    && d.data["retries_exhausted"] == json!(true)
+            }),
+            "exhaustion should be surfaced as a diagnostic"
+        );
+        let _ = fs::remove_file(&state_path);
     }
 }

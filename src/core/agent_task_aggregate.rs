@@ -313,7 +313,11 @@ fn reconcile_outcome(
         AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Timeout
     ) || matches!(
         outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Provider | AgentTaskFailureClassification::Timeout)
+        Some(
+            AgentTaskFailureClassification::Provider
+                | AgentTaskFailureClassification::Transient
+                | AgentTaskFailureClassification::Timeout
+        )
     ) {
         return (
             AgentTaskReconciliationDecision::RetryCandidate,

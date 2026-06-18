@@ -261,6 +261,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             ]),
             failure_classification: enum_values(&[
                 AgentTaskFailureClassification::Provider,
+                AgentTaskFailureClassification::Transient,
                 AgentTaskFailureClassification::Timeout,
                 AgentTaskFailureClassification::PolicyDenied,
                 AgentTaskFailureClassification::CapabilityMissing,
@@ -305,6 +306,7 @@ pub fn agent_task_outcome_statuses() -> Vec<String> {
 pub fn agent_task_failure_classifications() -> Vec<String> {
     enum_values(&[
         AgentTaskFailureClassification::Provider,
+        AgentTaskFailureClassification::Transient,
         AgentTaskFailureClassification::Timeout,
         AgentTaskFailureClassification::PolicyDenied,
         AgentTaskFailureClassification::CapabilityMissing,
