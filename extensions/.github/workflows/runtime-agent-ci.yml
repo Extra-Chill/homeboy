@@ -46,6 +46,16 @@ on:
         required: false
         type: string
         default: '{}'
+      runtime_output_projections:
+        description: JSON map of output names to provider runtime result paths.
+        required: false
+        type: string
+        default: '{}'
+      evidence_projections:
+        description: JSON array mapping provider operation results to named runtime outputs or artifact refs.
+        required: false
+        type: string
+        default: '[]'
       ability_requirements:
         description: JSON array of required ability/tool identifiers.
         required: false
@@ -95,6 +105,8 @@ jobs:
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
           RUNTIME_TASK: ${{ inputs.runtime_task }}
           RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
+          RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
+          EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
           ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           ARTIFACT_SLOTS: ${{ inputs.artifact_slots }}
@@ -126,6 +138,8 @@ jobs:
             runtimeComponentPaths: parseJson('RUNTIME_COMPONENT_PATHS', {}),
             ignoredWorkspacePaths: parseJson('IGNORED_WORKSPACE_PATHS', []),
             runtimeExecution: parseJson('RUNTIME_EXECUTION', {}),
+            runtimeOutputProjections: parseJson('RUNTIME_OUTPUT_PROJECTIONS', {}),
+            evidenceProjections: parseJson('EVIDENCE_PROJECTIONS', []),
             abilityInput: runtimeTask.input || {},
             ability: runtimeTask.ability,
             abilityRequirements: parseJson('ABILITY_REQUIREMENTS', []),

@@ -50,6 +50,8 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   ability: 'example/run-task',
   abilityInput: { prompt: 'Cook.' },
   abilityTools: [{ name: 'example_tool' }],
+  runtimeOutputProjections: { packet_url: 'metadata.artifacts.packet.url' },
+  evidenceProjections: [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }],
   artifactSlots: [{ name: 'packet', required: true }],
   transcriptSlots: [{ name: 'main', required: true }],
   runtimeInvocation: { operations: ['workspaceCommand'] },
@@ -62,6 +64,8 @@ assert.deepEqual(genericConfig.ignored_workspace_paths, ['.cache', 'tmp']);
 assert.deepEqual(genericConfig.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
 assert.deepEqual(genericConfig.ability_requirements, ['example/run-task', 'example/read-state']);
 assert.deepEqual(genericConfig.ability_tools, [{ name: 'example_tool' }]);
+assert.deepEqual(genericConfig.runtime_output_projections, { packet_url: 'metadata.artifacts.packet.url' });
+assert.deepEqual(genericConfig.evidence_projections, [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }]);
 assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true }]);
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
 assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
@@ -83,6 +87,23 @@ assert.deepEqual(genericBundleConfig.runtime_task.input.workflow, { name: 'mater
 assert.equal(genericBundleConfig.runtime_task.input.prompt, 'Cook a packet.');
 assert.equal(genericBundleConfig.runtime_execution.kind, 'bundle');
 assert.notEqual(genericBundleConfig.runtime_task.ability, 'datamachine/run-agent-bundle');
+
+const genericPackageConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  runtimeExecution: {
+    bundle: { path: '/workspace/example-repo/packages/example-agent' },
+    input: { prompt: 'Cook from package.' },
+  },
+  runtimeOutputProjections: { package_pr_url: 'metadata.publication.pr_url' },
+  evidenceProjections: [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }],
+});
+
+assert.equal(genericPackageConfig.runtime_task.ability, 'runtime/run-agent-bundle');
+assert.equal(genericPackageConfig.runtime_task.input.source, '/workspace/example-repo/packages/example-agent');
+assert.equal(genericPackageConfig.runtime_task.input.prompt, 'Cook from package.');
+assert.deepEqual(genericPackageConfig.runtime_output_projections, { package_pr_url: 'metadata.publication.pr_url' });
+assert.deepEqual(genericPackageConfig.evidence_projections, [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }]);
 
 const genericWorkflowConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeProfile: runtimeProfile.id,
