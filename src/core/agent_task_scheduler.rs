@@ -28,8 +28,6 @@ use crate::core::agent_task_timeout_artifacts::{
 };
 use crate::core::config::value_type_name;
 
-const SCHEDULER_MAX_RESULT_WAIT_MS: u64 = 25;
-
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
 /// Provider lifecycle payloads live with the agent-task schemas, but execution
@@ -344,7 +342,12 @@ where
                 continue;
             }
 
-            match rx.recv_timeout(scheduler_result_wait_timeout(&running)) {
+            let scheduler_event = match scheduler_result_wait_timeout(&running) {
+                Some(timeout) => rx.recv_timeout(timeout).map_err(Some),
+                None => rx.recv().map_err(|_| None),
+            };
+
+            match scheduler_event {
                 Ok(SchedulerEvent::Cancellation) => {
                     continue;
                 }
@@ -398,8 +401,8 @@ where
                     }
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(Some(mpsc::RecvTimeoutError::Timeout)) => {}
+                Err(Some(mpsc::RecvTimeoutError::Disconnected)) | Err(None) => break,
             }
         }
 
@@ -461,8 +464,7 @@ enum SchedulerEvent {
     Cancellation,
 }
 
-fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Duration {
-    let max_wait = Duration::from_millis(SCHEDULER_MAX_RESULT_WAIT_MS);
+fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Option<Duration> {
     running
         .iter()
         .filter_map(|task| {
@@ -474,8 +476,6 @@ fn scheduler_result_wait_timeout(running: &[RunningTask]) -> Duration {
             })
         })
         .min()
-        .map(|until_timeout| until_timeout.min(max_wait))
-        .unwrap_or(max_wait)
 }
 
 /// Record a finalized outcome in the completed-by-task index and the ordered
@@ -2100,13 +2100,10 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn scheduler_result_wait_timeout_uses_bounded_default_without_task_timeouts() {
+    fn scheduler_result_wait_timeout_blocks_without_task_timeouts() {
         let running = vec![running_task("task-1", None, Duration::from_millis(0))];
 
-        assert_eq!(
-            scheduler_result_wait_timeout(&running),
-            Duration::from_millis(SCHEDULER_MAX_RESULT_WAIT_MS)
-        );
+        assert_eq!(scheduler_result_wait_timeout(&running), None);
     }
 
     #[test]
@@ -2116,7 +2113,23 @@ mod tests {
             running_task("task-2", Some(1), Duration::from_millis(149)),
         ];
 
-        assert_eq!(scheduler_result_wait_timeout(&running), Duration::ZERO);
+        assert_eq!(
+            scheduler_result_wait_timeout(&running),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn scheduler_result_wait_timeout_is_not_capped_before_deadline() {
+        let running = vec![running_task(
+            "task-1",
+            Some(5_000),
+            Duration::from_millis(0),
+        )];
+
+        assert!(
+            scheduler_result_wait_timeout(&running).expect("deadline") > Duration::from_secs(1)
+        );
     }
 
     #[test]
