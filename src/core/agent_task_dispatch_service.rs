@@ -525,6 +525,18 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
     Ok(context)
 }
 
+/// Error returned when a resolved provider config is not a JSON object. Shared
+/// by the explicit-spec and post-default validation paths so both surface an
+/// identical message (#5091).
+fn provider_config_must_be_object_error() -> Error {
+    Error::validation_invalid_argument(
+        "provider-config",
+        "agent-task dispatch --provider-config must resolve to a JSON object",
+        None,
+        None,
+    )
+}
+
 fn dispatch_provider_config(
     request: &AgentTaskDispatchRequest,
     repo: &Option<String>,
@@ -543,12 +555,7 @@ fn dispatch_provider_config(
         })?;
 
         if !explicit.is_object() {
-            return Err(Error::validation_invalid_argument(
-                "provider-config",
-                "agent-task dispatch --provider-config must resolve to a JSON object",
-                None,
-                None,
-            ));
+            return Err(provider_config_must_be_object_error());
         }
 
         let map = config.as_object_mut().expect("global settings object");
@@ -561,12 +568,7 @@ fn dispatch_provider_config(
     }
 
     if !config.is_object() {
-        return Err(Error::validation_invalid_argument(
-            "provider-config",
-            "agent-task dispatch --provider-config must resolve to a JSON object",
-            None,
-            None,
-        ));
+        return Err(provider_config_must_be_object_error());
     }
 
     let mut config = materialize_provider_config_refs(config)?;

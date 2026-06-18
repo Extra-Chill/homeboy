@@ -29,6 +29,7 @@ use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
+use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::daemon_health::runner_daemon_health_failure;
 use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
 use super::super::lab_apply::apply_lab_offload_patch;
@@ -294,65 +295,6 @@ fn dirty_patch_provider_checkout_hints(source_path: &Path, status: &str) -> Vec<
     }
 
     hints
-}
-
-/// Explicit path-translation preflight for the remote dispatch argv.
-///
-/// By the time this runs the argv has already passed through the Lab offload
-/// remap pipeline (`remap_path_settings_in_args`, `remap_provider_config_in_args`,
-/// `rewrite_lab_offload_args`, ...), which rewrites controller-local paths to
-/// their synced remote locations. This is the final gate before
-/// [`exec`]: it rejects any argument that still embeds the controller-local
-/// source-checkout root, so a missed remap fails loudly on the controller
-/// instead of handing a non-existent local path to the remote runner.
-fn preflight_remote_argv_path_translation(
-    runner_id: &str,
-    command: &[String],
-    source_path: &Path,
-    remote_cwd: &str,
-) -> Result<()> {
-    let local_root = source_path.display().to_string();
-    let local_root = local_root.trim_end_matches('/');
-    if local_root.is_empty() {
-        return Ok(());
-    }
-
-    let leaked: Vec<String> = command
-        .iter()
-        .filter(|arg| arg_embeds_untranslated_local_path(arg, local_root, remote_cwd))
-        .cloned()
-        .collect();
-    if leaked.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "command",
-        format!(
-            "Lab offload refused to dispatch to runner `{runner_id}`: {} remote argv argument(s) still reference the controller-local source path `{local_root}` instead of the remote workspace `{remote_cwd}`",
-            leaked.len()
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![
-            format!("Untranslated argument(s): {}", leaked.join(", ")),
-            "This is a path-translation defect in the Lab offload remap pipeline; the argument must be remapped to the remote workspace path before dispatch.".to_string(),
-        ]),
-    ))
-}
-
-/// True when `arg` embeds the controller-local source root but has not been
-/// translated to the remote workspace path. Arguments that already point at the
-/// remote workspace (or do not reference the local root at all) are accepted.
-fn arg_embeds_untranslated_local_path(arg: &str, local_root: &str, remote_cwd: &str) -> bool {
-    if !arg.contains(local_root) {
-        return false;
-    }
-    // A correctly translated argument addresses the remote workspace root; if it
-    // happens to share a prefix string with the local root that is fine.
-    if !remote_cwd.is_empty() && arg.contains(remote_cwd) {
-        return false;
-    }
-    true
 }
 
 /// Record a freshly synced, remapped agent-task workspace entry: append it to
@@ -626,6 +568,7 @@ fn run_runner_resident_lab_offload(
     // patch-provider offload path before its remote dispatch (#5071).
     let source_path = lab_offload_source_path(request.normalized_args)?;
     preflight_remote_argv_path_translation(
+        "Lab offload",
         runner_id,
         &command,
         &source_path,
@@ -1304,7 +1247,13 @@ fn run_lab_offload_inner(
     // that no controller-local source-checkout path survived un-translated
     // before we dispatch the command to the remote runner, so a missed remap
     // fails loudly here instead of corrupting the remote run.
-    preflight_remote_argv_path_translation(runner_id, &command, &source_path, &remote_cwd)?;
+    preflight_remote_argv_path_translation(
+        "Lab offload",
+        runner_id,
+        &command,
+        &source_path,
+        &remote_cwd,
+    )?;
     let exec_result = exec(
         runner_id,
         RunnerExecOptions {

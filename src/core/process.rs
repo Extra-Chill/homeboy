@@ -1,5 +1,7 @@
-use crate::core::error::Result;
+use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Generic process step shape shared by command/runner adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,18 @@ pub fn pid_is_running(pid: u32) -> bool {
     {
         pid == std::process::id()
     }
+}
+
+/// Install a Ctrl-C / SIGINT handler that flips `stop` to `true` on the first
+/// signal, giving long-running loops a cooperative shutdown flag. The `context`
+/// label is woven into the error message so callers (reverse runner worker,
+/// preview client, ...) surface a distinct diagnostic on failure (#5092).
+pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<()> {
+    let context = context.to_string();
+    ctrlc::set_handler(move || {
+        stop.store(true, Ordering::SeqCst);
+    })
+    .map_err(|err| Error::internal_unexpected(format!("install {context} signal handler: {err}")))
 }
 
 #[cfg(test)]
