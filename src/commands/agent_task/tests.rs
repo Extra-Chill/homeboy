@@ -4,7 +4,9 @@
 use std::process::Command;
 
 use super::super::agent_task_dispatch::DispatchArgs;
-use super::args::{AgentTaskLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs};
+use super::args::{
+    AgentTaskLoopArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+};
 use super::controller::{
     apply_from_spec_dispatch_defaults, apply_from_spec_dispatch_defaults_with_cwd,
     controller_run_action_with_executor, controller_run_next_with_executor,
@@ -45,6 +47,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 use super::contract;
+use super::loop_definition;
 use super::{ContractArgs, ContractFormat};
 
 #[test]
@@ -98,6 +101,10 @@ fn contract_output_exports_core_agent_task_metadata() {
         "homeboy/secret-env-requirement/v1"
     );
     assert_eq!(
+        value["schemas"]["loop_definition"],
+        "homeboy/agent-task-loop-definition/v1"
+    );
+    assert_eq!(
         value["schemas"]["provider"],
         AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
     );
@@ -125,6 +132,46 @@ fn contract_output_exports_core_agent_task_metadata() {
         .as_array()
         .expect("sensitive keys")
         .contains(&json!("refresh_token")));
+}
+
+#[test]
+fn compile_loop_command_emits_agent_task_plan() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let definition_path = temp.path().join("loop-definition.json");
+    std::fs::write(
+        &definition_path,
+        serde_json::to_string(&json!({
+            "schema": "homeboy/agent-task-loop-definition/v1",
+            "loop_id": "cli/loop",
+            "tasks": [
+                { "task_id": "idea", "request": agent_task_request_json("idea") },
+                {
+                    "task_id": "design",
+                    "request": agent_task_request_json("design"),
+                    "depends_on": ["idea"],
+                    "bindings": {
+                        "concept_packet": { "task_id": "idea", "path": "/outputs/concept_packet" }
+                    }
+                }
+            ]
+        }))
+        .expect("definition json"),
+    )
+    .expect("write definition");
+
+    let (value, status) = loop_definition::compile_loop(CompileLoopArgs {
+        definition: format!("@{}", definition_path.display()),
+    })
+    .expect("compile loop");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["schema"], "homeboy/agent-task-plan/v1");
+    assert_eq!(value["plan_id"], "cli/loop");
+    assert_eq!(value["tasks"].as_array().expect("tasks").len(), 2);
+    assert_eq!(
+        value["output_dependencies"]["design"]["bindings"]["concept_packet"]["task_id"],
+        "idea"
+    );
 }
 
 #[test]
@@ -1137,4 +1184,12 @@ fn test_plan() -> AgentTaskPlan {
             metadata: Value::Null,
         }],
     )
+}
+
+fn agent_task_request_json(task_id: &str) -> Value {
+    let mut plan = test_plan();
+    let mut request = plan.tasks.pop().expect("test task");
+    request.task_id = task_id.to_string();
+    request.instructions = format!("run {task_id}");
+    serde_json::to_value(request).expect("request json")
 }

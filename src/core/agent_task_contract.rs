@@ -14,6 +14,7 @@ use crate::core::agent_task_lifecycle::AgentTaskRunState;
 use crate::core::agent_task_loop_controller::{
     AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
 };
+use crate::core::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::core::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA;
 use crate::core::agent_task_provider::{
     provider_capability_contract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
@@ -65,6 +66,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub cook_loop_report: String,
     pub loop_controller: String,
     pub loop_controller_status: String,
+    pub loop_definition: String,
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
     pub command_invocation: String,
@@ -136,6 +138,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             cook_loop_report: AGENT_TASK_COOK_LOOP_REPORT_SCHEMA.to_string(),
             loop_controller: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
             loop_controller_status: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
+            loop_definition: AGENT_TASK_LOOP_DEFINITION_SCHEMA.to_string(),
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
             command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),
