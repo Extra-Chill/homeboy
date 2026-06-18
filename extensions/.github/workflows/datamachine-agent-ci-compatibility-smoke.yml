@@ -1,4 +1,4 @@
-name: Data Machine Agent CI self-smoke
+name: Data Machine Agent CI compatibility smoke
 
 'on':
   workflow_dispatch:
@@ -15,24 +15,24 @@ jobs:
       homeboy_extensions_ref: ${{ github.sha }}
       runtime_provider: wp-codebox
       runtime_ref: main
-      runtime_profile: generic-self-smoke
+      runtime_profile: generic-boundary-smoke
       runtime_profiles: |
         {
-          "generic-self-smoke": {
-            "id": "generic-self-smoke",
+          "generic-boundary-smoke": {
+            "id": "generic-boundary-smoke",
             "runtime_task_ability": "example/acknowledge",
             "ability_requirements": ["example/acknowledge"]
           }
         }
-      workload_id: generic-self-smoke
+      workload_id: generic-boundary-smoke
       target_repo: Extra-Chill/homeboy-extensions
       prompt: Exercise the generic runtime full-run dry-run path.
       runtime_task: '{"ability":"example/acknowledge","input":{"message":"hello"}}'
       success_requires_pr: false
       dry_run: true
-      callback_data: '{"source":"self-smoke"}'
+      callback_data: '{"source":"compatibility-smoke"}'
 
-  self-smoke:
+  compatibility-bundle-smoke:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
@@ -56,7 +56,7 @@ jobs:
       HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
-  generic-provider-smoke:
+  compatibility-provider-plugin-smoke:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent
@@ -86,7 +86,7 @@ jobs:
       HOMEBOY_APP_PRIVATE_KEY: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
       PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
 
-  wp-codebox-runtime-smoke:
+  compatibility-wp-codebox-runtime-smoke:
     uses: ./.github/workflows/datamachine-agent-ci.yml
     with:
       bundle_path: tests/fixtures/datamachine-agent-self-smoke/bundles/self-smoke-agent

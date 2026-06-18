@@ -1,11 +1,14 @@
-# Reusable wrapper for Data Machine agent CI runs.
+# Compatibility-only wrapper for Data Machine agent CI runs.
+#
+# New consumers should call runtime-agent-full-run.yml directly. This wrapper
+# stays while default-branch callers still reference the legacy workflow name.
 #
 # Consumers receive one stable `engine_data_json` output. GitHub Actions cannot
 # create dynamic workflow_call outputs from `engine_data_outputs`, so callers
 # should parse that JSON map in their own workflow when they need named fields.
 # The `auth_mode` output reports whether the run used a Homeboy GitHub App token
 # or the repository-scoped GitHub Actions token fallback.
-name: Data Machine Agent CI (reusable)
+name: Data Machine Agent CI (compatibility wrapper)
 
 'on':
   workflow_call:

@@ -23,16 +23,26 @@ const files = [
 ];
 
 const failures = [];
+const compatibilityReferences = [];
 for (const file of files) {
   const body = fs.readFileSync(path.join(root, file), 'utf8');
   const match = body.match(forbidden);
   if (match) {
     failures.push(`${file}: ${match[0]}`);
   }
+
+  if (body.includes('datamachine-agent-ci')) {
+    compatibilityReferences.push(file);
+  }
 }
 
 if (failures.length > 0) {
   process.stderr.write(`Generic runtime full-run boundary violations:\n${failures.join('\n')}\n`);
+  process.exit(1);
+}
+
+if (compatibilityReferences.length > 0) {
+  process.stderr.write(`Generic runtime full-run references compatibility wrapper files:\n${compatibilityReferences.join('\n')}\n`);
   process.exit(1);
 }
 NODE

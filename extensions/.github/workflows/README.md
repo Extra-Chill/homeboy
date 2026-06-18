@@ -1,4 +1,4 @@
-# Data Machine Agent CI reusable workflow
+# Homeboy Extensions reusable workflows
 
 ## Actions Run Once
 
@@ -87,9 +87,10 @@ jobs:
 
 ### Legacy Data Machine Wrapper Mapping
 
-`datamachine-agent-ci.yml` remains as a compatibility wrapper and delegates to
-`runtime-agent-full-run.yml`. New consumers should call the generic workflow
-directly and supply the equivalent generic inputs:
+`datamachine-agent-ci.yml` is compatibility-only and delegates to
+`runtime-agent-full-run.yml`. Keep it for existing default-branch consumers, but
+new workflows should call the generic workflow directly and supply the equivalent
+generic inputs:
 
 | Legacy `datamachine-agent-ci.yml` input | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
@@ -123,13 +124,13 @@ directly and supply the equivalent generic inputs:
 | `app_token_repos`, `require_homeboy_app_token`, `allowed_repos` | same generic inputs |
 | `rules`, `general_rules`, `task_rules`, `probes` | same generic inputs |
 
-`datamachine-agent-ci.yml` wraps the common GitHub Actions shape for running a
-Data Machine agent bundle or a direct runtime task in a disposable WordPress
-execution substrate. Bundle consumers provide bundle and flow identifiers, a
-prompt, and optional output projections. Runtime-task consumers provide
-`execution_kind: runtime_task` plus `runtime_task` or the `ability_request` /
-`ability_input` shorthand. Agent runs use the WP Codebox substrate; the legacy
-direct Playground runner is no longer selectable by callers.
+`datamachine-agent-ci.yml` wraps the common GitHub Actions shape for existing
+Data Machine agent bundle consumers in a disposable WordPress execution
+substrate. Bundle consumers provide bundle and flow identifiers, a prompt, and
+optional output projections. Runtime-task consumers should migrate to
+`runtime-agent-full-run.yml` and pass `runtime_task` or the `ability_request` /
+`ability_input` shorthand directly. Agent runs use the WP Codebox substrate; the
+legacy direct Playground runner is no longer selectable by callers.
 See [`wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
 for the WP Codebox contract, runtime surface, and evaluation notes.
 
@@ -163,7 +164,7 @@ The workflow keeps two GitHub authentication modes:
 The run summary includes the selected auth mode, target repository, token scope,
 and whether the caller required a Homeboy App token. Tokens are never printed.
 
-## Example
+## Compatibility wrapper example
 
 ```yaml
 jobs:
@@ -182,6 +183,9 @@ jobs:
       transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
+
+Use this shape only when maintaining an existing Data Machine bundle caller. New
+callers should start from the `runtime-agent-full-run.yml` example above.
 
 ## World Creator agent example
 
