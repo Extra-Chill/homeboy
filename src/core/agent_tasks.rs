@@ -92,8 +92,8 @@ pub use super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskSchedul
 
 pub use super::agent_tool_control_plane::{
     dispatch_agent_tool_request, AgentToolControlPlaneDispatcher, AgentToolDispatchEvidence,
-    AgentToolDispatchOutcome, UnsupportedAgentToolControlPlaneDispatcher,
-    AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
+    AgentToolDispatchOutcome, HomeboyAgentToolControlPlaneDispatcher,
+    UnsupportedAgentToolControlPlaneDispatcher, AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA,
 };
 
 // Matrix expansion is `pub(crate)` on the implementation module; expose it

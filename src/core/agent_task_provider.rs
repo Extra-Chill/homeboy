@@ -23,6 +23,7 @@ use crate::core::agent_task_secrets::{
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::command_invocation::CommandInvocation;
+use crate::core::engine::shell;
 use crate::core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
 use crate::core::{agent_runtime_manifest, component, defaults, extension, Error};
 
@@ -2191,6 +2192,10 @@ fn provider_command_env(
             AGENT_TOOL_POLICY_SCHEMA.to_string(),
         ),
         (
+            "HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND".to_string(),
+            agent_tool_dispatch_command(),
+        ),
+        (
             "HOMEBOY_EXTENSION_ID".to_string(),
             provider.extension_id.clone().unwrap_or_default(),
         ),
@@ -2214,6 +2219,16 @@ fn provider_command_env(
         .map_err(ProviderCommandEnvError::Secret)?,
     );
     Ok(env)
+}
+
+fn agent_tool_dispatch_command() -> String {
+    let current_exe = std::env::current_exe()
+        .map(|path| path.to_string_lossy().to_string())
+        .expect("current executable path is required for agent tool dispatch command");
+    format!(
+        "{} agent-task tool dispatch",
+        shell::quote_arg(&current_exe)
+    )
 }
 
 fn failure_outcome(
@@ -2654,6 +2669,17 @@ mod tests {
             env.get("HOMEBOY_AGENT_TOOL_POLICY_SCHEMA")
                 .map(String::as_str),
             Some(AGENT_TOOL_POLICY_SCHEMA)
+        );
+        let dispatch_command = env
+            .get("HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND")
+            .expect("tool dispatch command env");
+        assert!(
+            dispatch_command.ends_with(" agent-task tool dispatch"),
+            "dispatch command should invoke hidden tool dispatch command: {dispatch_command}"
+        );
+        assert!(
+            dispatch_command.starts_with('/') || dispatch_command.starts_with('\''),
+            "dispatch command should start with an absolute executable path, shell quoted when needed: {dispatch_command}"
         );
 
         let policy: crate::core::agent_task::AgentToolPolicy = serde_json::from_str(
