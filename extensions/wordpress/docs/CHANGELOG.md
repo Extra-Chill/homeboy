@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.6.1] - 2026-06-18
+
+### Changed
+- Add WP Codebox runtime tool bridge
+
+### Fixed
+- Fix WP Codebox runtime bridge mu-plugin loading
+
 ## [3.6.0] - 2026-06-18
 
 ### Added
