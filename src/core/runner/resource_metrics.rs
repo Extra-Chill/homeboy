@@ -278,12 +278,16 @@ fn read_process_stat(pid: i32) -> Option<ProcessStat> {
 
 #[cfg(target_os = "linux")]
 fn clock_ticks_per_second() -> u64 {
-    command_u64("getconf", &["CLK_TCK"]).unwrap_or(100)
+    static CLOCK_TICKS_PER_SECOND: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+    *CLOCK_TICKS_PER_SECOND.get_or_init(|| command_u64("getconf", &["CLK_TCK"]).unwrap_or(100))
 }
 
 #[cfg(target_os = "linux")]
 fn page_size_bytes() -> u64 {
-    command_u64("getconf", &["PAGESIZE"]).unwrap_or(4096)
+    static PAGE_SIZE_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+    *PAGE_SIZE_BYTES.get_or_init(|| command_u64("getconf", &["PAGESIZE"]).unwrap_or(4096))
 }
 
 #[cfg(target_os = "linux")]
