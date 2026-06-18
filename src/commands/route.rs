@@ -58,8 +58,10 @@ pub fn route_after_parse(
             normalized_args,
             explicit_runner: cli.runner.as_deref(),
             force_hot: cli.force_hot,
-            allow_local_hot: cli.allow_local_hot,
-            allow_local_fallback: cli.allow_local_fallback,
+            local_policy: runners::LabLocalExecutionPolicy {
+                allow_local_hot: cli.allow_local_hot,
+                allow_local_fallback: cli.allow_local_fallback,
+            },
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: mutation_flag.is_some(),
             mutation_flag,

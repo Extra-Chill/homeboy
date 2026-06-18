@@ -80,13 +80,25 @@ use super::secrets::{
 };
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 
+/// Local-execution escape hatches shared across the Lab routing and offload
+/// request layers. Grouping these two flags keeps the policy shape identical
+/// wherever a Lab command is allowed to stay local instead of offloading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LabLocalExecutionPolicy {
+    /// Permit a `--force-hot` portable command to stay local even when a
+    /// default Lab runner exists.
+    pub allow_local_hot: bool,
+    /// Permit a selected Lab runner to fall back to local execution after
+    /// offload preflight fails.
+    pub allow_local_fallback: bool,
+}
+
 pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub force_hot: bool,
-    pub allow_local_hot: bool,
-    pub allow_local_fallback: bool,
+    pub local_policy: LabLocalExecutionPolicy,
     pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
     /// Human-readable flag (e.g. `--write`, `--fix`) that requested the
@@ -391,10 +403,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         &contract,
         request.explicit_runner,
         request.force_hot,
-        request.allow_local_hot,
+        request.local_policy.allow_local_hot,
     )?;
     let Some(selection) = selection else {
-        let reason = if request.force_hot && request.allow_local_hot {
+        let reason = if request.force_hot && request.local_policy.allow_local_hot {
             "force_hot_local_override"
         } else if request.force_hot {
             "force_hot"
@@ -473,7 +485,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     "release_gate",
                 ));
             }
-            if !request.allow_local_fallback {
+            if !request.local_policy.allow_local_fallback {
                 return Err(selected_runner_fallback_error(
                     &selection,
                     "Lab offload selected a runner but could not prepare it for remote execution",
@@ -913,7 +925,7 @@ fn run_lab_offload_inner(
                         &runner_status,
                         reason,
                         remediation,
-                        request.allow_local_fallback,
+                        request.local_policy.allow_local_fallback,
                     );
                 }
                 LabRunnerSelectionSource::Explicit => {
@@ -1292,7 +1304,7 @@ fn run_lab_offload_inner(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if !request.allow_local_fallback {
+                        if !request.local_policy.allow_local_fallback {
                             Err(selected_runner_fallback_error(
                                 &selection,
                                 "Lab offload selected a runner but its daemon did not respond",
@@ -3622,8 +3634,10 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "test".to_string()],
             explicit_runner: None,
             force_hot: true,
-            allow_local_hot: true,
-            allow_local_fallback: false,
+            local_policy: LabLocalExecutionPolicy {
+                allow_local_hot: true,
+                allow_local_fallback: false,
+            },
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
@@ -3652,8 +3666,7 @@ mod tests {
             ],
             explicit_runner: Some("homeboy-lab"),
             force_hot: false,
-            allow_local_hot: false,
-            allow_local_fallback: false,
+            local_policy: LabLocalExecutionPolicy::default(),
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
