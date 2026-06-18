@@ -17,9 +17,9 @@ const RECONCILIATION_SCHEMA = 'homeboy/static-site-fanout-reconciliation/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const WP_CODEBOX_TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const DEFAULT_PRESET = 'static-site/import-validation';
+const COMPATIBILITY_AGENT_TASK_BACKEND = 'codebox';
 const DEFAULT_AGENT_TASK_PRESET = {
   runtime_task: 'static-site/import-validation',
-  backend: 'codebox',
 };
 
 function createStaticSiteFanoutPlan(input = {}) {
@@ -59,7 +59,7 @@ function createStaticSiteFanoutPlan(input = {}) {
 
 function normalizeOrchestrator(input) {
   const preset = input.preset || input.controller?.preset || DEFAULT_PRESET;
-  return {
+  return stripUndefined({
     id: input.orchestrator_id || input.orchestrator?.id || 'homeboy-extensions/static-site-fanout-adapter',
     run_id: input.run_id || input.orchestrator?.run_id || input.controller?.run_id || 'static-site-fanout-run',
     plan_id: input.plan_id || input.orchestrator?.plan_id || input.controller?.loop_id || 'static-site-fanout-plan',
@@ -69,10 +69,11 @@ function normalizeOrchestrator(input) {
     parent_plan_id: input.parent_plan_id || input.parentPlanId || input.orchestrator?.parent_plan_id || '',
     provider: input.provider || '',
     model: input.model || '',
+    backend: input.backend || input.runtime_backend || input.runtimeBackend || input.agent_runtime_backend || input.agentRuntimeBackend || undefined,
     provider_plugin_paths: normalizeArray(input.provider_plugin_paths || input.providerPluginPaths),
     secret_env: normalizeArray(input.secret_env || input.secretEnv),
     request_schema: requestSchema(input.request_kind || input.requestKind || 'agent-task'),
-  };
+  });
 }
 
 function normalizeFindings(findings) {
@@ -142,6 +143,7 @@ function createTaskRequest(group, orchestrator, options = {}) {
 function createAgentTaskRequest(group, orchestrator, options = {}) {
   const runtime = {
     ...DEFAULT_AGENT_TASK_PRESET,
+    backend: orchestrator.backend || COMPATIBILITY_AGENT_TASK_BACKEND,
     ...(options.agent_task || options.agentTask || {}),
   };
   const taskId = taskIdForGroup(group, orchestrator, 'static-site');
@@ -159,7 +161,7 @@ function createAgentTaskRequest(group, orchestrator, options = {}) {
     group_key: group.key,
     parent_plan_id: orchestrator.parent_plan_id || orchestrator.plan_id,
     executor: stripUndefined({
-      backend: runtime.backend || 'codebox',
+      backend: runtime.backend || COMPATIBILITY_AGENT_TASK_BACKEND,
       secret_env: orchestrator.secret_env.length > 0 ? orchestrator.secret_env : undefined,
       config: stripUndefined({
         provider: orchestrator.provider || undefined,
@@ -481,6 +483,7 @@ module.exports = {
   AGENT_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_TASK_SCHEMA,
   DEFAULT_PRESET,
+  COMPATIBILITY_AGENT_TASK_BACKEND,
   createStaticSiteFanoutPlan,
   executeStaticSiteFanout,
   normalizeArtifactRefs,

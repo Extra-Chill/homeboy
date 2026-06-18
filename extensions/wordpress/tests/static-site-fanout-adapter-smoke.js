@@ -37,6 +37,14 @@ async function main() {
   assert.equal(plan.task_requests[0].inputs.finding_ids.length, 2);
   assert.equal(plan.task_requests[0].inputs.artifact_refs[0].kind, 'diagnostic');
 
+  const genericBackendPlan = createStaticSiteFanoutPlan({
+    run_id: 'generic-backend-run',
+    backend: 'opencode',
+    findings: [findings[0]],
+  });
+  assert.equal(genericBackendPlan.orchestrator.backend, 'opencode');
+  assert.equal(genericBackendPlan.task_requests[0].executor.backend, 'opencode');
+
   const codeboxPlan = createStaticSiteFanoutPlan({
     run_id: 'fixture-run',
     request_kind: 'wp-codebox',

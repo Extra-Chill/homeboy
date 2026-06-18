@@ -140,6 +140,8 @@ assert.equal(genericWorkflowConfig.runtime_task.input.dry_run, true);
 
 const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
   taskId: 'task-1',
+  backend: 'codebox',
+  runtimeProvider: 'codebox',
   runtimeProfile: runtimeProfile.id,
   runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
   ability: 'example/run-task',

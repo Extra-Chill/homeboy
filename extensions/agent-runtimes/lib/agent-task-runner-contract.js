@@ -8,7 +8,7 @@ function agentTaskRunnerSpec(options = {}) {
     throw new Error('config is required.');
   }
 
-  const backend = requiredString(options.backend || 'codebox', 'backend');
+  const backend = requiredString(options.backend, 'backend');
   const taskTimeoutSeconds = options.taskTimeoutSeconds || options.task_timeout_seconds;
   const limits = stripUndefined({
     ...(taskTimeoutSeconds ? { task_timeout_seconds: taskTimeoutSeconds } : {}),

@@ -19,10 +19,54 @@ function runtimeManifestPath(runtimeId, repoRoot = repoRootFromHere()) {
 
 function runtimeRegistry(options = {}) {
 	const repoRoot = options.repoRoot || repoRootFromHere();
-	const manifests = {
-		[DEFAULT_RUNTIME_ID]: readJson(runtimeManifestPath(DEFAULT_RUNTIME_ID, repoRoot)),
-	};
+	const manifests = {};
+	const runtimesRoot = path.join(repoRoot, 'agent-runtimes');
+	for (const manifestPath of runtimeManifestPaths(runtimesRoot)) {
+		let manifest;
+		try {
+			manifest = readJson(manifestPath);
+		} catch {
+			continue;
+		}
+		if (!isRuntimeManifest(manifest)) {
+			continue;
+		}
+		manifests[manifest.id] = manifest;
+	}
 	return manifests;
+}
+
+function runtimeManifestPaths(runtimesRoot) {
+	let entries;
+	try {
+		entries = fs.readdirSync(runtimesRoot, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((entry) => entry.isDirectory())
+		.flatMap((entry) => {
+			const runtimeDir = path.join(runtimesRoot, entry.name);
+			try {
+				return fs.readdirSync(runtimeDir, { withFileTypes: true })
+					.filter((candidate) => candidate.isFile() && candidate.name.endsWith('.json'))
+					.map((candidate) => path.join(runtimeDir, candidate.name));
+			} catch {
+				return [];
+			}
+		});
+}
+
+function isRuntimeManifest(manifest) {
+	return Boolean(
+		manifest &&
+		typeof manifest === 'object' &&
+		!Array.isArray(manifest) &&
+		manifest.schema === 'homeboy/agent-runtime-manifest/v1' &&
+		typeof manifest.id === 'string' &&
+		manifest.id.trim() !== '' &&
+		Array.isArray(manifest.agent_task_executors)
+	);
 }
 
 function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
@@ -87,12 +131,21 @@ function resolvePaths(paths, workspace) {
 
 function resolveExecutor(manifest, repoRoot) {
 	const provider = Array.isArray(manifest.agent_task_executors) ? manifest.agent_task_executors[0] : null;
-	const argv = provider?.invocation?.argv || [];
-	const scriptArg = argv.find((arg) => typeof arg === 'string' && arg.includes('{{runtime_path}}')) || '';
+	const scriptArg = executorScriptArg(provider);
 	return {
 		backend: provider?.backend || '',
 		path: scriptArg ? scriptArg.replace('{{runtime_path}}', path.join(repoRoot, 'agent-runtimes', manifest.id)) : '',
 	};
+}
+
+function executorScriptArg(provider) {
+	const argv = provider?.invocation?.argv || [];
+	const invocationArg = argv.find((arg) => typeof arg === 'string' && arg.includes('{{runtime_path}}')) || '';
+	if (invocationArg) {
+		return invocationArg;
+	}
+	const command = provider?.command || '';
+	return command.split(/\s+/).find((arg) => arg.includes('{{runtime_path}}')) || '';
 }
 
 module.exports = {

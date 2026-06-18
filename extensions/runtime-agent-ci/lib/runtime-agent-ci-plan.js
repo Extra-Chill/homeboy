@@ -60,7 +60,7 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   const taskExecutorConfig = context.taskExecutorConfig || runtimeAgentCiTaskExecutorConfig;
   const config = taskExecutorConfig(options);
   return agentTaskRunnerSpec({
-    backend: options.backend || options.runtimeProvider || options.runtime_provider || 'codebox',
+    backend: options.backend || options.runtimeBackend || options.runtime_backend,
     config,
     secret_env: normalizeArray(config.secret_env),
     task_timeout_seconds: config.task_timeout_seconds || options.taskTimeoutSeconds || options.task_timeout_seconds || 900,
