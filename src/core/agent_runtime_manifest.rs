@@ -121,7 +121,7 @@ pub struct AgentRuntimeMaterializationPlan {
     pub workspace: Option<AgentTaskProviderWorkspaceMaterialization>,
 }
 
-pub fn runtime_materialization_plan(
+pub(crate) fn runtime_materialization_plan(
     manifest: &AgentRuntimeManifest,
 ) -> AgentRuntimeMaterializationPlan {
     let mut env_passthrough = manifest.materialization.env_passthrough.clone();
@@ -141,7 +141,7 @@ pub fn runtime_materialization_plan(
     }
 }
 
-pub fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
+pub(crate) fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
     let mut manifests = discover_standalone_agent_runtime_manifests();
     manifests.extend(discover_agent_runtime_manifests_from_extensions(
         &load_all_extensions().unwrap_or_default(),
