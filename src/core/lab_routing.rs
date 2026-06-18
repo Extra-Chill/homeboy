@@ -30,8 +30,7 @@ pub struct LabRoutingRequest<'a> {
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
     pub force_hot: bool,
-    pub allow_local_hot: bool,
-    pub allow_local_fallback: bool,
+    pub local_policy: runners::LabLocalExecutionPolicy,
     pub allow_dirty_lab_workspace: bool,
     pub capture_patch: bool,
     pub mutation_flag: Option<&'a str>,
@@ -49,8 +48,7 @@ pub fn route_lab_offload(request: LabRoutingRequest<'_>) -> Result<runners::LabO
         normalized_args: request.normalized_args,
         explicit_runner: request.explicit_runner,
         force_hot: request.force_hot,
-        allow_local_hot: request.allow_local_hot,
-        allow_local_fallback: request.allow_local_fallback,
+        local_policy: request.local_policy,
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         capture_patch: request.capture_patch,
         mutation_flag: request.mutation_flag,
@@ -391,8 +389,7 @@ fn execute_lab_offload_with_timeout(
     let normalized_args = request.normalized_args.to_vec();
     let explicit_runner = request.explicit_runner.map(str::to_string);
     let force_hot = request.force_hot;
-    let allow_local_hot = request.allow_local_hot;
-    let allow_local_fallback = request.allow_local_fallback;
+    let local_policy = request.local_policy;
     let allow_dirty_lab_workspace = request.allow_dirty_lab_workspace;
     let capture_patch = request.capture_patch;
     let active_run_id = request.active_run_id.map(str::to_string);
@@ -404,8 +401,7 @@ fn execute_lab_offload_with_timeout(
             normalized_args: &normalized_args,
             explicit_runner: explicit_runner.as_deref(),
             force_hot,
-            allow_local_hot,
-            allow_local_fallback,
+            local_policy,
             allow_dirty_lab_workspace,
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
@@ -562,8 +558,7 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
             force_hot: false,
-            allow_local_hot: false,
-            allow_local_fallback: false,
+            local_policy: runners::LabLocalExecutionPolicy::default(),
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
@@ -730,8 +725,7 @@ mod tests {
                 normalized_args: &["homeboy".to_string(), "status".to_string()],
                 explicit_runner: None,
                 force_hot: false,
-                allow_local_hot: false,
-                allow_local_fallback: false,
+                local_policy: runners::LabLocalExecutionPolicy::default(),
                 allow_dirty_lab_workspace: false,
                 capture_patch: false,
                 mutation_flag: None,
