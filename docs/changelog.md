@@ -4,6 +4,52 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.242.0] - 2026-06-19
+
+### Added
+- feat(agent-task): compile artifact graph edges
+- feat(agent-task): materialize loop specs
+- feat(agent-task): expose controller events command
+- compile controller loop fanout sections
+- feat(agent-task): add repo-local gate executor
+- compile repo loop specs into agent task plans
+- feat(agent-task): classify and retry transient provider timeouts
+
+### Changed
+- refactor(command-contract): dedupe output descriptor field group
+- trim filter audit footprint
+- keep filter predicates on args
+- skip remote probes for local filters
+- refactor(agent-task): trim scheduler wait audit footprint
+- refactor(agent-task): keep scheduler timeout helper internal
+- perf(agent-task): wait until scheduler deadlines
+- Warn on oversized patch releases
+- cover hidden top-level parser commands
+- remove product-specific runtime fixtures
+- trim process snapshot audit footprint
+- move artifact index summaries to common
+- keep process watch polling on state
+- batch rig artifact indexes
+- share process snapshots across watchers
+- Add control-plane agent tool dispatch
+- route migrated JSON commands through adapters
+- Add deterministic loop terminal outcomes
+- build module surfaces from snapshots
+- perf(agent-task): wake scheduler on cancellation
+- route dispatch through registry
+- remove dead code + fix adapter naming
+- reuse codebase map snapshots
+- perf(agent-task): reduce scheduler polling wakeups
+- register json command families
+
+### Fixed
+- correct pipeline settings-env fixture to stay runtime-agnostic (#5184)
+- capture liveness once to fix status_refresh race
+- fix(agent-task): keep malformed provider output permanent
+- use generic target artifact kind
+- fix(agent-task): remove duplicate loop producer lookup
+- surface extension command health
+
 ## [0.241.2] - 2026-06-18
 
 ### Changed
