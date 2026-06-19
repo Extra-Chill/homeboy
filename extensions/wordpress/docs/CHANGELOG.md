@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.44] - 2026-06-19
+
+### Changed
+- Resolve REST route matrix budgets
+
 ## [3.7.43] - 2026-06-19
 
 ### Changed
