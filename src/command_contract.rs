@@ -24,6 +24,7 @@ pub use lab::{
     LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabRoutingPolicy,
     LabSourcePathMode, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
 };
+pub(crate) use lab::{AUDIT_LAB_LABEL, BENCH_LAB_LABEL, LINT_LAB_LABEL, TEST_LAB_LABEL};
 pub use output::{
     registered_command_dispatch_family, registered_command_json_family, CommandDescriptor,
     CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,

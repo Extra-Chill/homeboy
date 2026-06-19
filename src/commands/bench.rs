@@ -22,6 +22,7 @@ use super::utils::args::{
 use super::{runs, CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    BENCH_LAB_LABEL,
 };
 
 mod fanout;
@@ -49,7 +50,7 @@ impl BenchArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         self.is_lab_offload_command().then(|| {
             LabCommandContract::portable(
-                "bench",
+                BENCH_LAB_LABEL,
                 self.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
                 true,

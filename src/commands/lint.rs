@@ -24,6 +24,7 @@ use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservatio
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    LINT_LAB_LABEL,
 };
 
 const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
@@ -109,13 +110,21 @@ impl LintArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.is_full_workspace_run() {
             return Some(
-                LabCommandContract::portable("lint", self.fix.then_some("--fix"), true, &[])
-                    .release_gate(),
+                LabCommandContract::portable(
+                    LINT_LAB_LABEL,
+                    self.fix.then_some("--fix"),
+                    true,
+                    &[],
+                )
+                .release_gate(),
             );
         }
 
         (self.changed_since.is_some() || self.changed_only).then(|| {
-            LabCommandContract::local_only("lint", LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON)
+            LabCommandContract::local_only(
+                LINT_LAB_LABEL,
+                LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON,
+            )
         })
     }
 

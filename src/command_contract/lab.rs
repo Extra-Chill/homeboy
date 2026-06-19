@@ -80,55 +80,143 @@ pub enum LabCommandRequiredTool {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
-const LAB_RUNNER_SUPPORTED_ERROR_LABELS: &[&str] = &[
-    "agent-task dispatch/cook/loop/run-plan",
-    "agent-task controller from-spec --resume/materialize/resume",
-    "agent-task retry --run",
-    "agent-task status/logs/artifacts/review/providers",
-    "agent-task auth status",
-    "lint",
-    "test",
-    "audit",
-    "bench",
-    "trace",
-    "refactor source runs",
-    "tunnel preview-consumer run",
-    "tunnel service expose",
-    "tunnel service start",
-];
-const LAB_RUNNER_SUPPORTED_HINT_LABELS: &[&str] = &[
-    "agent-task dispatch/cook/loop/run-plan",
-    "agent-task controller from-spec --resume/materialize/resume",
-    "agent-task retry --run",
-    "agent-task status/logs/artifacts/review/providers",
-    "agent-task auth status",
-    "audit",
-    "bench run",
-    "full lint",
-    "full test",
-    "trace",
-    "refactor source runs",
-    "tunnel preview-consumer run",
-    "tunnel service expose",
-    "tunnel service start",
+const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/loop/run-plan/retry --run";
+const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
+    "agent-task controller from-spec --resume/materialize";
+const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
+const AGENT_TASK_STATUS_LAB_LABEL: &str = "agent-task status/logs/artifacts/review";
+const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
+pub(crate) const LINT_LAB_LABEL: &str = "lint";
+pub(crate) const TEST_LAB_LABEL: &str = "test";
+pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
+pub(crate) const BENCH_LAB_LABEL: &str = "bench";
+const TRACE_LAB_LABEL: &str = "trace";
+const REFACTOR_LAB_LABEL: &str = "refactor";
+const RIG_CHECK_LAB_LABEL: &str = "rig check";
+const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
+const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
+const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
+
+struct LabSupportedCommandSummary {
+    contract_labels: &'static [&'static str],
+    message_label: &'static str,
+    hint_label: &'static str,
+}
+
+const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
+    LabSupportedCommandSummary {
+        contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
+        message_label: "agent-task dispatch/cook/loop/run-plan",
+        hint_label: "agent-task dispatch/cook/loop/run-plan",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[
+            AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
+            AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
+        ],
+        message_label: "agent-task controller from-spec --resume/materialize/resume",
+        hint_label: "agent-task controller from-spec --resume/materialize/resume",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
+        message_label: "agent-task retry --run",
+        hint_label: "agent-task retry --run",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
+        message_label: "agent-task status/logs/artifacts/review/providers",
+        hint_label: "agent-task status/logs/artifacts/review/providers",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
+        message_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
+        hint_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[LINT_LAB_LABEL],
+        message_label: LINT_LAB_LABEL,
+        hint_label: "full lint",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[TEST_LAB_LABEL],
+        message_label: TEST_LAB_LABEL,
+        hint_label: "full test",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[AUDIT_LAB_LABEL],
+        message_label: AUDIT_LAB_LABEL,
+        hint_label: AUDIT_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[BENCH_LAB_LABEL],
+        message_label: BENCH_LAB_LABEL,
+        hint_label: "bench run",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[TRACE_LAB_LABEL],
+        message_label: TRACE_LAB_LABEL,
+        hint_label: TRACE_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[REFACTOR_LAB_LABEL],
+        message_label: "refactor source runs",
+        hint_label: "refactor source runs",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[RIG_CHECK_LAB_LABEL],
+        message_label: RIG_CHECK_LAB_LABEL,
+        hint_label: RIG_CHECK_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
+        message_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
+        hint_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[TUNNEL_SERVICE_EXPOSE_LAB_LABEL],
+        message_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
+        hint_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[TUNNEL_SERVICE_START_LAB_LABEL],
+        message_label: TUNNEL_SERVICE_START_LAB_LABEL,
+        hint_label: TUNNEL_SERVICE_START_LAB_LABEL,
+    },
 ];
 
-pub fn lab_runner_supported_labels() -> &'static [&'static str] {
-    LAB_RUNNER_SUPPORTED_ERROR_LABELS
+pub fn lab_runner_supported_labels() -> Vec<&'static str> {
+    LAB_SUPPORTED_COMMAND_SUMMARIES
+        .iter()
+        .map(|summary| summary.message_label)
+        .collect()
 }
 
 pub fn lab_runner_unsupported_message() -> String {
     format!(
         "--runner is only supported for commands with portable Lab offload support: {}",
-        human_join(lab_runner_supported_labels())
+        human_join(&lab_runner_supported_labels())
     )
 }
 
 pub fn lab_runner_unsupported_hint() -> String {
     format!(
         "Current Lab offload support: {}.",
-        human_join(LAB_RUNNER_SUPPORTED_HINT_LABELS)
+        human_join(&lab_runner_supported_hint_labels())
     )
+}
+
+fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
+    LAB_SUPPORTED_COMMAND_SUMMARIES
+        .iter()
+        .map(|summary| summary.hint_label)
+        .collect()
+}
+
+fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
+    LAB_SUPPORTED_COMMAND_SUMMARIES
+        .iter()
+        .any(|summary| summary.contract_labels.contains(&contract_label))
 }
 
 fn human_join(labels: &[&str]) -> String {
@@ -157,7 +245,7 @@ impl Commands {
                 ) =>
             {
                 let mut contract = LabCommandContract::portable(
-                    "agent-task dispatch/cook/loop/run-plan/retry --run",
+                    AGENT_TASK_RUN_LAB_LABEL,
                     None,
                     true,
                     LAB_NO_EXTRA_TOOLS,
@@ -171,7 +259,7 @@ impl Commands {
                 if matches!(args.command, agent_task::AgentTaskCommand::Providers(_)) =>
             {
                 LabCommandContract::explicit_runner(
-                    "agent-task providers",
+                    AGENT_TASK_PROVIDERS_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -188,7 +276,7 @@ impl Commands {
                 ) =>
             {
                 LabCommandContract::explicit_runner(
-                    "agent-task controller from-spec --resume/materialize",
+                    AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -203,7 +291,7 @@ impl Commands {
                 ) =>
             {
                 let mut contract = LabCommandContract::explicit_runner(
-                    "agent-task controller resume",
+                    AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -222,7 +310,7 @@ impl Commands {
                 ) =>
             {
                 let mut contract = LabCommandContract::explicit_runner(
-                    "agent-task status/logs/artifacts/review",
+                    AGENT_TASK_STATUS_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -240,7 +328,7 @@ impl Commands {
                 ) =>
             {
                 LabCommandContract::explicit_runner(
-                    "agent-task auth status",
+                    AGENT_TASK_AUTH_STATUS_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -268,7 +356,12 @@ impl Commands {
                 )
             }
             Commands::Rig(args) if args.is_check_command() => {
-                LabCommandContract::portable_workload("rig check", None, false, LAB_NO_EXTRA_TOOLS)
+                LabCommandContract::portable_workload(
+                    RIG_CHECK_LAB_LABEL,
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
             }
             Commands::Rig(args) if args.is_hot_resource_command() => {
                 LabCommandContract::local_only("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
@@ -288,7 +381,7 @@ impl Commands {
             }
             Commands::Tunnel(args) if args.is_preview_consumer_run() => {
                 LabCommandContract::explicit_runner(
-                    "tunnel preview-consumer run",
+                    TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -296,7 +389,7 @@ impl Commands {
             }
             Commands::Tunnel(args) if args.is_service_start() => {
                 let mut contract = LabCommandContract::explicit_runner(
-                    "tunnel service start",
+                    TUNNEL_SERVICE_START_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -307,7 +400,7 @@ impl Commands {
             }
             Commands::Tunnel(args) if args.is_service_expose() => {
                 let mut contract = LabCommandContract::explicit_runner(
-                    "tunnel service expose",
+                    TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
@@ -579,7 +672,7 @@ mod tests {
     #[test]
     fn test_lab_runner_supported_labels_are_contract_owned() {
         assert_eq!(
-            lab_runner_supported_labels(),
+            lab_runner_supported_labels().as_slice(),
             &[
                 "agent-task dispatch/cook/loop/run-plan",
                 "agent-task controller from-spec --resume/materialize/resume",
@@ -592,6 +685,7 @@ mod tests {
                 "bench",
                 "trace",
                 "refactor source runs",
+                "rig check",
                 "tunnel preview-consumer run",
                 "tunnel service expose",
                 "tunnel service start",
@@ -599,11 +693,11 @@ mod tests {
         );
         assert_eq!(
             lab_runner_unsupported_message(),
-            "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+            "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
         );
         assert_eq!(
             lab_runner_unsupported_hint(),
-            "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+            "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, full lint, full test, audit, bench run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
         );
     }
 
@@ -853,11 +947,20 @@ mod tests {
                 ]),
                 "agent-task auth status",
             ),
+            (
+                parsed_command(&["homeboy", "rig", "check", "studio"]),
+                "rig check",
+            ),
         ];
 
         for (command, label) in supported {
             let contract = command.lab_contract().expect("hot contract");
             assert_eq!(contract.hot_label, label);
+            assert!(
+                lab_runner_summary_covers_contract_label(contract.hot_label),
+                "Lab support summary omitted `{}`",
+                contract.hot_label
+            );
             assert_eq!(contract.portability, LabCommandPortability::Portable);
             assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
             assert_eq!(
@@ -869,6 +972,7 @@ mod tests {
         let trace = parsed_command(&["homeboy", "trace"])
             .lab_contract()
             .expect("trace contract");
+        assert!(lab_runner_summary_covers_contract_label(trace.hot_label));
         assert_eq!(trace.extra_required_tools, LAB_TRACE_EXTRA_TOOLS);
         assert!(!trace.routing_policy.requires_extension_parity);
         assert!(!trace.routing_policy.infer_source_path_tools);
@@ -988,6 +1092,22 @@ mod tests {
         assert!(!auth_status.routing_policy.requires_extension_parity);
         assert!(!auth_status.routing_policy.infer_source_path_tools);
 
+        let tunnel_preview_consumer_run = parsed_command(&[
+            "homeboy",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "preview-consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/",
+        ])
+        .lab_contract()
+        .expect("tunnel preview-consumer run contract");
+        assert!(lab_runner_summary_covers_contract_label(
+            tunnel_preview_consumer_run.hot_label
+        ));
+
         let tunnel_service_start = parsed_command(&[
             "homeboy",
             "tunnel",
@@ -1001,6 +1121,9 @@ mod tests {
         ])
         .lab_contract()
         .expect("tunnel service start contract");
+        assert!(lab_runner_summary_covers_contract_label(
+            tunnel_service_start.hot_label
+        ));
         assert_eq!(
             tunnel_service_start.source_path_mode,
             LabSourcePathMode::RunnerResident
@@ -1029,6 +1152,9 @@ mod tests {
         ])
         .lab_contract()
         .expect("tunnel service expose contract");
+        assert!(lab_runner_summary_covers_contract_label(
+            tunnel_service_expose.hot_label
+        ));
         assert_eq!(
             tunnel_service_expose.source_path_mode,
             LabSourcePathMode::RunnerResident
