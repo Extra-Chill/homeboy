@@ -36,6 +36,69 @@ Use one of:
 
 These findings participate in baseline comparisons like any other audit finding.
 
+## Thin Command Adapters
+
+`audit.thin_command_adapter` enforces the command/core boundary:
+
+```text
+commands/* = argument parsing + typed request construction + output adaptation
+core/*     = domain policy, orchestration, persistence, execution, artifacts
+```
+
+After services are extracted, command modules tend to re-accumulate
+orchestration (process execution, persistence, runner dispatch, business logic)
+as a convenient place to route exceptions. This detector measures the
+*orchestration density* of each command module: it sums weighted matches of
+configured orchestration markers and flags any module whose total weight reaches
+`max_orchestration_weight`. Unlike a single-term forbidden-pattern scan, it
+judges adapter thinness holistically per module, so a lone marker is tolerated
+while accumulated orchestration is a violation.
+
+Core stays ecosystem-agnostic: every marker, path scope, extension, and
+allowlist comes from config. With no `audit.thin_command_adapter` config the
+detector is inert.
+
+```json
+{
+  "audit": {
+    "thin_command_adapter": {
+      "include_path_contains": ["src/commands/"],
+      "exclude_path_contains": ["src/commands/legacy/"],
+      "file_extensions": ["rs"],
+      "skip_test_paths": true,
+      "allow_line_contains": ["homeboy-audit: allow-thin-command-adapter"],
+      "ignore_line_prefixes": ["//", "///", "//!"],
+      "ignore_after_line_equals": ["#[cfg(test)]"],
+      "max_orchestration_weight": 3,
+      "orchestration_markers": [
+        {
+          "label": "direct process execution",
+          "patterns": ["\\bCommand::new\\s*\\("]
+        },
+        {
+          "label": "direct filesystem mutation",
+          "patterns": ["\\b(std::fs|fs)::(write|remove_file|rename)\\s*\\("],
+          "weight": 1
+        }
+      ]
+    }
+  }
+}
+```
+
+Finding output:
+
+- `convention`: `thin_command_adapter`
+- `kind`: `thin_command_adapter_violation`
+- severity: warning
+
+The finding description names the orchestration categories observed (sorted,
+without counts or weights) so the baseline tracks the module rather than its
+exact orchestration volume. Existing orchestration-heavy modules are baselined
+so the detector ratchets from current state and only flags new drift; new
+command modules should delegate orchestration to a `core` service. Test paths
+are skipped by default (`skip_test_paths`).
+
 ## Config Key Usage Rules
 
 `audit.config_key_usage.rules` lets a component provide language/framework-specific regexes for config keys that are written, migrated, or exposed by accessors. Homeboy core only correlates configured captures across fingerprints; it does not know what a given key means.
@@ -135,19 +198,10 @@ Use source policies for architecture boundaries such as core-layer purity,
 detector implementation neutrality, or product/domain terms that belong in
 component-owned config rather than generic core code.
 
-Homeboy's own `homeboy.json` also uses this primitive for the
-`thin-command-adapters` rule. The expected boundary is:
-
-```text
-src/commands/* = clap args + typed request construction + output adaptation
-src/core/* = domain policy, orchestration, persistence, execution, artifacts
-```
-
-That rule scans command modules for direct process execution, filesystem
-mutation, run-artifact persistence, and runner orchestration markers. Existing
-orchestration-heavy command modules are allowlisted as transitional extraction
-targets; new command modules should delegate those responsibilities to `core`
-services instead of adding local exceptions.
+The command/core adapter boundary has its own dedicated detector
+(`audit.thin_command_adapter`, documented below) rather than a source policy,
+because adapter thinness is a per-module density judgment, not a single
+forbidden term.
 
 Example:
 

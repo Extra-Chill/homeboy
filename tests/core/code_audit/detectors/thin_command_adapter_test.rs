@@ -1,0 +1,142 @@
+use super::AuditFinding;
+use super::ThinCommandAdapterConfig;
+use crate::core::component::ThinCommandAdapterMarkerGroup;
+
+fn write(root: &std::path::Path, rel: &str, body: &str) {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, body).unwrap();
+}
+
+fn config() -> ThinCommandAdapterConfig {
+    ThinCommandAdapterConfig {
+        include_path_contains: vec!["src/commands/".to_string()],
+        file_extensions: vec!["rs".to_string()],
+        ignore_line_prefixes: vec!["//".to_string()],
+        ignore_after_line_equals: vec!["#[cfg(test)]".to_string()],
+        allow_line_contains: vec!["allow-thin-command-adapter".to_string()],
+        orchestration_markers: vec![
+            ThinCommandAdapterMarkerGroup {
+                label: "process execution".to_string(),
+                patterns: vec![r"Command::new\s*\(".to_string()],
+                weight: 1,
+            },
+            ThinCommandAdapterMarkerGroup {
+                label: "filesystem mutation".to_string(),
+                patterns: vec![r"std::fs::(write|remove_file)\s*\(".to_string()],
+                weight: 1,
+            },
+        ],
+        max_orchestration_weight: 2,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn empty_config_is_inert() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/foo.rs",
+        "fn run() { Command::new(\"x\"); }\n",
+    );
+    let findings = super::run(dir.path(), &ThinCommandAdapterConfig::default());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn thick_command_module_is_flagged() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/thick.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n    std::fs::write(\"a\", \"b\").unwrap();\n}\n",
+    );
+    let findings = super::run(dir.path(), &config());
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].kind, AuditFinding::ThinCommandAdapterViolation);
+    assert_eq!(findings[0].convention, "thin_command_adapter");
+    assert!(findings[0].description.contains("process execution x1"));
+    assert!(findings[0].description.contains("filesystem mutation x1"));
+}
+
+#[test]
+fn thin_module_below_threshold_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/thin.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n}\n",
+    );
+    let findings = super::run(dir.path(), &config());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn files_outside_command_scope_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/core/service.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n    std::fs::write(\"a\", \"b\").unwrap();\n}\n",
+    );
+    let findings = super::run(dir.path(), &config());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn excluded_path_is_allowlisted() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/transitional.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n    std::fs::write(\"a\", \"b\").unwrap();\n}\n",
+    );
+    let mut config = config();
+    config
+        .exclude_path_contains
+        .push("src/commands/transitional.rs".to_string());
+    let findings = super::run(dir.path(), &config);
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn comment_and_allow_lines_do_not_contribute_weight() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/commented.rs",
+        "fn run() {\n    // Command::new(\"git\") is documented here\n    std::fs::write(\"a\", \"b\").unwrap(); // allow-thin-command-adapter\n}\n",
+    );
+    let findings = super::run(dir.path(), &config());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn test_module_tail_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/with_tests.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n}\n#[cfg(test)]\nmod tests {\n    fn t() { std::fs::write(\"a\", \"b\").unwrap(); }\n}\n",
+    );
+    let findings = super::run(dir.path(), &config());
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn weighted_group_reaches_threshold_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "src/commands/weighted.rs",
+        "fn run() {\n    let mut c = Command::new(\"git\");\n}\n",
+    );
+    let mut config = config();
+    config.orchestration_markers[0].weight = 5;
+    let findings = super::run(dir.path(), &config);
+    assert_eq!(findings.len(), 1);
+    assert!(findings[0].description.contains("weight 5"));
+}

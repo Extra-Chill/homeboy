@@ -57,7 +57,7 @@ use self::detectors::{
     dead_guard, deprecation_age, enum_dispatch_contracts, field_patterns, global_env_guard,
     mutating_resource_access, parallel_runner_setup, public_registry_exposure, redirect_validation,
     remote_execution_preflight, requested_detectors, source_policy, test_coverage,
-    unbounded_output_capture, wrapper_inference,
+    thin_command_adapter, unbounded_output_capture, wrapper_inference,
 };
 use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
@@ -1241,6 +1241,25 @@ fn audit_internal(
         );
         all_findings.extend(command_status_findings);
     }
+
+    // Phase 4za: Thin-command-adapter boundary checks. Flags command-layer
+    // modules that accumulate orchestration/business logic instead of staying
+    // thin adapters over core services.
+    let thin_command_adapter_findings = time_audit_detector(
+        &mut timing,
+        "detector.thin_command_adapter",
+        plan.run_thin_command_adapter(),
+        || thin_command_adapter::run(root, &audit_config.thin_command_adapter),
+        Vec::new,
+    );
+    if !thin_command_adapter_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Thin command adapters: {} finding(s) (command modules accumulating orchestration logic)",
+            thin_command_adapter_findings.len()
+        );
+        all_findings.extend(thin_command_adapter_findings);
+    }
     timing.push_ok("detectors", detectors_started.elapsed());
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
@@ -1546,6 +1565,22 @@ fn audit_root_only(
             artifact_portability_findings.len()
         );
         findings.extend(artifact_portability_findings);
+    }
+
+    let thin_command_adapter_findings = time_audit_detector(
+        timing,
+        "detector.thin_command_adapter",
+        plan.run_thin_command_adapter(),
+        || thin_command_adapter::run(root, &audit_config.thin_command_adapter),
+        Vec::new,
+    );
+    if !thin_command_adapter_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Thin command adapters: {} finding(s) (command modules accumulating orchestration logic)",
+            thin_command_adapter_findings.len()
+        );
+        findings.extend(thin_command_adapter_findings);
     }
 
     let outliers_found = findings.len();
