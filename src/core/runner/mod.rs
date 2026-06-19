@@ -74,8 +74,8 @@ pub(crate) use execution::{
     RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV,
 };
 pub use execution::{
-    daemon_api_post, exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput,
+    daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
 };
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,

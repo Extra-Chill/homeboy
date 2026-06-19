@@ -1353,26 +1353,7 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
-    let body = runner::daemon_api_post(runner_id, &format!("/jobs/{job_id}/cancel"))?;
-    let canonical = body.get("body").unwrap_or(&body);
-    let job: Job = serde_json::from_value(canonical["job"].clone()).map_err(|err| {
-        homeboy::core::Error::internal_json(
-            err.to_string(),
-            Some("parse runner job cancel response".to_string()),
-        )
-    })?;
-    let events = canonical
-        .get("events")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|err| {
-            homeboy::core::Error::internal_json(
-                err.to_string(),
-                Some("parse runner job cancel events".to_string()),
-            )
-        })?
-        .unwrap_or_default();
+    let (job, events) = runner::runner_job_cancel(runner_id, job_id)?;
 
     Ok((
         RunnerJobOutput {
