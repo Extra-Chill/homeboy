@@ -1355,7 +1355,7 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
-    let (job, events) = homeboy::core::runner::runner_job_cancel(runner_id, job_id)?;
+    let (job, events) = homeboy::core::runners::runner_job_cancel(runner_id, job_id)?;
 
     Ok((
         RunnerJobOutput {
