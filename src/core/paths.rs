@@ -272,7 +272,7 @@ pub fn extensions() -> Result<PathBuf> {
     Ok(homeboy()?.join("extensions"))
 }
 
-/// Agent runtimes directory
+/// Agent runtime package directory
 pub fn agent_runtimes() -> Result<PathBuf> {
     Ok(homeboy()?.join("agent-runtimes"))
 }
