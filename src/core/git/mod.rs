@@ -63,9 +63,8 @@ pub use primitives::{
 };
 pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
 
+use std::path::Path;
 use std::process::Command;
-
-use crate::core::error::Error;
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("git").args(args).current_dir(path).output()
@@ -118,14 +117,11 @@ pub fn configure_identity(path: &str, identity: &GitIdentity) -> crate::core::er
         ("user.name", identity.name.as_str()),
         ("user.email", identity.email.as_str()),
     ] {
-        let output = execute_git(path, &["config", key, value])
-            .map_err(|e| Error::git_command_failed(format!("git config {key}: {e}")))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::git_command_failed(format!(
-                "git config {key} failed: {stderr}"
-            )));
-        }
+        run_git(
+            Path::new(path),
+            &["config", key, value],
+            &format!("git config {key}"),
+        )?;
     }
     Ok(())
 }
