@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.41] - 2026-06-19
+
+### Changed
+- Add WordPress external HTTP guardrails
+
 ## [3.7.40] - 2026-06-19
 
 ### Changed
