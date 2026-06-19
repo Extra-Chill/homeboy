@@ -493,15 +493,8 @@ fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let mirror = mirror_reverse_broker_evidence(
-        runner,
-        broker_url,
-        &cwd,
-        &command,
-        &job,
-        &events,
-        &result,
-    )?;
+    let mirror =
+        mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
 

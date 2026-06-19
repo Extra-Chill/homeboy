@@ -117,10 +117,9 @@ fn replace_from_path(
     let mut source = resolve_local_source(source_path)?;
     let extension_id = local_extension_id(&source, source_path, id_override)?;
     config::check_id_collision(&extension_id, "extension")?;
-    let source_root = resolve_local_monorepo_extension(&source, &extension_id).map(|root| {
+    let source_root = resolve_local_monorepo_extension(&source, &extension_id).inspect(|root| {
         let extension_source = root.join(&extension_id);
         source = extension_source;
-        root
     });
     validate_local_extension_source(&source, source_path, &extension_id)?;
 
