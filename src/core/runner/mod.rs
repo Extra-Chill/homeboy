@@ -40,6 +40,7 @@ mod rig_materialization;
 mod session;
 mod source_materialization;
 mod tool_registry;
+mod transport;
 mod validation_dependencies;
 pub(crate) use validation_dependencies::validation_dependency_ids;
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
@@ -101,6 +102,7 @@ pub use session::{
     RunnerStatusReport, RunnerTunnelMode,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
+pub(crate) use transport::{select_runner_transport, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
     sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
