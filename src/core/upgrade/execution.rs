@@ -2,6 +2,7 @@ use crate::core::defaults;
 use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
 use super::helpers::{current_version, version_is_newer};
@@ -298,15 +299,9 @@ fn find_homeboy_source_checkout(path: &Path) -> Option<PathBuf> {
 fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
     let exe_path = active_binary_path()?;
 
-    let output = Command::new(exe_path)
-        .arg("--version")
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some("verify active binary version".to_string()),
-            )
-        })?;
+    let mut command = Command::new(exe_path);
+    command.arg("--version");
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(5))?;
 
     if !output.status.success() {
         return Ok(None);
@@ -315,6 +310,49 @@ fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
     Ok(Some(parse_cli_version_info(&String::from_utf8_lossy(
         &output.stdout,
     ))))
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some("verify active binary version".to_string()),
+        )
+    })?;
+    let start = Instant::now();
+
+    loop {
+        if child.try_wait().map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("verify active binary version".to_string()),
+            )
+        })?.is_some() {
+            return child.wait_with_output().map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some("verify active binary version".to_string()),
+                )
+            });
+        }
+
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::internal_io(
+                format!(
+                    "active binary did not answer --version within {}s",
+                    timeout.as_secs()
+                ),
+                Some("verify active binary version".to_string()),
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn active_binary_path() -> Result<PathBuf> {

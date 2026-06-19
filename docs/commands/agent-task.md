@@ -11,7 +11,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 `agent-task` is split into four operator-facing seams:
 
 - **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
-- **Cook/review:** repo-cooking conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
+- **Cook/review:** workspace task conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
 - **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
 - **Controller:** durable multi-agent loop state that can create or observe lifecycle runs over time.
 
@@ -21,7 +21,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 | Subcommand | Purpose |
 |---|---|
-| `dispatch` | Build and queue common repo-cooking agent tasks without hand-authored provider JSON. |
+| `dispatch` | Build and queue common workspace agent tasks without hand-authored provider JSON. |
 | `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
 | `run <run-id>` | Execute a previously submitted durable run. |
 | `run-next` | Claim and execute the oldest queued durable run. |
@@ -40,7 +40,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 | Subcommand | Purpose |
 |---|---|
-| `cook` | Sync a workspace when `--runner` is supplied, dispatch a repo-cooking task, and return the durable run id. |
+| `cook` | Sync a workspace when `--runner` is supplied, dispatch a workspace task, and return the durable run id. |
 | `loop` | Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
@@ -202,7 +202,7 @@ diagnostics instead of partial compilation.
 
 ## Dispatch
 
-`agent-task dispatch` builds a durable task plan from common repo-cooking inputs
+`agent-task dispatch` builds a durable task plan from common workspace inputs
 without requiring hand-authored provider JSON:
 
 ```bash

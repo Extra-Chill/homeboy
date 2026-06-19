@@ -179,6 +179,7 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     let (resume_report, exit_code) = controller_resume_with_executor(
         report.loop_id.clone(),
         ExtensionProviderAgentTaskExecutor::discover(),
+        ControllerDispatchDefaults::from_from_spec_args(&args),
     )?;
     Ok((
         serde_json::json!({
@@ -282,6 +283,14 @@ struct ControllerDispatchDefaults {
 }
 
 impl ControllerDispatchDefaults {
+    fn from_from_spec_args(args: &AgentTaskControllerFromSpecArgs) -> Self {
+        Self {
+            backend: args.dispatch_backend.clone(),
+            selector: args.dispatch_selector.clone(),
+            model: args.dispatch_model.clone(),
+        }
+    }
+
     fn from_run_next_args(args: &AgentTaskControllerRunNextArgs) -> Self {
         Self {
             backend: args.dispatch_backend.clone(),
@@ -472,15 +481,15 @@ where
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-pub(super) fn controller_resume_with_executor<E>(loop_id: String, executor: E) -> CmdResult<Value>
+fn controller_resume_with_executor<E>(
+    loop_id: String,
+    executor: E,
+    defaults: ControllerDispatchDefaults,
+) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    controller_resume_with_executor_and_defaults(
-        loop_id,
-        executor,
-        ControllerDispatchDefaults::default(),
-    )
+    controller_resume_with_executor_and_defaults(loop_id, executor, defaults)
 }
 
 fn controller_resume_with_executor_and_defaults<E>(

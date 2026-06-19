@@ -39,11 +39,11 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
-    /// Cook loop: sync a workspace when needed, dispatch a repo-cooking task, and return the durable run id.
+    /// Cook loop: sync a workspace when needed, dispatch an agent task, and return the durable run id.
     Cook(DispatchArgs),
     /// Cook loop: dispatch, promote, verify, retry red gates, and finalize.
     Loop(AgentTaskLoopArgs),
-    /// Lifecycle: build and queue common repo-cooking agent tasks without hand-authored provider JSON.
+    /// Lifecycle: build and queue agent tasks without hand-authored provider JSON.
     Dispatch(DispatchArgs),
     /// Lifecycle: run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),

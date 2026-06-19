@@ -82,6 +82,7 @@ const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
 const LAB_RUNNER_SUPPORTED_ERROR_LABELS: &[&str] = &[
     "agent-task dispatch/cook/loop/run-plan",
+    "agent-task controller from-spec --resume/materialize/resume",
     "agent-task retry --run",
     "agent-task status/logs/artifacts/review/providers",
     "agent-task auth status",
@@ -97,6 +98,7 @@ const LAB_RUNNER_SUPPORTED_ERROR_LABELS: &[&str] = &[
 ];
 const LAB_RUNNER_SUPPORTED_HINT_LABELS: &[&str] = &[
     "agent-task dispatch/cook/loop/run-plan",
+    "agent-task controller from-spec --resume/materialize/resume",
     "agent-task retry --run",
     "agent-task status/logs/artifacts/review/providers",
     "agent-task auth status",
@@ -174,6 +176,41 @@ impl Commands {
                     false,
                     LAB_NO_EXTRA_TOOLS,
                 )
+            }
+            Commands::AgentTask(args)
+                if matches!(
+                    args.command,
+                    agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+                        command: agent_task::AgentTaskControllerCommand::FromSpec(
+                            agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
+                        ) | agent_task::AgentTaskControllerCommand::Materialize(_),
+                    },)
+                ) =>
+            {
+                LabCommandContract::explicit_runner(
+                    "agent-task controller from-spec --resume/materialize",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                )
+            }
+            Commands::AgentTask(args)
+                if matches!(
+                    args.command,
+                    agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+                        command: agent_task::AgentTaskControllerCommand::Resume(_),
+                    },)
+                ) =>
+            {
+                let mut contract = LabCommandContract::explicit_runner(
+                    "agent-task controller resume",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_TOOLS,
+                );
+                contract.source_path_mode = LabSourcePathMode::RunnerResident;
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
+                contract
             }
             Commands::AgentTask(args)
                 if matches!(
@@ -545,6 +582,7 @@ mod tests {
             lab_runner_supported_labels(),
             &[
                 "agent-task dispatch/cook/loop/run-plan",
+                "agent-task controller from-spec --resume/materialize/resume",
                 "agent-task retry --run",
                 "agent-task status/logs/artifacts/review/providers",
                 "agent-task auth status",
@@ -561,11 +599,11 @@ mod tests {
         );
         assert_eq!(
             lab_runner_unsupported_message(),
-            "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+            "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
         );
         assert_eq!(
             lab_runner_unsupported_hint(),
-            "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+            "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, audit, bench run, full lint, full test, trace, refactor source runs, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
         );
     }
 
@@ -787,6 +825,27 @@ mod tests {
                 parsed_command(&[
                     "homeboy",
                     "agent-task",
+                    "controller",
+                    "from-spec",
+                    "loop.json",
+                    "--resume",
+                ]),
+                "agent-task controller from-spec --resume/materialize",
+            ),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "agent-task",
+                    "controller",
+                    "materialize",
+                    "loop.json",
+                ]),
+                "agent-task controller from-spec --resume/materialize",
+            ),
+            (
+                parsed_command(&[
+                    "homeboy",
+                    "agent-task",
                     "auth",
                     "status",
                     "--secret-env",
@@ -889,6 +948,7 @@ mod tests {
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
         ] {
             let contract = parsed_command(args)
                 .lab_contract()
@@ -900,6 +960,19 @@ mod tests {
             );
             assert!(!contract.routing_policy.default_lab_offload);
         }
+
+        assert!(
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "controller",
+                "from-spec",
+                "loop.json",
+            ])
+            .lab_contract()
+            .is_none(),
+            "from-spec without --resume only writes local controller state"
+        );
 
         let auth_status = parsed_command(&[
             "homeboy",
