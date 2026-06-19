@@ -262,13 +262,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let mut test_stage = None;
 
     let stage_run = match review::execute_review_plan_steps(&quality_plan.steps, |step| {
-        dispatch_review_plan_step(
-            step,
-            &args,
-            global,
-            &component_label,
-            &review_context,
-        )
+        dispatch_review_plan_step(step, &args, global, &component_label, &review_context)
     }) {
         Ok(run) => run,
         Err(error) => {
@@ -480,10 +474,7 @@ fn build_audit_args(
     }
 }
 
-fn build_lint_args(
-    args: &ReviewArgs,
-    review_context: &ReviewExecutionContext,
-) -> lint::LintArgs {
+fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
     lint::LintArgs {
         comp: args.comp.clone(),
         summary: args.summary,
@@ -508,10 +499,7 @@ fn build_lint_args(
     }
 }
 
-fn build_test_args(
-    args: &ReviewArgs,
-    review_context: &ReviewExecutionContext,
-) -> test::TestArgs {
+fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> test::TestArgs {
     test::TestArgs {
         comp: args.comp.clone(),
         extension_override: args.extension_override.clone(),

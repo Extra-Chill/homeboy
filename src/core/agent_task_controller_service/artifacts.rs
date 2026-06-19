@@ -426,7 +426,7 @@ fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArti
             .or_else(|| artifact.path.clone())
             .unwrap_or_else(|| format!("artifact:{}", artifact.id)),
         kind: Some(artifact.kind.clone()),
-        label: artifact.name.clone().or_else(|| Some(artifact.id.clone())),
+        label: Some(artifact.name.clone().unwrap_or_else(|| artifact.id.clone())),
     }
 }
 
