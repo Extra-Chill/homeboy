@@ -514,15 +514,15 @@ pub(crate) fn run_validation_dependency_lifecycle(
     run_dependency_build_lifecycle(component, path)
 }
 
-/// Materialize dependencies (e.g. `composer install`, `npm install`) for the
-/// component rooted at `path` so that downstream gates/tests run against a
-/// dependency-ready worktree rather than fataling on missing autoloaded deps.
+/// Materialize a component's declared dependencies for the component rooted at
+/// `path` so that downstream gates/tests run against a dependency-ready
+/// worktree rather than fataling on missing dependency artifacts.
 ///
 /// This is generic and config-driven: it resolves the component's dependency
-/// providers (composer/npm/component-script/extension) and runs each provider's
-/// install step. When no component or dependency provider can be resolved for
-/// the path (nothing to install), it is a no-op and returns `Ok(false)`.
-/// Returns `Ok(true)` when at least one install step ran.
+/// providers (component-script / extension-declared providers) and runs each
+/// provider's install step. When no component or dependency provider can be
+/// resolved for the path (nothing to install), it is a no-op and returns
+/// `Ok(false)`. Returns `Ok(true)` when at least one install step ran.
 ///
 /// A provider install failure is propagated as an error so callers can
 /// distinguish a genuine setup failure from a real gate result.
