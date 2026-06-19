@@ -194,6 +194,11 @@ pub enum ProjectComponentDashboardStatus {
     Uncommitted,
     /// Local branch is behind upstream (needs pull)
     BehindUpstream,
+    /// Absorbed into another component; not independently deployable. Tracked
+    /// for visibility but excluded from deploy/outdated obligations.
+    Bundled,
+    /// Sunset; no longer a deploy target. Excluded from outdated obligations.
+    Retired,
     /// Cannot determine status
     Unknown,
 }
@@ -218,7 +223,15 @@ pub struct ProjectDashboardSummary {
     pub docs_only: usize,
     pub uncommitted: usize,
     pub behind_upstream: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bundled: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retired: usize,
     pub unknown: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub enum StatusResult {
@@ -456,10 +469,40 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         docs_only: 0,
         uncommitted: 0,
         behind_upstream: 0,
+        bundled: 0,
+        retired: 0,
         unknown: 0,
     };
 
     for comp in &components {
+        // Bundled/retired components are no longer standalone deploy targets.
+        // Surface their lifecycle status for visibility, but do not run the
+        // version/release-state machinery that would flag false `outdated`
+        // drift (issue #3489).
+        if !comp.is_active_lifecycle() {
+            let dashboard_status = match comp.lifecycle {
+                component::ComponentLifecycle::Bundled => {
+                    summary.bundled += 1;
+                    ProjectComponentDashboardStatus::Bundled
+                }
+                _ => {
+                    summary.retired += 1;
+                    ProjectComponentDashboardStatus::Retired
+                }
+            };
+            rows.push(ProjectStatusRow {
+                component_id: comp.id.clone(),
+                local_version: local_versions.get(&comp.id).cloned(),
+                remote_version: None,
+                origin_version: None,
+                unreleased_commits: 0,
+                ahead_upstream: None,
+                behind_upstream: None,
+                status: dashboard_status,
+            });
+            continue;
+        }
+
         let local_ver = local_versions.get(&comp.id).cloned();
         let remote_ver = remote_versions.get(&comp.id).cloned();
         let drift = upstream_drift_map.get(&comp.id);
@@ -508,6 +551,10 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             ProjectComponentDashboardStatus::DocsOnly => summary.docs_only += 1,
             ProjectComponentDashboardStatus::Uncommitted => summary.uncommitted += 1,
             ProjectComponentDashboardStatus::BehindUpstream => summary.behind_upstream += 1,
+            // Lifecycle statuses are assigned on the early-return path above and
+            // never reach this active-component branch.
+            ProjectComponentDashboardStatus::Bundled => summary.bundled += 1,
+            ProjectComponentDashboardStatus::Retired => summary.retired += 1,
             ProjectComponentDashboardStatus::Unknown => summary.unknown += 1,
         }
 
