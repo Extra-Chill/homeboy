@@ -7,7 +7,8 @@ use std::process::Command;
 use serde_json::Value;
 
 use homeboy::core::agent_task_loop_definition::{
-    materialize_repo_loop_spec, AgentTaskLoopSpecMaterializationRequest,
+    materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
+    AgentTaskLoopSpecMaterializationRequest,
 };
 use homeboy::core::agent_tasks::controller_service as agent_task_controller_service;
 use homeboy::core::agent_tasks::controller_service::{
@@ -96,11 +97,32 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
         }
         None => Value::Null,
     };
+    let policy_results = args
+        .policy_results
+        .iter()
+        .map(|policy_result| parse_policy_result(policy_result))
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
     let report = materialize_repo_loop_spec(AgentTaskLoopSpecMaterializationRequest {
         spec: &spec,
         run_inputs: &run_inputs,
+        policy_results: &policy_results,
     })?;
     Ok((command_json_value(report)?, 0))
+}
+
+fn parse_policy_result(
+    source: &str,
+) -> homeboy::core::Result<AgentTaskLoopPolicyResultMaterialization> {
+    let raw = config::read_json_spec_to_string(source)?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "policy-result",
+            error.to_string(),
+            Some(source.to_string()),
+            None,
+        )
+    })?;
+    AgentTaskLoopPolicyResultMaterialization::from_value(value, source)
 }
 
 fn controller_plan(args: AgentTaskControllerPlanArgs) -> CmdResult<Value> {

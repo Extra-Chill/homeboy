@@ -57,6 +57,69 @@ pub struct AgentTaskLoopDefinitionTask {
 pub struct AgentTaskLoopSpecMaterializationRequest<'a> {
     pub spec: &'a AgentTaskRepoLoopSpec,
     pub run_inputs: &'a Value,
+    pub policy_results: &'a [AgentTaskLoopPolicyResultMaterialization],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopPolicyResultMaterialization {
+    pub policy_id: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub policy_inputs: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub policy_results: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub provenance: Value,
+}
+
+impl AgentTaskLoopPolicyResultMaterialization {
+    pub fn from_value(value: Value, source: impl Into<String>) -> Result<Self> {
+        let source = source.into();
+        if !value.is_object() {
+            return Err(Error::validation_invalid_argument(
+                "policy-result",
+                "policy result must be a JSON object",
+                Some(source),
+                None,
+            ));
+        }
+        let result: Self = serde_json::from_value(value).map_err(|error| {
+            Error::validation_invalid_argument(
+                "policy-result",
+                error.to_string(),
+                Some(source.clone()),
+                None,
+            )
+        })?;
+        result.validate(source)?;
+        Ok(result)
+    }
+
+    fn validate(&self, source: String) -> Result<()> {
+        if self.policy_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "policy-result.policy_id",
+                "policy_id must not be empty",
+                Some(source),
+                None,
+            ));
+        }
+        validate_optional_policy_object(
+            &self.policy_inputs,
+            "policy-result.policy_inputs",
+            &self.policy_id,
+        )?;
+        validate_optional_policy_object(
+            &self.policy_results,
+            "policy-result.policy_results",
+            &self.policy_id,
+        )?;
+        validate_optional_policy_object(
+            &self.provenance,
+            "policy-result.provenance",
+            &self.policy_id,
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,10 +156,110 @@ pub fn materialize_repo_loop_spec(
         merge_json_objects(&mut spec.metadata, metadata);
     }
 
+    materialize_policy_results(&mut spec, request.policy_results)?;
+
     Ok(AgentTaskLoopSpecMaterialization {
         schema: AGENT_TASK_LOOP_SPEC_MATERIALIZATION_SCHEMA.to_string(),
         spec,
     })
+}
+
+fn materialize_policy_results(
+    spec: &mut AgentTaskRepoLoopSpec,
+    policy_results: &[AgentTaskLoopPolicyResultMaterialization],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    let mut policy_inputs = serde_json::Map::new();
+    let mut policy_result_values = serde_json::Map::new();
+    let mut policy_materialization = serde_json::Map::new();
+
+    for policy_result in policy_results {
+        if !seen.insert(policy_result.policy_id.clone()) {
+            return Err(Error::validation_invalid_argument(
+                "policy-result.policy_id",
+                format!("duplicate policy_id {}", policy_result.policy_id),
+                Some(spec.loop_id.clone()),
+                None,
+            ));
+        }
+        if !policy_result.policy_inputs.is_null() {
+            policy_inputs.insert(
+                policy_result.policy_id.clone(),
+                policy_result.policy_inputs.clone(),
+            );
+        }
+        if !policy_result.policy_results.is_null() {
+            policy_result_values.insert(
+                policy_result.policy_id.clone(),
+                policy_result.policy_results.clone(),
+            );
+        }
+        policy_materialization.insert(
+            policy_result.policy_id.clone(),
+            policy_result_metadata(policy_result),
+        );
+    }
+
+    let mut workflow_inputs = serde_json::Map::new();
+    if !policy_inputs.is_empty() {
+        workflow_inputs.insert("policy_inputs".to_string(), Value::Object(policy_inputs));
+    }
+    if !policy_result_values.is_empty() {
+        workflow_inputs.insert(
+            "policy_results".to_string(),
+            Value::Object(policy_result_values),
+        );
+    }
+    let workflow_inputs = Value::Object(workflow_inputs);
+    for workflow in &mut spec.workflows {
+        merge_workflow_inputs(&mut workflow.inputs, &workflow_inputs);
+    }
+
+    if !policy_materialization.is_empty() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "policy_materialization".to_string(),
+            Value::Object(policy_materialization),
+        );
+        merge_json_objects(&mut spec.metadata, &Value::Object(metadata));
+    }
+    Ok(())
+}
+
+fn policy_result_metadata(policy_result: &AgentTaskLoopPolicyResultMaterialization) -> Value {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(
+        "policy_id".to_string(),
+        Value::String(policy_result.policy_id.clone()),
+    );
+    if !policy_result.policy_inputs.is_null() {
+        envelope.insert(
+            "policy_inputs".to_string(),
+            policy_result.policy_inputs.clone(),
+        );
+    }
+    if !policy_result.policy_results.is_null() {
+        envelope.insert(
+            "policy_results".to_string(),
+            policy_result.policy_results.clone(),
+        );
+    }
+    if !policy_result.provenance.is_null() {
+        envelope.insert("provenance".to_string(), policy_result.provenance.clone());
+    }
+    Value::Object(envelope)
+}
+
+fn validate_optional_policy_object(value: &Value, field: &str, policy_id: &str) -> Result<()> {
+    if value.is_null() || value.is_object() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        field,
+        "policy materialization fields must be JSON objects when present",
+        Some(policy_id.to_string()),
+        None,
+    ))
 }
 
 pub fn compile_loop_definition(definition: AgentTaskLoopDefinition) -> Result<AgentTaskPlan> {

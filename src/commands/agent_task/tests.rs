@@ -313,6 +313,7 @@ fn controller_materialize_merges_inputs_and_metadata_without_mutating_source() {
     let (value, status) = controller_materialize(AgentTaskControllerMaterializeArgs {
         spec: format!("@{}", spec_path.display()),
         inputs: Some(format!("@{}", inputs_path.display())),
+        policy_results: Vec::new(),
     })
     .expect("materialize spec");
 
@@ -335,6 +336,123 @@ fn controller_materialize_merges_inputs_and_metadata_without_mutating_source() {
     .expect("source spec json");
     assert_eq!(source_after["workflows"][0]["inputs"]["topic"], "existing");
     assert!(source_after["metadata"].get("run_id").is_none());
+}
+
+#[test]
+fn controller_materialize_projects_policy_results_with_provenance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec_path = temp.path().join("repo-loop.json");
+    let policy_path = temp.path().join("policy-result.json");
+    let second_policy_path = temp.path().join("second-policy-result.json");
+    std::fs::write(
+        &spec_path,
+        serde_json::to_string(&json!({
+            "loop_id": "materialize-policy-loop",
+            "workflows": [
+                {
+                    "workflow_id": "brief",
+                    "prompt": "Draft the brief.",
+                    "inputs": { "topic": "existing" }
+                },
+                {
+                    "workflow_id": "build",
+                    "prompt": "Build the site."
+                }
+            ]
+        }))
+        .expect("spec json"),
+    )
+    .expect("write spec");
+    std::fs::write(
+        &policy_path,
+        serde_json::to_string(&json!({
+            "policy_id": "example-policy",
+            "policy_inputs": { "requested_tier": "foundation" },
+            "policy_results": { "selected_tier": "foundation", "decision": "hold" },
+            "provenance": { "source": "fixture", "sha256": "abc123" }
+        }))
+        .expect("policy result json"),
+    )
+    .expect("write policy result");
+    std::fs::write(
+        &second_policy_path,
+        serde_json::to_string(&json!({
+            "policy_id": "second-policy",
+            "policy_results": { "enabled": true },
+            "provenance": { "source": "second-fixture" }
+        }))
+        .expect("policy result json"),
+    )
+    .expect("write second policy result");
+
+    let (value, status) = controller_materialize(AgentTaskControllerMaterializeArgs {
+        spec: format!("@{}", spec_path.display()),
+        inputs: None,
+        policy_results: vec![
+            format!("@{}", policy_path.display()),
+            format!("@{}", second_policy_path.display()),
+        ],
+    })
+    .expect("materialize spec");
+
+    assert_eq!(status, 0);
+    assert_eq!(
+        value["spec"]["workflows"][0]["inputs"]["policy_inputs"]["example-policy"]
+            ["requested_tier"],
+        "foundation"
+    );
+    assert_eq!(
+        value["spec"]["workflows"][1]["inputs"]["policy_results"]["example-policy"]["decision"],
+        "hold"
+    );
+    assert_eq!(
+        value["spec"]["workflows"][1]["inputs"]["policy_results"]["second-policy"]["enabled"],
+        true
+    );
+    assert_eq!(
+        value["spec"]["metadata"]["policy_materialization"]["example-policy"]["provenance"]
+            ["source"],
+        "fixture"
+    );
+    assert_eq!(
+        value["spec"]["metadata"]["policy_materialization"]["second-policy"]["provenance"]
+            ["source"],
+        "second-fixture"
+    );
+}
+
+#[test]
+fn controller_materialize_rejects_non_object_policy_result_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let spec_path = temp.path().join("repo-loop.json");
+    let policy_path = temp.path().join("policy-result.json");
+    std::fs::write(
+        &spec_path,
+        serde_json::to_string(&json!({
+            "loop_id": "materialize-policy-validation-loop",
+            "workflows": [{ "workflow_id": "brief", "prompt": "Draft." }]
+        }))
+        .expect("spec json"),
+    )
+    .expect("write spec");
+    std::fs::write(
+        &policy_path,
+        serde_json::to_string(&json!({
+            "policy_id": "example-policy",
+            "policy_results": "hold"
+        }))
+        .expect("policy result json"),
+    )
+    .expect("write policy result");
+
+    let error = controller_materialize(AgentTaskControllerMaterializeArgs {
+        spec: format!("@{}", spec_path.display()),
+        inputs: None,
+        policy_results: vec![format!("@{}", policy_path.display())],
+    })
+    .expect_err("policy result fields are validated");
+
+    assert!(error.message.contains("policy materialization fields"));
 }
 
 #[test]
