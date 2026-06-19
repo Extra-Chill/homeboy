@@ -45,6 +45,7 @@
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:rest-route-matrix": "node tests/rest-route-matrix-smoke.js",
+    "test:rest-request-case-generation": "node tests/rest-request-case-generation-smoke.js",
     "test:wordpress-route-latency": "node tests/wordpress-route-latency-smoke.js",
     "test:runtime-agent-wp-codebox-runner": "node tests/wp-codebox-task-runner-smoke.js",
     "test:project-wpgym-eval-row": "bash scripts/agent/project-wpgym-eval-row-smoke.sh",
