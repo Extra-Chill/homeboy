@@ -2017,6 +2017,7 @@ fn in_flight_daemon_disconnect_error(
         job_id,
         None,
         DaemonJobHandoffState::InFlight,
+        true,
     ) {
         disconnected = disconnected.with_hint(hint);
     }
@@ -2607,6 +2608,7 @@ mod tests {
             }),
             stale_daemon: None,
             active_jobs: Vec::new(),
+            active_job_count: 0,
             session_path: "/tmp/lab.json".to_string(),
         }
     }

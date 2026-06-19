@@ -612,17 +612,23 @@ pub fn run(
             max_idle_backoff_ms,
             broker_failure_backoff_ms,
             broker_retry_limit,
-        } => map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
-            runner_id,
-            broker_url,
-            project_id: project,
-            lease_ms,
-            loop_mode: r#loop,
-            idle_backoff_ms,
-            max_idle_backoff_ms,
-            broker_failure_backoff_ms,
-            broker_retry_limit,
-        })),
+        } => {
+            let concurrency_limit = runner::load(&runner_id)
+                .ok()
+                .and_then(|runner| runner.settings.concurrency_limit);
+            map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
+                runner_id,
+                broker_url,
+                project_id: project,
+                lease_ms,
+                concurrency_limit,
+                loop_mode: r#loop,
+                idle_backoff_ms,
+                max_idle_backoff_ms,
+                broker_failure_backoff_ms,
+                broker_retry_limit,
+            }))
+        }
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
     }
@@ -995,6 +1001,7 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     if let Some(id) = id {
         let mut report = runner::status(id)?;
         report.active_jobs = active_runner_jobs(id);
+        report.active_job_count = report.active_jobs.len();
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
@@ -1017,6 +1024,7 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
                     .into_iter()
                     .map(|mut report| {
                         report.active_jobs = active_runner_jobs(&report.runner_id);
+                        report.active_job_count = report.active_jobs.len();
                         report
                     })
                     .collect(),
@@ -1034,6 +1042,13 @@ fn active_runner_jobs(runner_id: &str) -> Vec<homeboy::core::api_jobs::ActiveRun
         .and_then(|data| data.get("body").cloned())
         .and_then(|body| body.get("active_runner_jobs").cloned())
         .and_then(|jobs| serde_json::from_value(jobs).ok())
+        .map(
+            |jobs: Vec<homeboy::core::api_jobs::ActiveRunnerJobSummary>| {
+                jobs.into_iter()
+                    .filter(|job| job.runner_id == runner_id)
+                    .collect()
+            },
+        )
         .unwrap_or_default()
 }
 
@@ -1355,26 +1370,7 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
-    let body = runner::daemon_api_post(runner_id, &format!("/jobs/{job_id}/cancel"))?;
-    let canonical = body.get("body").unwrap_or(&body);
-    let job: Job = serde_json::from_value(canonical["job"].clone()).map_err(|err| {
-        homeboy::core::Error::internal_json(
-            err.to_string(),
-            Some("parse runner job cancel response".to_string()),
-        )
-    })?;
-    let events = canonical
-        .get("events")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|err| {
-            homeboy::core::Error::internal_json(
-                err.to_string(),
-                Some("parse runner job cancel events".to_string()),
-            )
-        })?
-        .unwrap_or_default();
+    let (job, events) = homeboy::core::runners::runner_job_cancel(runner_id, job_id)?;
 
     Ok((
         RunnerJobOutput {

@@ -15,7 +15,7 @@ use crate::core::error::{Error, Result};
 
 use super::broker_http;
 use super::capabilities::RunnerCapabilityPreflight;
-use super::execution::{exec, RunnerExecOptions};
+use super::execution::{exec_worker_local, RunnerExecOptions};
 
 #[derive(Debug, Clone)]
 pub struct ReverseRunnerWorkerOptions {
@@ -23,6 +23,7 @@ pub struct ReverseRunnerWorkerOptions {
     pub broker_url: String,
     pub project_id: Option<String>,
     pub lease_ms: u64,
+    pub concurrency_limit: Option<usize>,
     pub loop_mode: bool,
     pub idle_backoff_ms: u64,
     pub max_idle_backoff_ms: u64,
@@ -287,7 +288,7 @@ fn run_once_output(
             result,
         )
     };
-    let exec_result = exec(
+    let exec_result = exec_worker_local(
         &options.runner_id,
         RunnerExecOptions {
             cwd: claim.request.cwd.clone(),
@@ -444,6 +445,7 @@ fn claim_job(
             "runner_id": options.runner_id,
             "project_id": options.project_id,
             "lease_ms": options.lease_ms.max(1),
+            "concurrency_limit": options.concurrency_limit,
         }),
         "claim reverse runner job",
     )?;
@@ -530,6 +532,7 @@ mod tests {
             broker_url,
             project_id: None,
             lease_ms: 30_000,
+            concurrency_limit: None,
             loop_mode: false,
             idle_backoff_ms: 1,
             max_idle_backoff_ms: 10,
@@ -581,6 +584,7 @@ mod tests {
                 })
                 .expect("submit job");
             let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+            write_reverse_controller_session(&broker_url);
 
             let (output, exit_code) =
                 run_reverse_worker(worker_options(broker_url.clone())).expect("run worker");
@@ -789,6 +793,37 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn write_reverse_controller_session(broker_url: &str) {
+        let path = crate::core::paths::runner_session_file("lab").expect("session path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create session dir");
+        }
+        let session = crate::core::runner::RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: crate::core::runner::RunnerTunnelMode::Reverse,
+            role: crate::core::runner::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some("controller".to_string()),
+            broker_url: Some(broker_url.to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-06-19T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+        };
+        std::fs::write(
+            path,
+            serde_json::to_string(&session).expect("serialize session"),
+        )
+        .expect("write session");
+    }
+
     struct MockRequest {
         path: String,
         body: Value,
@@ -844,7 +879,7 @@ mod tests {
     fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         if request.path == "/runner/jobs/claim" {
             let claim = store
-                .claim_remote_runner_job("lab", None, 30_000)
+                .claim_remote_runner_job("lab", None, 30_000, None)
                 .expect("claim job");
             return serde_json::json!({
                 "success": true,

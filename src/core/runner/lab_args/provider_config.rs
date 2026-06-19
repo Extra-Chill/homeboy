@@ -161,7 +161,12 @@ fn args_have_provider_config(args: &[String]) -> bool {
 fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String {
     let needs_inlining = is_provider_config_file_spec(spec);
 
-    if !needs_inlining && mappings.is_empty() {
+    // Even with no mappings, an inline-JSON spec may carry stale controller-local
+    // `provider_plugin_paths` that must be pruned before offload (a `@file`/`-`
+    // spec always needs inlining). Without that pruning a stale path is forwarded
+    // verbatim and breaks remote recipe validation, so we cannot early-return
+    // here just because there is nothing to remap.
+    if !needs_inlining && mappings.is_empty() && !spec_has_provider_plugin_paths(spec) {
         return spec.to_string();
     }
 
@@ -174,7 +179,71 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> String 
         Err(_) => return spec.to_string(),
     };
     remap_paths_in_value(&mut value, mappings);
+    prune_unresolved_provider_plugin_paths(&mut value, mappings);
     serde_json::to_string(&value).unwrap_or_else(|_| spec.to_string())
+}
+
+/// Cheap pre-check so a plain inline-JSON spec with no mappings is only fully
+/// parsed/rewritten when it actually carries `provider_plugin_paths` that might
+/// need pruning. Avoids round-tripping every untouched provider-config.
+fn spec_has_provider_plugin_paths(spec: &str) -> bool {
+    spec.contains("provider_plugin_paths")
+}
+
+/// Drop `provider_plugin_paths` entries that point at a controller-local
+/// absolute path which was never remapped to a synced remote location.
+///
+/// Lab offload only syncs (and records local->remote mappings for) the
+/// directories a cook actually references, so an absolute provider-plugin path
+/// inherited from stale/global controller or runner settings (e.g. a Codex
+/// provider plugin path that is not part of this run's workspace) survives
+/// remapping unchanged. Forwarding it would make the WP Codebox recipe declare
+/// an `extra_plugins[..]` entry pointing at a directory that does not exist on
+/// the runner, failing recipe validation with a `missing-path` error before the
+/// task runs (homeboy #4829). Such entries are not materialized on the selected
+/// runner, so we omit them; explicit, materializable refs and entries that did
+/// remap into a synced remote location are preserved.
+fn prune_unresolved_provider_plugin_paths(value: &mut Value, mappings: &[&LabPathRemap]) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    let Some(Value::Array(paths)) = map.get_mut("provider_plugin_paths") else {
+        return;
+    };
+    paths.retain(|entry| match entry {
+        // Non-string entries (e.g. materialized ref objects) are left untouched;
+        // ref materialization already resolved them to a present path string.
+        Value::String(path) => provider_plugin_path_is_resolvable(path, mappings),
+        _ => true,
+    });
+}
+
+/// A provider-plugin path is resolvable for the runner when it is not a bare
+/// controller-local absolute path: relative paths are runner-relative, and any
+/// path that already lives under a synced remote location (i.e. it was produced
+/// by remapping) is valid. Only an absolute path that matches no synced remote
+/// root is treated as stale/unresolvable.
+fn provider_plugin_path_is_resolvable(path: &str, mappings: &[&LabPathRemap]) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Relative paths resolve against the runner workspace, not the controller.
+    if !trimmed.starts_with('/') {
+        return true;
+    }
+    // A path that lives under a synced remote root was remapped (or authored to
+    // point at the synced location) and will exist on the runner.
+    mappings.iter().any(|mapping| {
+        if mapping.remote.is_empty() {
+            return false;
+        }
+        if trimmed == mapping.remote {
+            return true;
+        }
+        let prefix = format!("{}/", mapping.remote.trim_end_matches('/'));
+        trimmed.starts_with(&prefix)
+    })
 }
 
 /// A provider-config spec that points at a controller-local file (`@path`) or

@@ -74,8 +74,8 @@ pub(crate) use execution::{
     RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV,
 };
 pub use execution::{
-    daemon_api_post, exec, runner_exec_failure_error, RunnerExecDiagnostics, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput,
+    daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput,
 };
 pub(crate) use git_dependency_materialization::{
     materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
@@ -312,6 +312,9 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
                 id: runner.id,
                 mode,
                 connected: status.connected,
+                stale_daemon: status.stale_daemon.is_some(),
+                active_jobs: status.active_jobs.len(),
+                capabilities_ready: true,
             })
         }),
     ))
@@ -322,6 +325,47 @@ struct DefaultLabRunnerCandidate {
     id: String,
     mode: RunnerTunnelMode,
     connected: bool,
+    stale_daemon: bool,
+    active_jobs: usize,
+    capabilities_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefaultLabRunnerReadiness {
+    eligible: bool,
+    score: i32,
+}
+
+impl DefaultLabRunnerCandidate {
+    fn readiness(&self) -> DefaultLabRunnerReadiness {
+        if !self.capabilities_ready || self.stale_daemon {
+            return DefaultLabRunnerReadiness {
+                eligible: false,
+                score: 0,
+            };
+        }
+
+        if self.mode == RunnerTunnelMode::Reverse && !self.connected {
+            return DefaultLabRunnerReadiness {
+                eligible: false,
+                score: 0,
+            };
+        }
+
+        let mut score = 10;
+        if self.connected {
+            score += 100;
+        }
+        if self.mode == RunnerTunnelMode::DirectSsh {
+            score += 5;
+        }
+        score -= self.active_jobs.min(50) as i32;
+
+        DefaultLabRunnerReadiness {
+            eligible: true,
+            score,
+        }
+    }
 }
 
 fn resolve_default_lab_runner_from_candidates(
@@ -331,26 +375,33 @@ fn resolve_default_lab_runner_from_candidates(
     let candidates: Vec<DefaultLabRunnerCandidate> = candidates.into_iter().collect();
 
     if let Some(preferred) = preferred {
-        return candidates
-            .into_iter()
-            .find(|candidate| candidate.id == preferred)
-            .map(|candidate| candidate.id);
+        let preferred_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.id == preferred)?;
+        if preferred_candidate.readiness().eligible {
+            return Some(preferred_candidate.id.clone());
+        }
     }
 
-    if candidates.len() == 1 {
-        return candidates.into_iter().next().map(|candidate| candidate.id);
-    }
-
-    let connected: Vec<DefaultLabRunnerCandidate> = candidates
+    let eligible: Vec<(DefaultLabRunnerCandidate, DefaultLabRunnerReadiness)> = candidates
         .into_iter()
-        .filter(|candidate| candidate.connected)
+        .filter_map(|candidate| {
+            let readiness = candidate.readiness();
+            readiness.eligible.then_some((candidate, readiness))
+        })
         .collect();
 
-    if connected.len() == 1 {
-        connected.into_iter().next().map(|candidate| candidate.id)
-    } else {
-        None
-    }
+    let best_score = eligible
+        .iter()
+        .map(|(_, readiness)| readiness.score)
+        .max()?;
+    let best: Vec<DefaultLabRunnerCandidate> = eligible
+        .into_iter()
+        .filter(|(_, readiness)| readiness.score == best_score)
+        .map(|(candidate, _)| candidate)
+        .collect();
+
+    (best.len() == 1).then(|| best.into_iter().next().expect("checked len").id)
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
@@ -667,6 +718,21 @@ fn validate_server_runner(server_id: &str, runner: &ServerRunner) -> Result<()> 
 mod tests {
     use super::*;
     use crate::test_support;
+
+    fn default_lab_candidate(
+        id: &str,
+        mode: RunnerTunnelMode,
+        connected: bool,
+    ) -> DefaultLabRunnerCandidate {
+        DefaultLabRunnerCandidate {
+            id: id.to_string(),
+            mode,
+            connected,
+            stale_daemon: false,
+            active_jobs: 0,
+            capabilities_ready: true,
+        }
+    }
 
     #[test]
     fn runner_registry_persists_local_runner() {
@@ -1049,16 +1115,8 @@ mod tests {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-b"),
             vec![
-                DefaultLabRunnerCandidate {
-                    id: "lab-a".to_string(),
-                    mode: RunnerTunnelMode::DirectSsh,
-                    connected: true,
-                },
-                DefaultLabRunnerCandidate {
-                    id: "lab-b".to_string(),
-                    mode: RunnerTunnelMode::Reverse,
-                    connected: true,
-                },
+                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true),
+                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
             ],
         );
 
@@ -1070,16 +1128,8 @@ mod tests {
         let selected = resolve_default_lab_runner_from_candidates(
             None,
             vec![
-                DefaultLabRunnerCandidate {
-                    id: "lab-a".to_string(),
-                    mode: RunnerTunnelMode::DirectSsh,
-                    connected: false,
-                },
-                DefaultLabRunnerCandidate {
-                    id: "lab-b".to_string(),
-                    mode: RunnerTunnelMode::Reverse,
-                    connected: true,
-                },
+                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, false),
+                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
             ],
         );
 
@@ -1087,78 +1137,108 @@ mod tests {
 
         let disconnected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![DefaultLabRunnerCandidate {
-                id: "lab-a".to_string(),
-                mode: RunnerTunnelMode::DirectSsh,
-                connected: false,
-            }],
+            vec![default_lab_candidate(
+                "lab-a",
+                RunnerTunnelMode::DirectSsh,
+                false,
+            )],
         );
 
         assert_eq!(disconnected.as_deref(), Some("lab-a"));
     }
 
     #[test]
-    fn default_lab_runner_is_conservative_without_unique_connected_runner() {
+    fn default_lab_runner_uses_readiness_when_connected_state_is_not_unique() {
         let none_connected_with_multiple_candidates = resolve_default_lab_runner_from_candidates(
             None,
             vec![
-                DefaultLabRunnerCandidate {
-                    id: "lab-a".to_string(),
-                    mode: RunnerTunnelMode::DirectSsh,
-                    connected: false,
-                },
-                DefaultLabRunnerCandidate {
-                    id: "lab-b".to_string(),
-                    mode: RunnerTunnelMode::Reverse,
-                    connected: false,
-                },
+                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, false),
+                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, false),
             ],
         );
         let multiple_connected = resolve_default_lab_runner_from_candidates(
             None,
             vec![
-                DefaultLabRunnerCandidate {
-                    id: "lab-a".to_string(),
-                    mode: RunnerTunnelMode::DirectSsh,
-                    connected: true,
-                },
-                DefaultLabRunnerCandidate {
-                    id: "lab-b".to_string(),
-                    mode: RunnerTunnelMode::Reverse,
-                    connected: true,
-                },
+                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true),
+                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
             ],
         );
 
-        assert!(none_connected_with_multiple_candidates.is_none());
-        assert!(multiple_connected.is_none());
+        assert_eq!(
+            none_connected_with_multiple_candidates.as_deref(),
+            Some("lab-a")
+        );
+        assert_eq!(multiple_connected.as_deref(), Some("lab-a"));
     }
 
     #[test]
-    fn default_lab_runner_uses_disconnected_preferred_runner() {
+    fn default_lab_runner_uses_eligible_preferred_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
-            vec![DefaultLabRunnerCandidate {
-                id: "lab-a".to_string(),
-                mode: RunnerTunnelMode::Reverse,
-                connected: false,
-            }],
+            vec![default_lab_candidate(
+                "lab-a",
+                RunnerTunnelMode::DirectSsh,
+                false,
+            )],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-a"));
     }
 
     #[test]
+    fn default_lab_runner_rejects_ineligible_preferred_runner() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-a"),
+            vec![
+                default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, false),
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
     fn default_lab_runner_can_select_connected_reverse_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![DefaultLabRunnerCandidate {
-                id: "homeboy-lab".to_string(),
-                mode: RunnerTunnelMode::Reverse,
-                connected: true,
-            }],
+            vec![default_lab_candidate(
+                "homeboy-lab",
+                RunnerTunnelMode::Reverse,
+                true,
+            )],
         );
 
         assert_eq!(selected.as_deref(), Some("homeboy-lab"));
+    }
+
+    #[test]
+    fn default_lab_runner_prefers_less_busy_ready_runner() {
+        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        busy.active_jobs = 3;
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                busy,
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_skips_stale_daemon_runner() {
+        let mut stale = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        stale.stale_daemon = true;
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                stale,
+                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
     }
 }

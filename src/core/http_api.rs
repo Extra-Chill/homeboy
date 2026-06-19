@@ -371,11 +371,15 @@ where
             "command": "api.bench.runs",
             "runs": list_runs(&request.path, Some("bench"), job_store)?,
         }),
-        HttpEndpoint::Jobs => json!({
-            "command": "api.jobs.list",
-            "jobs": job_store.list(),
-            "active_runner_jobs": job_store.active_runner_jobs(),
-        }),
+        HttpEndpoint::Jobs => {
+            let active_runner_jobs = job_store.active_runner_jobs();
+            json!({
+                "command": "api.jobs.list",
+                "jobs": job_store.list(),
+                "active_runner_job_count": active_runner_jobs.len(),
+                "active_runner_jobs": active_runner_jobs,
+            })
+        }
         HttpEndpoint::Job { id } => json!({
             "command": "api.jobs.show",
             "job": job_store.get(parse_job_id(id)?)?,
