@@ -85,14 +85,12 @@ jobs:
     secrets: inherit
 ```
 
-### Migrating Old Bundle Callers
+### Migrating Old Wrapper Callers
 
-The former domain-specific reusable workflow has been removed after
-active default-branch callers migrated. Existing bundle callers
-should call `runtime-agent-full-run.yml` directly and provide their runtime stack
-as explicit generic inputs.
+Removed domain-specific wrappers should migrate to `runtime-agent-full-run.yml`
+directly and provide their runtime stack as explicit generic inputs.
 
-Use this mapping when updating old workflow bodies:
+Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
@@ -181,14 +179,14 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime_provider`.
+- Agent CI runs through the selected `runtime_provider`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
 - `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
 - Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
-- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the selected runtime package.
+- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the selected runtime profile.
 - Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to WP Codebox as runtime component requirements.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
@@ -213,7 +211,7 @@ jobs:
 - `verification_commands` and `drift_checks` run through the WP Codebox runner workspace command API, so remote runner workspaces do not require Homeboy to know backend-local paths.
 - If runner-owned workspace publication is unavailable or fails, the run fails as `write_without_pr`; Homeboy does not compose alternate PR fallback calls.
 
-## External Bundle And Tool Recording Example
+## External Bundle And Tool Recording
 
 Consumers such as `docs-agent` can keep the agent bundle in one repository while
 running it against another repository. The reusable workflow handles the bundle

@@ -18,7 +18,9 @@ const {
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = 'codebox';
+const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME = 'wp-codebox';
 const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND;
+const WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME;
 const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 	read: 'sandbox',
 	write: 'sandbox',
@@ -28,11 +30,13 @@ const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 function wordpressRuntimeTaskPlan(options = {}) {
 	const planId = requiredString(options.planId || options.plan_id, 'planId');
 	const backend = wordpressRuntimeTaskBackend(options);
+	const runtime = wordpressRuntimeTaskRuntime(options);
 	const taskOptions = normalizeTaskOptions(options);
 	const tasks = taskOptions.map((taskOption, index) => wordpressRuntimeTaskRequest({
 		...options,
 		...taskOption,
 		backend: wordpressRuntimeTaskBackend({ ...options, ...taskOption }, backend),
+		runtime: wordpressRuntimeTaskRuntime({ ...options, ...taskOption }, runtime),
 		planId,
 		parentPlanId: planId,
 		taskId: taskOption.taskId || taskOption.task_id || taskIdForPlan(planId, index, taskOption),
@@ -50,7 +54,7 @@ function wordpressRuntimeTaskPlan(options = {}) {
 		metadata: stripUndefined({
 			...(options.metadata || {}),
 			planner: 'homeboy-extension-wordpress/wordpress-runtime-task-planner',
-			runtime: options.runtime || options.runtimeId || options.runtime_id,
+			runtime,
 			backend,
 		}),
 	});
@@ -98,6 +102,7 @@ function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	const config = wordpressRuntimeTaskExecutorConfig(options);
 	return agentTaskRunnerSpec({
 		backend: wordpressRuntimeTaskBackend(options),
+		runtime: wordpressRuntimeTaskRuntime(options),
 		config,
 		secret_env: normalizeArray(options.secretEnv || options.secret_env),
 		task_timeout_seconds: numberOrUndefined(options.taskTimeoutSeconds || options.task_timeout_seconds || options.timeoutSeconds || options.timeout_seconds),
@@ -110,13 +115,18 @@ function wordpressRuntimeTaskBackend(options = {}, fallback = WORDPRESS_RUNTIME_
 	return options.backend || options.runtimeBackend || options.runtime_backend || options.agentRuntimeBackend || options.agent_runtime_backend || fallback;
 }
 
+function wordpressRuntimeTaskRuntime(options = {}, fallback = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME) {
+	return options.runtime || options.runtimeId || options.runtime_id || options.agentRuntime || options.agent_runtime || fallback;
+}
+
 function wordpressRuntimeTaskExecutorConfig(options = {}) {
+	const runtime = wordpressRuntimeTaskRuntime(options);
 	return stripUndefined({
 		...(options.config || {}),
 		provider: options.provider,
 		model: options.model,
-		runtime: options.runtime,
-		runtime_id: options.runtimeId || options.runtime_id,
+		runtime,
+		runtime_id: options.runtimeId || options.runtime_id || runtime,
 		runtime_bin: options.runtimeBin || options.runtime_bin,
 		provider_plugin_paths: options.providerPluginPaths || options.provider_plugin_paths,
 		homeboy_extensions: options.homeboyExtensions || options.homeboy_extensions,
@@ -215,11 +225,14 @@ function stripUndefined(value) {
 module.exports = {
 	WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND,
 	WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND,
+	WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME,
 	WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY,
+	WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME,
 	WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
 	wordpressRuntimeTaskBackend,
 	wordpressRuntimeTaskExecutorConfig,
 	wordpressRuntimeTaskPlan,
 	wordpressRuntimeTaskRequest,
+	wordpressRuntimeTaskRuntime,
 	wordpressRuntimeTaskRunnerSpec,
 };

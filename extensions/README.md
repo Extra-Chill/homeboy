@@ -19,6 +19,12 @@ documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md)
 They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
 helper contract.
 
+Generic fanout/reconcile JSON planning is documented in
+[`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
+
+Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
+when a reusable integration needs documentation outside its owning project.
+
 ## Available Extensions
 
 | Extension | Description |
@@ -115,42 +121,17 @@ homeboy release
 ### Runtime agent full-run tasks
 
 The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is the
-recommended entrypoint for full runtime-backed agent and ability runs. It can
-run a generic WordPress ability directly through WP Codebox without importing an
-agent bundle. Use `runtime_task` or the `ability_request`/`ability_input`
-shorthand. Downloaded GitHub Actions artifacts can be mounted into the sandbox
-with `runtime_mounts`, and typed outputs can be enforced with
-`artifact_declarations` plus `runtime_output_projections`:
-
-```yaml
-jobs:
-  process-artifact:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@main
-    with:
-      homeboy_extensions_ref: main
-      runtime_provider: wp-codebox
-      runtime_ref: main
-      runtime_profile: artifact-processor
-      runtime_profiles: >-
-        {"artifact-processor":{"id":"artifact-processor","runtime_task_ability":"example/process-artifact","ability_requirements":["example/process-artifact"]}}
-      target_repo: Example/project
-      workload_id: artifact-flow
-      actions_artifact_downloads: >-
-        [{"repo":"Example/project","run_id":"123456789","name":"source-packet","dir":".ci/actions-artifacts/source-packet"}]
-      runtime_mounts: >-
-        [{"source":".ci/actions-artifacts/source-packet","target":"/workspace/input","mode":"readonly"}]
-      ability_request: >-
-        {"ability":"example/process-artifact","input":{"source_artifact":"/workspace/input/source.json"}}
-      runtime_output_projections: >-
-        {"processed_packet":"result.processed_packet"}
-      artifact_declarations: >-
-        [{"name":"processed_packet","type":"example-packet","schema":"example/processed-packet/v1","required":true}]
-      expected_artifacts: '["processed_packet"]'
-```
+recommended entrypoint for full runtime-backed agent and ability runs. Use
+`runtime_task` or the `ability_request`/`ability_input` shorthand for direct
+ability execution. Mount downloaded GitHub Actions artifacts with
+`runtime_mounts`, and enforce typed outputs with `artifact_declarations` plus
+`runtime_output_projections`.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
 agent runs. Former domain-specific reusable workflow wrappers have been removed
 after active default-branch consumers migrated to the generic workflow.
+See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
+inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
@@ -158,12 +139,19 @@ types owned by the caller; Homeboy Extensions only forwards the generic runtime
 task contract.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
-`component_contracts`, `extra_plugins`, `runtime_overlays`, `env`, and
-`provider_plugins`. Homeboy Extensions declares the temporary
-`homeboy_parent_tool_bridge` compatibility field in that payload only when a
-profile does not already expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
-component or `parent_tool_bridge` declaration. The expected upstream primitive is
-a Codebox-owned parent-tool bridge that maps parent-owned tools into
+generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
+`themes`, `overlays`, `runtime_overlays`, `env`, and `provider_plugins`.
+Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
+and derives `component_contracts` / `extra_plugins` only as adapter
+compatibility for Codebox agent-task entry points that still consume component
+contracts directly. Ability selection, tool policy, hook/tool registration, and
+runtime-owned schemas stay in the caller or selected runtime.
+
+Homeboy Extensions declares the temporary `homeboy_parent_tool_bridge`
+compatibility field in the runtime profile only when the profile does not already
+expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`, `parent_tool_bridge`,
+or generic parent-tool bridge component descriptor. The expected upstream
+primitive is a Codebox-owned parent-tool bridge that maps parent-owned tools into
 sandbox-visible descriptors without Homeboy injecting the bridge env directly.
 
 Each extension also exposes a CLI binding for direct use against a project or component:

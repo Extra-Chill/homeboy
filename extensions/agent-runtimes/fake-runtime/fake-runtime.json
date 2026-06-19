@@ -17,6 +17,7 @@
         "schema",
         "task_id",
         "executor.backend",
+        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [
@@ -35,13 +36,36 @@
       "redacted_metadata_keys": [
         "secret_env_values",
         "secretEnvValues",
-        "secrets",
-        "fake_runtime_token"
+        "secrets"
       ],
       "capabilities": [
         "workspace_materialization",
         "structured_outcome",
         "diagnostic_artifacts"
+      ],
+      "tool_presets": [
+        "runner_workspace",
+        "publication"
+      ],
+      "workspace_tools": {
+        "readonly": [
+          "workspace_ls",
+          "workspace_read",
+          "workspace_git_status"
+        ],
+        "readwrite": [
+          "workspace_run",
+          "workspace_write",
+          "workspace_edit",
+          "workspace_apply_patch",
+          "workspace_delete",
+          "workspace_git_add"
+        ]
+      },
+      "publication_tools": [
+        "publication_prepare",
+        "publication_publish",
+        "publication_status"
       ],
       "workspace_materialization": {
         "cwd": "git_checkout",
@@ -51,27 +75,11 @@
           ".homeboy/fake-runtime"
         ]
       },
-      "secret_requirements": [
-        {
-          "name": "FAKE_RUNTIME_TOKEN",
-          "required": false,
-          "purpose": "Optional fake credential used by the contract fixture."
-        }
-      ],
-      "secret_env_requirements": [
-        {
-          "schema": "homeboy/secret-env-requirement/v1",
-          "source": "provider_default",
-          "env": ["FAKE_RUNTIME_TOKEN"],
-          "when": {
-            "path": "executor.config.provider",
-            "equals": "fake-runtime"
-          }
-        }
-      ],
+      "secret_requirements": [],
+      "secret_env_requirements": [],
       "provider_defaults": {
         "fake-runtime": {
-          "secret_env": ["FAKE_RUNTIME_TOKEN"]
+          "secret_env": []
         }
       },
       "diagnostics": {
@@ -81,7 +89,8 @@
           "metadata"
         ],
         "artifact_kinds": [
-          "fake-runtime-diagnostic"
+          "fake-runtime-outcome",
+          "fake-runtime-transcript"
         ]
       },
       "status": "experimental",

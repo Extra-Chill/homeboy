@@ -3,6 +3,10 @@
 Node benchmark workloads can import the product-neutral helper exported by
 `HOMEBOY_NODEJS_WORKLOAD_UTILS`.
 
+This helper is intentionally substrate-neutral. Visual parity workloads that
+target WordPress Codebox should import the workload owned by the WordPress
+extension: `homeboy-extension-wordpress/wordpress-codebox-visual-parity-workload`.
+
 ```js
 const { metric, runCommand, writeJson } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
 ```
@@ -20,7 +24,6 @@ concepts:
 - `metric(value, fallback)` coerces finite numeric values.
 - `runCommand(command, args, options)` runs a subprocess with redacted output by default.
 - `runPackageScriptBench(options)` runs a `package.json` script with optional spec args and returns the standard bench workload shape: `{ metrics, artifacts, metadata }`.
-- `runVisualParityWorkload(options)` runs a WP Codebox `wordpress.visual-compare` recipe and returns the standard bench workload shape with a typed `homeboy/VisualParityArtifact/v1` JSON artifact.
 - `writeJson(file, data)` and `writeText(file, data)` create parent directories and redact common secrets.
 - `runId(name)` creates a sanitized run identifier.
 - `artifactDir(name)` returns a directory under `HOMEBOY_BENCH_SHARED_STATE` or the OS temp directory.
@@ -28,73 +31,6 @@ concepts:
 - `percentile(values, pct)` uses R-7 linear interpolation.
 
 Use `{ redact: false }` with `runCommand()`, `writeJson()`, or `writeText()` only when a workload needs raw output for parsing before writing a redacted artifact.
-
-## Visual Parity Workloads
-
-`runVisualParityWorkload()` is the reusable primitive for visual comparison
-workloads that already have a WP Codebox CLI available. It accepts a source URL
-or local source path, a candidate WordPress context, viewport/threshold settings,
-and emits a normalized `homeboy/VisualParityArtifact/v1` artifact while preserving
-the underlying WP Codebox artifact references.
-
-```js
-const { runVisualParityWorkload } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
-
-export default async function () {
-  return runVisualParityWorkload({
-    id: 'homepage-parity',
-    wpCodeboxCli: process.env.WP_CODEBOX_CLI,
-    source: {
-      path: './dist/site',
-      ref: process.env.GITHUB_SHA,
-      label: 'static-source',
-      port: 4173,
-    },
-    candidate: {
-      url: '/',
-      label: 'wordpress-candidate',
-      context: { runtime: 'playground' },
-      recipe: {
-        runtime: { wp: 'latest' },
-        inputs: { mounts: [] },
-      },
-    },
-    viewport: { width: 1280, height: 1600 },
-    threshold: 0.015,
-    pixelThreshold: 0.1,
-    waitFor: 'domcontentloaded',
-  });
-}
-```
-
-The helper stays product-neutral. Callers own site-specific import steps,
-scoring, PR comments, retry policy, and reviewer gates. Homeboy Extensions owns
-the reusable recipe invocation and artifact normalization shape:
-
-```json
-{
-  "schema": "homeboy/VisualParityArtifact/v1",
-  "source": { "label": "static-source", "ref": "...", "path": "...", "url": "..." },
-  "candidate": { "label": "wordpress-candidate", "ref": "...", "url": "/", "context": {} },
-  "summary": {
-    "status": "passed",
-    "pass": true,
-    "threshold": 0.015,
-    "mismatch_ratio": 0,
-    "mismatch_pixels": 0,
-    "total_pixels": 2048000,
-    "dimension_mismatch": false,
-    "region_count": 0
-  },
-  "artifacts": {
-    "directory": "...",
-    "visual_diff": "files/browser/visual-compare/visual-diff.json",
-    "source_screenshot": "files/browser/visual-compare/source.png",
-    "candidate_screenshot": "files/browser/visual-compare/candidate.png",
-    "diff_screenshot": "files/browser/visual-compare/diff.png"
-  }
-}
-```
 
 Typed setting helpers use the same precedence as `setting()`: values in
 `HOMEBOY_SETTINGS_JSON` win when the key exists and is not `null`; otherwise the

@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { capture, normalizeProviderPlugin, parseJsonInput, requireRepo, run, splitCsv } = require('./lib/common.cjs');
-const { resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const printPlan = process.argv.includes('--print-plan');
@@ -24,9 +24,9 @@ function main() {
 }
 
 function dependencyEntries(env) {
-  const runtimeId = env.RUNTIME_PROVIDER || 'wp-codebox';
+  const runtimeId = env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID;
   const runtime = resolveRuntimeProvider(runtimeId, { env });
-  const entries = [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }];
+  const entries = runtime.checkout.repo ? [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }] : [];
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);
   const runtimeDependencies = runtimeDependencyEntries(env.RUNTIME_DEPENDENCIES || '');
   if (runtimeDependencies.length > 0) {
@@ -104,11 +104,13 @@ function normalizeDependencyEntry(rawEntry) {
   return { repo, ref, target: '' };
 }
 
-try {
-  main();
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exit(1);
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exit(1);
+  }
 }
 
 module.exports = { dependencyEntries, resolvePlan };

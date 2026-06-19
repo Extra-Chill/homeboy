@@ -9,6 +9,7 @@ function agentTaskRunnerSpec(options = {}) {
   }
 
   const backend = requiredString(options.backend, 'backend');
+  const runtime = requiredString(options.runtime || options.runtimeId || options.runtime_id, 'runtime');
   const taskTimeoutSeconds = options.taskTimeoutSeconds || options.task_timeout_seconds;
   const limits = stripUndefined({
     ...(taskTimeoutSeconds ? { task_timeout_seconds: taskTimeoutSeconds } : {}),
@@ -19,6 +20,7 @@ function agentTaskRunnerSpec(options = {}) {
     schema: AGENT_TASK_RUNNER_SPEC_SCHEMA,
     executor: stripUndefined({
       backend,
+      runtime,
       ...(normalizeArray(options.secretEnv || options.secret_env).length > 0
         ? { secret_env: normalizeArray(options.secretEnv || options.secret_env) }
         : {}),
@@ -52,6 +54,7 @@ function validateAgentTaskRunnerSpec(spec) {
     throw new Error('runner spec executor is required.');
   }
   requiredString(spec.executor.backend, 'runner spec executor.backend');
+  requiredString(spec.executor.runtime, 'runner spec executor.runtime');
   if (!spec.executor.config || typeof spec.executor.config !== 'object' || Array.isArray(spec.executor.config)) {
     throw new Error('runner spec executor.config is required.');
   }

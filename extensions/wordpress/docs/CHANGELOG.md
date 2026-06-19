@@ -2,6 +2,51 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.24] - 2026-06-19
+
+### Changed
+- Add standalone agent runtime integrations
+
+## [3.7.23] - 2026-06-19
+
+### Changed
+- Implement OpenCode agent task executor
+
+## [3.7.22] - 2026-06-19
+
+### Changed
+- Add generic seams for WordPress runtime backends
+
+## [3.7.21] - 2026-06-19
+
+### Changed
+- Extract audit fanout runtime provider seam
+
+## [3.7.20] - 2026-06-19
+
+### Changed
+- Quarantine remaining Codebox runtime surfaces
+
+## [3.7.19] - 2026-06-19
+
+### Changed
+- Decouple WordPress agent runtime selection
+
+## [3.7.18] - 2026-06-19
+
+### Changed
+- Register OpenCode agent runtime
+
+## [3.7.17] - 2026-06-18
+
+### Changed
+- Decouple agent runtime selection from Codebox
+
+## [3.7.16] - 2026-06-18
+
+### Changed
+- Add generic fanout reconcile workflow
+
 ## [3.7.15] - 2026-06-18
 
 ### Changed

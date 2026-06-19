@@ -13,8 +13,7 @@ const {
   splitCsv,
   writeGithubOutput,
 } = require('./lib/common.cjs');
-const { resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
-const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
   runtimeAgentCiFirstNonEmptyArray,
   runtimeAgentCiFirstNonEmptyObject,
@@ -35,7 +34,7 @@ function buildConfig(env) {
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
   const componentId = env.COMPONENT_ID || path.basename(workspace);
   const componentPath = env.COMPONENT_PATH || workspace;
-  const runtimeId = env.RUNTIME_PROVIDER || 'wp-codebox';
+  const runtimeId = env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID;
   const runtimeProfile = required(env.RUNTIME_PROFILE, 'RUNTIME_PROFILE');
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
@@ -77,14 +76,14 @@ function buildConfig(env) {
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
   const resolvedRuntimeProfile = runtimeProfiles[runtimeProfile] || {};
-  const effectiveRuntimeProfile = isCodeboxRuntime(runtime) ? codeboxRuntimeProfilePayload({
+  const effectiveRuntimeProfile = runtimeProfilePayload(runtime, {
     id: runtimeProfile,
     profile: resolvedRuntimeProfile,
     componentContracts,
     runtimeOverlays,
     runtimeEnv,
     providerPluginPaths,
-  }) : resolvedRuntimeProfile;
+  });
   const effectiveRuntimeProfiles = {
     ...runtimeProfiles,
     [runtimeProfile]: effectiveRuntimeProfile,
@@ -235,6 +234,14 @@ function runtimeTaskFromEnv(env) {
 
 function isCodeboxRuntime(runtime) {
   return runtime?.id === 'wp-codebox' || runtime?.executor?.backend === 'codebox';
+}
+
+function runtimeProfilePayload(runtime, options) {
+  if (!isCodeboxRuntime(runtime)) {
+    return options.profile;
+  }
+  const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
+  return codeboxRuntimeProfilePayload(options);
 }
 
 function runtimePathRequired(runtime, pathName) {

@@ -15,9 +15,10 @@ const PLAN_SCHEMA = 'homeboy/static-site-fanout-plan/v1';
 const RUN_SCHEMA = 'homeboy/static-site-fanout-run/v1';
 const RECONCILIATION_SCHEMA = 'homeboy/static-site-fanout-reconciliation/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
-const WP_CODEBOX_TASK_SCHEMA = 'wp-codebox/task-input/v1';
+const CODEBOX_COMPATIBILITY_TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const DEFAULT_PRESET = 'static-site/import-validation';
 const COMPATIBILITY_AGENT_TASK_BACKEND = 'codebox';
+const CODEBOX_COMPATIBILITY_PROVIDER = 'wp-codebox';
 const DEFAULT_AGENT_TASK_PRESET = {
   runtime_task: 'static-site/import-validation',
 };
@@ -72,7 +73,8 @@ function normalizeOrchestrator(input) {
     backend: input.backend || input.runtime_backend || input.runtimeBackend || input.agent_runtime_backend || input.agentRuntimeBackend || undefined,
     provider_plugin_paths: normalizeArray(input.provider_plugin_paths || input.providerPluginPaths),
     secret_env: normalizeArray(input.secret_env || input.secretEnv),
-    request_schema: requestSchema(input.request_kind || input.requestKind || 'agent-task'),
+    compatibility_provider: codeboxCompatibilityRequested(input) ? CODEBOX_COMPATIBILITY_PROVIDER : undefined,
+    request_schema: requestSchema(input),
   });
 }
 
@@ -134,7 +136,7 @@ function normalizeFanoutGroup(group, index) {
 }
 
 function createTaskRequest(group, orchestrator, options = {}) {
-  if ((options.request_kind || options.requestKind) === 'wp-codebox') {
+  if (codeboxCompatibilityRequested(options)) {
     return createWpCodeboxTaskRequest(group, orchestrator, options);
   }
   return createAgentTaskRequest(group, orchestrator, options);
@@ -143,8 +145,8 @@ function createTaskRequest(group, orchestrator, options = {}) {
 function createAgentTaskRequest(group, orchestrator, options = {}) {
   const runtime = {
     ...DEFAULT_AGENT_TASK_PRESET,
-    backend: orchestrator.backend || COMPATIBILITY_AGENT_TASK_BACKEND,
     ...(options.agent_task || options.agentTask || {}),
+    backend: orchestrator.backend || (options.agent_task || options.agentTask || {}).backend,
   };
   const taskId = taskIdForGroup(group, orchestrator, 'static-site');
   const runtimeTaskInput = {
@@ -161,7 +163,7 @@ function createAgentTaskRequest(group, orchestrator, options = {}) {
     group_key: group.key,
     parent_plan_id: orchestrator.parent_plan_id || orchestrator.plan_id,
     executor: stripUndefined({
-      backend: runtime.backend || COMPATIBILITY_AGENT_TASK_BACKEND,
+      backend: runtime.backend,
       secret_env: orchestrator.secret_env.length > 0 ? orchestrator.secret_env : undefined,
       config: stripUndefined({
         provider: orchestrator.provider || undefined,
@@ -192,7 +194,7 @@ function createAgentTaskRequest(group, orchestrator, options = {}) {
 function createWpCodeboxTaskRequest(group, orchestrator, options = {}) {
   const taskId = taskIdForGroup(group, orchestrator, 'static-site-codebox');
   return stripUndefined({
-    schema: WP_CODEBOX_TASK_SCHEMA,
+    schema: CODEBOX_COMPATIBILITY_TASK_SCHEMA,
     id: taskId,
     sandbox_session_id: taskId,
     group_key: group.key,
@@ -444,8 +446,18 @@ function taskOrder(plan, record) {
   return plan.task_requests.findIndex((taskRequest) => taskRequestId(taskRequest) === taskRequestId(record));
 }
 
-function requestSchema(kind) {
-  return kind === 'wp-codebox' ? WP_CODEBOX_TASK_SCHEMA : AGENT_TASK_REQUEST_SCHEMA;
+function requestSchema(input = {}) {
+  return codeboxCompatibilityRequested(input) ? CODEBOX_COMPATIBILITY_TASK_SCHEMA : AGENT_TASK_REQUEST_SCHEMA;
+}
+
+function codeboxCompatibilityRequested(input = {}) {
+  const compatibilityProvider = input.compatibility_provider || input.compatibilityProvider || input.request_provider || input.requestProvider;
+  return (input.request_kind || input.requestKind) === 'wp-codebox'
+    || compatibilityProvider === CODEBOX_COMPATIBILITY_PROVIDER
+    || input.codebox_compatibility === true
+    || input.codeboxCompatibility === true
+    || input.wp_codebox_compatibility === true
+    || input.wpCodeboxCompatibility === true;
 }
 
 function safeSlug(value) {
@@ -481,7 +493,7 @@ module.exports = {
   RUN_SCHEMA,
   RECONCILIATION_SCHEMA,
   AGENT_TASK_REQUEST_SCHEMA,
-  WP_CODEBOX_TASK_SCHEMA,
+  CODEBOX_COMPATIBILITY_PROVIDER,
   DEFAULT_PRESET,
   COMPATIBILITY_AGENT_TASK_BACKEND,
   createStaticSiteFanoutPlan,

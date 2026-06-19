@@ -53,6 +53,7 @@
         "schema",
         "task_id",
         "executor.backend",
+        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [
@@ -155,9 +156,9 @@
             "env": ["HOMEBOY_WP_CODEBOX_BIN"],
             "candidates": ["wp-codebox"],
             "version_command": ["--version"],
-            "install_hint": "Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path."
+            "install_hint": "Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias."
           },
-          "remediation": "Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path."
+          "remediation": "Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias."
         }
       ],
       "workspace_tools": {
@@ -330,6 +331,21 @@
         }
       },
       "role_aliases": {
+        "artifact_roles": {
+          "artifact_bundle": ["codebox-artifact-bundle", "artifact-bundle", "codebox-artifact-directory", "codebox-session-artifacts"],
+          "changed_files": ["codebox-changed-files"],
+          "patch": ["codebox-patch"],
+          "transcript": ["codebox-transcript", "agent-runtime-transcript", "agent-runtime-transcript-summary"],
+          "runtime_log": ["codebox-runtime-log", "codebox-recipe-startup-log"],
+          "command_log": ["codebox-command-log"],
+          "typed_artifact": ["typed-bundle-output"],
+          "replay_bundle": ["agent-runtime-replay-bundle"],
+          "pull_request": ["agent-runtime-pull-request"],
+          "probe_result": ["codebox-recipe-probe-json", "recipe-probe-result"],
+          "screenshot": ["codebox-recipe-screenshot"],
+          "side_effects": ["codebox-recipe-fake-side-effects"],
+          "preflight_evidence": ["codebox-command-evidence", "codebox-agent-task-input"]
+        },
         "artifact_kinds": {
           "patch": ["codebox-patch"]
         },
@@ -343,6 +359,36 @@
           "provider_run_result": ["codebox_run_result"]
         }
       },
+      "upstream_primitive_requirements": [
+        {
+          "id": "runtime-profile",
+          "schema": "wp-codebox/runtime-profile/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "forward_profile_payload",
+          "requirement": "Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals."
+        },
+        {
+          "id": "parent-tool-bridge",
+          "schema": "wp-codebox/parent-tool-bridge/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "declare_requirement_when_missing",
+          "requirement": "Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details."
+        },
+        {
+          "id": "provider-runtime-invocation",
+          "schema": "wp-codebox/provider-runtime-invocation-contract/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "declare_task_and_ability_names",
+          "requirement": "Provide runner workspace, transcript recording, and artifact handoff operations behind stable task/ability names."
+        },
+        {
+          "id": "artifact-result-envelope",
+          "schema": "wp-codebox/evidence-artifact-envelope/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "normalize_declared_artifacts",
+          "requirement": "Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts."
+        }
+      ],
       "status": "active",
       "integration_contract": "homeboy-wordpress-agent-task/v1",
       "runtime_gap_trackers": []

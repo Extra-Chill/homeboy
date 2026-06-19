@@ -42,7 +42,6 @@
       "task_id": "static-site-fixture-run-converter-support",
       "group_key": "converter-support",
       "parent_plan_id": "fixture-parent-plan",
-      "executor_backend": "codebox",
       "executor_secret_env": [
         "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
       ],
@@ -163,7 +162,6 @@
       "task_id": "static-site-fixture-run-visual-parity-policy",
       "group_key": "visual-parity-policy",
       "parent_plan_id": "fixture-parent-plan",
-      "executor_backend": "codebox",
       "executor_secret_env": [
         "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
       ],

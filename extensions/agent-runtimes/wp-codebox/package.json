@@ -5,9 +5,12 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./codebox-artifact-contract": "./lib/codebox-artifact-contract.js",
     "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
+    "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
     "./delegated-run-contract": "./lib/delegated-run-contract.js",
-    "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js"
+    "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",
+    "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js"
   },
   "bin": {
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"

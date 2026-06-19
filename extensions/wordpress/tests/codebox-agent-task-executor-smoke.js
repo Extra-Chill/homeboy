@@ -347,7 +347,7 @@ assert.equal(provider.backend, 'codebox');
 assert.equal(provider.command, 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
-assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
+assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'executor.runtime', 'instructions']);
 assert.deepEqual(provider.outcome_statuses, AGENT_TASK_OUTCOME_STATUSES);
 assert.deepEqual(provider.failure_classifications, AGENT_TASK_FAILURE_CLASSIFICATIONS);
 assert.deepEqual(provider.redacted_metadata_keys, AGENT_TASK_REDACTED_METADATA_KEYS);
@@ -405,6 +405,21 @@ assert.equal(providerPreflightManifest('codex').provider_plugin_validation.diagn
 assert.deepEqual(missingRequiredSecretEnvMapping({ secret_env: codexSecretEnv.slice(0, 3) }, 'codex'), ['AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID']);
 assert.deepEqual(missingRequiredSecretEnvValues('claude-code', {}), [claudeCodeRefreshTokenEnv]);
 assert.deepEqual(provider.role_aliases, {
+  artifact_roles: {
+    artifact_bundle: ['codebox-artifact-bundle', 'artifact-bundle', 'codebox-artifact-directory', 'codebox-session-artifacts'],
+    changed_files: ['codebox-changed-files'],
+    patch: ['codebox-patch'],
+    transcript: ['codebox-transcript', 'agent-runtime-transcript', 'agent-runtime-transcript-summary'],
+    runtime_log: ['codebox-runtime-log', 'codebox-recipe-startup-log'],
+    command_log: ['codebox-command-log'],
+    typed_artifact: ['typed-bundle-output'],
+    replay_bundle: ['agent-runtime-replay-bundle'],
+    pull_request: ['agent-runtime-pull-request'],
+    probe_result: ['codebox-recipe-probe-json', 'recipe-probe-result'],
+    screenshot: ['codebox-recipe-screenshot'],
+    side_effects: ['codebox-recipe-fake-side-effects'],
+    preflight_evidence: ['codebox-command-evidence', 'codebox-agent-task-input'],
+  },
   artifact_kinds: {
     patch: ['codebox-patch'],
   },
@@ -2131,6 +2146,8 @@ assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'ar
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-changed-files' && artifact.path === '/tmp/canary/runtime/files/changed-files.json'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/canary/runtime/files/patch.diff'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript' && artifact.path === '/tmp/canary/runtime/files/transcript.json'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'patch' && artifact.metadata.wp_codebox.kind === 'codebox-patch' && artifact.metadata.wp_codebox.raw.metadata.artifact === 'files/patch.diff'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'transcript' && artifact.metadata.wp_codebox.kind === 'codebox-transcript'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-log'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
 assert.equal(canaryRunOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/canary/runtime/files/patch.diff'), true);

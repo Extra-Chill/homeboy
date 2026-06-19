@@ -30,6 +30,7 @@
       "schema",
       "task_id",
       "executor.backend",
+      "executor.runtime",
       "instructions"
     ],
     "outcome_statuses": [
@@ -84,6 +85,9 @@
       "runner_sources",
       "dependency_failure_patterns",
       "timeout_artifact_discovery",
+      "tool_presets",
+      "workspace_tools",
+      "publication_tools",
       "role_aliases",
       "extension_id",
       "extension_path",

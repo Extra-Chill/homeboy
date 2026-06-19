@@ -66,9 +66,9 @@ assert.deepEqual(provider.runner_readiness, [{
     env: ['HOMEBOY_WP_CODEBOX_BIN'],
     candidates: ['wp-codebox'],
     version_command: ['--version'],
-    install_hint: 'Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path.',
+    install_hint: 'Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias.',
   },
-  remediation: 'Install WP Codebox or set HOMEBOY_WP_CODEBOX_BIN to the wp-codebox executable path.',
+  remediation: 'Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias.',
 }]);
 assert.deepEqual(secretEnvRequirementForProvider(runtime.agent_task_executors[0], 'codex').env, codexSecretEnv);
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);

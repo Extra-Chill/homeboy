@@ -11,10 +11,18 @@ const {
   createAuditWpCodeboxFanoutPlanFromFiles,
   executeAuditWpCodeboxFanout,
   executeAuditWpCodeboxFanoutFromFiles,
+  IMPLEMENTATION_SCOPE,
   safeBranchSlug,
   taskOutcome,
   taskOutcomeSucceeded,
 } = require('../lib/audit-wp-codebox-fanout');
+const {
+  auditFanoutRuntimeEnv,
+  auditFanoutRuntimeInvocation,
+} = require('../lib/audit-fanout-runtime-adapter');
+const {
+  wpCodeboxAuditRuntimeOptions,
+} = require('../lib/audit-wp-codebox-runtime-provider');
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -132,6 +140,24 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
+  const genericRequest = JSON.parse(process.env.HOMEBOY_AGENT_TASK_REQUEST || '{}');
+  const wpCodeboxRequest = JSON.parse(process.env.HOMEBOY_WP_CODEBOX_TASK_REQUEST || '{}');
+  if (genericRequest.sandbox_session_id !== request.sandbox_session_id) {
+    process.stderr.write('fixture missing generic HOMEBOY_AGENT_TASK_REQUEST\\n');
+    process.exit(5);
+  }
+  if (wpCodeboxRequest.sandbox_session_id !== request.sandbox_session_id) {
+    process.stderr.write('fixture missing WP Codebox compatibility task request env\\n');
+    process.exit(5);
+  }
+  if (process.env.HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID !== request.sandbox_session_id) {
+    process.stderr.write('fixture missing WP Codebox compatibility sandbox env\\n');
+    process.exit(5);
+  }
+  if (process.env.HOMEBOY_WP_CODEBOX_GROUP_KEY !== request.group_key) {
+    process.stderr.write('fixture missing WP Codebox compatibility group env\\n');
+    process.exit(5);
+  }
   const artifactsIndex = process.argv.indexOf('--artifacts');
   const artifactsRoot = artifactsIndex >= 0 ? process.argv[artifactsIndex + 1] : '';
   function writePartialArtifact() {
@@ -295,6 +321,61 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-audit-wp-codebox-fan
 
 async function main() {
 try {
+  assert.equal(IMPLEMENTATION_SCOPE.quarantine, 'wp-codebox-compatibility-entrypoint');
+  assert.equal(IMPLEMENTATION_SCOPE.generic_surface, false);
+  assert.equal(IMPLEMENTATION_SCOPE.runtime_adapter, 'wordpress/lib/audit-fanout-runtime-adapter.js');
+  assert.ok(IMPLEMENTATION_SCOPE.public_entrypoints.includes('wordpress/lib/audit-wp-codebox-fanout.js'));
+
+  const defaultRuntimeInvocation = auditFanoutRuntimeInvocation();
+  assert.equal(defaultRuntimeInvocation.runtime.id, 'wp-codebox');
+  assert.equal(defaultRuntimeInvocation.command, 'wp-codebox');
+  const previousWpCodeboxEnv = {
+    HOMEBOY_WP_CODEBOX_TASK_REQUEST: process.env.HOMEBOY_WP_CODEBOX_TASK_REQUEST,
+    HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: process.env.HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID,
+    HOMEBOY_WP_CODEBOX_GROUP_KEY: process.env.HOMEBOY_WP_CODEBOX_GROUP_KEY,
+  };
+  delete process.env.HOMEBOY_WP_CODEBOX_TASK_REQUEST;
+  delete process.env.HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID;
+  delete process.env.HOMEBOY_WP_CODEBOX_GROUP_KEY;
+  const genericEnv = auditFanoutRuntimeEnv({ id: 'task-1', group_key: 'docs' }, '{"fixture":true}\n', {
+    env: {},
+  });
+  for (const [key, value] of Object.entries(previousWpCodeboxEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+  assert.equal(genericEnv.HOMEBOY_AGENT_TASK_ID, 'task-1');
+  assert.equal(genericEnv.HOMEBOY_AGENT_TASK_GROUP_KEY, 'docs');
+  assert.equal(Object.hasOwn(genericEnv, 'HOMEBOY_WP_CODEBOX_TASK_REQUEST'), false);
+  assert.equal(Object.hasOwn(genericEnv, 'HOMEBOY_WP_CODEBOX_GROUP_KEY'), false);
+  const explicitRuntimeInvocation = auditFanoutRuntimeInvocation({
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: ['fixture-command.cjs'],
+  });
+  assert.equal(explicitRuntimeInvocation.runtime.id, 'wp-codebox');
+  assert.equal(explicitRuntimeInvocation.command, 'wp-codebox');
+  assert.deepEqual(explicitRuntimeInvocation.args, []);
+  const codeboxRuntimeOptions = wpCodeboxAuditRuntimeOptions({
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: ['fixture-command.cjs'],
+  });
+  const codeboxRuntimeInvocation = auditFanoutRuntimeInvocation(codeboxRuntimeOptions);
+  assert.equal(codeboxRuntimeInvocation.command, process.execPath);
+  assert.deepEqual(codeboxRuntimeInvocation.args, ['fixture-command.cjs']);
+  const codeboxEnv = auditFanoutRuntimeEnv({ sandbox_session_id: 'sandbox-1', group_key: 'docs' }, '{"fixture":true}\n', codeboxRuntimeOptions);
+  assert.equal(codeboxEnv.HOMEBOY_WP_CODEBOX_TASK_REQUEST, '{"fixture":true}\n');
+  assert.equal(codeboxEnv.HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID, 'sandbox-1');
+  assert.equal(codeboxEnv.HOMEBOY_WP_CODEBOX_GROUP_KEY, 'docs');
+
+  const wordpressPackageExports = require('..');
+  assert.equal(Object.hasOwn(wordpressPackageExports, 'createAuditWpCodeboxFanoutPlan'), false);
+  assert.equal(Object.hasOwn(wordpressPackageExports, 'executeAuditWpCodeboxFanout'), false);
+  assert.equal(Object.hasOwn(wordpressPackageExports.wpCodebox || {}, 'createAuditWpCodeboxFanoutPlan'), false);
+  assert.equal(Object.hasOwn(wordpressPackageExports.wpCodebox || {}, 'executeAuditWpCodeboxFanout'), false);
+
   const initialPlan = createAuditWpCodeboxFanoutPlan({
     report,
     issue_url: 'https://github.com/Extra-Chill/homeboy-extensions/issues/769',
@@ -622,7 +703,7 @@ try {
   assert.equal(execution.status, 'failed');
   const completedRecord = execution.records.find((record) => record.group_key === 'PHPCS Formatting/Auto Fix!');
   const failedRecord = execution.records.find((record) => record.group_key === 'docs-reference');
-  assert.equal(completedRecord.status, 'completed');
+  assert.equal(completedRecord.status, 'completed', JSON.stringify({ command: completedRecord.command, stderr: completedRecord.stderr, outcome: completedRecord.outcome }, null, 2));
   assert.equal(completedRecord.finding_id, 'finding-phpcs-001');
   assert.deepEqual(completedRecord.finding_ids, ['finding-phpcs-001', 'finding-phpcs-002']);
   assert.equal(completedRecord.command.bin, process.execPath);
