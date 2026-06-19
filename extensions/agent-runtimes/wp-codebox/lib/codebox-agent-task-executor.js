@@ -55,6 +55,7 @@ const {
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
+const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -138,6 +139,7 @@ function providerContract(options = {}) {
     id: options.id || WP_CODEBOX_PROVIDER_ID,
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
     backend: WP_CODEBOX_BACKEND,
+    runtime_id: options.runtimeId || options.runtime_id || runtimeManifest().id || 'wp-codebox',
     command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     invocation: runtimeCommandInvocation(options),
     ...agentTaskProviderContractFields(),
@@ -297,8 +299,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || runtimeOptions.mounts || []);
-  const componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
-  const components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
+  let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
+  let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
   const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions);
@@ -326,6 +328,11 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
   const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
+  componentContracts = uniqueComponentContracts([
+    ...componentContracts,
+    ...normalizeArray(runtimeRequirements.component_contracts),
+  ]);
+  components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -718,12 +725,93 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 }
 
 function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
-  const workflowInputs = workflowInputsFromAgentTaskRequest(request, config, inputs);
+  const defaultInput = firstObject(
+    declared?.input_defaults,
+    declared?.inputDefaults,
+    inputs.ability_input_defaults,
+    inputs.abilityInputDefaults,
+    config.ability_input_defaults,
+    config.abilityInputDefaults,
+  ) || {};
+  const mappedInput = runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared);
+  const legacyWorkflowInputs = legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared);
   const explicitInput = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
-  return { ...workflowInputs, ...explicitInput };
+  return { ...defaultInput, ...mappedInput, ...legacyWorkflowInputs, ...explicitInput };
 }
 
-function workflowInputsFromAgentTaskRequest(request, config, inputs) {
+function runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
+  const mappings = normalizeArray(firstDefined(
+    declared?.input_mapping,
+    declared?.inputMapping,
+    declared?.context_mapping,
+    declared?.contextMapping,
+    inputs.runtime_input_mapping,
+    inputs.runtimeInputMapping,
+    inputs.context_mapping,
+    inputs.contextMapping,
+    config.runtime_input_mapping,
+    config.runtimeInputMapping,
+    config.context_mapping,
+    config.contextMapping,
+  ));
+  if (mappings.length === 0) {
+    return {};
+  }
+  const sources = runtimeInputMappingSources(request, config, inputs);
+  return mappings.reduce((mapped, mapping) => {
+    const entry = runtimeInputMappingEntry(mapping);
+    if (!entry) {
+      return mapped;
+    }
+    const value = valueAtPath(sources, entry.from);
+    if (value === undefined) {
+      if (entry.default !== undefined) {
+        setValueAtPath(mapped, entry.to, entry.default);
+      }
+      return mapped;
+    }
+    setValueAtPath(mapped, entry.to, value);
+    return mapped;
+  }, {});
+}
+
+function runtimeInputMappingSources(request, config, inputs) {
+  return {
+    request,
+    inputs,
+    config,
+    client_context: firstObject(inputs.client_context, inputs.clientContext, request.client_context, request.clientContext, config.client_context, config.clientContext) || {},
+    context: firstObject(inputs.context, request.context, config.context) || {},
+  };
+}
+
+function runtimeInputMappingEntry(mapping) {
+  if (typeof mapping === 'string' && mapping.trim()) {
+    return { from: mapping.trim(), to: pathLeaf(mapping.trim()) };
+  }
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+    return null;
+  }
+  const from = firstValue(mapping.from, mapping.source, mapping.path);
+  const to = firstValue(mapping.to, mapping.target, mapping.name, mapping.input);
+  if (!from || !to) {
+    return null;
+  }
+  return { from, to, default: mapping.default };
+}
+
+function legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared = {}) {
+  const legacyMerge = firstDefined(
+    declared?.allow_legacy_client_context_input_merge,
+    declared?.allowLegacyClientContextInputMerge,
+    inputs.allow_legacy_client_context_input_merge,
+    inputs.allowLegacyClientContextInputMerge,
+    config.allow_legacy_client_context_input_merge,
+    config.allowLegacyClientContextInputMerge,
+  );
+  if (legacyMerge !== true) {
+    return {};
+  }
   return firstObject(
     inputs.client_context?.inputs,
     inputs.clientContext?.inputs,
@@ -732,6 +820,38 @@ function workflowInputsFromAgentTaskRequest(request, config, inputs) {
     config.client_context?.inputs,
     config.clientContext?.inputs,
   ) || {};
+}
+
+function valueAtPath(source, fieldPath) {
+  if (!fieldPath || typeof fieldPath !== 'string') {
+    return undefined;
+  }
+  return fieldPath.split('.').filter(Boolean).reduce((value, segment) => {
+    if (value === undefined || value === null || typeof value !== 'object') {
+      return undefined;
+    }
+    return value[segment];
+  }, source);
+}
+
+function setValueAtPath(target, fieldPath, value) {
+  const segments = String(fieldPath || '').split('.').filter(Boolean);
+  if (segments.length === 0) {
+    return;
+  }
+  let cursor = target;
+  segments.slice(0, -1).forEach((segment) => {
+    if (!cursor[segment] || typeof cursor[segment] !== 'object' || Array.isArray(cursor[segment])) {
+      cursor[segment] = {};
+    }
+    cursor = cursor[segment];
+  });
+  cursor[segments[segments.length - 1]] = value;
+}
+
+function pathLeaf(fieldPath) {
+  const segments = String(fieldPath || '').split('.').filter(Boolean);
+  return segments[segments.length - 1] || fieldPath;
 }
 
 function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults) {
@@ -2674,6 +2794,7 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
   WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+  RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
   providerContract,
   providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,

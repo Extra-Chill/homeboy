@@ -36,6 +36,7 @@ function codeboxRuntimeProfilePayload({
     ...normalizeArray(normalizedProfile.component_contracts),
     ...normalizeArray(normalizedRuntimeRequirements.component_contracts),
     ...normalizeArray(componentContracts),
+    ...componentContractsFromDependencies(runtimeProfileDependencies),
   ]);
   const normalizedExtraPlugins = uniqueObjectsByRuntimeIdentity([
     ...normalizeArray(normalizedProfile.extra_plugins),
@@ -62,6 +63,36 @@ function codeboxRuntimeProfilePayload({
     runtime_config_mounts: runtimeConfigMounts,
     ...parentToolBridgeProfileFields(normalizedProfile, normalizedRuntimeRequirements, runtimeProfileDependencies, normalizedComponentContracts),
   });
+}
+
+function componentContractsFromDependencies(runtimeProfileDependencies = {}) {
+  return [
+    ...dependencyComponentContracts(runtimeProfileDependencies.components, 'mu-plugin'),
+    ...dependencyComponentContracts(runtimeProfileDependencies.mu_plugins, 'mu-plugin'),
+    ...dependencyComponentContracts(runtimeProfileDependencies.plugins, 'plugin'),
+    ...dependencyComponentContracts(runtimeProfileDependencies.themes, 'theme'),
+    ...dependencyComponentContracts(runtimeProfileDependencies.overlays),
+  ];
+}
+
+function dependencyComponentContracts(entries, defaultLoadAs) {
+  return normalizeArray(entries).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    const slug = entry.slug || entry.id || entry.name;
+    const contractPath = entry.path || entry.source || entry.target;
+    if (!slug || !contractPath) {
+      return null;
+    }
+    return withoutEmptyObjectValues({
+      slug,
+      path: contractPath,
+      loadAs: entry.loadAs || entry.load_as || defaultLoadAs,
+      pluginFile: entry.pluginFile || entry.plugin_file,
+      metadata: entry.metadata,
+    });
+  }).filter(Boolean);
 }
 
 function providerPluginEntries(value) {
