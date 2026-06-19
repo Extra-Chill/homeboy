@@ -266,6 +266,66 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 }
 
+pub(crate) fn exec_worker_local(
+    runner_id: &str,
+    options: RunnerExecOptions,
+) -> Result<(RunnerExecOutput, i32)> {
+    let secret_env_names = runner_exec_secret_env_names(
+        &options.command,
+        options.capability_preflight.as_ref(),
+        &options.secret_env_names,
+    );
+    let mut runner = load(runner_id)?;
+    runner.kind = RunnerKind::Local;
+    runner.server_id = None;
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        runner_id: runner_id.to_string(),
+        runner: Some(runner),
+        cwd: options.cwd.clone(),
+        project_id: options.project_id.clone(),
+        command: options.command.clone(),
+        env: options.env.clone(),
+        secret_env_names,
+        capture_patch: options.capture_patch,
+        raw_exec: options.raw_exec,
+        source_snapshot: options.source_snapshot.clone(),
+        require_paths: options.require_paths.clone(),
+        validate_require_paths_on_host: true,
+    })?;
+    validate_runner_policy(
+        &plan.runner,
+        &plan.cwd,
+        RunnerPolicyRequest {
+            project_id: options.project_id.as_deref(),
+            command: &options.command,
+            capture_patch: options.capture_patch,
+            raw_exec: options.raw_exec,
+        },
+    )?;
+    preflight_worker_local_capability_plan(
+        &plan.runner,
+        options.capability_preflight.as_ref(),
+        &plan.env,
+    )?;
+    exec_local(plan)
+}
+
+fn preflight_worker_local_capability_plan(
+    runner: &Runner,
+    preflight: Option<&RunnerCapabilityPreflight>,
+    request_env: &HashMap<String, String>,
+) -> Result<()> {
+    let Some(preflight) = preflight else {
+        return Ok(());
+    };
+    if preflight.is_empty() {
+        return Ok(());
+    }
+
+    let capabilities = runner_capability_snapshot_for_preflight(runner, preflight)?;
+    validate_runner_capability_preflight(&runner.id, preflight, &capabilities, request_env)
+}
+
 fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
     runner.kind == RunnerKind::Ssh && options.allow_diagnostic_ssh
 }
