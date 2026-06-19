@@ -2997,7 +2997,7 @@ try {
       ...request.executor,
       config: {
         provider: 'openai',
-        task_kind: 'repo-cooking',
+        workspace_required: true,
         repo: 'a8c-intelligence',
       },
     },
@@ -3019,7 +3019,7 @@ try {
   assert.equal(missingWorkspaceOutcome.failure_classification, 'execution_failed');
   assert.equal(missingWorkspaceOutcome.diagnostics[0].class, 'codebox.preflight.missing_workspace');
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.repo, 'a8c-intelligence');
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.task_kind, 'repo-cooking');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.workspace_required, true);
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.mounts_count, 0);
   assert.equal(missingWorkspaceOutcome.metadata.codebox.missing_workspace, true);
 

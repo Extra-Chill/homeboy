@@ -398,7 +398,7 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     backend: 'codebox',
     config: datamachineAgentCiCodeboxExecutorConfig({
       provider: 'openai',
-      task_kind: 'repo-cooking',
+      workspace_required: true,
     }),
   },
   instructions: 'Run a repo-loop workflow against the current checkout.',

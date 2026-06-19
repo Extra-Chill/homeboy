@@ -85,6 +85,36 @@ process.stdout.write(JSON.stringify({
 	assert.equal(agentsApiPlugin.activate, false);
 	assert.ok(agentsApiPlugin.source.endsWith(`${path.sep}vendor${path.sep}wordpress${path.sep}agents-api`), `agents-api source points at the bundled Composer dependency: ${agentsApiPlugin.source}`);
 
+	const runtimeRequirementsCapturePath = path.join(fixtureRoot, 'captured-runtime-requirements-input.json');
+	const runtimeRequirementsRequest = {
+		...request,
+		runtime_component_paths: {},
+		component_contracts: [],
+		runtime_requirements: {
+			component_contracts: [
+				{ slug: 'agents-api', path: agentsApi, loadAs: 'mu-plugin', activate: false },
+			],
+		},
+	};
+	const runtimeRequirementsResult = spawnSync(process.execPath, [runner], {
+		input: JSON.stringify(runtimeRequirementsRequest),
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			HOMEBOY_CAPTURE_TASK_INPUT: runtimeRequirementsCapturePath,
+		},
+	});
+	assert.equal(runtimeRequirementsResult.status, 0, runtimeRequirementsResult.stderr || runtimeRequirementsResult.stdout);
+	const runtimeRequirementsCaptured = JSON.parse(readFileSync(runtimeRequirementsCapturePath, 'utf8'));
+	assert.ok(
+		runtimeRequirementsCaptured.component_contracts.some((contract) => contract.slug === 'agents-api'),
+		'agents-api component contract is preserved from runtime_requirements when top-level contracts are empty'
+	);
+	assert.ok(
+		runtimeRequirementsCaptured.extra_plugins.some((plugin) => plugin.slug === 'agents-api'),
+		'agents-api extra plugin is emitted from runtime_requirements when top-level contracts are empty'
+	);
+
 	console.log('wp-codebox bundled agents-api smoke passed');
 } finally {
 	rmSync(fixtureRoot, { recursive: true, force: true });

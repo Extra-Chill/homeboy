@@ -430,10 +430,27 @@ function stderrFailurePayload(result) {
   };
 }
 
-function isRepoCookingRequest(request, taskInput) {
+function workspaceRequiredValue(value) {
+  if (value === true) {
+    return true;
+  }
+  if (typeof value === 'string') {
+    return ['1', 'true', 'yes', 'required'].includes(value.trim().toLowerCase());
+  }
+  return false;
+}
+
+function requiresWorkspace(request, taskInput) {
   const config = request.executor?.config || {};
   const parentConfig = taskInput.parent_request?.executor?.config || {};
-  return config.task_kind === 'repo-cooking' || config.taskKind === 'repo-cooking' || parentConfig.task_kind === 'repo-cooking' || parentConfig.taskKind === 'repo-cooking';
+  const materialization = request.workspace?.materialization || {};
+  return workspaceRequiredValue(config.workspace_required)
+    || workspaceRequiredValue(config.workspaceRequired)
+    || workspaceRequiredValue(parentConfig.workspace_required)
+    || workspaceRequiredValue(parentConfig.workspaceRequired)
+    || workspaceRequiredValue(materialization.required)
+    || workspaceRequiredValue(materialization.workspace_required)
+    || workspaceRequiredValue(materialization.workspaceRequired);
 }
 
 function workspaceMounts(taskInput) {
@@ -453,12 +470,12 @@ function hasWorkspaceMount(taskInput) {
 }
 
 function missingWorkspacePayload(request, taskInput) {
-  if (!isRepoCookingRequest(request, taskInput) || hasWorkspaceMount(taskInput)) {
+  if (!requiresWorkspace(request, taskInput) || hasWorkspaceMount(taskInput)) {
     return null;
   }
 
   const config = request.executor?.config || {};
-  const message = 'WP Codebox repo-cooking task has no mounted checkout/workspace.';
+  const message = 'WP Codebox task requires a mounted checkout/workspace, but none was provided.';
   return {
     success: false,
     status: 'failed',
@@ -470,7 +487,7 @@ function missingWorkspacePayload(request, taskInput) {
       data: {
         phase: 'codebox.preflight',
         repo: config.repo || request.group_key || request.workspace?.slug || '',
-        task_kind: config.task_kind || config.taskKind || '',
+        workspace_required: true,
         workspace_root: config.workspace_root || config.workspaceRoot || request.workspace?.root || '',
         mounts_count: workspaceMounts(taskInput).length,
         workspaces_count: Array.isArray(taskInput.workspaces) ? taskInput.workspaces.length : 0,
@@ -481,7 +498,7 @@ function missingWorkspacePayload(request, taskInput) {
       phase: 'codebox.preflight',
       missing_workspace: true,
       repo: config.repo || request.group_key || request.workspace?.slug || '',
-      task_kind: config.task_kind || config.taskKind || '',
+      workspace_required: true,
       workspace_root: config.workspace_root || config.workspaceRoot || request.workspace?.root || '',
       mounts_count: workspaceMounts(taskInput).length,
       workspaces_count: Array.isArray(taskInput.workspaces) ? taskInput.workspaces.length : 0,

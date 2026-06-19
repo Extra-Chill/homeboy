@@ -1263,7 +1263,7 @@ function requestRuntimeComponents(request, mounts = []) {
   const explicit = request.runtime_component_paths && typeof request.runtime_component_paths === 'object'
     ? request.runtime_component_paths
     : {};
-  const contractPaths = runtimeComponentPathsFromContracts(request.component_contracts || []);
+  const contractPaths = runtimeComponentPathsFromContracts(requestComponentContracts(request));
   const workspaceRoot = workspaceRootFromMounts(mounts);
   const requestedAgentRuntimePath = explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
   const localAgentRuntimePath = firstExistingPath(
@@ -1349,7 +1349,7 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     runtime_component_paths: runtimeComponentPaths,
-    component_contracts: uniqueComponentContracts((request.component_contracts || []).map(remapRuntimeComponentContract)),
+    component_contracts: uniqueComponentContracts(requestComponentContracts(request).map(remapRuntimeComponentContract)),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wordpress_runtime_version || request.wordpress_version || request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
@@ -1408,11 +1408,57 @@ function componentContracts(input) {
     activate: Boolean(plugin.activate),
   }));
   return uniqueComponentContracts([
-    ...(input.component_contracts || []).map(remapRuntimeComponentContract),
-    ...(input.parent_request?.component_contracts || []).map(remapRuntimeComponentContract),
-    ...(input.parent_request?.parent_request?.component_contracts || []).map(remapRuntimeComponentContract),
+    ...requestComponentContracts(input).map(remapRuntimeComponentContract),
+    ...requestComponentContracts(input.parent_request).map(remapRuntimeComponentContract),
+    ...requestComponentContracts(input.parent_request?.parent_request).map(remapRuntimeComponentContract),
     ...runtimeContracts,
   ]);
+}
+
+function requestComponentContracts(request) {
+  if (!request || typeof request !== 'object') {
+    return [];
+  }
+  return uniqueComponentContracts([
+    ...(Array.isArray(request.component_contracts) ? request.component_contracts : []),
+    ...(Array.isArray(request.runtime_requirements?.component_contracts) ? request.runtime_requirements.component_contracts : []),
+    ...(Array.isArray(request.runtime_requirements?.extra_plugins) ? request.runtime_requirements.extra_plugins : []),
+    ...runtimeRequirementDependencyContracts(request.runtime_requirements),
+  ]);
+}
+
+function runtimeRequirementDependencyContracts(runtimeRequirements) {
+  if (!runtimeRequirements || typeof runtimeRequirements !== 'object') {
+    return [];
+  }
+  return [
+    ...runtimeRequirementDependencyEntries(runtimeRequirements.components, 'mu-plugin'),
+    ...runtimeRequirementDependencyEntries(runtimeRequirements.mu_plugins, 'mu-plugin'),
+    ...runtimeRequirementDependencyEntries(runtimeRequirements.plugins, 'plugin'),
+  ];
+}
+
+function runtimeRequirementDependencyEntries(entries, loadAs) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return [];
+    }
+    const source = entry.source || entry.path;
+    if (!entry.slug || !source) {
+      return [];
+    }
+    return [{
+      slug: entry.slug,
+      path: entry.path || source,
+      source,
+      pluginFile: entry.pluginFile || entry.plugin_file,
+      loadAs: entry.loadAs || entry.load_as || loadAs,
+      activate: entry.activate,
+    }];
+  });
 }
 
 function verifySteps(input) {
