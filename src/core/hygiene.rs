@@ -109,8 +109,8 @@ pub struct DependencyHygieneOptions {
 }
 
 // Thin wrapper over `require_dependency_hygiene_for_source_with_settings`, kept for
-// callers that do not need settings; currently exercised by tests.
-#[allow(dead_code)]
+// callers that do not need settings; currently exercised only by tests.
+#[cfg(test)]
 pub(crate) fn require_dependency_hygiene_for_source(
     source_path: &Path,
     extension_path: Option<&Path>,

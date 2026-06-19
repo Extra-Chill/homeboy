@@ -644,7 +644,7 @@ fn mark_non_canonical(toolchain: &mut TraceToolchainProvenance, reason: &str) {
 }
 
 fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProvenance {
-    let probe_path = git_probe_path(path);
+    let probe_path = crate::core::git::git_probe_path(path);
     let git_root = crate::core::git::get_git_root(&probe_path.to_string_lossy())
         .ok()
         .map(PathBuf::from)
@@ -655,16 +655,6 @@ fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProvenance {
         branch: crate::core::git::current_branch(&git_root),
         dirty: git_dirty_state(&git_root),
         source: source.map(ToString::to_string),
-    }
-}
-
-fn git_probe_path(path: &Path) -> PathBuf {
-    if path.is_file() {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.to_path_buf())
-    } else {
-        path.to_path_buf()
     }
 }
 

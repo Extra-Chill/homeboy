@@ -41,6 +41,25 @@ struct ExtensionCliDiscovery {
     health: ExtensionCliHealth,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupFastPath {
+    Help,
+    Version,
+}
+
+pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
+    match startup_fast_path(args)? {
+        StartupFastPath::Help => {
+            let mut cmd = Cli::command();
+            cmd.print_help().expect("Failed to print help");
+            println!();
+        }
+        StartupFastPath::Version => println!("{}", upgrade::current_build_version()),
+    }
+
+    Some(std::process::ExitCode::SUCCESS)
+}
+
 impl CliRuntime {
     pub fn new() -> Self {
         let discovery = collect_extension_cli_info();
@@ -210,6 +229,14 @@ fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
 
 fn is_top_level_version_request(args: &[String]) -> bool {
     matches!(args, [_, flag] if flag == "--version" || flag == "-V")
+}
+
+fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
+    match args {
+        [_, flag] if flag == "--help" || flag == "-h" => Some(StartupFastPath::Help),
+        [_, flag] if flag == "--version" || flag == "-V" => Some(StartupFastPath::Version),
+        _ => None,
+    }
 }
 
 impl Default for CliRuntime {
@@ -682,6 +709,38 @@ mod tests {
     #[test]
     fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
+    }
+
+    #[test]
+    fn startup_fast_path_only_matches_root_help_and_version_flags() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "--help"])),
+            Some(StartupFastPath::Help)
+        );
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "-h"])),
+            Some(StartupFastPath::Help)
+        );
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "--version"])),
+            Some(StartupFastPath::Version)
+        );
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "-V"])),
+            Some(StartupFastPath::Version)
+        );
+        assert_eq!(
+            startup_fast_path(&args(&["homeboy", "status", "--help"])),
+            None
+        );
+        assert_eq!(startup_fast_path(&args(&["homeboy", "wp", "--help"])), None);
     }
 
     #[test]

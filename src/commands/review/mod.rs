@@ -101,6 +101,11 @@ enum ReviewStageRun {
     Test(ReviewStage<TestCommandOutput>),
 }
 
+struct ReviewScopePreflight {
+    scope: String,
+    changed_file_count: Option<usize>,
+}
+
 impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Args, Output> {
     fn execute(
         &self,
@@ -185,26 +190,11 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
-    let scope = if args.changed_since.is_some() {
-        "changed-since"
-    } else if args.changed_only {
-        "changed-only"
-    } else {
-        "full"
-    }
-    .to_string();
+    let preflight = preflight_review_scope(&args, &source_path)?;
+    let scope = preflight.scope;
+    let changed_file_count = preflight.changed_file_count;
 
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
-
-    // Probe the changed set once at the umbrella level so we can short-circuit
-    // before paying for any extension setup. Each stage will re-derive its
-    // own scope internally (and that's fine — `get_files_changed_since` is
-    // cheap, and lint/audit/test must remain independently invocable).
-    let changed_file_count = match (&args.changed_since, args.changed_only) {
-        (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?.len()),
-        (_, true) => Some(git::get_dirty_files(&source_path)?.len()),
-        _ => None,
-    };
 
     if let Some(0) = changed_file_count {
         let scope_label = if let Some(ref r) = args.changed_since {
@@ -365,6 +355,35 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+fn preflight_review_scope(
+    args: &ReviewArgs,
+    source_path: &str,
+) -> homeboy::core::Result<ReviewScopePreflight> {
+    let scope = if args.changed_since.is_some() {
+        "changed-since"
+    } else if args.changed_only {
+        "changed-only"
+    } else {
+        "full"
+    }
+    .to_string();
+
+    // Probe once at the umbrella level so review can short-circuit before
+    // extension setup and include a stable changed-file count in its artifact.
+    // Stages still resolve their own scope to preserve standalone command
+    // behavior; changed-since resolution may deepen shallow clones.
+    let changed_file_count = match (&args.changed_since, args.changed_only) {
+        (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?.len()),
+        (_, true) => Some(git::get_dirty_files(source_path)?.len()),
+        _ => None,
+    };
+
+    Ok(ReviewScopePreflight {
+        scope,
+        changed_file_count,
+    })
 }
 
 /// Markdown output mode — runs the JSON path internally and renders the

@@ -610,9 +610,10 @@ impl StatusGitCache {
     }
 
     fn fetch_upstream_drift_for(&mut self, path: &str, id: &str) -> Option<UpstreamDrift> {
+        let cache_key = upstream_drift_cache_key(path);
         let drift = self
             .upstream_drift
-            .entry(path.to_string())
+            .entry(cache_key)
             .or_insert_with(|| fetch_upstream_drift(path));
 
         drift.as_ref().map(|cached| {
@@ -621,6 +622,10 @@ impl StatusGitCache {
             drift
         })
     }
+}
+
+fn upstream_drift_cache_key(path: &str) -> String {
+    git::get_git_root(path).unwrap_or_else(|_| path.to_string())
 }
 
 /// Fetch from origin and compute upstream drift for a component.
@@ -1125,5 +1130,36 @@ mod tests {
             }
             _ => panic!("expected full output"),
         }
+    }
+
+    #[test]
+    fn upstream_drift_cache_reuses_git_root_and_preserves_component_id() {
+        let (_dir, repo) = make_git_repo("monorepo");
+        let component_dir = repo.join("components/demo");
+        fs::create_dir_all(&component_dir).expect("component dir");
+
+        let repo_key = upstream_drift_cache_key(&repo.to_string_lossy());
+        let component_key = upstream_drift_cache_key(&component_dir.to_string_lossy());
+        assert_eq!(component_key, repo_key);
+
+        let mut git_cache = StatusGitCache::default();
+        git_cache.upstream_drift.insert(
+            repo_key,
+            Some(UpstreamDrift {
+                component_id: "cached-component".to_string(),
+                ahead: Some(2),
+                behind: Some(1),
+                latest_origin_tag: Some("v1.2.3".to_string()),
+            }),
+        );
+
+        let drift = git_cache
+            .fetch_upstream_drift_for(&component_dir.to_string_lossy(), "actual-component")
+            .expect("cached drift");
+
+        assert_eq!(drift.component_id, "actual-component");
+        assert_eq!(drift.ahead, Some(2));
+        assert_eq!(drift.behind, Some(1));
+        assert_eq!(drift.latest_origin_tag.as_deref(), Some("v1.2.3"));
     }
 }
