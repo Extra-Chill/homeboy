@@ -1817,6 +1817,47 @@ assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics[0
 assert.equal(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
 assert.deepEqual(outputAgentRuntimeFailureWithoutTypedArtifactsOutcome.metadata.typed_artifacts, {});
 
+const synthesizedArtifactRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  artifact_declarations: [
+    { name: 'patch', required: true },
+    { name: 'agent_result', required: true },
+  ],
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  summary: 'WP Codebox agent task succeeded.',
+  artifacts: [{ id: 'codebox-patch', kind: 'codebox-patch', path: '/tmp/patch.diff' }],
+  outputs: {
+    typed_artifacts: {
+      patch: { name: 'patch', type: 'file', payload: { path: '/tmp/patch.diff' } },
+      agent_result: { name: 'agent_result', type: 'json', payload: { status: 'failed' } },
+    },
+  },
+  metadata: {
+    agent_runtime: {
+      workload: {
+        success: false,
+        status: 'failed',
+        outputs: {},
+      },
+    },
+  },
+}, {
+  normalizeAgentTaskRunResult: () => ({
+    schema: 'wp-codebox/agent-task-run-result/v1',
+    status: 'succeeded',
+    artifacts: [],
+    diagnostics: [],
+    metadata: {},
+    refs: {},
+  }),
+});
+assert.equal(synthesizedArtifactRuntimeFailureOutcome.status, 'failed');
+assert.equal(synthesizedArtifactRuntimeFailureOutcome.failure_classification, 'execution_failed');
+assert.equal(synthesizedArtifactRuntimeFailureOutcome.diagnostics[0].class, 'agent_runtime.failed');
+
 const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'agent-bundle-task-123',

@@ -1139,13 +1139,32 @@ function requestRuntimeComponents(request, mounts = []) {
     ? request.runtime_component_paths
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(requestComponentContracts(request));
+  const agentRuntime = remapLabWorkspacePath(explicit.agent_runtime || contractPaths.agent_runtime);
+  const agentsApi = remapLabWorkspacePath(
+    explicit.agents_api
+      || contractPaths.agents_api
+      || request.agents_api_path
+      || request.agents_api
+      || agentsApiPathFromRuntime(agentRuntime),
+    'agents-api'
+  );
   return Object.fromEntries(Object.entries({
     ...contractPaths,
     ...explicit,
-    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api, 'agents-api'),
-    agent_runtime: remapLabWorkspacePath(explicit.agent_runtime || contractPaths.agent_runtime),
+    agents_api: agentsApi,
+    agent_runtime: agentRuntime,
     agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools),
   }).filter(([, value]) => value !== '' && value !== undefined));
+}
+
+function agentsApiPathFromRuntime(agentRuntime) {
+  if (!agentRuntime) {
+    return '';
+  }
+  return [
+    path.join(agentRuntime, 'vendor', 'wordpress', 'agents-api'),
+    path.join(agentRuntime, 'vendor', 'automattic', 'agents-api'),
+  ].find((candidate) => fs.existsSync(path.join(candidate, 'agents-api.php'))) || '';
 }
 
 function runtimeComponentPathsFromContracts(contracts) {
