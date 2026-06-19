@@ -2,7 +2,7 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::command_contract::lab::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
+use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
 use crate::core::{Error, Result};
 
 use super::{
