@@ -281,6 +281,44 @@ fn git_root_for_path(path: &Path) -> Option<PathBuf> {
 #[derive(Clone)]
 struct CliDispatchHook<E> {
     executor: E,
+    defaults: ControllerDispatchDefaults,
+}
+
+#[derive(Clone, Default)]
+struct ControllerDispatchDefaults {
+    backend: Option<String>,
+    selector: Option<String>,
+    model: Option<String>,
+}
+
+impl ControllerDispatchDefaults {
+    fn from_run_next_args(args: &AgentTaskControllerRunNextArgs) -> Self {
+        Self {
+            backend: args.dispatch_backend.clone(),
+            selector: args.dispatch_selector.clone(),
+            model: args.dispatch_model.clone(),
+        }
+    }
+
+    fn from_run_args(args: &AgentTaskControllerRunArgs) -> Self {
+        Self {
+            backend: args.dispatch_backend.clone(),
+            selector: args.dispatch_selector.clone(),
+            model: args.dispatch_model.clone(),
+        }
+    }
+
+    fn apply(&self, args: &mut DispatchArgs) {
+        if args.backend.is_none() {
+            args.backend = self.backend.clone();
+        }
+        if args.selector.is_none() {
+            args.selector = self.selector.clone();
+        }
+        if args.model.is_none() {
+            args.model = self.model.clone();
+        }
+    }
 }
 
 impl<E> ControllerDispatchHook for CliDispatchHook<E>
@@ -288,7 +326,8 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     fn dispatch(&self, request: &Value) -> homeboy::core::Result<(Value, i32)> {
-        let dispatch_args = dispatch_args_from_controller_request(request)?;
+        let mut dispatch_args = dispatch_args_from_controller_request(request)?;
+        self.defaults.apply(&mut dispatch_args);
         dispatch_service::run_dispatch_command(dispatch_args.into(), self.executor.clone())
     }
 }
@@ -351,32 +390,62 @@ pub(super) fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) ->
 }
 
 fn controller_run_next(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
-    controller_run_next_with_executor(args.loop_id, ExtensionProviderAgentTaskExecutor::discover())
+    let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
+    controller_run_next_with_executor_and_defaults(
+        args.loop_id,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        defaults,
+    )
 }
 
 fn controller_run_action(args: AgentTaskControllerRunArgs) -> CmdResult<Value> {
-    controller_run_action_with_executor(
+    let defaults = ControllerDispatchDefaults::from_run_args(&args);
+    controller_run_action_with_executor_and_defaults(
         args.loop_id,
         args.action_id,
         ExtensionProviderAgentTaskExecutor::discover(),
+        defaults,
     )
 }
 
 fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
-    controller_resume_with_executor(args.loop_id, ExtensionProviderAgentTaskExecutor::discover())
+    let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
+    controller_resume_with_executor_and_defaults(
+        args.loop_id,
+        ExtensionProviderAgentTaskExecutor::discover(),
+        defaults,
+    )
 }
 
+#[cfg(test)]
 pub(super) fn controller_run_next_with_executor<E>(loop_id: String, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    controller_run_next_with_executor_and_defaults(
+        loop_id,
+        executor,
+        ControllerDispatchDefaults::default(),
+    )
+}
+
+fn controller_run_next_with_executor_and_defaults<E>(
+    loop_id: String,
+    executor: E,
+    defaults: ControllerDispatchDefaults,
+) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
+        defaults,
     };
     let result = agent_task_controller_service::run_next(&loop_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
+#[cfg(test)]
 pub(super) fn controller_run_action_with_executor<E>(
     loop_id: String,
     action_id: String,
@@ -385,8 +454,26 @@ pub(super) fn controller_run_action_with_executor<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    controller_run_action_with_executor_and_defaults(
+        loop_id,
+        action_id,
+        executor,
+        ControllerDispatchDefaults::default(),
+    )
+}
+
+fn controller_run_action_with_executor_and_defaults<E>(
+    loop_id: String,
+    action_id: String,
+    executor: E,
+    defaults: ControllerDispatchDefaults,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
+        defaults,
     };
     let result =
         agent_task_controller_service::run_action(&loop_id, &action_id, executor, &dispatch)?;
@@ -397,8 +484,24 @@ pub(super) fn controller_resume_with_executor<E>(loop_id: String, executor: E) -
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    controller_resume_with_executor_and_defaults(
+        loop_id,
+        executor,
+        ControllerDispatchDefaults::default(),
+    )
+}
+
+fn controller_resume_with_executor_and_defaults<E>(
+    loop_id: String,
+    executor: E,
+    defaults: ControllerDispatchDefaults,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
+        defaults,
     };
     let result = agent_task_controller_service::resume(&loop_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))

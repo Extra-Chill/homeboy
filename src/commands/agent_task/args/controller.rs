@@ -122,6 +122,18 @@ pub struct AgentTaskControllerApplyEventArgs {
 pub struct AgentTaskControllerRunNextArgs {
     /// Durable loop id returned by `agent-task controller init`.
     pub loop_id: String,
+
+    /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+
+    /// Provider selector/id to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-selector", value_name = "SELECTOR")]
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -132,6 +144,18 @@ pub struct AgentTaskControllerRunArgs {
     /// Pending controller action id to execute.
     #[arg(long = "action-id", value_name = "ID")]
     pub action_id: String,
+
+    /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+
+    /// Provider selector/id to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-selector", value_name = "SELECTOR")]
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
 }
 
 #[derive(Args, Debug)]

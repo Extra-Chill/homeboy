@@ -85,6 +85,24 @@ fn agent_task_controller_events_command_parses() {
 }
 
 #[test]
+fn agent_task_controller_resume_dispatch_defaults_parse() {
+    Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "controller",
+        "resume",
+        "loop-1",
+        "--dispatch-backend",
+        "wp-codebox",
+        "--dispatch-selector",
+        "homeboy-lab",
+        "--dispatch-model",
+        "test-model",
+    ])
+    .expect("agent-task controller resume should accept generic dispatch defaults");
+}
+
+#[test]
 fn command_surface_depth_is_configurable() {
     let surface = command_surface_from_with_depth(Cli::command(), 1);
 
