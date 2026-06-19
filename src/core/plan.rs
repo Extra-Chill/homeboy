@@ -231,6 +231,8 @@ pub struct PlanStep {
     pub scope: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    #[serde(default, skip_serializing_if = "PlanStepDependencyKind::is_default")]
+    pub needs_kind: PlanStepDependencyKind,
     pub status: PlanStepStatus,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub inputs: HashMap<String, serde_json::Value>,
@@ -242,6 +244,23 @@ pub struct PlanStep {
     pub policy: HashMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+}
+
+/// Describes whether `needs` blocks execution or only preserves UI order.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepDependencyKind {
+    /// The step consumes state or pass/fail results from the listed steps.
+    #[default]
+    Execution,
+    /// The listed steps should render first, but do not block independent execution.
+    DisplayOrder,
+}
+
+impl PlanStepDependencyKind {
+    fn is_default(&self) -> bool {
+        *self == Self::Execution
+    }
 }
 
 impl PlanStep {
@@ -387,6 +406,7 @@ impl PlanStepBuilder {
                 blocking: true,
                 scope: Vec::new(),
                 needs: Vec::new(),
+                needs_kind: PlanStepDependencyKind::Execution,
                 status,
                 inputs: HashMap::new(),
                 outputs: HashMap::new(),
@@ -414,6 +434,11 @@ impl PlanStepBuilder {
 
     pub(crate) fn needs(mut self, needs: impl IntoIterator<Item = String>) -> Self {
         self.step.needs.extend(needs);
+        self
+    }
+
+    pub(crate) fn needs_kind(mut self, needs_kind: PlanStepDependencyKind) -> Self {
+        self.step.needs_kind = needs_kind;
         self
     }
 

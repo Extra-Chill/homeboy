@@ -1,4 +1,4 @@
-use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
+use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepDependencyKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualityPlanOptions {
@@ -17,6 +17,7 @@ pub struct QualityPlanOptions {
     pub granular_skip_reason: String,
     pub lint_needs: Vec<String>,
     pub test_needs: Vec<String>,
+    pub needs_kind: PlanStepDependencyKind,
     pub audit_policy_available: bool,
     pub audit_label: String,
     pub lint_label: String,
@@ -37,6 +38,7 @@ impl QualityPlanOptions {
             granular_skip_reason: "--skip-checks=<check>".to_string(),
             lint_needs: vec!["preflight.bump_policy".to_string()],
             test_needs: vec!["preflight.lint".to_string()],
+            needs_kind: PlanStepDependencyKind::Execution,
             audit_policy_available: false,
             audit_label: "Run release audit".to_string(),
             lint_label: "Run release lint".to_string(),
@@ -73,6 +75,7 @@ impl QualityPlanOptions {
             granular_skip_reason: "--skip-checks=<check>".to_string(),
             lint_needs: vec!["review.audit".to_string()],
             test_needs: vec!["review.lint".to_string()],
+            needs_kind: PlanStepDependencyKind::DisplayOrder,
             audit_policy_available: true,
             audit_label: "Run review audit".to_string(),
             lint_label: "Run review lint".to_string(),
@@ -136,6 +139,7 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
             "audit",
             &options.audit_label,
             Vec::new(),
+            PlanStepDependencyKind::Execution,
         )
     } else {
         disabled_step(
@@ -159,6 +163,7 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
             "lint",
             &options.lint_label,
             options.lint_needs.clone(),
+            options.needs_kind,
         )
     };
 
@@ -175,21 +180,26 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
             "test",
             &options.test_label,
             options.test_needs.clone(),
+            options.needs_kind,
         )
     };
 
     vec![audit, lint, test]
 }
 
-fn ready_step(prefix: &str, name: &str, label: &str, needs: Vec<String>) -> PlanStep {
+fn ready_step(
+    prefix: &str,
+    name: &str,
+    label: &str,
+    needs: Vec<String>,
+    needs_kind: PlanStepDependencyKind,
+) -> PlanStep {
     let id = step_id(prefix, name);
-    PlanStep::ready_labeled(
-        id.clone(),
-        id,
-        label,
-        needs,
-        std::iter::empty::<(String, serde_json::Value)>(),
-    )
+    PlanStep::ready(id.clone(), id)
+        .label(label)
+        .needs(needs)
+        .needs_kind(needs_kind)
+        .build()
 }
 
 fn disabled_step(prefix: &str, name: &str, label: &str, reason: &str) -> PlanStep {
@@ -206,7 +216,7 @@ fn step_id(prefix: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_quality_plan, build_quality_steps, QualityPlanOptions};
-    use crate::core::plan::{PlanKind, PlanStepStatus};
+    use crate::core::plan::{PlanKind, PlanStepDependencyKind, PlanStepStatus};
 
     #[test]
     fn test_release_preflight() {
@@ -230,6 +240,7 @@ mod tests {
         assert_eq!(options.step_prefix, "review");
         assert_eq!(options.lint_needs, vec!["review.audit"]);
         assert_eq!(options.test_needs, vec!["review.lint"]);
+        assert_eq!(options.needs_kind, PlanStepDependencyKind::DisplayOrder);
         assert!(options.audit_policy_available);
     }
 
@@ -267,6 +278,23 @@ mod tests {
         assert_eq!(plan.steps[0].status, PlanStepStatus::Disabled);
         assert_eq!(plan.steps[1].needs, vec!["preflight.bump_policy"]);
         assert_eq!(plan.steps[2].needs, vec!["preflight.lint"]);
+        assert_eq!(plan.steps[1].needs_kind, PlanStepDependencyKind::Execution);
+    }
+
+    #[test]
+    fn review_quality_edges_are_display_order_only() {
+        let plan = build_quality_plan(QualityPlanOptions::review("fixture"));
+
+        assert_eq!(plan.steps[1].needs, vec!["review.audit"]);
+        assert_eq!(plan.steps[2].needs, vec!["review.lint"]);
+        assert_eq!(
+            plan.steps[1].needs_kind,
+            PlanStepDependencyKind::DisplayOrder
+        );
+        assert_eq!(
+            plan.steps[2].needs_kind,
+            PlanStepDependencyKind::DisplayOrder
+        );
     }
 
     #[test]
