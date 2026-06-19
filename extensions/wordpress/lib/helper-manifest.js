@@ -9,6 +9,7 @@ const WORDPRESS_EXTENSION_ROOT = path.resolve(__dirname, '..');
 
 const HELPER_PATHS = Object.freeze({
 	requestProfiler: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'request-profiler.js'),
+	externalHttpGuardrail: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'external-http-guardrail.js'),
 	timingCorrelator: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'timing-correlator.js'),
 	wordpressRouteLatency: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-route-latency.js'),
 	bootstrapTimeline: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-bootstrap-timeline.js'),

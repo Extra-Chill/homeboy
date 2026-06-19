@@ -1034,6 +1034,68 @@ installWordPressRequestProfiler(sitePath, {
 });
 ```
 
+## External HTTP Guardrail Helper
+
+The WordPress extension exports a generic Node helper for bench and request
+workloads that need deterministic control over outbound WordPress HTTP calls. It
+installs a temporary MU-plugin that observes `pre_http_request`, writes sanitized
+JSONL events, and can return a deterministic WordPress HTTP API response before
+network I/O occurs.
+
+```js
+const {
+  installWordPressExternalHttpGuardrail,
+  collectWordPressExternalHttpGuardrailEvents,
+  summarizeWordPressExternalHttpGuardrailEvents,
+  uninstallWordPressExternalHttpGuardrail,
+} = require('homeboy-extension-wordpress/external-http-guardrail');
+
+const sitePath = '/path/to/wordpress';
+
+installWordPressExternalHttpGuardrail(sitePath, {
+  allowlistDomains: ['api.wordpress.org', 'example.test'],
+  blockResponse: {
+    code: 599,
+    message: 'External HTTP blocked by Homeboy guardrail',
+    body: '',
+  },
+});
+
+// Run one or more browser, curl, WP-CLI, bench, or trace requests here.
+
+const events = collectWordPressExternalHttpGuardrailEvents(sitePath);
+const summary = summarizeWordPressExternalHttpGuardrailEvents(events);
+uninstallWordPressExternalHttpGuardrail(sitePath);
+
+console.log(summary.hosts);
+```
+
+Policies are generic WordPress HTTP policies:
+
+- `allowlistDomains` — exact host names or parent domains. `example.test` allows
+  `example.test` and `api.example.test`.
+- `blockNetwork` — when omitted, defaults to `true` if an allowlist is present
+  and `false` otherwise. Set `blockNetwork: true` to block every non-allowlisted
+  outbound call, or `false` to observe only.
+- `blockResponse` — deterministic response returned from `pre_http_request` for
+  blocked calls. Defaults to status `599`, an explanatory message, and an empty
+  body.
+- `redactUrls` — defaults to `true`. Stored event URLs preserve scheme, host,
+  port, and path while replacing query strings with `?redacted=1`, redacting URL
+  user info, and dropping fragments.
+
+By default the helper writes `wp-content/homeboy-external-http.jsonl` and
+installs `wp-content/mu-plugins/homeboy-external-http-guardrail.php`. The JSONL
+file is left in place during cleanup so benchmark and trace runners can preserve
+it as an artifact. Pass `{ removeArtifact: true }` to
+`uninstallWordPressExternalHttpGuardrail` when the raw event log should also be
+deleted.
+
+Captured entries use `http.allowed` and `http.blocked` events with host, method,
+redacted URL, hashed request ID, and block decision fields. The summary helper
+returns total allowed/blocked counts, per-host counts, and redacted samples for
+reviewable artifacts.
+
 ## WordPress Helper Discovery For Node Workloads
 
 Node.js rigs and bench workloads should discover WordPress helper files through
@@ -1052,6 +1114,7 @@ const requestProfiler = require(manifest.helpers.requestProfiler);
 The manifest contract is versioned and currently exposes absolute paths for:
 
 - `helpers.requestProfiler` — `wordpress/lib/request-profiler.js`
+- `helpers.externalHttpGuardrail` — `wordpress/lib/external-http-guardrail.js`
 - `helpers.timingCorrelator` — `wordpress/lib/timing-correlator.js`
 - `helpers.bootstrapTimeline` — `wordpress/lib/wordpress-bootstrap-timeline.js`
 

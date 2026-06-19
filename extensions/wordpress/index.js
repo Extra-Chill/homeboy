@@ -6,6 +6,7 @@ module.exports = {
 	...require('./lib/admin-page-scenarios'),
 	...require('./lib/wordpress-bootstrap-timeline'),
 	...require('./lib/request-profiler'),
+	...require('./lib/external-http-guardrail'),
 	...require('./lib/page-profiler'),
 	...require('./lib/rest-route-matrix'),
 	...require('./lib/wordpress-route-latency'),

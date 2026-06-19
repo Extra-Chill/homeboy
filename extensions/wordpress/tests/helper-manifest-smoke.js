@@ -25,6 +25,10 @@ assert.equal(
 	path.resolve(__dirname, '..', 'lib', 'request-profiler.js')
 );
 assert.equal(
+	manifest.helpers.externalHttpGuardrail,
+	path.resolve(__dirname, '..', 'lib', 'external-http-guardrail.js')
+);
+assert.equal(
 	manifest.helpers.timingCorrelator,
 	path.resolve(__dirname, '..', 'lib', 'timing-correlator.js')
 );
