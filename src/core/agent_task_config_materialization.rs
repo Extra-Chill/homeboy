@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Map, Value};
 
 use crate::core::component::{self, TargetSpec};
+use crate::core::git;
 use crate::core::{paths, Error, Result};
 
 const MATERIALIZATION_DIR: &str = "agent-task-provider-refs";
@@ -102,7 +102,7 @@ fn materialize_configured_ref(configured_ref: &ConfiguredRef) -> Result<Material
     let remote = resolve_repo_remote(&configured_ref.repo)?;
     let checkout = materialized_checkout_path(&configured_ref.repo, &configured_ref.ref_name)?;
     if checkout.join(".git").exists() {
-        run_git(
+        git::run_git(
             &checkout,
             &["fetch", "--prune", "origin"],
             "git fetch provider ref",
@@ -113,19 +113,16 @@ fn materialize_configured_ref(configured_ref: &ConfiguredRef) -> Result<Material
                 Error::internal_io(err.to_string(), Some(parent.display().to_string()))
             })?;
         }
-        run_git_no_cwd(
-            &["clone", &remote, &checkout.to_string_lossy()],
-            "git clone provider ref",
-        )?;
+        git::clone_repo(&remote, &checkout)?;
     }
 
     let checkout_ref = checkout_ref(&checkout, &configured_ref.ref_name)?;
-    run_git(
+    git::run_git(
         &checkout,
         &["checkout", "--detach", &checkout_ref],
         "git checkout provider ref",
     )?;
-    run_git(
+    git::run_git(
         &checkout,
         &["reset", "--hard", &checkout_ref],
         "git reset provider ref",
@@ -179,7 +176,9 @@ fn resolve_repo_remote(repo: &str) -> Result<String> {
         ..TargetSpec::default()
     }) {
         if let Some(git_root) = target.git_root {
-            if let Ok(remote) = git_output(&git_root, &["config", "--get", "remote.origin.url"]) {
+            if let Some(remote) =
+                git::output_optional(&git_root, &["config", "--get", "remote.origin.url"])
+            {
                 if !remote.trim().is_empty() {
                     return Ok(remote);
                 }
@@ -204,18 +203,20 @@ fn materialized_checkout_path(repo: &str, ref_name: &str) -> Result<PathBuf> {
 }
 
 fn checkout_ref(checkout: &Path, ref_name: &str) -> Result<String> {
-    if git_output(
+    if git::run_git(
         checkout,
         &["rev-parse", "--verify", &format!("{ref_name}^{{commit}}")],
+        "git verify provider ref",
     )
     .is_ok()
     {
         return Ok(ref_name.to_string());
     }
     let remote_ref = format!("origin/{ref_name}");
-    if git_output(
+    if git::run_git(
         checkout,
         &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
+        "git verify remote provider ref",
     )
     .is_ok()
     {
@@ -261,54 +262,6 @@ fn slug(value: &str) -> String {
     }
 }
 
-fn run_git(path: &Path, args: &[&str], label: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|err| Error::git_command_failed(format!("{label}: {err}")))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(git_failed(label, args, output))
-}
-
-fn run_git_no_cwd(args: &[&str], label: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|err| Error::git_command_failed(format!("{label}: {err}")))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(git_failed(label, args, output))
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|err| Error::git_command_failed(format!("git {}: {err}", args.join(" "))))?;
-    if !output.status.success() {
-        return Err(git_failed("git output", args, output));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_failed(label: &str, args: &[&str], output: std::process::Output) -> Error {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Error::git_command_failed(format!(
-        "{label} failed: git {}{}",
-        args.join(" "),
-        if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(": {stderr}")
-        }
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +275,10 @@ mod tests {
             fs::create_dir_all(repo.path().join("plugin")).expect("plugin dir");
             fs::write(repo.path().join("plugin/main.php"), "<?php").expect("plugin file");
             commit_all(repo.path());
-            let head = git_output(repo.path(), &["rev-parse", "HEAD"]).expect("head");
+            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+                .expect("head")
+                .trim()
+                .to_string();
 
             let config = serde_json::json!({
                 "provider_plugin_paths": [{
@@ -348,7 +304,10 @@ mod tests {
             fs::create_dir_all(repo.path().join("runtime")).expect("runtime dir");
             fs::write(repo.path().join("runtime/bootstrap.php"), "<?php").expect("runtime file");
             commit_all(repo.path());
-            let head = git_output(repo.path(), &["rev-parse", "HEAD"]).expect("head");
+            let head = git::run_git(repo.path(), &["rev-parse", "HEAD"], "head")
+                .expect("head")
+                .trim()
+                .to_string();
 
             let config = serde_json::json!({
                 "runtime_overlays": [{
@@ -369,13 +328,14 @@ mod tests {
     }
 
     fn init_repo(path: &Path) {
-        run_git(path, &["init"], "init").expect("git init");
-        run_git(path, &["config", "user.name", "Test"], "name").expect("git name");
-        run_git(path, &["config", "user.email", "test@example.com"], "email").expect("git email");
+        git::run_git(path, &["init"], "init").expect("git init");
+        git::run_git(path, &["config", "user.name", "Test"], "name").expect("git name");
+        git::run_git(path, &["config", "user.email", "test@example.com"], "email")
+            .expect("git email");
     }
 
     fn commit_all(path: &Path) {
-        run_git(path, &["add", "."], "add").expect("git add");
-        run_git(path, &["commit", "-m", "fixture"], "commit").expect("git commit");
+        git::run_git(path, &["add", "."], "add").expect("git add");
+        git::run_git(path, &["commit", "-m", "fixture"], "commit").expect("git commit");
     }
 }
