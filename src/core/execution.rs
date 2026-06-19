@@ -14,13 +14,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::core::error::Result;
-use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanSubject};
+use crate::core::plan::{
+    HomeboyPlan, PlanStep, PlanStepDependencyKind, PlanStepStatus, PlanSubject,
+};
 
 /// Result of walking executable plan steps through a workflow dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanExecutionRun<R> {
     pub results: Vec<R>,
     pub stopped: bool,
+}
+
+/// Return dependency IDs that must complete before a step can execute.
+///
+/// Display-only ordering edges intentionally return no execution dependencies;
+/// callers can still use `step.needs` directly when rendering a stable plan.
+pub fn executable_plan_step_needs(step: &PlanStep) -> impl Iterator<Item = &str> {
+    step.needs
+        .iter()
+        .filter(move |_| step.needs_kind == PlanStepDependencyKind::Execution)
+        .map(String::as_str)
 }
 
 /// Execute plan steps with workflow-specific dispatch and stop semantics.
@@ -426,7 +439,7 @@ const fn publish_phase() -> ExecutionPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep};
+    use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepDependencyKind};
     use crate::core::release::{
         ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
     };
@@ -769,6 +782,38 @@ mod tests {
         .expect_err("unsupported executable step should fail");
 
         assert!(err.to_string().contains("unsupported demo.bad"));
+    }
+
+    #[test]
+    fn executable_needs_exclude_display_order_edges() {
+        let execution_step = PlanStep::ready("lint", "review.lint")
+            .needs(vec!["review.audit".to_string()])
+            .build();
+        let display_step = PlanStep::ready("test", "review.test")
+            .needs(vec!["review.lint".to_string()])
+            .needs_kind(PlanStepDependencyKind::DisplayOrder)
+            .build();
+
+        assert_eq!(
+            executable_plan_step_needs(&execution_step).collect::<Vec<_>>(),
+            vec!["review.audit"]
+        );
+        assert!(executable_plan_step_needs(&display_step)
+            .collect::<Vec<_>>()
+            .is_empty());
+    }
+
+    #[test]
+    fn display_order_needs_kind_serializes_explicitly() {
+        let step = PlanStep::ready("test", "review.test")
+            .needs(vec!["review.lint".to_string()])
+            .needs_kind(PlanStepDependencyKind::DisplayOrder)
+            .build();
+
+        let value = serde_json::to_value(&step).expect("serialize step");
+
+        assert_eq!(value["needs"], serde_json::json!(["review.lint"]));
+        assert_eq!(value["needs_kind"], "display_order");
     }
 
     fn patch_artifact() -> ChangeArtifact {

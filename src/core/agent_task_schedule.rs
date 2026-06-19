@@ -9,7 +9,9 @@ use serde_json::Value;
 use crate::core::agent_task::{
     AgentTaskComponentContract, AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskRequest,
 };
-use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};
+use crate::core::plan::{
+    HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepDependencyKind, PlanStepStatus,
+};
 
 pub const AGENT_TASK_PLAN_SCHEMA: &str = "homeboy/agent-task-plan/v1";
 pub const AGENT_TASK_AGGREGATE_SCHEMA: &str = "homeboy/agent-task-aggregate/v1";
@@ -180,6 +182,7 @@ impl AgentTaskPlan {
                         .as_ref()
                         .map(|dependencies| dependencies.depends_on.clone())
                         .unwrap_or_default(),
+                    needs_kind: PlanStepDependencyKind::Execution,
                     status: PlanStepStatus::Ready,
                     inputs,
                     outputs: HashMap::new(),

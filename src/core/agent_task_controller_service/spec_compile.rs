@@ -1,6 +1,7 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
 use super::*;
+use crate::core::plan::PlanStepDependencyKind;
 
 pub(super) const REPO_LOOP_SPEC_METADATA_KEY: &str = "repo_loop_spec";
 pub(super) const REPO_LOOP_SPEC_WORKFLOW_REASON: &str = "repo loop spec workflow";
@@ -191,6 +192,7 @@ pub(super) fn controller_action_plan_step(
             .map(|value| vec![value.clone()])
             .unwrap_or_default(),
         needs: Vec::new(),
+        needs_kind: PlanStepDependencyKind::Execution,
         status,
         inputs,
         outputs,
@@ -687,6 +689,7 @@ pub(super) fn workflow_homeboy_plan(
         blocking: true,
         scope: workflow.entity_ids.clone(),
         needs: workflow.dependencies.clone(),
+        needs_kind: PlanStepDependencyKind::Execution,
         status: PlanStepStatus::Ready,
         inputs: HashMap::from([(
             "workflow".to_string(),

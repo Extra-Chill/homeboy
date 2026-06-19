@@ -49,6 +49,10 @@ the call site when they adopt the contract.
 - Release planning remains represented by `HomeboyPlan`; release run results can
   project into `ExecutionRun` and `ChangeArtifact` without changing release CLI
   JSON.
+- Plan steps use `needs` for stable plan ordering and dependency display. When an
+  edge is only presentational, set `needs_kind: display_order`; bounded parallel
+  executors should use `executable_plan_step_needs()` so only true execution
+  dependencies block independent read-only steps.
 - Runner/Lab patch capture can project captured patches or deltas into
   `ChangeArtifact`; local mutation belongs in `ApplyResult`.
 - Refactor write paths can treat `--write` as `ExecutionMode::Apply` while
