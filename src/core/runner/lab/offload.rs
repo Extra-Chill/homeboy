@@ -56,15 +56,16 @@ use super::super::lab_workspaces::{
     path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
     provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
-    workspace_mapping_entry,
+    workspace_mapping_entry, LabWorkspaceMappingEntry,
 };
+use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
     connect, disconnect, evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
     status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
     RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 use super::agent_task_bridge::{
@@ -399,6 +400,7 @@ fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_runner_resident_lab_offload(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -519,6 +521,291 @@ fn run_runner_resident_lab_offload(
         stdout: exec_output.stdout,
         stderr,
         exit_code,
+    })
+}
+
+struct LabOffloadWorkspaceStage {
+    plan: HomeboyPlan,
+    sync_mode: RunnerWorkspaceSyncMode,
+    changed_since_preflight: LabOffloadChangedSincePreflight,
+    synced: RunnerWorkspaceSyncOutput,
+    remote_cwd: String,
+    workspace_mapping: Vec<LabWorkspaceMappingEntry>,
+    source_snapshot: SourceSnapshot,
+    remapped_args: Vec<String>,
+    agent_task_run_id: Option<String>,
+    command: Vec<String>,
+    remote_command: Vec<String>,
+    synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
+    rig_component_path_overrides: Vec<(String, String)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_lab_offload_workspace_stage(
+    request: &LabOffloadRequest<'_>,
+    contract: &LabOffloadCommand,
+    mut plan: HomeboyPlan,
+    runner_id: &str,
+    source_path: &Path,
+    homeboy_path: &str,
+    command_prefix_argv: &[String],
+    runner_workspace_root: Option<&str>,
+) -> Result<LabOffloadWorkspaceStage> {
+    let sync_mode = lab_workspace_sync_mode(
+        contract.workspace_mode_policy,
+        request.normalized_args,
+        source_path,
+    )?;
+    let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
+        prepare_git_lab_offload_changed_since(request.normalized_args, source_path)?
+    } else {
+        preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
+    };
+    let mut git_fetch_refs = changed_since_preflight.git_fetch_refs.clone();
+    for git_ref in
+        lab_offload_git_fetch_refs(&changed_since_preflight.args, source_path, sync_mode)?
+    {
+        if !git_fetch_refs.contains(&git_ref) {
+            git_fetch_refs.push(git_ref);
+        }
+    }
+    if let Some(resolved_base) = &changed_since_preflight.resolved_base {
+        eprintln!(
+            "Lab offload: changed-since requested `{}` resolved to `{}`; runner fetch refs: {}.",
+            changed_since_preflight
+                .requested_ref
+                .as_deref()
+                .unwrap_or(resolved_base),
+            resolved_base,
+            if git_fetch_refs.is_empty() {
+                "<none>".to_string()
+            } else {
+                git_fetch_refs.join(", ")
+            }
+        );
+    }
+    let offload_args =
+        inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
+    let mut extra_workspaces = lab_extra_workspaces(source_path)?;
+    // Sync any controller-local directories referenced by --provider-config
+    // (runtime components, provider plugins, extra mount sources) so the cook
+    // config's paths resolve on the runner after remapping.
+    extra_workspaces.extend(provider_config_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
+    extra_workspaces.extend(agent_task_plan_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
+    extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
+    extra_workspaces.extend(rig_component_path_env_extra_workspaces(source_path)?);
+    // Isolate the primary workspace per cook/dispatch run. Without a per-run
+    // token the git-mode remote path is keyed only on (source path, HEAD), so a
+    // later unrelated run at the same HEAD reuses the earlier run's checkout and
+    // can observe its leftover untracked artifacts (#4393). Resolve the
+    // agent-task run id (existing or freshly generated) up front and fold it
+    // into the workspace identity so each run gets a clean, isolated directory.
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    let synced = sync_workspace(
+        runner_id,
+        RunnerWorkspaceSyncOptions {
+            path: source_path.display().to_string(),
+            mode: sync_mode,
+            controller_routed_git: false,
+            changed_since_base: changed_since_preflight.resolved_base.clone(),
+            git_fetch_refs: git_fetch_refs.clone(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+            run_isolation_token: run_isolation_token.clone(),
+        },
+    )?
+    .0;
+    let remote_cwd = synced.remote_path.clone();
+    let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
+            .inputs(
+                PlanValues::new()
+                    .string("local_path", &synced.local_path)
+                    .string("remote_path", &remote_cwd)
+                    .string("mode", sync_mode.label())
+                    .json(
+                        "allow_dirty_lab_workspace",
+                        request.allow_dirty_lab_workspace,
+                    )
+                    .json(
+                        "changed_since_requested_ref",
+                        &changed_since_preflight.requested_ref,
+                    )
+                    .json(
+                        "changed_since_resolved_base",
+                        &changed_since_preflight.resolved_base,
+                    )
+                    .json("git_fetch_refs", &git_fetch_refs)
+                    .string("workspace_cleanliness", &synced.workspace_cleanliness),
+            )
+            .build(),
+    );
+
+    let synced_extra_workspaces = sync_extra_lab_workspaces(
+        runner_id,
+        &synced.local_path,
+        extra_workspaces,
+        &mut workspace_mapping,
+    )?;
+    if !synced_extra_workspaces.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_extra_workspaces", "lab.sync_extra_workspaces")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_extra_workspaces.len())
+                        .json("workspaces", &synced_extra_workspaces),
+                )
+                .build(),
+        );
+    }
+
+    let source_snapshot = SourceSnapshot::collect_local(
+        runner_id,
+        Path::new(&synced.local_path),
+        Some(&remote_cwd),
+        "lab_offload",
+    );
+    if contract.routing_policy.requires_extension_parity {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
+        );
+    }
+
+    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
+        runner_id,
+        homeboy_path,
+        &remote_cwd,
+        &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
+    )?;
+    if !synced_rigs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_rigs.len())
+                        .string("source_snapshot_remote_path", &remote_cwd)
+                        .json("rigs", &synced_rigs),
+                )
+                .build(),
+        );
+    }
+
+    let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
+        runner_id,
+        &changed_since_preflight.args,
+        &synced.local_path,
+        &remote_cwd,
+        runner_workspace_root,
+        request.allow_dirty_lab_workspace,
+    )?;
+    let synced_rig_dependencies = rig_component_sync.materializations;
+    let rig_component_path_overrides = rig_component_sync.component_path_env;
+    if !synced_rig_dependencies.is_empty() {
+        for dependency in &synced_rig_dependencies {
+            workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
+                "rig_component_dependency",
+                dependency,
+            ));
+        }
+        plan = with_step(
+            plan,
+            PlanStep::ready(
+                "lab.sync_rig_component_dependencies",
+                "lab.sync_rig_component_dependencies",
+            )
+            .inputs(
+                PlanValues::new()
+                    .json("count", synced_rig_dependencies.len())
+                    .json("dependencies", &synced_rig_dependencies),
+            )
+            .build(),
+        );
+    }
+
+    // Remap controller-local absolute paths embedded in --provider-config
+    // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
+    // to their synced remote locations, using every local->remote pair recorded
+    // during workspace sync. Without this the remote sandbox cannot resolve the
+    // workspace or runtime components a hand-authored cook config references.
+    let path_remaps: Vec<LabPathRemap> = workspace_mapping
+        .iter()
+        .map(|entry| LabPathRemap {
+            local: entry.local_path().to_string(),
+            remote: entry.remote_path().to_string(),
+        })
+        .collect();
+    preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
+    let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
+        &offload_args,
+        &remote_cwd,
+    );
+    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
+    let remapped_args =
+        remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
+    let remapped_args =
+        inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
+    let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
+    let (remapped_args, synced_remapped_tasks) =
+        materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
+    plan = record_synced_remapped_workspace_entry(
+        plan,
+        &mut workspace_mapping,
+        synced_remapped_tasks,
+        "lab.sync_remapped_agent_task_tasks",
+    );
+    let (remapped_args, synced_remapped_plan) =
+        materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
+    plan = record_synced_remapped_workspace_entry(
+        plan,
+        &mut workspace_mapping,
+        synced_remapped_plan,
+        "lab.sync_remapped_agent_task_plan",
+    );
+    let (remapped_args, agent_task_run_id) =
+        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
+            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
+
+    let mut command = command_prefix_argv.to_vec();
+    command.extend(
+        rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
+            .into_iter()
+            .skip(1),
+    );
+    let remote_command = command.clone();
+    plan = with_step(
+        plan,
+        PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
+            .inputs(PlanValues::new().json("argv", &command))
+            .build(),
+    );
+
+    Ok(LabOffloadWorkspaceStage {
+        plan,
+        sync_mode,
+        changed_since_preflight,
+        synced,
+        remote_cwd,
+        workspace_mapping,
+        source_snapshot,
+        remapped_args,
+        agent_task_run_id,
+        command,
+        remote_command,
+        synced_rigs,
+        rig_component_path_overrides,
     })
 }
 
@@ -797,246 +1084,32 @@ fn run_lab_offload_inner(
     }
 
     let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
-    let sync_mode = lab_workspace_sync_mode(
-        contract.workspace_mode_policy,
-        request.normalized_args,
-        &source_path,
-    )?;
-    let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
-        prepare_git_lab_offload_changed_since(request.normalized_args, &source_path)?
-    } else {
-        preflight_lab_offload_changed_since(request.normalized_args, sync_mode)?
-    };
-    let mut git_fetch_refs = changed_since_preflight.git_fetch_refs.clone();
-    for git_ref in
-        lab_offload_git_fetch_refs(&changed_since_preflight.args, &source_path, sync_mode)?
-    {
-        if !git_fetch_refs.contains(&git_ref) {
-            git_fetch_refs.push(git_ref);
-        }
-    }
-    if let Some(resolved_base) = &changed_since_preflight.resolved_base {
-        eprintln!(
-            "Lab offload: changed-since requested `{}` resolved to `{}`; runner fetch refs: {}.",
-            changed_since_preflight
-                .requested_ref
-                .as_deref()
-                .unwrap_or(resolved_base),
-            resolved_base,
-            if git_fetch_refs.is_empty() {
-                "<none>".to_string()
-            } else {
-                git_fetch_refs.join(", ")
-            }
-        );
-    }
-    let offload_args =
-        inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
-    let mut extra_workspaces = lab_extra_workspaces(&source_path)?;
-    // Sync any controller-local directories referenced by --provider-config
-    // (runtime components, provider plugins, extra mount sources) so the cook
-    // config's paths resolve on the runner after remapping.
-    extra_workspaces.extend(provider_config_extra_workspaces(
-        &offload_args,
-        &source_path,
-    )?);
-    extra_workspaces.extend(agent_task_plan_extra_workspaces(
-        &offload_args,
-        &source_path,
-    )?);
-    extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, &source_path)?);
-    extra_workspaces.extend(rig_component_path_env_extra_workspaces(&source_path)?);
-    // Isolate the primary workspace per cook/dispatch run. Without a per-run
-    // token the git-mode remote path is keyed only on (source path, HEAD), so a
-    // later unrelated run at the same HEAD reuses the earlier run's checkout and
-    // can observe its leftover untracked artifacts (#4393). Resolve the
-    // agent-task run id (existing or freshly generated) up front and fold it
-    // into the workspace identity so each run gets a clean, isolated directory.
-    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
-    let synced = sync_workspace(
-        runner_id,
-        RunnerWorkspaceSyncOptions {
-            path: source_path.display().to_string(),
-            mode: sync_mode,
-            controller_routed_git: false,
-            changed_since_base: changed_since_preflight.resolved_base.clone(),
-            git_fetch_refs: git_fetch_refs.clone(),
-            snapshot_includes: Vec::new(),
-            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-            run_isolation_token: run_isolation_token.clone(),
-        },
-    )?
-    .0;
-    let remote_cwd = synced.remote_path.clone();
-    let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
-    plan = with_step(
+    let workspace_stage = prepare_lab_offload_workspace_stage(
+        &request,
+        &contract,
         plan,
-        PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
-            .inputs(
-                PlanValues::new()
-                    .string("local_path", &synced.local_path)
-                    .string("remote_path", &remote_cwd)
-                    .string("mode", sync_mode.label())
-                    .json(
-                        "allow_dirty_lab_workspace",
-                        request.allow_dirty_lab_workspace,
-                    )
-                    .json(
-                        "changed_since_requested_ref",
-                        &changed_since_preflight.requested_ref,
-                    )
-                    .json(
-                        "changed_since_resolved_base",
-                        &changed_since_preflight.resolved_base,
-                    )
-                    .json("git_fetch_refs", &git_fetch_refs)
-                    .string("workspace_cleanliness", &synced.workspace_cleanliness),
-            )
-            .build(),
-    );
-
-    let synced_extra_workspaces = sync_extra_lab_workspaces(
         runner_id,
-        &synced.local_path,
-        extra_workspaces,
-        &mut workspace_mapping,
-    )?;
-    if !synced_extra_workspaces.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_extra_workspaces", "lab.sync_extra_workspaces")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_extra_workspaces.len())
-                        .json("workspaces", &synced_extra_workspaces),
-                )
-                .build(),
-        );
-    }
-
-    let source_snapshot = SourceSnapshot::collect_local(
-        runner_id,
-        Path::new(&synced.local_path),
-        Some(&remote_cwd),
-        "lab_offload",
-    );
-    if contract.routing_policy.requires_extension_parity {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
-        );
-    }
-
-    let synced_rigs = rig_materialization::sync_lab_offload_rigs(
-        runner_id,
+        &source_path,
         homeboy_path,
-        &remote_cwd,
-        &changed_since_preflight.args,
-        &synced.local_path,
-        &remote_cwd,
-    )?;
-    if !synced_rigs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_rigs", "lab.sync_rigs")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_rigs.len())
-                        .string("source_snapshot_remote_path", &remote_cwd)
-                        .json("rigs", &synced_rigs),
-                )
-                .build(),
-        );
-    }
-
-    let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
-        runner_id,
-        &changed_since_preflight.args,
-        &synced.local_path,
-        &remote_cwd,
+        &command_prefix.argv,
         runner.workspace_root.as_deref(),
-        request.allow_dirty_lab_workspace,
     )?;
-    let synced_rig_dependencies = rig_component_sync.materializations;
-    let rig_component_path_overrides = rig_component_sync.component_path_env;
-    if !synced_rig_dependencies.is_empty() {
-        for dependency in &synced_rig_dependencies {
-            workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
-                "rig_component_dependency",
-                dependency,
-            ));
-        }
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.sync_rig_component_dependencies",
-                "lab.sync_rig_component_dependencies",
-            )
-            .inputs(
-                PlanValues::new()
-                    .json("count", synced_rig_dependencies.len())
-                    .json("dependencies", &synced_rig_dependencies),
-            )
-            .build(),
-        );
-    }
-
-    // Remap controller-local absolute paths embedded in --provider-config
-    // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
-    // to their synced remote locations, using every local->remote pair recorded
-    // during workspace sync. Without this the remote sandbox cannot resolve the
-    // workspace or runtime components a hand-authored cook config references.
-    let path_remaps: Vec<LabPathRemap> = workspace_mapping
-        .iter()
-        .map(|entry| LabPathRemap {
-            local: entry.local_path().to_string(),
-            remote: entry.remote_path().to_string(),
-        })
-        .collect();
-    preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
-    let remapped_args = rig_materialization::remap_bench_rig_default_component_to_primary_snapshot(
-        &offload_args,
-        &remote_cwd,
-    );
-    let remapped_args = remap_provider_config_in_args(&remapped_args, &path_remaps);
-    let remapped_args =
-        remap_agent_task_plan_in_args(&remapped_args, &path_remaps, Path::new(&synced.local_path))?;
-    let remapped_args =
-        inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
-    let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
-    let (remapped_args, synced_remapped_tasks) =
-        materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
-    plan = record_synced_remapped_workspace_entry(
-        plan,
-        &mut workspace_mapping,
-        synced_remapped_tasks,
-        "lab.sync_remapped_agent_task_tasks",
-    );
-    let (remapped_args, synced_remapped_plan) =
-        materialize_inline_agent_task_plan_arg(runner_id, &remapped_args)?;
-    plan = record_synced_remapped_workspace_entry(
-        plan,
-        &mut workspace_mapping,
-        synced_remapped_plan,
-        "lab.sync_remapped_agent_task_plan",
-    );
-    let (remapped_args, agent_task_run_id) =
-        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
-            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
-
-    let mut command = command_prefix.argv.clone();
-    command.extend(
-        rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
-            .into_iter()
-            .skip(1),
-    );
-    let remote_command = command.clone();
-    plan = with_step(
-        plan,
-        PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &command))
-            .build(),
-    );
+    let LabOffloadWorkspaceStage {
+        plan: next_plan,
+        sync_mode,
+        changed_since_preflight,
+        synced,
+        remote_cwd,
+        workspace_mapping,
+        source_snapshot,
+        remapped_args,
+        agent_task_run_id,
+        command,
+        remote_command,
+        synced_rigs,
+        rig_component_path_overrides,
+    } = workspace_stage;
+    plan = next_plan;
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
@@ -1516,6 +1589,7 @@ struct AgentTaskProviderSelection {
     selector: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preflight_agent_task_provider_on_runner(
     runner_id: &str,
     command_prefix: &[String],
@@ -1844,6 +1918,7 @@ fn provider_available(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_task_provider_selection_preflight_error(
     runner_id: &str,
     selection: &AgentTaskProviderSelection,
