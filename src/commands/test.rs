@@ -24,6 +24,7 @@ use super::utils::observed_workflow::ObservedWorkflowRunner;
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    TEST_LAB_LABEL,
 };
 use homeboy::core::validation_progress::validation_progress_metadata;
 
@@ -101,10 +102,13 @@ impl TestArgs {
 
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
         if self.changed_since.is_none() {
-            LabCommandContract::portable("test", self.write.then_some("--write"), true, &[])
+            LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
                 .release_gate()
         } else {
-            LabCommandContract::local_only("test", TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON)
+            LabCommandContract::local_only(
+                TEST_LAB_LABEL,
+                TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON,
+            )
         }
     }
 }

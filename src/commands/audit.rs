@@ -20,6 +20,7 @@ use super::utils::observed_workflow::{
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    AUDIT_LAB_LABEL,
 };
 
 const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
@@ -75,7 +76,7 @@ impl AuditArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         if self.changed_since.is_some() {
             return Some(LabCommandContract::local_only(
-                "audit",
+                AUDIT_LAB_LABEL,
                 AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON,
             ));
         }
@@ -85,7 +86,7 @@ impl AuditArgs {
 
         Some(
             LabCommandContract::portable(
-                "audit",
+                AUDIT_LAB_LABEL,
                 (self.baseline_args.baseline || self.baseline_args.ratchet)
                     .then_some("--baseline/--ratchet"),
                 true,
