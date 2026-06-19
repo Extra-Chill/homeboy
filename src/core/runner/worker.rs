@@ -795,6 +795,9 @@ mod tests {
             homeboy_version: "test".to_string(),
             homeboy_build_identity: None,
             connected_at: "2026-06-19T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
         };
         std::fs::write(
             path,
