@@ -14,6 +14,44 @@ use crate::core::{git, worktree};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
 
+/// Maximum number of bytes retained per captured command stream when surfacing a
+/// control-plane tool failure. The dispatched commands' stdout/stderr are
+/// agent-influenced and otherwise unbounded, so the retained evidence is capped
+/// with truncation metadata before it lands in a diagnostic payload. Mirrors the
+/// bounded-capture pattern used by `agent_task_promotion` / runner exec captures
+/// (#5363).
+const COMMAND_CAPTURE_LIMIT_BYTES: usize = 65_536;
+
+/// Truncation metadata describing how much of a captured stream was retained.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+struct StreamCaptureMetadata {
+    limit_bytes: usize,
+    seen_bytes: usize,
+    retained_bytes: usize,
+    truncated: bool,
+}
+
+/// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
+/// (the most relevant tail for a failure message) and returning the retained
+/// text plus truncation metadata. Mirrors the `bound_captured_stream` pattern in
+/// `agent_task_promotion` so a pathological command cannot force an arbitrarily
+/// large failure payload into memory or logs.
+fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, StreamCaptureMetadata) {
+    let seen = bytes.len();
+    let retained: &[u8] = if seen > limit {
+        &bytes[seen - limit..]
+    } else {
+        bytes
+    };
+    let metadata = StreamCaptureMetadata {
+        limit_bytes: limit,
+        seen_bytes: seen,
+        retained_bytes: retained.len(),
+        truncated: seen > retained.len(),
+    };
+    (String::from_utf8_lossy(retained).to_string(), metadata)
+}
+
 pub trait AgentToolControlPlaneDispatcher {
     fn dispatch(&self, request: &AgentToolRequest) -> AgentToolResult;
 }
@@ -689,14 +727,34 @@ fn command_spawn_error(operation: &str, error: std::io::Error) -> AgentTaskDiagn
 }
 
 fn command_error(operation: &str, output: std::process::Output) -> AgentTaskDiagnostic {
+    // The dispatched command's stdout/stderr are unbounded; bound the retained
+    // bytes (keeping the trailing tail) with truncation metadata so a
+    // pathological command cannot force an arbitrarily large failure payload
+    // into the diagnostic (#5363).
+    let (stdout, stdout_capture) =
+        bound_captured_stream(&output.stdout, COMMAND_CAPTURE_LIMIT_BYTES);
+    let (stderr, stderr_capture) =
+        bound_captured_stream(&output.stderr, COMMAND_CAPTURE_LIMIT_BYTES);
     AgentTaskDiagnostic {
         class: "agent_tool.command_failed".to_string(),
         message: format!("{} failed", operation),
         data: json!({
             "operation": operation,
             "exit_code": output.status.code(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_capture": {
+                "limit_bytes": stdout_capture.limit_bytes,
+                "seen_bytes": stdout_capture.seen_bytes,
+                "retained_bytes": stdout_capture.retained_bytes,
+                "truncated": stdout_capture.truncated,
+            },
+            "stderr_capture": {
+                "limit_bytes": stderr_capture.limit_bytes,
+                "seen_bytes": stderr_capture.seen_bytes,
+                "retained_bytes": stderr_capture.retained_bytes,
+                "truncated": stderr_capture.truncated,
+            },
         }),
     }
 }
@@ -709,6 +767,57 @@ mod tests {
     use crate::core::agent_task::{
         AgentToolPolicyRule, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
     };
+
+    #[test]
+    fn bound_captured_stream_retains_full_source_within_limit() {
+        let (text, capture) = bound_captured_stream(b"all good", 64);
+        assert_eq!(text, "all good");
+        assert_eq!(capture.seen_bytes, 8);
+        assert_eq!(capture.retained_bytes, 8);
+        assert_eq!(capture.limit_bytes, 64);
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn bound_captured_stream_keeps_trailing_tail_when_truncated() {
+        let blob = format!("{}TAIL-ERR", "x".repeat(100));
+        let (text, capture) = bound_captured_stream(blob.as_bytes(), 8);
+        assert_eq!(capture.limit_bytes, 8);
+        assert_eq!(capture.seen_bytes, blob.len());
+        assert_eq!(capture.retained_bytes, 8);
+        assert!(capture.truncated);
+        assert_eq!(text, "TAIL-ERR");
+    }
+
+    #[test]
+    fn command_error_bounds_oversized_streams_with_truncation_metadata() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: vec![b'a'; COMMAND_CAPTURE_LIMIT_BYTES + 4096],
+            stderr: vec![b'b'; COMMAND_CAPTURE_LIMIT_BYTES + 4096],
+        };
+        let diagnostic = command_error("workspace_apply_patch", output);
+        let data = &diagnostic.data;
+        assert_eq!(
+            data["stdout"].as_str().map(str::len),
+            Some(COMMAND_CAPTURE_LIMIT_BYTES)
+        );
+        assert_eq!(
+            data["stderr"].as_str().map(str::len),
+            Some(COMMAND_CAPTURE_LIMIT_BYTES)
+        );
+        assert_eq!(data["stdout_capture"]["truncated"], json!(true));
+        assert_eq!(
+            data["stdout_capture"]["retained_bytes"],
+            json!(COMMAND_CAPTURE_LIMIT_BYTES)
+        );
+        assert_eq!(
+            data["stdout_capture"]["seen_bytes"],
+            json!(COMMAND_CAPTURE_LIMIT_BYTES + 4096)
+        );
+        assert_eq!(data["stderr_capture"]["truncated"], json!(true));
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct EchoDispatcher;
