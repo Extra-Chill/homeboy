@@ -211,3 +211,10 @@ contract. It accepts `homeboy/agent-task-request/v1`, requires an explicit
 and emits `homeboy/agent-task-outcome/v1` without any secret inputs. It exists to
 prove future runtimes can satisfy Homeboy's generic runtime package shape without
 copying another runtime package structure or domain behavior.
+
+## Local Shell Runtime
+
+`agent-runtimes/local-shell` is the smallest generic non-WordPress runtime. It
+runs an explicit local command from the `AgentTaskRequest` and emits a
+normalized `AgentTaskOutcome`. It is intended for deterministic loops where the
+caller owns domain policy and command safety.
