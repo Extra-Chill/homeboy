@@ -15,6 +15,8 @@
 //!   guard.
 //! - `args_util` — minimal argv inspection helpers shared by the other
 //!   submodules.
+//! - `workspace_plan` — workspace sync mode selection and patch-provider
+//!   checkout preflight.
 //!
 //! `core::runners::execute_lab_offload` remains the public facade entry point;
 //! everything else is internal to the runner module.
@@ -25,6 +27,7 @@ mod evidence;
 mod offload;
 pub(super) mod secrets;
 mod trace_fetch_refs;
+mod workspace_plan;
 
 pub use super::lab_selection::LabRunnerSelectionSource;
 pub use offload::{
