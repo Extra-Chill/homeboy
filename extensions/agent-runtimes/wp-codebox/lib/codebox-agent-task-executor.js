@@ -972,6 +972,9 @@ function runtimeComponentPaths(config, options = {}) {
   const aliases = runtimeComponentPathAliases(options);
   const resolved = {
     ...contractPaths,
+    agents_api: config.agents_api || config.agents_api_path || options.agentsApi,
+    agent_runtime: config.agent_runtime || config.data_machine || config.data_machine_path || options.agentRuntime,
+    agent_runtime_tools: config.agent_runtime_tools || config.data_machine_code || config.data_machine_code_path || options.agentRuntimeTools,
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
   };
