@@ -2017,6 +2017,7 @@ fn in_flight_daemon_disconnect_error(
         job_id,
         None,
         DaemonJobHandoffState::InFlight,
+        true,
     ) {
         disconnected = disconnected.with_hint(hint);
     }

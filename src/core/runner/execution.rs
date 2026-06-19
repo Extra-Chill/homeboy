@@ -401,6 +401,7 @@ fn exec_via_reverse_broker(
                 &job,
                 &events,
                 "reverse runner job",
+                true,
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -539,6 +540,7 @@ fn exec_via_daemon(
                 &job,
                 &events,
                 "runner daemon job",
+                true,
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -687,6 +689,7 @@ fn daemon_job_wait_timeout(
     job: &Job,
     events: &[JobEvent],
     label: &str,
+    supports_cancellation: bool,
 ) -> Error {
     let job_id = job.id.to_string();
     let mirrored = mirror_daemon_job_progress(runner, cwd, command, job, events);
@@ -728,6 +731,7 @@ fn daemon_job_wait_timeout(
         &job_id,
         mirrored_run_id.as_deref(),
         DaemonJobHandoffState::InFlight,
+        supports_cancellation,
     ) {
         error = error.with_hint(hint);
     }
@@ -746,6 +750,7 @@ pub(crate) fn lab_offload_handoff_hints(
     job_id: &str,
     persisted_run_id: Option<&str>,
     state: DaemonJobHandoffState,
+    supports_cancellation: bool,
 ) -> Vec<String> {
     let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
         Some(cwd) => format!(
@@ -792,9 +797,9 @@ pub(crate) fn lab_offload_handoff_hints(
     hints.push(format!(
         "Daemon job logs: `homeboy runner job logs {runner_id} {job_id} --follow`."
     ));
-    if state == DaemonJobHandoffState::InFlight {
+    if state == DaemonJobHandoffState::InFlight && supports_cancellation {
         hints.push(format!(
-            "Cancel if supported: `homeboy runner job cancel {runner_id} {job_id}`."
+            "Cancel: `homeboy runner job cancel {runner_id} {job_id}`."
         ));
     }
     hints
@@ -808,9 +813,92 @@ fn print_lab_offload_handoff(
     state: DaemonJobHandoffState,
 ) {
     eprintln!("Lab offload handoff:");
-    for hint in lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id, state) {
+    for hint in
+        lab_offload_handoff_hints(runner_id, remote_cwd, job_id, persisted_run_id, state, true)
+    {
         eprintln!("- {hint}");
     }
+}
+
+pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {
+    let runner = load(runner_id)?;
+    let connected = status(runner_id)?;
+    let Some(session) = connected.session.filter(|_| connected.connected) else {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "runner is not connected; run `homeboy runner connect <runner-id>` first",
+            Some(runner.id),
+            Some(vec![
+                "Runner job cancellation requires an active direct daemon or reverse broker transport."
+                    .to_string(),
+            ]),
+        ));
+    };
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("build runner job cancel client: {err}"))
+        })?;
+    let path = format!("/jobs/{job_id}/cancel");
+    let body = if let Some(local_url) = session.local_url.as_deref() {
+        let data = daemon_post(&client, local_url, &path)?;
+        canonical_daemon_body(&data, "daemon job cancel response")?.clone()
+    } else if session.mode == RunnerTunnelMode::Reverse {
+        let Some(broker_url) = session.broker_url.as_deref() else {
+            return Err(runner_job_cancel_unsupported(
+                &runner.id,
+                "reverse runner session has no broker URL",
+            ));
+        };
+        broker_http::post_json(
+            &client,
+            broker_url,
+            &path,
+            json!({}),
+            "cancel reverse runner broker job",
+        )?
+    } else {
+        return Err(runner_job_cancel_unsupported(
+            &runner.id,
+            "runner session does not expose a cancellable daemon or broker transport",
+        ));
+    };
+    parse_runner_job_cancel_body(body)
+}
+
+fn runner_job_cancel_unsupported(runner_id: &str, reason: &str) -> Error {
+    Error::validation_invalid_argument(
+        "runner",
+        format!("runner job cancellation is unsupported for runner `{runner_id}`: {reason}"),
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Use a direct daemon connection or a reverse runner session registered with a broker before cancelling runner jobs."
+                .to_string(),
+        ]),
+    )
+}
+
+fn parse_runner_job_cancel_body(body: Value) -> Result<(Job, Vec<JobEvent>)> {
+    let job: Job = serde_json::from_value(body["job"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse runner job cancel response".to_string()),
+        )
+    })?;
+    let events = body
+        .get("events")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse runner job cancel events".to_string()),
+            )
+        })?
+        .unwrap_or_default();
+    Ok((job, events))
 }
 
 fn persist_lab_offload_handoff_run(
@@ -3333,6 +3421,7 @@ mod tests {
                 &job,
                 &[],
                 "runner daemon job",
+                true,
             );
             let run_id = format!("runner-exec-lab-{job_id}");
 
@@ -3383,6 +3472,7 @@ mod tests {
             "job-123",
             Some("run-456"),
             DaemonJobHandoffState::InFlight,
+            true,
         );
         let joined = hints.join("\n");
 
@@ -3397,7 +3487,23 @@ mod tests {
             "homeboy runner exec homeboy-lab --cwd '/home/user/Developer/project with spaces' -- homeboy runs list --status running --limit 20"
         ));
         assert!(joined.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
-        assert!(joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+        assert!(joined.contains("Cancel: `homeboy runner job cancel homeboy-lab job-123`"));
+    }
+
+    #[test]
+    fn lab_offload_handoff_hints_omit_cancel_when_transport_cannot_cancel() {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/srv/homeboy/project"),
+            "job-123",
+            None,
+            DaemonJobHandoffState::InFlight,
+            false,
+        );
+        let joined = hints.join("\n");
+
+        assert!(joined.contains("still in flight"));
+        assert!(!joined.contains("homeboy runner job cancel homeboy-lab job-123"));
     }
 
     #[test]
@@ -3408,6 +3514,7 @@ mod tests {
             "job-123",
             Some("run-456"),
             DaemonJobHandoffState::Terminal(JobStatus::Succeeded),
+            true,
         );
         let joined = hints.join("\n");
 
@@ -3429,6 +3536,7 @@ mod tests {
             "job-123",
             Some("run-456"),
             DaemonJobHandoffState::Terminal(JobStatus::Failed),
+            true,
         );
         let joined = hints.join("\n");
 
@@ -3445,6 +3553,7 @@ mod tests {
             "job-123",
             None,
             DaemonJobHandoffState::Terminal(JobStatus::Cancelled),
+            true,
         );
         let joined = hints.join("\n");
 
