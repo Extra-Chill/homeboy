@@ -420,6 +420,35 @@ impl RefactorArgs {
     pub fn lab_offload_writes_local_state(&self) -> bool {
         self.write_mode.write || self.commit
     }
+
+    /// The single component id this hot refactor targets, if it can be
+    /// unambiguously resolved from a positional component or a single
+    /// `--component`/`--components` value. Returns `None` when the component is
+    /// auto-detected from the working directory or when multiple components are
+    /// targeted (offload patch capture maps one source path at a time).
+    pub fn lab_offload_positional_component(&self) -> Option<String> {
+        if let Some(comp) = &self.comp {
+            if let Some(component) = &comp.component {
+                return Some(component.clone());
+            }
+        }
+        let mut flagged = collect_component_ids(&self.component_ids, &self.components);
+        if flagged.len() == 1 {
+            flagged.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Whether an explicit `--path` override was supplied. When present, the
+    /// offload pipeline already syncs and remaps that path, so component-id
+    /// based source resolution must not override it.
+    pub fn lab_offload_has_path_override(&self) -> bool {
+        self.comp
+            .as_ref()
+            .map(|comp| comp.path.is_some())
+            .unwrap_or(false)
+    }
 }
 
 fn matches_hot_refactor_source(source: &str) -> bool {
