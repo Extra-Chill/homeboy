@@ -47,6 +47,7 @@ pub(crate) mod walker;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -155,6 +156,41 @@ impl AuditTiming {
             status: "skipped".to_string(),
             duration_ms: None,
         });
+    }
+}
+
+#[derive(Debug)]
+struct ScopedAuditExecution<'a> {
+    file_filter: Option<&'a [String]>,
+    git_ref: Option<&'a str>,
+    changed_files: HashSet<String>,
+}
+
+impl<'a> ScopedAuditExecution<'a> {
+    fn new(file_filter: Option<&'a [String]>, git_ref: Option<&'a str>) -> Self {
+        let changed_files = file_filter
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        Self {
+            file_filter,
+            git_ref,
+            changed_files,
+        }
+    }
+
+    fn is_scoped(&self) -> bool {
+        self.file_filter.is_some()
+    }
+
+    fn changed_file_count(&self) -> usize {
+        self.changed_files.len()
+    }
+
+    fn impact_tracing_enabled(&self) -> bool {
+        self.git_ref.is_some()
     }
 }
 
@@ -450,14 +486,20 @@ fn audit_internal(
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root, extension_overrides);
     let mut timing = AuditTiming::default();
+    let scoped_execution = ScopedAuditExecution::new(file_filter, git_ref);
 
-    if let Some(filter) = file_filter {
+    if scoped_execution.is_scoped() {
         log_status!(
             "audit",
-            "Scanning {} changed file(s) in {} for conventions...",
-            filter.len(),
-            source_path
+            "Scoped audit: {} changed file(s), impact tracing {}",
+            scoped_execution.changed_file_count(),
+            if scoped_execution.impact_tracing_enabled() {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
+        log_status!("audit", "Scanning {} for conventions...", source_path);
     } else {
         log_status!("audit", "Scanning {} for conventions...", source_path);
     }
@@ -482,8 +524,17 @@ fn audit_internal(
 
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
     let discovery_started = std::time::Instant::now();
+    let source_snapshot_started = std::time::Instant::now();
     let source_snapshot =
         walker::walk_shared_audit_files_snapshot(root, structural::source_extensions());
+    timing.push_ok("source_snapshot", source_snapshot_started.elapsed());
+    if scoped_execution.is_scoped() {
+        log_status!(
+            "audit",
+            "Scoped audit snapshot: {} full-codebase source file(s) captured for convention discovery",
+            source_snapshot.len()
+        );
+    }
     let discovery =
         discovery::auto_discover_groups_from_snapshot(root, &audit_config, &source_snapshot);
     let files_skipped = discovery
@@ -1199,7 +1250,8 @@ fn audit_internal(
     // With git_ref: diff fingerprints against base ref, find affected call sites,
     //   report findings in changed files + affected files.
     // Without git_ref: fall back to simple filename filter (changed files only).
-    if let Some(filter) = file_filter {
+    if let Some(filter) = scoped_execution.file_filter {
+        let scope_started = std::time::Instant::now();
         let before = all_findings.len();
 
         let scope_files: std::collections::HashSet<String> = if let Some(ref_str) = git_ref {
@@ -1228,8 +1280,15 @@ fn audit_internal(
             expanded_scope
         } else {
             // No git ref — simple filename filter (legacy behavior)
-            filter.iter().cloned().collect()
+            scoped_execution.changed_files.clone()
         };
+
+        log_status!(
+            "audit",
+            "Scoped audit filter: {} changed file(s), {} total scoped file(s)",
+            scoped_execution.changed_file_count(),
+            scope_files.len()
+        );
 
         all_findings.retain(|f| {
             scope_files
@@ -1245,6 +1304,7 @@ fn audit_internal(
                 all_findings.len()
             );
         }
+        timing.push_ok("scope.filter", scope_started.elapsed());
     }
 
     // Phase 5: Build report
@@ -1902,6 +1962,23 @@ mod tests {
         assert_eq!(timing.spans[0].id, "detector.duplication.exact");
         assert_eq!(timing.spans[0].status, "skipped");
         assert!(timing.spans[0].duration_ms.is_none());
+    }
+
+    #[test]
+    fn scoped_audit_execution_caches_changed_file_set() {
+        let changed = vec![
+            "src/core/code_audit/mod.rs".to_string(),
+            "src/core/code_audit/mod.rs".to_string(),
+            "src/core/code_audit/run.rs".to_string(),
+        ];
+
+        let scoped = ScopedAuditExecution::new(Some(&changed), Some("origin/main"));
+
+        assert!(scoped.is_scoped());
+        assert!(scoped.impact_tracing_enabled());
+        assert_eq!(scoped.changed_file_count(), 2);
+        assert!(scoped.changed_files.contains("src/core/code_audit/mod.rs"));
+        assert!(scoped.changed_files.contains("src/core/code_audit/run.rs"));
     }
 
     #[test]
