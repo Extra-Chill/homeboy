@@ -43,6 +43,7 @@ const provider = providerContract();
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
+assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
@@ -112,6 +113,7 @@ const customContract = providerContract({
     path_aliases: { agent_runtime: ['runtime_component:example_runtime'] },
   },
 });
+assert.equal(customContract.runtime_id, 'wp-codebox');
 assert.deepEqual(customContract.capabilities, ['wordpress_sandbox', 'tool:example/run-workflow']);
 assert.deepEqual(customContract.workspace_tools.readwrite, ['example_workspace_write']);
 assert.deepEqual(customContract.component_path_defaults.contract_slug_map, { 'example-runtime': 'agent_runtime' });
@@ -369,6 +371,11 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   },
   inputs: {
     ability_request: { name: 'example/run-agent-bundle' },
+    runtime_input_mapping: [
+      { from: 'client_context.inputs.source', to: 'source' },
+      { from: 'client_context.inputs.flow', to: 'flow' },
+      { from: 'client_context.inputs.wait_for_completion', to: 'wait_for_completion' },
+    ],
     client_context: {
       inputs: {
         source: 'bundles/example-agent',
@@ -407,6 +414,11 @@ const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   inputs: {
     ability_request: {
       name: 'example/materialize-artifact',
+      input_defaults: { dry_run: true, format: 'json' },
+      input_mapping: [
+        { from: 'client_context.inputs.packet', to: 'packet' },
+        { from: 'client_context.inputs.dry_run', to: 'dry_run' },
+      ],
       input: { dry_run: false },
     },
     context: {
@@ -418,6 +430,51 @@ const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 assert.equal(genericRepoLoopTaskInput.runtime_task.ability, 'example/materialize-artifact');
 assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
   packet: 'artifact-42',
+  format: 'json',
+  dry_run: false,
+});
+
+const noImplicitClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'generic-ability-no-ambient-client-context-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a generic declared ability without ambient client context merge.',
+  client_context: {
+    inputs: {
+      packet: 'ambient-artifact',
+      dry_run: true,
+    },
+  },
+  inputs: {
+    ability_request: {
+      name: 'example/materialize-artifact',
+      input: { explicit: true },
+    },
+  },
+});
+assert.deepEqual(noImplicitClientContextTaskInput.runtime_task.input, { explicit: true });
+
+const legacyClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'generic-ability-legacy-client-context-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a queued legacy declared ability with explicit legacy context merge.',
+  client_context: {
+    inputs: {
+      packet: 'legacy-artifact',
+      dry_run: true,
+    },
+  },
+  inputs: {
+    allow_legacy_client_context_input_merge: true,
+    ability_request: {
+      name: 'example/materialize-artifact',
+      input: { dry_run: false },
+    },
+  },
+});
+assert.deepEqual(legacyClientContextTaskInput.runtime_task.input, {
+  packet: 'legacy-artifact',
   dry_run: false,
 });
 

@@ -135,7 +135,7 @@ function workflowInputsFromWordPressWorkloadProfile(profile) {
 		extra_wp_config_defines: JSON.stringify(normalized.wp_config_defines),
 		runtime_mounts: JSON.stringify(normalized.mounts),
 		workload_run_before: JSON.stringify(normalized.run_before),
-		wp_codebox_workloads: JSON.stringify(normalized.workloads),
+		wordpress_runtime_workloads: JSON.stringify(normalized.workloads),
 		workload_run_after: JSON.stringify(runAfter),
 		metadata: {
 			profile_id: normalized.id,

@@ -100,6 +100,7 @@ const genericBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
 });
 
 assert.equal(genericBundleConfig.runtime_task.ability, 'runtime/run-agent-bundle');
+assert.equal(genericBundleConfig.runtime_execution.schema, 'homeboy/runtime-execution/v1');
 assert.equal(genericBundleConfig.runtime_task.input.source, '/workspace/example-repo/bundles/example-agent');
 assert.deepEqual(genericBundleConfig.runtime_task.input.workflow, { name: 'materialize-artifact' });
 assert.equal(genericBundleConfig.runtime_task.input.prompt, 'Cook a packet.');

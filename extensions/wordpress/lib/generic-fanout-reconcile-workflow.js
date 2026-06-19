@@ -13,6 +13,7 @@ const {
 
 const CONFIG_SCHEMA = 'homeboy/generic-fanout-reconcile-config/v1';
 const RESULT_SCHEMA = 'homeboy/generic-fanout-reconcile-result/v1';
+const FINDING_PACKET_CONFIG_SCHEMA = 'homeboy/generic-finding-packet-fanout-config/v1';
 
 function createGenericFanoutReconcilePlan(input = {}) {
   const config = normalizeConfig(input.config || input);
@@ -38,6 +39,58 @@ function createGenericFanoutReconcilePlan(input = {}) {
       config,
     }),
   });
+}
+
+function createFindingPacketFanoutPlan(input = {}) {
+  const materialized = materializeFindingPacketFanoutConfig(input);
+  return createGenericFanoutReconcilePlan({
+    config: materialized.config,
+    groups: materialized.groups,
+  });
+}
+
+function materializeFindingPacketFanoutConfig(input = {}) {
+  const baseConfig = normalizeConfig(input.config || {});
+  const policy = normalizeFindingPolicy(input.policy || baseConfig.finding_policy || baseConfig.findingPolicy || {});
+  const packets = input.packets || input.finding_packets || input.findingPackets || baseConfig.packets || baseConfig.finding_packets || [];
+  const items = normalizeFindingPacketItems(packets, policy);
+  const groups = groupFindingPacketItems(items, policy);
+  const orchestrator = input.orchestrator || baseConfig.orchestrator || {};
+  const taskRequestTemplate = input.task_request_template || input.taskRequestTemplate || baseConfig.task_request_template || baseConfig.taskRequestTemplate || defaultFindingPacketTaskTemplate(policy);
+
+  return {
+    config: {
+      ...baseConfig,
+      schema: baseConfig.schema || FINDING_PACKET_CONFIG_SCHEMA,
+      orchestrator,
+      task_request_template: taskRequestTemplate,
+      runtime_execution: baseConfig.runtime_execution || baseConfig.runtimeExecution || baseConfig.runtime || input.runtime_execution || input.runtimeExecution || input.runtime,
+      summary: {
+        packet_count: countFindingPackets(packets),
+        finding_count: items.length,
+        grouping: {
+          strategy: policy.group_key_template ? 'template' : 'paths',
+          paths: policy.group_by,
+        },
+        ...(baseConfig.summary || {}),
+      },
+      finding_policy: policy,
+    },
+    groups,
+    items,
+  };
+}
+
+function createFindingPacketReconcileInput(input = {}) {
+  const materialized = materializeFindingPacketFanoutConfig(input);
+  return {
+    config: materialized.config,
+    plan: input.plan || createGenericFanoutReconcilePlan({
+      config: materialized.config,
+      groups: materialized.groups,
+    }),
+    records: normalizeFindingPacketRecords(input.records || []),
+  };
 }
 
 async function createGenericFanoutReconcileResult(input = {}) {
@@ -89,6 +142,116 @@ function normalizeRecords(records) {
     return [];
   }
   return records.map((record, index) => (record && typeof record === 'object' ? record : { id: `record-${index + 1}`, value: record }));
+}
+
+function normalizeFindingPolicy(policy) {
+  const normalized = normalizeConfig(policy);
+  const groupBy = normalized.group_by || normalized.groupBy || normalized.group_key_paths || normalized.groupKeyPaths;
+  return {
+    packet_id_path: normalized.packet_id_path || normalized.packetIdPath || 'id',
+    findings_path: normalized.findings_path || normalized.findingsPath || 'findings',
+    finding_id_path: normalized.finding_id_path || normalized.findingIdPath || 'id',
+    group_by: Array.isArray(groupBy) && groupBy.length > 0 ? groupBy : ['finding.type', 'finding.severity'],
+    group_key_template: text(normalized.group_key_template || normalized.groupKeyTemplate),
+    fallback_group_key: text(normalized.fallback_group_key || normalized.fallbackGroupKey) || 'default',
+    include_packet: normalized.include_packet !== false,
+  };
+}
+
+function normalizeFindingPacketItems(packets, policy = {}) {
+  policy = normalizeFindingPolicy(policy);
+  if (!Array.isArray(packets)) {
+    return [];
+  }
+
+  return packets.flatMap((packet, packetIndex) => {
+    const packetObject = packet && typeof packet === 'object' ? packet : { value: packet };
+    const packetId = text(getPath(packetObject, policy.packet_id_path)) || text(packetObject.packet_id) || text(packetObject.key) || `packet-${packetIndex + 1}`;
+    const findings = packetFindings(packetObject, policy);
+
+    return findings.map((finding, findingIndex) => {
+      const findingObject = finding && typeof finding === 'object' ? finding : { value: finding };
+      const findingId = text(getPath(findingObject, policy.finding_id_path)) || text(findingObject.finding_id) || text(findingObject.rule_id) || text(findingObject.code) || `finding-${findingIndex + 1}`;
+      const item = stripUndefined({
+        id: `${packetId}:${findingId}`,
+        packet_id: packetId,
+        finding_id: findingId,
+        index: findingIndex,
+        packet_index: packetIndex,
+        group_key: findingGroupKey(packetObject, findingObject, policy),
+        type: text(findingObject.type) || text(findingObject.kind) || text(findingObject.rule_id),
+        severity: text(findingObject.severity),
+        path: text(findingObject.path) || text(findingObject.file),
+        message: text(findingObject.message) || text(findingObject.description),
+        finding: findingObject,
+      });
+
+      if (policy.include_packet) {
+        item.packet = packetObject;
+      }
+
+      return item;
+    });
+  });
+}
+
+function packetFindings(packet, policy) {
+  const configured = getPath(packet, policy.findings_path);
+  if (Array.isArray(configured)) {
+    return configured;
+  }
+  if (Array.isArray(packet.findings)) {
+    return packet.findings;
+  }
+  if (Array.isArray(packet.diagnostics)) {
+    return packet.diagnostics;
+  }
+  if (packet.finding && typeof packet.finding === 'object') {
+    return [packet.finding];
+  }
+  return [];
+}
+
+function groupFindingPacketItems(items, policy = {}) {
+  policy = normalizeFindingPolicy(policy);
+  return groupFanoutItems(items, {
+    group_key: (item) => text(item.group_key) || findingGroupKey(item.packet || {}, item.finding || item, policy),
+  });
+}
+
+function findingGroupKey(packet, finding, policy = {}) {
+  const context = { packet, finding };
+  if (policy.group_key_template) {
+    return text(renderString(policy.group_key_template, context)) || policy.fallback_group_key || 'default';
+  }
+
+  const parts = policy.group_by
+    .map((pathExpression) => text(getPath(context, pathExpression)))
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join(':') : policy.fallback_group_key || 'default';
+}
+
+function defaultFindingPacketTaskTemplate() {
+  return {
+    id: 'finding-packet-{{group.key}}',
+    group_key: '{{group.key}}',
+    item_ids: '{{group.item_ids}}',
+    packet_ids: '{{group.packet_ids}}',
+    finding_count: '{{group.item_count}}',
+    inputs: {
+      findings: '{{group.items}}',
+    },
+  };
+}
+
+function normalizeFindingPacketRecords(records) {
+  return normalizeRecords(records).map((record) => stripUndefined({
+    ...record,
+    id: taskId(record),
+    group_key: text(record.group_key) || text(record.groupKey),
+    finding_ids: Array.isArray(record.finding_ids) ? record.finding_ids : undefined,
+    packet_ids: Array.isArray(record.packet_ids) ? record.packet_ids : undefined,
+  }));
 }
 
 function normalizeGroups(groups, items, config) {
@@ -186,6 +349,12 @@ function templateValue(expression, context) {
   if (path === 'group.item_ids') {
     return context.group.items.map((item) => text(item.id) || text(item.key) || String(item.index + 1));
   }
+  if (path === 'group.packet_ids') {
+    return unique(context.group.items.map((item) => text(item.packet_id)).filter(Boolean));
+  }
+  if (path === 'group.finding_ids') {
+    return context.group.items.map((item) => text(item.finding_id) || text(item.id) || String(item.index + 1));
+  }
   return getPath(context, path);
 }
 
@@ -215,6 +384,14 @@ function stripUndefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
+function unique(values) {
+  return Array.from(new Set(values));
+}
+
+function countFindingPackets(packets) {
+  return Array.isArray(packets) ? packets.length : 0;
+}
+
 function text(value) {
   if (typeof value === 'string') {
     return value.trim();
@@ -227,9 +404,15 @@ function text(value) {
 
 module.exports = {
   CONFIG_SCHEMA,
+  FINDING_PACKET_CONFIG_SCHEMA,
   RESULT_SCHEMA,
+  createFindingPacketFanoutPlan,
+  createFindingPacketReconcileInput,
   createGenericFanoutReconcilePlan,
   createGenericFanoutReconcileResult,
+  groupFindingPacketItems,
+  materializeFindingPacketFanoutConfig,
+  normalizeFindingPacketItems,
   normalizeGroups,
   renderTaskRequest,
 };

@@ -88,13 +88,15 @@
     "test:wp-codebox-phpunit-recipe-builder": "node tests/wp-codebox-phpunit-recipe-builder-smoke.js",
     "test:build-package-artifacts": "bash scripts/build/build-package-artifacts-smoke.sh",
     "test:agent-task-core-contract-drift": "node tests/agent-task-core-contract-drift.test.js",
+    "test:runtime-agent-host-lifecycle": "node tests/runtime-agent-host-lifecycle-smoke.js",
     "test:codebox-agent-task-executor-boundary": "node tests/codebox-agent-task-executor-boundary.test.js",
     "test:provider-outcome-normalizer": "node tests/provider-outcome-normalizer.test.js",
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
     "test:wordpress-runtime-task-planner": "node tests/wordpress-runtime-task-planner-smoke.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
-    "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
+    "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js",
+    "test:replay-envelope": "node tests/replay-envelope-smoke.js"
   },
   "devDependencies": {
     "@wordpress/eslint-plugin": "^25.3.0",

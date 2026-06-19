@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-/* eslint-disable no-console */
+/* eslint-disable camelcase, no-console */
 
+/**
+ * External dependencies
+ */
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -199,6 +202,50 @@ function validateWritablePaths(config, files) {
   };
 }
 
+function declaredSideEffectPatterns(config) {
+  const lifecycle = plainObject(config.workspace_lifecycle) ? config.workspace_lifecycle : {};
+  const artifactExport = plainObject(config.artifact_export) ? config.artifact_export : {};
+  const configured = [
+    lifecycle.side_effect_paths,
+    lifecycle.declared_side_effect_paths,
+    config.declared_side_effect_paths,
+    config.verification_side_effect_paths,
+    config.allowed_side_effect_paths,
+    artifactExport.side_effect_paths,
+  ].find(Array.isArray) || [];
+  return configured.map(normalizePathPattern).filter(Boolean);
+}
+
+function evaluateSideEffectPolicy(config, files) {
+  const patterns = declaredSideEffectPatterns(config);
+  const normalizedFiles = files.map(normalizePathPattern).filter(Boolean);
+  if (normalizedFiles.length === 0) {
+    return { enabled: patterns.length > 0, success: true, patterns, files: [], accepted_files: [], rejected_files: [] };
+  }
+
+  const matchers = patterns.map(globPatternToRegExp);
+  const accepted = normalizedFiles.filter((file) => matchers.some((matcher) => matcher.test(file)));
+  const rejected = normalizedFiles.filter((file) => !accepted.includes(file));
+  const success = rejected.length === 0;
+  return {
+    enabled: true,
+    success,
+    patterns,
+    files: normalizedFiles,
+    accepted_files: accepted,
+    rejected_files: rejected,
+    error: success ? '' : `Verification side-effect files outside declared policy: ${rejected.join(', ')}`,
+  };
+}
+
+function calculatePublishSet(agentFiles, sideEffectPolicy) {
+  const files = new Set(agentFiles.map(normalizePathPattern).filter(Boolean));
+  for (const file of sideEffectPolicy.accepted_files || []) {
+    files.add(normalizePathPattern(file));
+  }
+  return Array.from(files);
+}
+
 function workspaceContractConfig(config) {
   return plainObject(config.workspace_contract_checks) ? config.workspace_contract_checks : {};
 }
@@ -242,9 +289,12 @@ function contractEntryPointEntries(config) {
     if (!plainObject(entry)) {
       return [];
     }
-    const entryPath = typeof entry.path === 'string'
-      ? entry.path
-      : (typeof entry.entry_path === 'string' ? entry.entry_path : entry.entry);
+    let entryPath = entry.entry;
+    if (typeof entry.path === 'string') {
+      entryPath = entry.path;
+    } else if (typeof entry.entry_path === 'string') {
+      entryPath = entry.entry_path;
+    }
     const mustLinkTo = Array.isArray(entry.must_link_to) ? entry.must_link_to : [entry.must_link_to];
     const targets = mustLinkTo
       .map((target) => normalizePathPattern(target))
@@ -743,16 +793,19 @@ function recordLifecycle(results, scenario, lifecycle) {
   metadata.engine_data.runner_workspace_capture = lifecycle.capture;
   metadata.engine_data.runner_workspace_publication = lifecycle.publication;
   metadata.engine_data.runner_writable_path_policy = lifecycle.writablePaths;
+  metadata.engine_data.runner_side_effect_policy = lifecycle.sideEffectPolicy;
   metadata.engine_data.runner_workspace_contract = lifecycle.workspaceContract;
   metadata.runner_workspace_capture = lifecycle.capture;
   metadata.runner_workspace_publication = lifecycle.publication;
   metadata.runner_writable_path_policy = lifecycle.writablePaths;
+  metadata.runner_side_effect_policy = lifecycle.sideEffectPolicy;
   metadata.runner_workspace_contract = lifecycle.workspaceContract;
   metadata.verification_results = lifecycle.verification;
   metadata.drift_check_results = lifecycle.drift;
   scenario.metrics.verification_commands_succeeded = !lifecycle.verification.enabled || lifecycle.verification.success ? 1 : 0;
   scenario.metrics.drift_checks_succeeded = !lifecycle.drift.enabled || lifecycle.drift.success ? 1 : 0;
   scenario.metrics.writable_paths_satisfied = !lifecycle.writablePaths.enabled || lifecycle.writablePaths.success ? 1 : 0;
+  scenario.metrics.side_effect_policy_satisfied = !lifecycle.sideEffectPolicy.enabled || lifecycle.sideEffectPolicy.success ? 1 : 0;
   scenario.metrics.workspace_contract_satisfied = !lifecycle.workspaceContract.enabled || lifecycle.workspaceContract.success ? 1 : 0;
   scenario.metrics.pr_opened = lifecycle.publication.opened ? 1 : 0;
   scenario.metrics.pr_opened_mean = scenario.metrics.pr_opened;
@@ -778,22 +831,7 @@ function recordLifecycle(results, scenario, lifecycle) {
   results.status = lifecycle.success ? (results.status || 'completed') : 'failed';
 }
 
-function main() {
-  const resultsPath = argValue('--results');
-  const configPath = argValue('--config');
-  const scenarioId = argValue('--scenario');
-  const workspace = path.resolve(argValue('--workspace', process.cwd()));
-  if (!resultsPath || !configPath) {
-    throw new Error('Usage: run-host-runner-lifecycle.cjs --results <path> --config <path> --scenario <id> [--workspace <path>]');
-  }
-
-  const results = readJson(resultsPath);
-  const config = readJson(configPath);
-  const scenario = scenarioById(results, scenarioId);
-  if (!scenario) {
-    throw new Error(`Scenario not found in results: ${scenarioId || '(first scenario)'}`);
-  }
-
+function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace) {
   const agentFiles = changedFiles(workspace, config);
   const verification = runCommandChecks(config, workspace, 'verification_commands');
   if ((!verification.enabled || verification.success) && agentFiles.length > 0 && hasCommandChecks(config, 'drift_checks')) {
@@ -803,14 +841,16 @@ function main() {
     ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
     : runCommandChecks(config, workspace, 'drift_checks');
   const workspaceFiles = changedFiles(workspace, config);
-  const files = agentFiles;
+  const verificationSideEffectFiles = differenceFiles(workspaceFiles, agentFiles);
+  const sideEffectPolicy = evaluateSideEffectPolicy(config, verificationSideEffectFiles);
+  const files = calculatePublishSet(agentFiles, sideEffectPolicy);
   const writablePaths = validateWritablePaths(config, files);
   const workspaceContract = evaluateWorkspaceContract(config, workspace);
-  const verificationSideEffectFiles = differenceFiles(workspaceFiles, agentFiles);
   const capture = {
     enabled: true,
     changed: files.length > 0,
     files,
+    agent_files: agentFiles,
     workspace,
     workspace_files: workspaceFiles,
     verification_side_effect_files: verificationSideEffectFiles,
@@ -818,6 +858,7 @@ function main() {
   let publication = { opened: false };
   let success = (!verification.enabled || verification.success)
     && (!drift.enabled || drift.success)
+    && (!sideEffectPolicy.enabled || sideEffectPolicy.success)
     && (!writablePaths.enabled || writablePaths.success)
     && (!workspaceContract.enabled || workspaceContract.success);
   let error = '';
@@ -827,6 +868,8 @@ function main() {
       error = verification.error || 'verification_commands failed';
     } else if (drift.enabled && !drift.success) {
       error = drift.error || 'drift_checks failed';
+    } else if (sideEffectPolicy.enabled && !sideEffectPolicy.success) {
+      error = sideEffectPolicy.error || 'side_effect_policy failed';
     } else if (workspaceContract.enabled && !workspaceContract.success) {
       error = workspaceContract.error || 'workspace_contract_checks failed';
     } else {
@@ -849,10 +892,30 @@ function main() {
     }
   }
 
-  recordLifecycle(results, scenario, { verification, drift, writablePaths, workspaceContract, capture, publication, success, error });
+  return { verification, drift, sideEffectPolicy, writablePaths, workspaceContract, capture, publication, success, error };
+}
+
+function main() {
+  const resultsPath = argValue('--results');
+  const configPath = argValue('--config');
+  const scenarioId = argValue('--scenario');
+  const workspace = path.resolve(argValue('--workspace', process.cwd()));
+  if (!resultsPath || !configPath) {
+    throw new Error('Usage: run-host-runner-lifecycle.cjs --results <path> --config <path> --scenario <id> [--workspace <path>]');
+  }
+
+  const results = readJson(resultsPath);
+  const config = readJson(configPath);
+  const scenario = scenarioById(results, scenarioId);
+  if (!scenario) {
+    throw new Error(`Scenario not found in results: ${scenarioId || '(first scenario)'}`);
+  }
+
+  const lifecycle = runDeterministicWorkspaceLifecycle(config, results, scenario, workspace);
+  recordLifecycle(results, scenario, lifecycle);
   writeJson(resultsPath, results);
-  if (!success) {
-    throw new Error(error);
+  if (!lifecycle.success) {
+    throw new Error(lifecycle.error);
   }
 }
 
@@ -866,7 +929,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  calculatePublishSet,
+  evaluateSideEffectPolicy,
   evaluateWorkspaceContract,
   prepareRunnerCommand,
+  runDeterministicWorkspaceLifecycle,
   runShellCommand,
 };

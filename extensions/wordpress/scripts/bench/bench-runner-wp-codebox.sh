@@ -74,8 +74,10 @@ homeboy_wp_codebox_validate_bench_settings() {
         [
             ["bench_env", "object"],
             ["wp_config_defines", "object"],
+            ["wordpress_runtime_blueprint", "object"],
             ["wp_codebox_blueprint", "object"],
             ["playground_blueprint", "object"],
+            ["wordpress_runtime_workloads", "array"],
             ["wp_codebox_workloads", "array"],
             ["playground_workloads", "array"],
             ["wp_codebox_file_mounts", "array"],
@@ -896,7 +898,7 @@ WP_CODEBOX_WORKLOADS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
     WP_CONFIG_DEFINES_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
-    WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_workloads // .playground_workloads // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wordpress_runtime_workloads // .wp_codebox_workloads // .playground_workloads // []' 2>/dev/null || echo "[]")
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 homeboy_wp_codebox_append_extra_bench_workloads_configured_json
@@ -1063,7 +1065,7 @@ fi
 
 WP_CODEBOX_BLUEPRINT_JSON="{}"
 if [ "$settings_json" != "{}" ]; then
-    WP_CODEBOX_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_blueprint // .playground_blueprint // {}' 2>/dev/null || echo "{}")
+    WP_CODEBOX_BLUEPRINT_JSON=$(printf '%s' "$settings_json" | jq -c '.wordpress_runtime_blueprint // .wp_codebox_blueprint // .playground_blueprint // {}' 2>/dev/null || echo "{}")
 fi
 RUNTIME_BLUEPRINT_JSON=$(jq -nc \
     --argjson base "$WP_CODEBOX_BLUEPRINT_JSON" \
@@ -1184,7 +1186,7 @@ homeboy_wp_codebox_emit_dependency_provenance() {
                 keys: ($settings | keys | sort),
                 has_bench_env: (($settings.bench_env // null) != null),
                 has_wp_config_defines: (($settings.wp_config_defines // null) != null),
-                has_configured_workloads: ((($settings.wp_codebox_workloads // $settings.playground_workloads // []) | length) > 0),
+                has_configured_workloads: ((($settings.wordpress_runtime_workloads // $settings.wp_codebox_workloads // $settings.playground_workloads // []) | length) > 0),
                 has_scenario_manifests: ((($settings.wp_codebox_scenario_manifests // $settings.scenario_manifests // []) | length) > 0)
             }
         }' > "$provenance_file"

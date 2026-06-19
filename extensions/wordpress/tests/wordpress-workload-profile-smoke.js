@@ -60,7 +60,8 @@ assert.equal(inputs.validation_dependencies, 'example/content-importer@main,exam
 assert.deepEqual(JSON.parse(inputs.extra_wp_config_defines), { WP_DEBUG: true });
 assert.deepEqual(JSON.parse(inputs.runtime_mounts), normalized.mounts);
 assert.deepEqual(JSON.parse(inputs.workload_run_before), normalized.run_before);
-assert.deepEqual(JSON.parse(inputs.wp_codebox_workloads), normalized.workloads);
+assert.deepEqual(JSON.parse(inputs.wordpress_runtime_workloads), normalized.workloads);
+assert.equal(Object.hasOwn(inputs, 'wp_codebox_workloads'), false);
 assert.deepEqual(JSON.parse(inputs.workload_run_after), [
 	{ type: 'wp-cli', command: 'option get home' },
 	{

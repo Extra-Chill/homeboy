@@ -10,6 +10,7 @@ const {
 const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID = 'runtime-agent-ci';
+const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 
 function runtimeAgentCiRuntimeTaskRequest(options = {}, context = {}) {
   const taskId = requiredString(options.taskId || options.task_id, 'taskId');
@@ -124,7 +125,7 @@ function normalizeRuntimeExecutionDescriptor(descriptor, runtimeProfile = {}) {
   const ability = descriptor.ability || abilityForRuntimeExecutionKind(kind, runtimeProfile);
   const input = runtimeExecutionInput(descriptor, kind);
   return stripUndefined({
-    schema: descriptor.schema,
+    schema: descriptor.schema || RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
     kind,
     ability,
     input,

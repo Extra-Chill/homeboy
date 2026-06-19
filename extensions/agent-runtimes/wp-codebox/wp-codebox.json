@@ -38,6 +38,7 @@
       "id": "wordpress.codebox-agent-task-executor",
       "label": "WP Codebox agent task executor",
       "backend": "codebox",
+      "runtime_id": "wp-codebox",
       "command": "node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs",
       "invocation": {
         "schema": "homeboy/command-invocation/v1",
