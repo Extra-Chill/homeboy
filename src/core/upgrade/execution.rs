@@ -9,10 +9,60 @@ use super::helpers::{current_version, version_is_newer};
 use super::planning::resolve_binary_on_path;
 use super::types::InstallMethod;
 
+/// Maximum number of bytes retained per captured stream when surfacing an
+/// upgrade-command failure. The upgrade command's stdout/stderr are
+/// attacker-influenced and otherwise unbounded, so the retained evidence is
+/// capped with truncation metadata. Mirrors the bounded-capture pattern used by
+/// `agent_task_promotion` / runner exec captures (#5297).
+const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActiveBinaryInfo {
     pub version: Option<String>,
     pub build_identity: Option<String>,
+}
+
+/// Truncation metadata describing how much of a captured stream was retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamCaptureMetadata {
+    pub limit_bytes: usize,
+    pub seen_bytes: usize,
+    pub retained_bytes: usize,
+    pub truncated: bool,
+}
+
+/// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
+/// (the most relevant tail for a failure message) and returning the retained
+/// text plus truncation metadata. Mirrors the `bound_captured_stream` pattern
+/// in `agent_task_promotion`.
+pub(crate) fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, StreamCaptureMetadata) {
+    let seen = bytes.len();
+    let retained: &[u8] = if seen > limit {
+        &bytes[seen - limit..]
+    } else {
+        bytes
+    };
+    let metadata = StreamCaptureMetadata {
+        limit_bytes: limit,
+        seen_bytes: seen,
+        retained_bytes: retained.len(),
+        truncated: seen > retained.len(),
+    };
+    (String::from_utf8_lossy(retained).to_string(), metadata)
+}
+
+/// Append a human-readable truncation note when the retained capture dropped
+/// bytes, so a surfaced failure detail makes the truncation observable rather
+/// than silently hiding the dropped output.
+pub(crate) fn annotate_truncation(detail: &str, capture: &StreamCaptureMetadata) -> String {
+    if capture.truncated {
+        format!(
+            "{detail} [output truncated: retained {} of {} bytes]",
+            capture.retained_bytes, capture.seen_bytes
+        )
+    } else {
+        detail.to_string()
+    }
 }
 
 pub(crate) fn execute_upgrade(
@@ -66,12 +116,18 @@ pub(crate) fn execute_upgrade(
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        // The upgrade command's stdout/stderr are unbounded; bound the retained
+        // bytes (keeping the trailing tail) with truncation metadata so a
+        // pathological command cannot force an arbitrarily large failure string
+        // into memory or logs (#5297).
+        let (stderr, stderr_capture) =
+            bound_captured_stream(&output.stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
+        let (stdout, stdout_capture) =
+            bound_captured_stream(&output.stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
         let error_detail = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
+            annotate_truncation(stderr.trim(), &stderr_capture)
         } else if !stdout.trim().is_empty() {
-            stdout.trim().to_string()
+            annotate_truncation(stdout.trim(), &stdout_capture)
         } else {
             format!("exit code {}", output.status.code().unwrap_or(1))
         };
@@ -420,6 +476,66 @@ fn parse_cli_build_identity_output(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_captured_stream_retains_full_source_within_limit() {
+        let (text, capture) = bound_captured_stream(b"boom", 1024);
+
+        assert_eq!(text, "boom");
+        assert_eq!(capture.limit_bytes, 1024);
+        assert_eq!(capture.seen_bytes, 4);
+        assert_eq!(capture.retained_bytes, 4);
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn bound_captured_stream_keeps_trailing_tail_when_truncated() {
+        let source = vec![b'x'; 16];
+        let (text, capture) = bound_captured_stream(&source, 4);
+
+        assert_eq!(text, "xxxx");
+        assert_eq!(capture.limit_bytes, 4);
+        assert_eq!(capture.retained_bytes, 4);
+        assert_eq!(capture.seen_bytes, 16);
+        assert!(capture.truncated);
+    }
+
+    #[test]
+    fn bound_captured_stream_retains_most_relevant_tail() {
+        let source = b"head-noise-TAIL".to_vec();
+        let (text, capture) = bound_captured_stream(&source, 4);
+
+        assert_eq!(text, "TAIL");
+        assert!(capture.truncated);
+    }
+
+    #[test]
+    fn annotate_truncation_notes_dropped_bytes() {
+        let capture = StreamCaptureMetadata {
+            limit_bytes: 4,
+            seen_bytes: 16,
+            retained_bytes: 4,
+            truncated: true,
+        };
+
+        let annotated = annotate_truncation("TAIL", &capture);
+
+        assert!(annotated.starts_with("TAIL"));
+        assert!(annotated.contains("output truncated"));
+        assert!(annotated.contains("retained 4 of 16 bytes"));
+    }
+
+    #[test]
+    fn annotate_truncation_leaves_untruncated_detail_unchanged() {
+        let capture = StreamCaptureMetadata {
+            limit_bytes: 1024,
+            seen_bytes: 4,
+            retained_bytes: 4,
+            truncated: false,
+        };
+
+        assert_eq!(annotate_truncation("boom", &capture), "boom");
+    }
 
     #[test]
     fn parses_homeboy_version_output() {
