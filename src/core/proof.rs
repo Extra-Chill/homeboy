@@ -553,8 +553,8 @@ mod tests {
             },
             "gates": [{
                 "schema": "homeboy/gate-result/v1",
-                "id": "cargo-test",
-                "name": "cargo test",
+                "id": "quality-check",
+                "name": "quality check",
                 "kind": "command",
                 "status": "passed"
             }],
@@ -580,8 +580,8 @@ mod tests {
             },
             "gates": [{
                 "schema": "homeboy/gate-result/v1",
-                "id": "cargo-test",
-                "name": "cargo test",
+                "id": "quality-check",
+                "name": "quality check",
                 "kind": "command",
                 "status": "failed"
             }],
