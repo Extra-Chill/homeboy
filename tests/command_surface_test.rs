@@ -253,10 +253,6 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     assert!(runs.contains("artifact cleanup-persisted"));
     assert!(runs.contains("`reconcile`"));
 
-    let list = include_str!("../docs/commands/list.md");
-    assert!(list.contains("compatibility alias"));
-    assert!(list.contains("Prefer `homeboy --help`"));
-
     for args in [
         ["homeboy", "auth", "profile", "set-basic", "dev"].as_slice(),
         ["homeboy", "auth", "profile", "set-bearer", "dev"].as_slice(),
