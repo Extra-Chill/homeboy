@@ -1,9 +1,10 @@
 # `homeboy triage`
 
 Produce an attention report for components, projects, fleets, rigs, or the full configured workspace.
-GitHub access is read-only; each run also records a local observation in the
+Snapshot report mode reads GitHub state and records a local observation in the
 Homeboy SQLite database so later runs can compare against the previous
-observation for the same target.
+observation for the same target. Watch mode is also read-only unless
+`--auto-merge` is explicitly passed.
 
 `triage` is the reference consumer of Homeboy's shared scope model: it accepts
 component, project/target, fleet, rig, workspace, and direct path scopes, then

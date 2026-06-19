@@ -332,8 +332,9 @@ jobs:
 ### Dependencies And Attention
 
 `homeboy deps` inspects and updates component dependencies. `homeboy triage`
-gathers read-only attention reports across components, projects, fleets, rigs,
-or the whole workspace.
+gathers attention reports across components, projects, fleets, rigs, or the
+whole workspace. Snapshot report mode is read-only; watch mode only mutates
+GitHub when `--auto-merge` is explicitly passed.
 
 ```bash
 homeboy deps status my-project
