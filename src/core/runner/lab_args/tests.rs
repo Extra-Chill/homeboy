@@ -224,6 +224,120 @@ fn remap_inlines_and_rewrites_provider_config_local_paths() {
 }
 
 #[test]
+fn remap_prunes_stale_unresolved_provider_plugin_path() {
+    // #4829: a `provider_plugin_paths` entry inherited from stale/global
+    // settings points at a controller-local absolute directory that is not part
+    // of this run's synced workspace, so no local->remote mapping is recorded
+    // for it. Forwarding it verbatim makes the WP Codebox recipe declare an
+    // `extra_plugins` entry for a directory that does not exist on the runner,
+    // failing recipe validation. Such entries must be pruned before offload.
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/sample-plugin@cook".to_string(),
+        remote: "/home/user/_lab_workspaces/sample-plugin@cook-abc".to_string(),
+    }];
+    let config = serde_json::json!({
+        "provider": "codex",
+        "provider_plugin_paths": [
+            "/Users/user/Developer/sample-plugin@cook/vendor/provider",
+            "/Users/user/Developer/ai-provider-for-openai-codex-oauth-provider"
+        ]
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        config,
+    ];
+
+    let out = remap_provider_config_in_args(&args, &mappings);
+    let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+    let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+    // The synced workspace path is remapped and kept; the stale path is dropped.
+    let paths = remapped["provider_plugin_paths"]
+        .as_array()
+        .expect("plugin paths array");
+    assert_eq!(
+        paths.len(),
+        1,
+        "stale plugin path should be pruned: {paths:?}"
+    );
+    assert_eq!(
+        paths[0],
+        "/home/user/_lab_workspaces/sample-plugin@cook-abc/vendor/provider"
+    );
+}
+
+#[test]
+fn remap_prunes_all_provider_plugin_paths_when_no_mappings() {
+    // With no synced workspace mappings, every absolute provider plugin path is
+    // unresolvable on the runner and must be pruned so recipe validation never
+    // sees a missing extra-plugin path. The array stays present but empty.
+    let config = serde_json::json!({
+        "provider": "codex",
+        "provider_plugin_paths": [
+            "/home/chubes/Developer/ai-provider-for-openai-codex-oauth-provider"
+        ]
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        config,
+    ];
+
+    let out = remap_provider_config_in_args(&args, &[]);
+    let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+    let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+    assert_eq!(
+        remapped["provider_plugin_paths"]
+            .as_array()
+            .expect("plugin paths array")
+            .len(),
+        0
+    );
+    // Unrelated config is preserved.
+    assert_eq!(remapped["provider"], "codex");
+}
+
+#[test]
+fn remap_preserves_relative_and_materialized_provider_plugin_paths() {
+    // Relative paths resolve against the runner workspace, and non-string
+    // entries (materialized ref objects) are left untouched. Neither should be
+    // pruned even when there are no path mappings.
+    let config = serde_json::json!({
+        "provider_plugin_paths": [
+            "vendor/runner-relative-provider",
+            { "materialized_path": "/runner/checkout/provider", "ref": "main" }
+        ]
+    })
+    .to_string();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
+        config,
+    ];
+
+    let out = remap_provider_config_in_args(&args, &[]);
+    let cfg_idx = out.iter().position(|a| a == "--provider-config").unwrap() + 1;
+    let remapped: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("inline json");
+
+    let paths = remapped["provider_plugin_paths"]
+        .as_array()
+        .expect("plugin paths array");
+    assert_eq!(paths.len(), 2, "no entries should be pruned: {paths:?}");
+    assert_eq!(paths[0], "vendor/runner-relative-provider");
+    assert_eq!(paths[1]["materialized_path"], "/runner/checkout/provider");
+}
+
+#[test]
 fn injects_default_provider_config_for_agent_task_cook() {
     crate::test_support::with_isolated_home(|_| {
         defaults::save_config(&defaults::HomeboyConfig {
