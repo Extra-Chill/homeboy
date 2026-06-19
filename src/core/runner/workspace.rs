@@ -43,9 +43,10 @@ pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     "*.tsbuildinfo",
 ];
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerWorkspaceSyncMode {
+    #[default]
     Snapshot,
     Git,
 }
@@ -59,7 +60,7 @@ impl RunnerWorkspaceSyncMode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunnerWorkspaceSyncOptions {
     pub path: String,
     pub mode: RunnerWorkspaceSyncMode,
@@ -68,6 +69,16 @@ pub struct RunnerWorkspaceSyncOptions {
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
     pub allow_dirty_lab_workspace: bool,
+    /// Opaque per-run token (e.g. an agent-task run id) folded into the
+    /// deterministic remote workspace path so two distinct cook/dispatch runs
+    /// at the same source HEAD never share a long-lived remote checkout.
+    ///
+    /// Without this, the git-mode remote path is keyed only on
+    /// `(source path, HEAD)`, so a later unrelated run reuses the earlier run's
+    /// workspace directory and can observe leftover untracked artifacts from it
+    /// (cross-run contamination, see #4393). When set, each run gets an
+    /// isolated `_lab_workspaces/<name>-<digest>` directory.
+    pub run_isolation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +136,12 @@ pub fn sync_workspace(
         RunnerWorkspaceSyncMode::Snapshot => {
             let snapshot = snapshot_identity(&local_path, &excludes, &includes)?;
             let remote_path = temp::unique_name(
-                &deterministic_remote_path(workspace_root, &local_path, &snapshot),
+                &deterministic_remote_path(
+                    workspace_root,
+                    &local_path,
+                    &snapshot,
+                    options.run_isolation_token.as_deref(),
+                ),
                 "",
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
@@ -161,7 +177,12 @@ pub fn sync_workspace(
                 options.changed_since_base.as_deref(),
                 options.git_fetch_refs,
             )?;
-            let remote_path = deterministic_remote_path(workspace_root, &local_path, &git.head);
+            let remote_path = deterministic_remote_path(
+                workspace_root,
+                &local_path,
+                &git.head,
+                options.run_isolation_token.as_deref(),
+            );
             if options.controller_routed_git
                 || git.branch.is_none()
                 || super::source_materialization::requires_controller_routed_workspace_sync(
@@ -269,7 +290,12 @@ fn validate_absolute_path(field: &str, path: &str) -> Result<()> {
     ))
 }
 
-fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: &str) -> String {
+fn deterministic_remote_path(
+    workspace_root: &str,
+    local_path: &Path,
+    snapshot: &str,
+    run_isolation_token: Option<&str>,
+) -> String {
     let name = local_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -277,6 +303,14 @@ fn deterministic_remote_path(workspace_root: &str, local_path: &Path, snapshot: 
     let mut hasher = Sha256::new();
     hasher.update(local_path.display().to_string().as_bytes());
     hasher.update(snapshot.as_bytes());
+    // Fold a per-run isolation token (when present) into the digest so two
+    // distinct runs at the same source HEAD never resolve to the same remote
+    // workspace directory. This prevents cross-run contamination where a later
+    // run observes an earlier run's leftover untracked artifacts (#4393).
+    if let Some(token) = run_isolation_token.filter(|token| !token.trim().is_empty()) {
+        hasher.update(b"\0run-isolation\0");
+        hasher.update(token.as_bytes());
+    }
     let digest = hex_prefix(&hasher.finalize(), 12);
     format!(
         "{}/_lab_workspaces/{}-{}",
@@ -1005,11 +1039,50 @@ mod tests {
     #[test]
     fn deterministic_path_stays_under_workspace_root() {
         let path = Path::new("/Users/user/Developer/homeboy@fix-runner-workspace-sync");
-        let remote = deterministic_remote_path("/srv/homeboy", path, "snapshot:abc");
+        let remote = deterministic_remote_path("/srv/homeboy", path, "snapshot:abc", None);
 
         assert!(
             remote.starts_with("/srv/homeboy/_lab_workspaces/homeboy-fix-runner-workspace-sync-")
         );
+    }
+
+    #[test]
+    fn run_isolation_token_yields_distinct_remote_paths_for_same_head() {
+        let path = Path::new("/Users/user/Developer/homeboy");
+        let base = deterministic_remote_path("/srv/homeboy", path, "abc123", None);
+        let run_a = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
+        let run_b = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-b"));
+
+        // Two different runs at the same HEAD must not share a remote workspace
+        // directory, otherwise leftover untracked artifacts from one run can
+        // contaminate the other (#4393).
+        assert_ne!(run_a, run_b);
+        assert_ne!(run_a, base);
+        assert_ne!(run_b, base);
+        // All paths still stay under the deterministic workspace root.
+        for remote in [&base, &run_a, &run_b] {
+            assert!(remote.starts_with("/srv/homeboy/_lab_workspaces/homeboy-"));
+        }
+    }
+
+    #[test]
+    fn run_isolation_token_is_stable_for_same_run() {
+        let path = Path::new("/Users/user/Developer/homeboy");
+        let first = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
+        let second = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
+
+        // The same run id must deterministically resolve to the same workspace
+        // so retries/streaming of one run reuse its own isolated checkout.
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn blank_run_isolation_token_does_not_change_remote_path() {
+        let path = Path::new("/Users/user/Developer/homeboy");
+        let base = deterministic_remote_path("/srv/homeboy", path, "abc123", None);
+        let blank = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("   "));
+
+        assert_eq!(base, blank);
     }
 
     #[test]
@@ -1089,6 +1162,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect("sync workspace");
@@ -1135,6 +1209,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect("sync workspace");
@@ -1203,6 +1278,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect("sync workspace");
@@ -1284,6 +1360,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             );
 
@@ -1358,6 +1435,7 @@ mod tests {
                         git_fetch_refs: Vec::new(),
                         snapshot_includes: Vec::new(),
                         allow_dirty_lab_workspace: false,
+                        run_isolation_token: None,
                     },
                 )
             };
@@ -1426,6 +1504,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect("sync workspace");
@@ -1507,6 +1586,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect_err("shallow source checkout should fail before bundle creation");
@@ -1585,6 +1665,7 @@ mod tests {
                     git_fetch_refs: Vec::new(),
                     snapshot_includes: Vec::new(),
                     allow_dirty_lab_workspace: false,
+                    run_isolation_token: None,
                 },
             )
             .expect("sync workspace");

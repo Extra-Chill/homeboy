@@ -68,9 +68,10 @@ use super::super::{
 };
 
 use super::agent_task_bridge::{
-    ensure_agent_task_dispatch_run_id, lab_pre_dispatch_failure_message,
-    materialize_inline_agent_task_plan_arg, materialize_inline_agent_task_tasks_arg,
-    mirror_agent_task_run_plan_lifecycle, parse_offloaded_dispatch_envelope_from_outputs,
+    agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
+    lab_pre_dispatch_failure_message, materialize_inline_agent_task_plan_arg,
+    materialize_inline_agent_task_tasks_arg, mirror_agent_task_run_plan_lifecycle,
+    parse_offloaded_dispatch_envelope_from_outputs,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::secrets::{
@@ -845,6 +846,13 @@ fn run_lab_offload_inner(
     )?);
     extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, &source_path)?);
     extra_workspaces.extend(rig_component_path_env_extra_workspaces(&source_path)?);
+    // Isolate the primary workspace per cook/dispatch run. Without a per-run
+    // token the git-mode remote path is keyed only on (source path, HEAD), so a
+    // later unrelated run at the same HEAD reuses the earlier run's checkout and
+    // can observe its leftover untracked artifacts (#4393). Resolve the
+    // agent-task run id (existing or freshly generated) up front and fold it
+    // into the workspace identity so each run gets a clean, isolated directory.
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
     let synced = sync_workspace(
         runner_id,
         RunnerWorkspaceSyncOptions {
@@ -855,6 +863,7 @@ fn run_lab_offload_inner(
             git_fetch_refs: git_fetch_refs.clone(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+            run_isolation_token: run_isolation_token.clone(),
         },
     )?
     .0;
@@ -1011,8 +1020,9 @@ fn run_lab_offload_inner(
         synced_remapped_plan,
         "lab.sync_remapped_agent_task_plan",
     );
-    let (remapped_args, agent_task_run_id) = ensure_agent_task_dispatch_run_id(&remapped_args)
-        .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
+    let (remapped_args, agent_task_run_id) =
+        ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
+            .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
     let mut command = command_prefix.argv.clone();
     command.extend(

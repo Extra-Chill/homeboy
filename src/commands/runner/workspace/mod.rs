@@ -92,6 +92,7 @@ fn sync(
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace,
+            run_isolation_token: None,
         },
     )
 }
