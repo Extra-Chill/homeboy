@@ -2,15 +2,9 @@
 
 const WP_CODEBOX_RUNTIME_PROFILE_SCHEMA = 'wp-codebox/runtime-profile/v1';
 const WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA = 'wp-codebox/parent-tool-bridge/v1';
+const WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA = 'wp-codebox/upstream-primitive-requirement/v1';
 
 const RUNTIME_PROFILE_DEPENDENCY_FIELDS = ['components', 'plugins', 'mu_plugins', 'themes', 'overlays'];
-
-const HOMEBOY_PARENT_TOOL_BRIDGE_ENV = [
-  'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-  'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-  'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-  'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-];
 
 function codeboxRuntimeProfilePayload({
   id,
@@ -41,8 +35,11 @@ function codeboxRuntimeProfilePayload({
   const normalizedComponentContracts = uniqueObjectsByRuntimeIdentity([
     ...normalizeArray(normalizedProfile.component_contracts),
     ...normalizeArray(normalizedRuntimeRequirements.component_contracts),
-    ...componentContractsFromRuntimeProfileDependencies(runtimeProfileDependencies),
     ...normalizeArray(componentContracts),
+  ]);
+  const normalizedExtraPlugins = uniqueObjectsByRuntimeIdentity([
+    ...normalizeArray(normalizedProfile.extra_plugins),
+    ...normalizeArray(normalizedRuntimeRequirements.extra_plugins),
   ]);
   const normalizedProviderPlugins = uniqueObjectsByRuntimeIdentity([
     ...providerPluginEntries(normalizedProfile.provider_plugins),
@@ -57,7 +54,7 @@ function codeboxRuntimeProfilePayload({
     homeboy_profile_schema: normalizedProfile.schema && normalizedProfile.schema !== WP_CODEBOX_RUNTIME_PROFILE_SCHEMA ? normalizedProfile.schema : undefined,
     ...runtimeProfileDependencies,
     component_contracts: normalizedComponentContracts,
-    extra_plugins: normalizedComponentContracts,
+    extra_plugins: normalizedExtraPlugins,
     runtime_overlays: normalizedRuntimeOverlays,
     env: normalizedRuntimeEnv,
     provider_plugins: normalizedProviderPlugins,
@@ -78,9 +75,15 @@ function providerPluginEntries(value) {
 
 function parentToolBridgeProfileFields(profile = {}, runtimeRequirements = {}, runtimeProfileDependencies = {}, componentContracts = []) {
   if (hasCodeboxParentToolBridge(profile, runtimeRequirements, runtimeProfileDependencies, componentContracts)) {
-    return { homeboy_parent_tool_bridge: undefined };
+    return {};
   }
-  return { homeboy_parent_tool_bridge: homeboyParentToolBridgeRequirement() };
+  return {
+    upstream_primitive_requirements: uniqueObjectsByRuntimeIdentity([
+      ...normalizeArray(profile.upstream_primitive_requirements),
+      ...normalizeArray(runtimeRequirements.upstream_primitive_requirements),
+      codeboxParentToolBridgeRequirement(),
+    ]),
+  };
 }
 
 function runtimeProfileDependencyFields(profile = {}, runtimeRequirements = {}) {
@@ -91,35 +94,6 @@ function runtimeProfileDependencyFields(profile = {}, runtimeRequirements = {}) 
       ...normalizeArray(runtimeRequirements[field]),
     ]),
   ]));
-}
-
-function componentContractsFromRuntimeProfileDependencies(dependencies = {}) {
-  return [
-    ...normalizeArray(dependencies.components).map((dependency) => componentContractFromDependency(dependency, 'mu-plugin')),
-    ...normalizeArray(dependencies.mu_plugins).map((dependency) => componentContractFromDependency(dependency, 'mu-plugin')),
-    ...normalizeArray(dependencies.plugins).map((dependency) => componentContractFromDependency(dependency, 'plugin')),
-  ].filter(Boolean);
-}
-
-function componentContractFromDependency(dependency, loadAs) {
-  if (!dependency || typeof dependency !== 'object' || Array.isArray(dependency)) {
-    return null;
-  }
-  const source = dependency.source || dependency.path;
-  if (!dependency.slug || !source) {
-    return null;
-  }
-  return withoutEmptyObjectValues({
-    slug: dependency.slug,
-    path: dependency.path || source,
-    source,
-    pluginFile: dependency.pluginFile || dependency.plugin_file,
-    loadAs: dependency.loadAs || dependency.load_as || loadAs,
-    activate: dependency.activate,
-    required: dependency.required,
-    readiness_probe: dependency.readiness_probe || dependency.readinessProbe,
-    metadata: dependency.metadata,
-  });
 }
 
 function hasCodeboxParentToolBridge(...values) {
@@ -166,12 +140,15 @@ function parentToolBridgeDescriptor(value) {
     || normalizeArray(value.capabilities).some((capability) => String(capability).toLowerCase() === 'parent_tool_bridge' || String(capability).toLowerCase() === 'parent-tool-bridge');
 }
 
-function homeboyParentToolBridgeRequirement() {
+function codeboxParentToolBridgeRequirement() {
   return {
-    schema: WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
-    status: 'declared-compatibility-bridge',
-    env: HOMEBOY_PARENT_TOOL_BRIDGE_ENV,
-    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
+    schema: WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA,
+    id: 'parent-tool-bridge',
+    owner: 'wp-codebox',
+    primitive_schema: WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
+    status: 'required-upstream-primitive',
+    adapter_behavior: 'declare_requirement_only',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
   };
 }
 
@@ -216,8 +193,8 @@ function withoutEmptyObjectValues(value) {
 module.exports = {
   WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
   WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
+  WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA,
   codeboxRuntimeProfilePayload,
-  componentContractsFromRuntimeProfileDependencies,
+  codeboxParentToolBridgeRequirement,
   hasCodeboxParentToolBridge,
-  homeboyParentToolBridgeRequirement,
 };
