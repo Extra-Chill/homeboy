@@ -24,6 +24,7 @@ pub type RunnerWorkspaceApplyStatus = ChangeApplyStatus;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceApplyOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub local_path: String,
     #[serde(flatten)]
@@ -102,6 +103,7 @@ pub fn apply_change_artifact(
     let artifact_summary = artifact.summary();
 
     Ok(RunnerWorkspaceApplyOutput {
+        variant: "workspace_apply",
         command: "runner.workspace.apply",
         local_path: local_path.display().to_string(),
         result: ChangeApplyResult::applied(

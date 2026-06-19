@@ -69,6 +69,7 @@ pub enum RunnerExecMode {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerExecOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -493,15 +494,8 @@ fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let mirror = mirror_reverse_broker_evidence(
-        runner,
-        broker_url,
-        &cwd,
-        &command,
-        &job,
-        &events,
-        &result,
-    )?;
+    let mirror =
+        mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
 
@@ -515,6 +509,7 @@ fn exec_via_reverse_broker(
 
     Ok((
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -654,6 +649,7 @@ fn exec_via_daemon(
 
     Ok((
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -1907,6 +1903,7 @@ fn exec_output(
     );
     (
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -2294,6 +2291,7 @@ mod tests {
 
     fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExecOutput {
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,

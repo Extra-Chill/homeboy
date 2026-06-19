@@ -2771,6 +2771,7 @@ mod tests {
     #[test]
     fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         let snapshot = RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
             local_path: "/Users/user/Developer/app".to_string(),
@@ -2785,6 +2786,7 @@ mod tests {
             validation_dependencies: Vec::new(),
         };
         let git = RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
             local_path: "/Users/user/Developer/dep".to_string(),
@@ -3551,6 +3553,7 @@ mod tests {
     #[test]
     fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
         let exec_output = RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab-default".to_string(),
             dry_run: false,

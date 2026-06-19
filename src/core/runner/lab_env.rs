@@ -409,6 +409,7 @@ mod tests {
         let mapping = vec![workspace_mapping_entry(
             "rig_component_path_env",
             &RunnerWorkspaceSyncOutput {
+                variant: "workspace_sync",
                 command: "runner.workspace.sync",
                 runner_id: "homeboy-lab".to_string(),
                 local_path: "/Users/user/Developer/example-component".to_string(),

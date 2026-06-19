@@ -77,6 +77,7 @@ mod types {
 
     #[derive(Debug, Serialize)]
     pub struct RunnerDoctorOutput {
+        pub variant: &'static str,
         pub command: &'static str,
         pub runner_id: String,
         pub runner: RunnerTargetSummary,
@@ -427,6 +428,7 @@ mod local {
         };
 
         RunnerDoctorOutput {
+            variant: "doctor",
             command: "runner.doctor",
             runner_id: runner_id.to_string(),
             runner: runner_summary("local", runner, None),
@@ -664,6 +666,7 @@ mod remote {
         };
 
         RunnerDoctorOutput {
+            variant: "doctor",
             command: "runner.doctor",
             runner_id: runner_id.to_string(),
             runner: runner_summary("ssh", Some(runner), Some(server)),
