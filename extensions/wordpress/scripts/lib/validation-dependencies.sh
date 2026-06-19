@@ -298,7 +298,7 @@ homeboy_get_requires_plugins_from_header() {
 
 # Resolve the wp-content/plugins/<slug> path segment for a plugin checkout.
 # Normal checkouts keep using their directory basename. Worktree-style
-# directories may carry a branch suffix (for example data-machine@fix/foo), so
+# directories may carry a branch suffix (for example example-plugin@fix/foo), so
 # use the root plugin entry file when it matches the pre-suffix basename.
 homeboy_get_validation_dependency_slug() {
     local plugin_path="${1:-}"
@@ -958,16 +958,6 @@ _homeboy_prepare_cloned_dependency() {
     fi
 }
 
-_homeboy_known_dependency_github_org() {
-    local slug="${1:-}"
-
-    case "$slug" in
-        data-machine)
-            printf '%s\n' 'Extra-Chill'
-            ;;
-    esac
-}
-
 _homeboy_git_dependency_summary() {
     local repo_dir="${1:-}"
 
@@ -1098,19 +1088,7 @@ homeboy_resolve_validation_dependency_path() {
             github_org=$(_homeboy_infer_github_org "${_HOMEBOY_DEP_PLUGIN_PATH:-.}" || true)
         fi
 
-        local known_github_org
-        known_github_org=$(_homeboy_known_dependency_github_org "$dependency" || true)
-        if [ -n "$known_github_org" ]; then
-            local cloned_path
-            cloned_path=$(_homeboy_clone_dependency "$dependency" "$known_github_org" || true)
-            if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
-                _homeboy_report_resolved_dependency "$dependency" "git clone from ${known_github_org}/${dependency}" "$cloned_path"
-                printf '%s\n' "$cloned_path"
-                return 0
-            fi
-        fi
-
-        if [ -n "$github_org" ] && [ "$github_org" != "$known_github_org" ]; then
+        if [ -n "$github_org" ]; then
             local cloned_path
             cloned_path=$(_homeboy_clone_dependency "$dependency" "$github_org" || true)
             if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
@@ -1163,7 +1141,7 @@ _homeboy_walk_validation_dependency() {
 
     # Deduplicate equivalent dependency checkouts by the WordPress plugin slug
     # Playground will mount/load, not just by host path. This prevents a
-    # worktree path like data-machine@fix/foo and a canonical data-machine
+    # worktree path like example-plugin@fix/foo and a canonical example-plugin
     # checkout from loading as two copies of the same plugin.
     if [ -n "${seen_slugs[$resolved_slug]+x}" ]; then
         return 0

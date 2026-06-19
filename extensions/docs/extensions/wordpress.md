@@ -82,6 +82,19 @@ records. Keep new executor-neutral extraction behavior in
 `generic-fanout-reconcile-workflow`; keep Codebox request/session/artifact
 details inside the Codebox audit fanout lane.
 
+## Static Site Fanout Adapter
+
+The static-site fanout adapter emits generic `homeboy/agent-task-request/v1`
+requests by default. It does not select WP Codebox or any other executor backend
+unless the caller passes an explicit `backend`/`runtime_backend` value or agent
+task backend override.
+
+WP Codebox task-input compatibility is an opt-in compatibility path for callers
+that still consume `wp-codebox/task-input/v1`. Select it with
+`compatibility_provider: "wp-codebox"` or the legacy
+`request_kind: "wp-codebox"` flag. New callers should prefer the generic
+agent-task request schema and make runtime selection outside the adapter.
+
 ## Test failure sidecar
 
 When Homeboy sets `HOMEBOY_TEST_FAILURES_FILE`, the WordPress PHPUnit runners write a JSON sidecar with parsed failure details. Existing Homeboy analysis fields are preserved, and each failure also includes normalized sidecar fields for cross-runner consumers:
@@ -127,7 +140,7 @@ Configure dependencies in the component's WordPress extension settings:
   "extensions": {
     "wordpress": {
       "settings": {
-        "validation_dependencies": "data-machine"
+        "validation_dependencies": "example-dependency"
       }
     }
   }
@@ -136,10 +149,10 @@ Configure dependencies in the component's WordPress extension settings:
 
 Supported value shapes:
 
-- single component ID: `data-machine`
-- comma-separated list: `data-machine, other-plugin`
+- single component ID: `example-dependency`
+- comma-separated list: `example-dependency, other-plugin`
 - newline-separated list
-- JSON-array string: `["data-machine", "other-plugin"]`
+- JSON-array string: `["example-dependency", "other-plugin"]`
 
 Each dependency entry may be either:
 
@@ -775,10 +788,9 @@ Set `HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR` to write these derived artifacts
 to a specific directory. Otherwise they are written beside
 `HOMEBOY_BENCH_RESULTS_FILE`.
 
-The same workload contract powers Data Machine agent CI on the WP Codebox
-WordPress substrate. See
-[`../../wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
-for the dedicated agent sandbox guide.
+The same workload contract powers runtime-backed agent tasks on the WP Codebox
+WordPress substrate. See `.github/workflows/runtime-agent-full-run.yml` for the
+reusable runtime agent workflow contract.
 
 ## WP Codebox Validation Profile
 
@@ -904,7 +916,7 @@ Supported fields:
 - `tags`, `metadata`, and `limits`: copied into the BenchResults scenario
   envelope for reports, filtering, and downstream eval tooling.
 
-Data Machine agent workloads also evaluate known general rules against available
+Runtime agent workloads also evaluate known general rules against available
 runner evidence and expose the results under
 `metadata.eval_artifact.general_rule_results`. Initial executable general rules
 cover editable block failures, raw HTML/shortcode failures, speculative plugin
@@ -925,7 +937,7 @@ Example: drive a plugin's pipeline through an Abilities API entry point.
       "settings": {
         "wp_codebox_blueprint": {
           "steps": [
-            { "step": "installPlugin", "pluginData": { "resource": "wordpress.org/plugins", "slug": "data-machine" } }
+            { "step": "installPlugin", "pluginData": { "resource": "wordpress.org/plugins", "slug": "example-plugin" } }
           ]
         },
         "wp_codebox_workloads": [
@@ -934,7 +946,7 @@ Example: drive a plugin's pipeline through an Abilities API entry point.
             "run": [
               {
                 "type": "ability",
-                "ability": "datamachine/run-pipeline",
+                "ability": "example/run-pipeline",
                 "input": { "pipeline_id": 42 }
               }
             ]

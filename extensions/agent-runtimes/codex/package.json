@@ -1,0 +1,19 @@
+{
+  "name": "homeboy-agent-runtime-codex",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./codex-agent-task-executor": "./lib/codex-agent-task-executor.js"
+  },
+  "bin": {
+    "homeboy-codex-agent-task-executor": "./scripts/agent/homeboy-codex-agent-task-executor.cjs"
+  },
+  "scripts": {
+    "test:codex-agent-task-executor-boundary": "node tests/codex-agent-task-executor-boundary.test.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}

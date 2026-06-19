@@ -253,16 +253,16 @@ function projectEvalRow(results, scenario, config, benchmarkMode) {
 			result_json: referenceValue(references.homeboy_result),
 			artifact_bundle: referenceValue(references.artifact_bundle),
 		}),
-		datamachine: compactObject({
+		runtime: compactObject({
 			job_id: metadata.job_id || evalArtifact.run?.job_id,
 			pipeline_id: metadata.pipeline_id,
 			flow_id: metadata.flow_id,
 			transcript_session_id: metadata.transcript_session_id,
 		}),
-		data_machine_code: compactObject({
+		workspace_tools: compactObject({
 			workspace: metadata.runner_workspace || {},
 			workspace_capture: metadata.runner_workspace_capture || {},
-			policy_attestation: referenceValue(references.policy) || metadata.datamachine_code_policy_attestation,
+			policy_attestation: referenceValue(references.policy) || metadata.workspace_policy_attestation,
 		}),
 		github: compactObject({
 			workflow_run: referenceValue(references.workflow),

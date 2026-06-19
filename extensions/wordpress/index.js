@@ -22,7 +22,9 @@ module.exports = {
 	...require('./lib/audit-fanout-runtime-provider'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
-	...require('./lib/datamachine-agent-ci-plan'),
+	...require('./lib/wp-codebox-apply-adapter'),
+	...require('./lib/wp-codebox-recipe-helper'),
+	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wordpress-workload-profile'),
 	buildStaticVisualParityRecipe: staticVisualParity.buildStaticVisualParityRecipe,
 	createStaticServer: staticVisualParity.createStaticServer,
@@ -32,7 +34,6 @@ module.exports = {
 	...require('./lib/wordpress-runtime-task-planner'),
 	wpCodebox: {
 		...require('./lib/codebox-memory-report'),
-		...require('./lib/datamachine-agent-ci-codebox-adapter'),
 		...require('./lib/wp-codebox-apply-adapter'),
 		...require('./lib/wp-codebox-recipe-helper'),
 		...require('./lib/wp-codebox-artifacts'),

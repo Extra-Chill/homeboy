@@ -22,8 +22,8 @@ helper contract.
 Generic fanout/reconcile JSON planning is documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
-Integration-specific examples, including Data Machine Code promotion and Data
-Machine runtime-agent callers, live under [`docs/integrations/`](docs/integrations/).
+Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
+when a reusable integration needs documentation outside its owning project.
 
 ## Available Extensions
 
@@ -128,8 +128,10 @@ ability execution. Mount downloaded GitHub Actions artifacts with
 `runtime_output_projections`.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. See [`.github/workflows/README.md`](.github/workflows/README.md) for
-workflow inputs and integration examples.
+agent runs. Former domain-specific reusable workflow wrappers have been removed
+after active default-branch consumers migrated to the generic workflow.
+See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
+inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact

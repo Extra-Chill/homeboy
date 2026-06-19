@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { capture, normalizeProviderPlugin, parseJsonInput, requireRepo, run, splitCsv } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 function main() {
   const printPlan = process.argv.includes('--print-plan');

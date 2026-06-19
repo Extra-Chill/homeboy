@@ -3,6 +3,10 @@
 Node benchmark workloads can import the product-neutral helper exported by
 `HOMEBOY_NODEJS_WORKLOAD_UTILS`.
 
+This helper is intentionally substrate-neutral. Visual parity workloads that
+target WordPress Codebox should import the workload owned by the WordPress
+extension: `homeboy-extension-wordpress/wordpress-codebox-visual-parity-workload`.
+
 ```js
 const { metric, runCommand, writeJson } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
 ```

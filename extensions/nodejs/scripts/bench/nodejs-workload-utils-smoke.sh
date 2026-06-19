@@ -19,6 +19,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const utils = await import(process.env.WORKLOAD_UTILS_UNDER_TEST);
+const utilsSource = await readFile(process.env.WORKLOAD_UTILS_UNDER_TEST, 'utf8');
+for (const forbidden of ['Word' + 'Press', 'Code' + 'box', 'wordpress-' + 'codebox']) {
+  if (utilsSource.includes(forbidden)) throw new Error(`generic workload utils still reference ${forbidden}`);
+}
 
 if (utils.setting('alpha') !== 'json-value') throw new Error('JSON setting was not resolved');
 if (utils.setting('number') !== '42') throw new Error('numeric JSON setting was not coerced to string');

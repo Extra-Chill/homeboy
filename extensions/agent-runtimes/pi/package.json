@@ -1,0 +1,19 @@
+{
+  "name": "homeboy-agent-runtime-pi",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./pi-agent-task-executor": "./lib/pi-agent-task-executor.js"
+  },
+  "bin": {
+    "homeboy-pi-agent-task-executor": "./scripts/agent/homeboy-pi-agent-task-executor.cjs"
+  },
+  "scripts": {
+    "test:pi-agent-task-executor-boundary": "node tests/pi-agent-task-executor-boundary.test.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}

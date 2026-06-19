@@ -15,7 +15,6 @@ const quarantineManifest = JSON.parse(
 const scannedRoots = [
   '.github/scripts',
   '.github/workflows',
-  'datamachine-agent-ci',
   'runtime-agent-ci',
   'wordpress/lib',
   'wordpress/scripts/agent',
@@ -25,7 +24,7 @@ const scannedRoots = [
 const scannedFiles = [
   '.github/workflows/runtime-agent-ci.yml',
   'wordpress/scripts/agent/run-host-runner-lifecycle.cjs',
-  'agent-runtimes/lib/runtime-provider-resolver.cjs',
+  'runtime-agent-ci/lib/runtime-provider-resolver.cjs',
 ];
 
 function walkProductionFiles(relativeDir) {

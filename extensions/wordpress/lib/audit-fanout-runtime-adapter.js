@@ -14,7 +14,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const {
   DEFAULT_RUNTIME_ID,
   resolveRuntimeProvider,
-} = require('../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+} = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
@@ -42,8 +42,8 @@ function auditFanoutRuntimeProvider(options = {}) {
 
 function auditFanoutRuntimeInvocation(options = {}) {
   const runtimeProvider = options.runtimeProviderObject || options.runtime_provider_object || auditFanoutRuntimeProvider(options);
-  const explicitCommand = options.command || options.runtime_command || options.wp_codebox_command;
-  const explicitArgs = options.args || options.runtime_args || options.wp_codebox_args || [];
+  const explicitCommand = options.command || options.runtime_command;
+  const explicitArgs = options.args || options.runtime_args || [];
 
   if (explicitCommand) {
     return {
@@ -77,15 +77,17 @@ function auditFanoutRuntimeInvocation(options = {}) {
 }
 
 function auditFanoutRuntimeEnv(taskRequest, requestJson, options = {}) {
+  const runtimeEnv = typeof options.runtime_env === 'function'
+    ? options.runtime_env(taskRequest, requestJson, options)
+    : (options.runtime_env || {});
+
   return {
     ...process.env,
     ...(options.env || {}),
     HOMEBOY_AGENT_TASK_REQUEST: requestJson,
     HOMEBOY_AGENT_TASK_ID: taskRequest.task_id || taskRequest.id || taskRequest.sandbox_session_id || '',
     HOMEBOY_AGENT_TASK_GROUP_KEY: taskRequest.group_key || '',
-    HOMEBOY_WP_CODEBOX_TASK_REQUEST: requestJson,
-    HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: taskRequest.sandbox_session_id || '',
-    HOMEBOY_WP_CODEBOX_GROUP_KEY: taskRequest.group_key || '',
+    ...runtimeEnv,
   };
 }
 
@@ -224,6 +226,7 @@ function killProcessTree(child, signal) {
 module.exports = {
   DEFAULT_TASK_TIMEOUT_SECONDS,
   auditFanoutRuntimeId,
+  auditFanoutRuntimeEnv,
   auditFanoutRuntimeInvocation,
   auditFanoutRuntimeProvider,
   executeAuditFanoutRuntimeTask,

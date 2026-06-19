@@ -2,6 +2,27 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.25] - 2026-06-19
+
+### Changed
+- Remove Data Machine-specific runtime coupling
+- Decouple agent runtime selection from Codebox
+
+## [3.7.24] - 2026-06-19
+
+### Changed
+- Add standalone agent runtime integrations
+
+## [3.7.23] - 2026-06-19
+
+### Changed
+- Implement OpenCode agent task executor
+
+## [3.7.22] - 2026-06-19
+
+### Changed
+- Add generic seams for WordPress runtime backends
+
 ## [3.7.21] - 2026-06-19
 
 ### Changed

@@ -423,11 +423,11 @@ function buildSealedEnvelope(results, scenario, config, bundlePath, artifactInte
 	const attestation = evalArtifact.attestation && typeof evalArtifact.attestation === 'object' ? evalArtifact.attestation : {};
 	const existingSeams = Array.isArray(attestation.integration_seams) ? attestation.integration_seams : [];
 	missingSeams.push(...existingSeams);
-	if (!attestation.datamachine_provenance || Object.keys(attestation.datamachine_provenance).length === 0) {
-		missingSeams.push('datamachine_provenance');
+	if (!attestation.runtime_provenance || Object.keys(attestation.runtime_provenance).length === 0) {
+		missingSeams.push('runtime_provenance');
 	}
-	if (!attestation.datamachine_code_policy_attestation || Object.keys(attestation.datamachine_code_policy_attestation).length === 0) {
-		missingSeams.push('datamachine_code_policy_attestation');
+	if (!attestation.workspace_policy_attestation || Object.keys(attestation.workspace_policy_attestation).length === 0) {
+		missingSeams.push('workspace_policy_attestation');
 	}
 	if (toolAuditEvents.length === 0) {
 		missingSeams.push('agents_api_tool_audit_events');

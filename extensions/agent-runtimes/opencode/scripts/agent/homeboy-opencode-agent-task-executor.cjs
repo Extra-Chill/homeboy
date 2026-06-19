@@ -5,7 +5,8 @@
 
 const fs = require('node:fs');
 const {
-	experimentalOutcome,
+	executeOpenCodeAgentTask,
+	outcome,
 	providerContract,
 } = require('../../lib/opencode-agent-task-executor');
 
@@ -28,10 +29,16 @@ if (raw.trim()) {
 	try {
 		request = JSON.parse(raw);
 	} catch (error) {
-		console.error(`Invalid AgentTaskRequest JSON: ${error.message}`);
-		process.exit(1);
+		process.stdout.write(`${JSON.stringify(outcome({}, {
+			status: 'provider_error',
+			failure_classification: 'invalid_input',
+			failure_code: 'agent_task.invalid_json',
+			summary: 'Invalid AgentTaskRequest JSON.',
+			diagnostics: [{ classification: 'request_validation', message: error.message }],
+		}), null, 2)}\n`);
+		process.exit(0);
 	}
 }
 
-process.stdout.write(`${JSON.stringify(experimentalOutcome(request), null, 2)}\n`);
-process.exit(1);
+process.stdout.write(`${JSON.stringify(executeOpenCodeAgentTask(request), null, 2)}\n`);
+process.exit(0);

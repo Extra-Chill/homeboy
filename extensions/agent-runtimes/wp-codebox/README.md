@@ -16,9 +16,8 @@ override through the provider contract or task conversion options:
   discovery hints into generic runtime component path keys.
 
 The JavaScript executor consumes these manifest fields instead of owning product
-policy in code. Existing Data Machine and GitHub-oriented defaults remain declared
-there for compatibility, while alternate callers can supply their own generic
-manifest values without adding new runtime-specific branches.
+policy in code. Callers can supply generic manifest values without adding new
+runtime-specific branches.
 
 ## Adapter Boundary
 

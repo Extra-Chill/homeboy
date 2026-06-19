@@ -179,16 +179,16 @@ process.stdout.write(JSON.stringify({
       wp_codebox_output_dir: writeOutputDir,
       wp_codebox_bin: fixtureWpCli,
       wp_codebox_agents_api_path: path.join(root, 'agents-api'),
-      wp_codebox_data_machine_path: path.join(root, 'data-machine'),
-      wp_codebox_data_machine_code_path: path.join(root, 'data-machine-code'),
+      wp_codebox_runtime_path: path.join(root, 'example-runtime'),
+      wp_codebox_runtime_tools_path: path.join(root, 'example-runtime-tools'),
       wp_codebox_homeboy_path: path.join(root, 'homeboy'),
       wp_codebox_homeboy_extensions_path: path.join(root, 'homeboy-extensions'),
       wp_codebox_task_timeout_seconds: 2,
     },
   };
   fs.mkdirSync(writeCommand.settings.wp_codebox_agents_api_path, { recursive: true });
-  fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_path, { recursive: true });
-  fs.mkdirSync(writeCommand.settings.wp_codebox_data_machine_code_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_runtime_path, { recursive: true });
+  fs.mkdirSync(writeCommand.settings.wp_codebox_runtime_tools_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_path, { recursive: true });
   fs.mkdirSync(writeCommand.settings.wp_codebox_homeboy_extensions_path, { recursive: true });
   fs.mkdirSync(path.join(writeCommand.settings.wp_codebox_agents_api_path, 'src'), { recursive: true });

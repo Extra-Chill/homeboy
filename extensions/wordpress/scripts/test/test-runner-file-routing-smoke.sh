@@ -190,6 +190,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND="experimental-runtime" \
 HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/import-agent-ability-smoke.php > "${TMPDIR}/smoke-file.out"
 
@@ -280,6 +281,7 @@ HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND="wp-codebox" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php --filter ImportAgent > "${TMPDIR}/phpunit-file.out"
 
@@ -287,22 +289,38 @@ assert_contains "${TMPDIR}/phpunit-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/phpunit-file.out" "SELECTED=tests/Unit/ImportAgentAbilityTest.php"
 assert_contains "${TMPDIR}/phpunit-file.out" "ARGS=--filter ImportAgent"
 
+set +e
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND="experimental-runtime" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" --file tests/Unit/ImportAgentAbilityTest.php > "${TMPDIR}/unsupported-runtime.out" 2>&1
+status=$?
+set -e
+
+if [ "$status" -ne 2 ]; then
+    echo "Expected unsupported runtime backend to exit 2, got $status" >&2
+    sed 's/^/  /' "${TMPDIR}/unsupported-runtime.out" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/unsupported-runtime.out" "ERROR: unsupported WordPress test runtime backend: experimental-runtime"
+assert_contains "${TMPDIR}/unsupported-runtime.out" "Supported backends: wp-codebox"
+
 # A mixed smoke + PHPUnit changeset has no single exclusive scope, so the run
-# falls through to the full suite. Routed by file type, the full suite now runs
-# BOTH backends against real WordPress: PHPUnit (WP Codebox) and the real-WP
-# smoke runner, since the component carries both file types.
+# falls through to the canonical full-suite PHPUnit runtime backend. Ad hoc PHP
+# smokes still require explicit --file/--host-smoke-file selection.
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
 HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
-HOMEBOY_RUNTIME_TEST_RUNNER_HOST_SMOKE_WP="${TMPDIR}/stubs/host-smoke-wp.sh" \
 HOMEBOY_CHANGED_TEST_FILES=$'tests/import-agent-ability-smoke.php\ntests/Unit/ImportAgentAbilityTest.php' \
     bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/changed-mixed-files.out"
 
 assert_contains "${TMPDIR}/changed-mixed-files.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/changed-mixed-files.out" "CHANGED=tests/import-agent-ability-smoke.php"
-assert_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
+assert_not_contains "${TMPDIR}/changed-mixed-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 
 WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-args.txt" \
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
