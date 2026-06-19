@@ -80,6 +80,10 @@ pub(super) fn route(
             Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
             Err(err) => error_response(400, err),
         },
+        ("POST", "/runner/jobs/reconcile") => match reconcile(job_store) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.reconcile", body),
+            Err(err) => error_response(400, err),
+        },
         ("POST", "/runner/jobs/claim") => match claim(body, job_store) {
             Ok(body) => daemon_endpoint_response("runner.jobs.claim", body),
             Err(err) => error_response(400, err),
@@ -92,13 +96,27 @@ pub(super) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel."
+                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
             ),
         ),
     }
+}
+
+fn reconcile(job_store: &JobStore) -> Result<Value> {
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let reconciled = job_store.reconcile_expired_remote_runner_claims(now_ms)?;
+    Ok(json!({
+        "command": "api.runner.jobs.reconcile",
+        "reconciled": reconciled,
+        "reconciled_count": reconciled.len(),
+        "policy": {
+            "owner": "broker",
+            "reason": "expired reverse-runner claims are broker-owned lifecycle state"
+        },
+    }))
 }
 
 fn register_session(body: Option<Value>) -> Result<Value> {

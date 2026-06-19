@@ -297,10 +297,12 @@ where
         },
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs")
+        | ("POST", "/runner/jobs/reconcile")
         | ("POST", "/runner/jobs/claim") => remote_runner::route(method, path, body, job_store),
-        ("GET", "/runner/sessions") | ("GET", "/runner/jobs") | ("GET", "/runner/jobs/claim") => {
-            method_not_allowed()
-        }
+        ("GET", "/runner/sessions")
+        | ("GET", "/runner/jobs")
+        | ("GET", "/runner/jobs/reconcile")
+        | ("GET", "/runner/jobs/claim") => method_not_allowed(),
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store)
         }
