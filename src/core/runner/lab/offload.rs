@@ -1311,6 +1311,7 @@ fn run_lab_offload_inner(
         }
         plan = with_lab_apply_patch_step(plan, apply_output);
     }
+    ensure_lab_offload_streams_not_truncated(&exec_output)?;
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
 
     let mut stderr = String::new();
@@ -1389,6 +1390,29 @@ fn run_lab_offload_inner(
         stderr,
         exit_code,
     })
+}
+
+fn ensure_lab_offload_streams_not_truncated(
+    exec_output: &super::super::RunnerExecOutput,
+) -> Result<()> {
+    let Some(capture) = exec_output.capture.as_ref() else {
+        return Ok(());
+    };
+    if !capture.stdout.truncated && !capture.stderr.truncated {
+        return Ok(());
+    }
+
+    let mut error = Error::internal_unexpected(
+        "Lab offload command output exceeded the retained stream limit; refusing to treat truncated stdout/stderr as the complete command result",
+    )
+    .with_hint("The remote command completed, but Homeboy retained only the tail of at least one output stream.".to_string())
+    .with_hint("Inspect the persisted runner job instead of using the partial stdout payload.".to_string());
+    error.details["runner_id"] = serde_json::json!(exec_output.runner_id);
+    error.details["remote_cwd"] = serde_json::json!(exec_output.remote_cwd);
+    error.details["job_id"] = serde_json::json!(exec_output.job_id);
+    error.details["capture"] =
+        serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
+    Err(error)
 }
 
 /// Insert generic `${components.<id>.path}` override env vars so a remote rig
@@ -2326,6 +2350,7 @@ mod tests {
         workspace_mapping_entry, LAB_WORKSPACE_MAPPING_SCHEMA,
     };
     use super::*;
+    use crate::core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
@@ -3538,6 +3563,47 @@ mod tests {
             step.inputs["apply"]["reason"],
             serde_json::json!("no_patch")
         );
+    }
+
+    #[test]
+    fn lab_offload_rejects_truncated_runner_stdout() {
+        let exec_output = RunnerExecOutput {
+            command: "runner.exec",
+            runner_id: "lab-default".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Daemon,
+            argv: vec!["homeboy".to_string(), "agent-task".to_string()],
+            remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+            exit_code: 0,
+            stdout: "tail-only-json-fragment".to_string(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            job_id: Some("job-123".to_string()),
+            job_events: None,
+            mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+            patch: None,
+            metrics: None,
+            capture: Some(CommandCaptureMetadata {
+                stdout: CaptureMetadata {
+                    bytes_seen: 4_500_000,
+                    bytes_retained: 4 * 1024 * 1024,
+                    byte_limit: 4 * 1024 * 1024,
+                    truncated: true,
+                },
+                stderr: CaptureMetadata::default(),
+            }),
+            diagnostics: None,
+        };
+
+        let err = ensure_lab_offload_streams_not_truncated(&exec_output)
+            .expect_err("truncated stdout is rejected");
+
+        assert_eq!(err.code.as_str(), "internal.unexpected");
+        assert!(err.message.contains("output exceeded"));
+        assert_eq!(err.details["runner_id"], "lab-default");
+        assert_eq!(err.details["job_id"], "job-123");
+        assert_eq!(err.details["capture"]["stdout"]["truncated"], true);
     }
 
     #[test]

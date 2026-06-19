@@ -259,7 +259,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
     let active_jobs = if connected {
         match session.as_ref() {
-            Some(session) => active_runner_jobs(runner_id, session)?,
+            Some(session) => active_runner_jobs(runner_id, session).unwrap_or_default(),
             None => Vec::new(),
         }
     } else {

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::error::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -98,7 +98,7 @@ pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<(
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureMetadata {
     pub bytes_seen: u64,
     pub bytes_retained: usize,
@@ -106,7 +106,7 @@ pub struct CaptureMetadata {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandCaptureMetadata {
     pub stdout: CaptureMetadata,
     pub stderr: CaptureMetadata,

@@ -60,7 +60,7 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
 
 `homeboy runs latest-run` and `homeboy runs latest-finding` select the newest run
-or finding that matches the provided filters. They are useful when automation
+or finding that matches the provided filters. `latest-run` is useful when automation
 starts from component/kind/status context instead of a known run id.
 
 `homeboy runs findings` lists recorded findings for a run, while `homeboy runs
@@ -68,14 +68,17 @@ finding` reads one finding by id.
 
 `homeboy runs query` projects JSONPath expressions over imported run artifact
 rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or
-CSV without baking domain-specific artifact schemas into Homeboy core.
+CSV without baking domain-specific artifact schemas into Homeboy core. `query`
+is the generic projection reader for imported run artifacts.
 
 `homeboy runs drift` calculates window-based distribution drift for one JSONPath
 metric across imported artifact rows. It reports value shares for the selected
-window and can compare them against a longer baseline window.
+window and can compare them against a longer baseline window. `drift` is useful
+for lightweight distribution checks over imported artifact rows.
 
 `homeboy runs loop-sync` inventories continuous-loop archive directories and,
 unless `--dry-run` is passed, records the triage summary as observation evidence.
+`loop-sync` bridges existing loop archives into observation evidence.
 
 ## Compare Metrics Across History
 
