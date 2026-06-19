@@ -28,6 +28,7 @@ const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS = {
   workspace_publication: 'wp-codebox/runner-workspace-publication-result/v1',
   tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
   evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
+  artifact_result_envelope: 'wp-codebox/artifact-result-envelope/v1',
 };
 
 const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS = {
@@ -129,7 +130,7 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
   },
   {
     id: 'artifact-result-envelope',
-    schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.evidence_artifact_envelope,
+    schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.artifact_result_envelope,
     owner: 'wp-codebox',
     adapter_behavior: 'consume_when_available',
     requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Until this is complete, compatibility is centralized in codebox-artifact-contract.js.',

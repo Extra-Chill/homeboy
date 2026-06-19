@@ -2,6 +2,7 @@
 
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
+const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = 'wp-codebox/artifact-result-envelope/v1';
 
 const ARTIFACT_ROLE_FALLBACK_PATTERNS = [
   ['patch', /patch|diff/i],
@@ -59,6 +60,7 @@ function normalizeTypedArtifacts(value, options = {}) {
 function typedArtifactsFromCodeboxResult(result, options = {}) {
   const workload = options.workload || agentRuntimeWorkload(result) || {};
   const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
   const candidates = [
     result?.outputs?.typed_artifacts,
     result?.outputs?.typedArtifacts,
@@ -76,6 +78,10 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
     result?.metadata?.agent_runtime?.result?.outputs?.typedArtifacts,
     result?.metadata?.agent_runtime?.result?.outputs?.outputs?.typed_artifacts,
     result?.metadata?.agent_runtime?.result?.outputs?.outputs?.typedArtifacts,
+    artifactResult?.result?.typed_artifacts,
+    artifactResult?.result?.typedArtifacts,
+    artifactResult?.result?.outputs?.typed_artifacts,
+    artifactResult?.result?.outputs?.typedArtifacts,
     workload.typed_artifacts,
     workload.typedArtifacts,
     workload.outputs?.typed_artifacts,
@@ -94,6 +100,78 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
     ...scenarios.map((scenario) => scenario?.metadata?.typedArtifacts),
   ];
   return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
+}
+
+function artifactResultEnvelopeFromCodeboxResult(result) {
+  const candidates = [
+    result,
+    result?.artifact_result,
+    result?.artifactResult,
+    result?.metadata?.artifact_result,
+    result?.metadata?.artifactResult,
+    result?.metadata?.agent_runtime?.result,
+    ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
+    ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
+  ];
+  return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+}
+
+function normalizeArtifactResultEnvelope(envelope) {
+  if (!plainObject(envelope) || envelope.schema !== WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA) {
+    return null;
+  }
+  const artifactBundle = normalizeArtifactResultRef(envelope.artifactBundle || envelope.artifact_bundle);
+  const artifactRefs = [
+    artifactBundle,
+    ...(Array.isArray(envelope.artifactRefs) ? envelope.artifactRefs.map(normalizeArtifactResultRef) : []),
+    ...(Array.isArray(envelope.artifact_refs) ? envelope.artifact_refs.map(normalizeArtifactResultRef) : []),
+  ].filter(Boolean);
+  return cleanObject({
+    schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+    operation: envelope.operation,
+    operation_schema: envelope.operation_schema,
+    status: envelope.status,
+    success: envelope.success === undefined ? ['created', 'existing', 'updated'].includes(envelope.status) : envelope.success === true,
+    artifactBundle,
+    artifactRefs: uniqueArtifactResultRefs(artifactRefs),
+    verification: plainObject(envelope.verification) ? envelope.verification : undefined,
+    result: plainObject(envelope.result) ? envelope.result : undefined,
+    diagnostics: Array.isArray(envelope.diagnostics) ? envelope.diagnostics : [],
+    metadata: plainObject(envelope.metadata) ? envelope.metadata : undefined,
+    error: plainObject(envelope.error) ? envelope.error : undefined,
+    reason: envelope.reason,
+  });
+}
+
+function normalizeArtifactResultRef(ref) {
+  if (!plainObject(ref)) {
+    return null;
+  }
+  const digest = plainObject(ref.digest) ? ref.digest : {};
+  return cleanObject({
+    id: ref.id || ref.artifact_id,
+    kind: ref.kind || ref.type || 'artifact-bundle',
+    name: ref.name,
+    path: ref.path || ref.artifacts_path || ref.directory,
+    url: ref.url,
+    sha256: ref.sha256 || digest.value,
+    metadata: cleanObject({
+      digest: plainObject(ref.digest) ? ref.digest : undefined,
+      source_schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+    }),
+  });
+}
+
+function uniqueArtifactResultRefs(refs) {
+  const seen = new Set();
+  return refs.filter((ref) => {
+    const key = `${ref.kind || ''}:${ref.id || ''}:${ref.path || ''}:${ref.url || ''}:${ref.sha256 || ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeCodeboxArtifactDeclaration(defaultName, declaration, options = {}) {
@@ -253,11 +331,14 @@ function cleanObject(value) {
 module.exports = {
   TYPED_ARTIFACT_SCHEMA,
   WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
+  WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+  artifactResultEnvelopeFromCodeboxResult,
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
+  normalizeArtifactResultEnvelope,
   normalizeTypedArtifactEntry,
   normalizeTypedArtifacts,
   typedArtifactsFromCodeboxResult,
