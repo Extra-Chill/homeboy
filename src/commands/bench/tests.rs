@@ -262,6 +262,7 @@ pub(super) fn run_args(
 ) -> BenchArgs {
     BenchArgs {
         command: None,
+        json: false,
         run: BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: component.map(str::to_string),
