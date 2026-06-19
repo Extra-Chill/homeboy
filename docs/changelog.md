@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.244.0] - 2026-06-19
+
+### Added
+- add deterministic loop primitives
+- feat(agent-task): validate controller proof artifacts
+
+### Changed
+- refactor(agent-task): split structural god files + dedupe dispatch field group (#5181, #5187)
+- Allow workflow dependencies outside artifact references
+- test(agent-task): keep proof fixtures runtime neutral
+
 ## [0.243.0] - 2026-06-19
 
 ### Added
