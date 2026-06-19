@@ -68,50 +68,34 @@ fn validation_error_writes_json_output_file() {
 }
 
 #[test]
-fn output_json_is_rejected_as_format_footgun() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bare_json_output_format_is_rejected_as_footgun() {
+    for args in [
+        &["--runner", "lab", "--output", "json", "status"] as &[&str],
+        &["--runner", "lab", "--output=json", "status"],
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
 
-    let output = Command::new(homeboy_bin())
-        .args(["--runner", "lab", "--output", "json", "status"])
-        .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .output()
-        .expect("run homeboy");
+        let output = Command::new(homeboy_bin())
+            .args(args)
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .output()
+            .expect("run homeboy");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        !dir.path().join("json").exists(),
-        "bare --output json should not create a literal json file"
-    );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            !dir.path().join("json").exists(),
+            "bare --output json should not create a literal json file"
+        );
 
-    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    assert_eq!(stdout_json["success"], false);
-    assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
-    assert!(stdout_json["error"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("looks like an output format"));
-}
-
-#[test]
-fn output_equals_json_is_rejected_as_format_footgun() {
-    let dir = tempfile::tempdir().expect("tempdir");
-
-    let output = Command::new(homeboy_bin())
-        .args(["--runner", "lab", "--output=json", "status"])
-        .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .output()
-        .expect("run homeboy");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        !dir.path().join("json").exists(),
-        "bare --output=json should not create a literal json file"
-    );
-
-    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
+        let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+        assert_eq!(stdout_json["success"], false);
+        assert_eq!(stdout_json["error"]["code"], "validation.invalid_argument");
+        assert!(stdout_json["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("looks like an output format"));
+    }
 }
 
 #[test]

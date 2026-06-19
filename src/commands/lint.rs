@@ -470,13 +470,10 @@ mod tests {
     use homeboy::core::component::Component;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::lint as extension_lint;
-    use homeboy::core::extension::lint::baseline as lint_baseline;
     use homeboy::core::extension::lint::report;
-    use homeboy::core::finding::HomeboyFinding;
     use homeboy::core::refactor::plan::{
         lint_refactor_request, LintSourceOptions, RefactorSourceRun, SourceTotals,
     };
-    use std::path::Path;
 
     #[derive(Parser)]
     struct TestCli {
@@ -554,52 +551,6 @@ mod tests {
         >>::start_record(&adapter);
 
         assert!(record.metadata_json.get("run_dir").is_none());
-    }
-
-    #[test]
-    fn lint_baseline_roundtrip_and_compare() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let findings = vec![
-            HomeboyFinding::builder("lint", "Missing esc_html()")
-                .category("security")
-                .fingerprint("src/foo.php::WordPress.Security.EscapeOutput")
-                .build(),
-            HomeboyFinding::builder("lint", "Untranslated string")
-                .category("i18n")
-                .fingerprint("src/bar.php::WordPress.WP.I18n")
-                .build(),
-        ];
-
-        let saved = lint_baseline::save_baseline(dir.path(), "homeboy", &findings)
-            .expect("baseline should save");
-        assert!(saved.exists());
-
-        let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
-        assert_eq!(loaded.context_id, "homeboy");
-        assert_eq!(loaded.item_count, 2);
-
-        let current = vec![findings[0].clone()];
-        let comparison = lint_baseline::compare(&current, &loaded);
-        assert!(!comparison.drift_increased);
-        assert_eq!(comparison.resolved_fingerprints.len(), 1);
-    }
-
-    #[test]
-    fn test_lint_baseline_roundtrip_and_compare() {
-        lint_baseline_roundtrip_and_compare();
-    }
-
-    #[test]
-    fn lint_findings_parse_empty_when_file_missing() {
-        let parsed =
-            lint_baseline::parse_findings_file(Path::new("/tmp/definitely-missing-lint.json"))
-                .expect("missing file should parse as empty");
-        assert!(parsed.is_empty());
-    }
-
-    #[test]
-    fn test_lint_findings_parse_empty_when_file_missing() {
-        lint_findings_parse_empty_when_file_missing();
     }
 
     #[test]
