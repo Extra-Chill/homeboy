@@ -47,7 +47,7 @@
 - [status](status.md) — actionable component overview
 - [test](test.md)
 - [trace](trace.md) — black-box behavioral trace and evidence capture
-- [triage](triage.md) — read-only attention report across components, projects, fleets, and rigs
+- [triage](triage.md) — attention reports and watch utilities across components, projects, fleets, and rigs
 - [tunnel](tunnel.md) — private service tunnel declarations
 - [undo](undo.md) — restore or manage write-operation snapshots
 - [upgrade](upgrade.md)

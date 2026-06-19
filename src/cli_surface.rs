@@ -90,7 +90,7 @@ pub enum Commands {
     Fleet(fleet::FleetArgs),
     /// Remote log viewing
     Logs(logs::LogsArgs),
-    /// Read-only attention report for components, projects, fleets, and rigs
+    /// Attention reports and watch utilities for components, projects, fleets, and rigs
     Triage(triage::TriageArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
