@@ -3421,6 +3421,7 @@ mod tests {
                 &job,
                 &[],
                 "runner daemon job",
+                true,
             );
             let run_id = format!("runner-exec-lab-{job_id}");
 

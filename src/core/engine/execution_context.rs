@@ -978,7 +978,7 @@ mod tests {
         // Dotted child of an accepted root is fine; dotted child of an
         // unknown root surfaces the root once.
         let unknown = ctx.unknown_setting_overrides(
-            ["workflow_bench_env.FOO", "bench_env.BAR", "bench_env.BAZ"].into_iter(),
+            ["workflow_bench_env.FOO", "bench_env.BAR", "bench_env.BAZ"],
             std::iter::empty(),
         );
 
