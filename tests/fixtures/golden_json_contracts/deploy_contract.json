@@ -7,6 +7,7 @@
           "behind_upstream": false,
           "check": false,
           "command": "deploy.run",
+          "variant": "single",
           "dry_run": true,
           "force": false,
           "outdated": false,
@@ -49,6 +50,7 @@
         "data": {
           "check": false,
           "command": "deploy.multi",
+          "variant": "multi_project",
           "component_ids": [
             "homeboy"
           ],
