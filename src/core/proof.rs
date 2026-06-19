@@ -5,10 +5,14 @@
 //! explicit coverage gaps.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::core::agent_task_loop_definition::compile_loop_spec_value;
+use crate::core::artifact_address::validated_public_url;
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const HOMEBOY_PROOF_SCHEMA: &str = "homeboy/proof/v1";
+pub const HOMEBOY_PROOF_VALIDATION_SCHEMA: &str = "homeboy/proof-validation/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HomeboyProof {
@@ -85,6 +89,22 @@ pub enum HomeboyProofEnvironmentDisposition {
 pub struct HomeboyProofGap {
     pub kind: HomeboyProofGapKind,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyProofValidationReport {
+    #[serde(default = "proof_validation_schema")]
+    pub schema: String,
+    pub valid: bool,
+    pub diagnostics: Vec<HomeboyProofValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyProofValidationDiagnostic {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +212,221 @@ impl HomeboyProofArtifactRef {
     }
 }
 
+pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
+    let mut diagnostics = Vec::new();
+    match value.get("schema").and_then(Value::as_str) {
+        Some(HOMEBOY_PROOF_SCHEMA) => match serde_json::from_value::<HomeboyProof>(value) {
+            Ok(proof) => validate_homeboy_proof(&proof, &mut diagnostics),
+            Err(error) => diagnostics.push(diagnostic(
+                "invalid_proof_json",
+                format!("proof JSON does not match {HOMEBOY_PROOF_SCHEMA}: {error}"),
+                None,
+            )),
+        },
+        Some("homeboy/agent-task-loop-spec-materialization/v1") => {
+            validate_materialized_loop_spec(&value, &mut diagnostics);
+        }
+        Some("homeboy/agent-task-loop-controller/v1") => {
+            validate_controller_record(&value, &mut diagnostics);
+        }
+        Some(schema) => diagnostics.push(diagnostic(
+            "unsupported_schema",
+            format!("validate-proof supports {HOMEBOY_PROOF_SCHEMA}, homeboy/agent-task-loop-spec-materialization/v1, and homeboy/agent-task-loop-controller/v1; got {schema}"),
+            path("/schema"),
+        )),
+        None => diagnostics.push(diagnostic(
+            "missing_schema",
+            "proof validation input requires a schema field",
+            path("/schema"),
+        )),
+    }
+
+    HomeboyProofValidationReport {
+        schema: HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string(),
+        valid: diagnostics.is_empty(),
+        diagnostics,
+    }
+}
+
+fn validate_homeboy_proof(
+    proof: &HomeboyProof,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    if proof.artifacts.is_empty() {
+        diagnostics.push(diagnostic(
+            "declared_artifacts_missing",
+            "proof must declare at least one artifact reference",
+            path("/artifacts"),
+        ));
+    }
+    for (index, artifact) in proof.artifacts.iter().enumerate() {
+        validate_evidence_ref(
+            &artifact.uri,
+            format!("/artifacts/{index}/uri"),
+            diagnostics,
+        );
+    }
+    for (index, source_ref) in proof.provenance.source_refs.iter().enumerate() {
+        validate_evidence_ref(
+            source_ref,
+            format!("/provenance/source_refs/{index}"),
+            diagnostics,
+        );
+    }
+    for (index, gate) in proof.gates.iter().enumerate() {
+        if matches!(
+            gate.status,
+            HomeboyGateStatus::Failed | HomeboyGateStatus::Blocked
+        ) {
+            diagnostics.push(diagnostic(
+                "gate_not_complete",
+                format!(
+                    "gate '{}' has status {}; deterministic completion requires passed or explicitly skipped gates",
+                    gate.id,
+                    gate_status_label(gate.status)
+                ),
+                Some(format!("/gates/{index}/status")),
+            ));
+        }
+    }
+    for (index, gap) in proof.gaps.iter().enumerate() {
+        diagnostics.push(diagnostic(
+            "proof_gap_declared",
+            format!(
+                "proof declares unresolved gap {:?}: {}",
+                gap.kind, gap.summary
+            ),
+            Some(format!("/gaps/{index}")),
+        ));
+    }
+}
+
+fn validate_materialized_loop_spec(
+    value: &Value,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    let Some(spec) = value.get("spec") else {
+        diagnostics.push(diagnostic(
+            "materialized_spec_missing",
+            "materialized controller output must include spec",
+            path("/spec"),
+        ));
+        return;
+    };
+    if let Err(error) = compile_loop_spec_value(spec.clone()) {
+        let tried = error
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if tried.is_empty() {
+            diagnostics.push(diagnostic(
+                "unsupported_controller_semantics",
+                error.message,
+                path("/spec"),
+            ));
+        } else {
+            for message in tried
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+            {
+                diagnostics.push(diagnostic(
+                    diagnostic_code_for_compile_message(&message),
+                    message,
+                    path("/spec"),
+                ));
+            }
+        }
+    }
+}
+
+fn validate_controller_record(
+    value: &Value,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    if value.get("state").and_then(Value::as_str) == Some("completed") {
+        if value
+            .get("terminal_outcomes")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            diagnostics.push(diagnostic(
+                "completion_outcome_missing",
+                "completed controller records must include a terminal outcome explaining deterministic completion",
+                path("/terminal_outcomes"),
+            ));
+        }
+        if value
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|actions| !actions.is_empty())
+        {
+            diagnostics.push(diagnostic(
+                "completion_has_pending_actions",
+                "completed controller records must not retain executable next_actions",
+                path("/next_actions"),
+            ));
+        }
+    }
+}
+
+fn validate_evidence_ref(
+    reference: &str,
+    path: String,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    if is_non_local_evidence_ref(reference) {
+        return;
+    }
+    diagnostics.push(diagnostic(
+        "local_evidence_ref",
+        format!("evidence reference is not reviewer-visible/non-local: {reference}"),
+        Some(path),
+    ));
+}
+
+fn is_non_local_evidence_ref(reference: &str) -> bool {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return false;
+    }
+    if reference.starts_with("runner-artifact://") || reference.starts_with("gh://") {
+        return true;
+    }
+    validated_public_url(reference).is_some()
+}
+
+fn diagnostic_code_for_compile_message(message: &str) -> &'static str {
+    if message.contains("join over fan-out") {
+        "unsupported_join"
+    } else if message.contains("gates") || message.contains("metrics") {
+        "unsupported_gate"
+    } else {
+        "unsupported_controller_semantics"
+    }
+}
+
+fn diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    path: Option<String>,
+) -> HomeboyProofValidationDiagnostic {
+    HomeboyProofValidationDiagnostic {
+        code: code.into(),
+        message: message.into(),
+        path,
+    }
+}
+
+fn path(value: &str) -> Option<String> {
+    Some(value.to_string())
+}
+
+fn proof_validation_schema() -> String {
+    HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string()
+}
+
 fn proof_scope(gates: &[HomeboyGateResult]) -> HomeboyProofScope {
     if gates.is_empty() {
         return HomeboyProofScope::Unknown;
@@ -256,6 +491,7 @@ fn proof_schema() -> String {
 mod tests {
     use super::*;
     use crate::core::gate::{HomeboyGateKind, HomeboyGateStatus};
+    use serde_json::json;
 
     #[test]
     fn proof_scope_distinguishes_targeted_and_ci_equivalent_gates() {
@@ -302,5 +538,127 @@ mod tests {
             proof.gaps[0].kind,
             HomeboyProofGapKind::CiEquivalentNotRecorded
         );
+    }
+
+    #[test]
+    fn proof_validation_accepts_non_local_evidence() {
+        let report = validate_proof_value(json!({
+            "schema": HOMEBOY_PROOF_SCHEMA,
+            "id": "proof-1",
+            "scope": "targeted",
+            "provenance": {
+                "runner": "homeboy",
+                "run_id": "run-1",
+                "source_refs": ["https://github.com/Extra-Chill/homeboy/actions/runs/1"]
+            },
+            "gates": [{
+                "schema": "homeboy/gate-result/v1",
+                "id": "cargo-test",
+                "name": "cargo test",
+                "kind": "command",
+                "status": "passed"
+            }],
+            "artifacts": [{
+                "uri": "runner-artifact://lab/run-1/proof.json",
+                "kind": "proof"
+            }]
+        }));
+
+        assert!(report.valid, "{report:?}");
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_rejects_local_evidence_and_incomplete_gates() {
+        let report = validate_proof_value(json!({
+            "schema": HOMEBOY_PROOF_SCHEMA,
+            "id": "proof-1",
+            "scope": "targeted",
+            "provenance": {
+                "runner": "manual",
+                "source_refs": ["http://localhost:8888/evidence"]
+            },
+            "gates": [{
+                "schema": "homeboy/gate-result/v1",
+                "id": "cargo-test",
+                "name": "cargo test",
+                "kind": "command",
+                "status": "failed"
+            }],
+            "artifacts": [{ "uri": "file:///tmp/proof.json" }]
+        }));
+
+        assert!(!report.valid);
+        let codes: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(codes.contains(&"local_evidence_ref"));
+        assert!(codes.contains(&"gate_not_complete"));
+    }
+
+    #[test]
+    fn proof_validation_surfaces_materialized_join_and_gate_diagnostics() {
+        let report = validate_proof_value(json!({
+            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+            "spec": {
+                "loop_id": "example/join",
+                "config_version": "v1",
+                "artifacts": [{ "artifact_id": "page_blocks", "kind": "json" }],
+                "workflows": [
+                    {
+                        "workflow_id": "build_page",
+                        "prompt": "build page",
+                        "entity_ids": ["home", "about"],
+                        "emits": ["page_blocks"]
+                    },
+                    {
+                        "workflow_id": "publish_site",
+                        "prompt": "publish site",
+                        "consumes": ["page_blocks"],
+                        "gates": ["review"]
+                    }
+                ]
+            }
+        }));
+
+        assert!(!report.valid);
+        let codes: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(codes.contains(&"unsupported_join"));
+        assert!(codes.contains(&"unsupported_gate"));
+    }
+
+    #[test]
+    fn proof_validation_requires_completed_controller_terminal_outcome() {
+        let report = validate_proof_value(json!({
+            "schema": "homeboy/agent-task-loop-controller/v1",
+            "loop_id": "loop-1",
+            "phase": "done",
+            "state": "completed",
+            "config_version": "v1",
+            "created_at": "2026-06-18T00:00:00Z",
+            "updated_at": "2026-06-18T00:00:00Z",
+            "next_actions": [{
+                "action_id": "action-1",
+                "action": { "action": "complete" },
+                "status": "pending",
+                "reason": "queued",
+                "created_at": "2026-06-18T00:00:00Z"
+            }]
+        }));
+
+        assert!(!report.valid);
+        let codes: Vec<&str> = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        assert!(codes.contains(&"completion_outcome_missing"));
+        assert!(codes.contains(&"completion_has_pending_actions"));
     }
 }

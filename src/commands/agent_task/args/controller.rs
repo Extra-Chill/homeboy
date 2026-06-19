@@ -10,6 +10,8 @@ pub enum AgentTaskControllerCommand {
     FromSpec(AgentTaskControllerFromSpecArgs),
     /// Materialize a repo-authored loop spec with explicit run inputs.
     Materialize(AgentTaskControllerMaterializeArgs),
+    /// Validate a proof, materialized spec, or controller record for deterministic handoff.
+    ValidateProof(AgentTaskControllerValidateProofArgs),
     /// Compile a controller spec into a dry Homeboy plan without writing state.
     Plan(AgentTaskControllerPlanArgs),
     /// Read a durable loop controller record.
@@ -64,6 +66,13 @@ pub struct AgentTaskControllerMaterializeArgs {
     /// Explicit run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
     #[arg(long, value_name = "JSON")]
     pub inputs: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerValidateProofArgs {
+    /// Proof JSON, materialize output JSON, controller record JSON, @file, or - for stdin.
+    #[arg(value_name = "JSON")]
+    pub input: String,
 }
 
 #[derive(Args, Debug)]

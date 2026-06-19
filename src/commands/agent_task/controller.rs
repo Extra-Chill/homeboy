@@ -18,6 +18,7 @@ use homeboy::core::agent_tasks::controller_service::{
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
+use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
 
@@ -27,6 +28,7 @@ use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerValidateProofArgs,
 };
 use super::command_json_value;
 
@@ -43,6 +45,9 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
         AgentTaskControllerCommand::FromSpec(spec_args) => controller_from_spec(spec_args),
         AgentTaskControllerCommand::Materialize(materialize_args) => {
             controller_materialize(materialize_args)
+        }
+        AgentTaskControllerCommand::ValidateProof(validate_args) => {
+            controller_validate_proof(validate_args)
         }
         AgentTaskControllerCommand::Plan(plan_args) => controller_plan(plan_args),
         AgentTaskControllerCommand::Status(status_args) => {
@@ -70,6 +75,21 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
     }
+}
+
+fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdResult<Value> {
+    let raw = config::read_json_spec_to_string(&args.input)?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "input",
+            error.to_string(),
+            Some(args.input.clone()),
+            None,
+        )
+    })?;
+    let report = validate_proof_value(value);
+    let exit_code = if report.valid { 0 } else { 1 };
+    Ok((command_json_value(report)?, exit_code))
 }
 
 pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
