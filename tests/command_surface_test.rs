@@ -50,6 +50,19 @@ fn includes_first_level_subcommands() {
 }
 
 #[test]
+fn agent_task_tool_bridge_stays_hidden_but_parseable() {
+    let surface = current_command_surface();
+
+    assert!(!surface.contains_path(&["agent-task", "tool"]));
+    Cli::try_parse_from(["homeboy", "agent-task", "tool", "dispatch"])
+        .expect("hidden agent-task tool bridge should stay parseable for runtimes");
+
+    let docs = include_str!("../docs/commands/agent-task.md");
+    assert!(docs.contains("## Internal Bridge"));
+    assert!(docs.contains("hidden provider-runtime bridge"));
+}
+
+#[test]
 fn includes_second_level_subcommands() {
     let surface = current_command_surface();
 
