@@ -91,6 +91,8 @@ process.stdout.write(JSON.stringify({
     }
   },
   recipe_run: {
+    success: true,
+    status: 'completed',
     pack: 'fixture-recipes',
     name: 'fixture-recipe',
     probe: { success: true }
@@ -431,7 +433,7 @@ for (const capability of repoLoopCapabilities) {
 }
 assert.equal(provider.capabilities.includes('tool:wpsg_materialize_packet'), false);
 assert.equal(provider.capabilities.includes('ability:wpsg_materialize_packet'), false);
-assert.deepEqual(provider.runtime_gap_trackers, []);
+assert.deepEqual(provider.runtime_gap_trackers.map((tracker) => tracker.gap), ['runtime-profile-normalizer', 'typed-artifact-dto-normalizer']);
 
 const codeboxRequest = codeboxTaskRequestFromAgentTaskRequest(request);
 assert.equal(codeboxRequest.schema, 'wp-codebox/task-input/v1');
@@ -2147,7 +2149,7 @@ assert.equal(canaryRunOutcome.metadata.decision_evidence.runtime_status, 'destro
 assert.equal(canaryRunOutcome.metadata.decision_evidence.cleanup_observed, 'runtime_destroyed');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.no_op_reason, 'no_file_changes');
 assert.equal(canaryRunOutcome.metadata.decision_evidence.patch_bytes, 0);
-assert.deepEqual(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers, []);
+assert.deepEqual(canaryRunOutcome.metadata.decision_evidence.runtime_gap_trackers.map((tracker) => tracker.gap), ['runtime-profile-normalizer', 'typed-artifact-dto-normalizer']);
 
 const canaryTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
