@@ -5,7 +5,7 @@
 //! `query`/`drift` to project JSON over imported run artifacts).
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::File;
 use std::path::Path;
 use std::time::Duration;
 
@@ -238,8 +238,8 @@ pub fn load_artifact_rows(
                 continue;
             }
             let path = Path::new(&artifact.path);
-            let raw = match fs::read_to_string(path) {
-                Ok(raw) => raw,
+            let file = match File::open(path) {
+                Ok(file) => file,
                 Err(_) => {
                     skipped.push(skipped_artifact(
                         &run,
@@ -249,13 +249,24 @@ pub fn load_artifact_rows(
                     continue;
                 }
             };
-            let Ok(json) = serde_json::from_str::<Value>(&raw) else {
-                skipped.push(skipped_artifact(
-                    &run,
-                    &artifact,
-                    "artifact file is not valid JSON",
-                ));
-                continue;
+            let json = match serde_json::from_reader::<_, Value>(file) {
+                Ok(json) => json,
+                Err(err) if err.is_io() => {
+                    skipped.push(skipped_artifact(
+                        &run,
+                        &artifact,
+                        "artifact file is missing or unreadable",
+                    ));
+                    continue;
+                }
+                Err(_) => {
+                    skipped.push(skipped_artifact(
+                        &run,
+                        &artifact,
+                        "artifact file is not valid JSON",
+                    ));
+                    continue;
+                }
             };
             rows.push(ArtifactJsonRow {
                 run: run.clone(),
