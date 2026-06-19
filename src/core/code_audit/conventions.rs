@@ -90,6 +90,30 @@ impl Language {
     pub fn builtin_extension_tokens() -> &'static [&'static str] {
         &["rs", "php", "ts", "js", "go"]
     }
+
+    /// The ecosystem tokens whose builtin version-compare guard defaults ship
+    /// with Homeboy. Version-compatibility guard syntax (`version_compare(...)`)
+    /// is ecosystem-specific, so the concrete token set lives here in the
+    /// agnostic conventions home rather than hardcoded inside a detector under
+    /// `code_audit::detectors`. Components that opt into builtin defaults
+    /// inherit these; others declare their own via config.
+    pub fn builtin_version_guard_tokens() -> &'static [&'static str] {
+        &["php"]
+    }
+}
+
+/// Builtin tracker-reference regex defaults shipped with Homeboy. These match
+/// the concrete issue/PR/ticket URL shapes used by common upstream trackers.
+/// The ecosystem-specific URL literals (e.g. project-tracker hosts) live here
+/// in the agnostic conventions home so detector implementations under
+/// `code_audit::detectors` stay free of hardcoded ecosystem literals — they
+/// pull this default set when a component opts into builtin profile defaults.
+pub fn builtin_tracker_reference_regexes() -> &'static [&'static str] {
+    &[
+        r"https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+",
+        r"core\.trac\.wordpress\.org/ticket/\d+",
+        r"@see\s+https?://[^\s)]+",
+    ]
 }
 
 /// A discovered convention: a pattern that most files in a group follow.
