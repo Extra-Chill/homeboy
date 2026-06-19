@@ -4,6 +4,7 @@ use clap::Args;
 use serde::Serialize;
 
 use homeboy::core::extension::bench::{BenchCommandOutput, BenchScenario};
+use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 
 use super::{filter_homeboy_flags, matrix as bench_runner, BenchRunArgs};
 
@@ -73,6 +74,8 @@ pub struct BenchSettingsMatrixSummary {
     pub cells: usize,
     pub succeeded: usize,
     pub failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
     pub child_run_ids: Vec<String>,
 }
 
@@ -127,6 +130,14 @@ pub(super) fn run_settings_matrix(
         .id()
         .map(str::to_string)
         .unwrap_or_else(|| "<auto>".to_string());
+    let parent_run_id = persist_settings_matrix_parent_run(
+        run_args,
+        &component,
+        &axes,
+        &outputs,
+        &child_run_ids,
+        failed == 0,
+    );
 
     Ok(BenchSettingsMatrixOutput {
         command: "bench.matrix",
@@ -138,11 +149,11 @@ pub(super) fn run_settings_matrix(
             cells: outputs.len(),
             succeeded,
             failed,
+            parent_run_id,
             child_run_ids,
         },
         cells: outputs,
         follow_ups: vec![
-            "Persisted matrix-level observation record that groups child run IDs.".to_string(),
             "Add typed JSON setting matrix axes when a benchmark needs non-string settings."
                 .to_string(),
             "Add cross-rig matrix aggregation after the single-rig surface has real users."
@@ -169,6 +180,101 @@ fn cell_output(
         metrics,
         hints,
     }
+}
+
+fn persist_settings_matrix_parent_run(
+    run_args: &BenchRunArgs,
+    component: &str,
+    axes: &[BenchSettingsMatrixAxisOutput],
+    cells: &[BenchSettingsMatrixCellOutput],
+    child_run_ids: &[String],
+    passed: bool,
+) -> Option<String> {
+    try_persist_settings_matrix_parent_run(run_args, component, axes, cells, child_run_ids, passed)
+        .ok()
+}
+
+fn try_persist_settings_matrix_parent_run(
+    run_args: &BenchRunArgs,
+    component: &str,
+    axes: &[BenchSettingsMatrixAxisOutput],
+    cells: &[BenchSettingsMatrixCellOutput],
+    child_run_ids: &[String],
+    passed: bool,
+) -> homeboy::core::Result<String> {
+    let store = ObservationStore::open_initialized()?;
+    let cwd = std::env::current_dir().ok();
+    let run = store.start_run(
+        NewRunRecord::builder("bench.matrix")
+            .component_id(component)
+            .command(settings_matrix_parent_command(component, run_args))
+            .optional_cwd_path(cwd.as_deref())
+            .current_homeboy_version()
+            .optional_rig_id(run_args.rig.first().map(String::as_str))
+            .metadata(settings_matrix_parent_metadata(
+                axes,
+                cells,
+                child_run_ids,
+                passed,
+            ))
+            .build(),
+    )?;
+    store.finish_run(
+        &run.id,
+        if passed {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        },
+        None,
+    )?;
+    Ok(run.id)
+}
+
+fn settings_matrix_parent_command(component: &str, run_args: &BenchRunArgs) -> String {
+    let mut parts = vec![
+        "homeboy".to_string(),
+        "bench".to_string(),
+        "matrix".to_string(),
+    ];
+    if component != "<auto>" {
+        parts.push(component.to_string());
+    }
+    for rig in &run_args.rig {
+        parts.push("--rig".to_string());
+        parts.push(rig.clone());
+    }
+    parts.join(" ")
+}
+
+fn settings_matrix_parent_metadata(
+    axes: &[BenchSettingsMatrixAxisOutput],
+    cells: &[BenchSettingsMatrixCellOutput],
+    child_run_ids: &[String],
+    passed: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/bench-settings-matrix-run/v1",
+        "command": "bench.matrix",
+        "passed": passed,
+        "axes": axes,
+        "cells": cells,
+        "child_run_ids": child_run_ids,
+        "inspect": {
+            "show_children": child_run_ids
+                .iter()
+                .map(|run_id| format!("homeboy runs show {run_id}"))
+                .collect::<Vec<_>>(),
+            "compare_children": if child_run_ids.len() >= 2 {
+                Some(format!(
+                    "homeboy bench compare --from-run {} --to-run {}",
+                    child_run_ids[0], child_run_ids[1]
+                ))
+            } else {
+                None
+            },
+        },
+    })
 }
 
 fn parse_setting_matrix_axes(
@@ -287,6 +393,7 @@ fn collect_scenario_metric_samples(
 mod tests {
     use super::*;
     use crate::commands::bench::BenchArgs;
+    use crate::test_support::with_isolated_home;
     use clap::Parser;
 
     #[derive(Parser)]
@@ -414,5 +521,107 @@ mod tests {
         ]);
 
         assert_eq!(run_id.as_deref(), Some("bench-123"));
+    }
+
+    #[test]
+    fn matrix_parent_metadata_records_child_run_contract() {
+        let axes = vec![BenchSettingsMatrixAxisOutput {
+            name: "clients".to_string(),
+            values: vec!["10".to_string(), "100".to_string()],
+        }];
+        let cells = vec![matrix_cell(0, "clients", "10", Some("run-a"), true)];
+        let child_run_ids = vec!["run-a".to_string(), "run-b".to_string()];
+
+        let metadata = settings_matrix_parent_metadata(&axes, &cells, &child_run_ids, true);
+
+        assert_eq!(metadata["schema"], "homeboy/bench-settings-matrix-run/v1");
+        assert_eq!(metadata["command"], "bench.matrix");
+        assert_eq!(metadata["passed"], true);
+        assert_eq!(metadata["axes"][0]["name"], "clients");
+        assert_eq!(metadata["cells"][0]["run_id"], "run-a");
+        assert_eq!(metadata["child_run_ids"][1], "run-b");
+        assert_eq!(
+            metadata["inspect"]["show_children"][0],
+            "homeboy runs show run-a"
+        );
+        assert_eq!(
+            metadata["inspect"]["compare_children"],
+            "homeboy bench compare --from-run run-a --to-run run-b"
+        );
+    }
+
+    #[test]
+    fn persists_settings_matrix_parent_run_as_finished_matrix_record() {
+        with_isolated_home(|_home| {
+            let args = MatrixCli::parse_from([
+                "homeboy",
+                "studio-web",
+                "--setting-matrix",
+                "clients=10,100",
+                "--rig",
+                "studio",
+                "--iterations",
+                "1",
+            ])
+            .bench
+            .run
+            .clone();
+            let axes = parse_setting_matrix_axes(&["clients=10,100".to_string()])
+                .expect("axes should parse");
+            let cells = vec![
+                matrix_cell(0, "clients", "10", Some("run-a"), true),
+                matrix_cell(1, "clients", "100", Some("run-b"), false),
+            ];
+            let child_run_ids = vec!["run-a".to_string(), "run-b".to_string()];
+
+            let parent_run_id = try_persist_settings_matrix_parent_run(
+                &args,
+                "studio-web",
+                &axes,
+                &cells,
+                &child_run_ids,
+                false,
+            )
+            .expect("parent run should persist");
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(&parent_run_id)
+                .expect("read parent")
+                .expect("parent exists");
+            assert_eq!(run.kind, "bench.matrix");
+            assert_eq!(run.status, "fail");
+            assert_eq!(run.component_id.as_deref(), Some("studio-web"));
+            assert_eq!(run.rig_id.as_deref(), Some("studio"));
+            assert_eq!(run.metadata_json["child_run_ids"][0], "run-a");
+            assert_eq!(run.metadata_json["cells"][1]["status"], "fail");
+        });
+    }
+
+    #[derive(Parser)]
+    struct MatrixCli {
+        #[command(flatten)]
+        bench: BenchMatrixArgs,
+    }
+
+    fn matrix_cell(
+        index: usize,
+        name: &str,
+        value: &str,
+        run_id: Option<&str>,
+        passed: bool,
+    ) -> BenchSettingsMatrixCellOutput {
+        let mut settings = BTreeMap::new();
+        settings.insert(name.to_string(), value.to_string());
+        BenchSettingsMatrixCellOutput {
+            index,
+            settings,
+            run_id: run_id.map(str::to_string),
+            passed,
+            status: if passed { "pass" } else { "fail" }.to_string(),
+            exit_code: if passed { 0 } else { 1 },
+            metrics: Vec::new(),
+            hints: Vec::new(),
+        }
     }
 }
