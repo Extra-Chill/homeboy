@@ -52,10 +52,24 @@ pub fn route_after_parse(
     let active_run_id = observer.run_id().map(str::to_string);
 
     let mutation_flag = cli.command.lab_offload_mutation_flag();
+
+    // For component-targeted write/fix commands (`homeboy lint --fix <component>`,
+    // `homeboy refactor --from lint --write <component>`), the component is
+    // resolved on the controller to its source checkout and the args are
+    // rewritten to `--path <source>`. Without this, the offload syncs and
+    // diff-captures the controller's working directory while the remote re-resolves
+    // the positional component to the runner's registered checkout and writes
+    // fixes there — so the source-tree mutation lands outside the captured
+    // workspace and the runner returns no patch to apply (#4315).
+    let rewritten_args = (mutation_flag.is_some())
+        .then(|| rewrite_component_target_to_path(&cli.command, normalized_args))
+        .flatten();
+    let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
+
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
             command: lab_command,
-            normalized_args,
+            normalized_args: routed_args,
             explicit_runner: cli.runner.as_deref(),
             force_hot: cli.force_hot,
             local_policy: runners::LabLocalExecutionPolicy {
@@ -236,6 +250,111 @@ fn lab_offload_command(
         contract,
         required_extensions,
     )))
+}
+
+/// When a `lint --fix` / `refactor --write` command targets a component by id
+/// (positionally or via `--component`/`--components`), resolve that component to
+/// its on-disk source path and rewrite the offload args to `--path <source>`.
+///
+/// The Lab offload patch-capture pipeline (`lab_offload_source_path` →
+/// workspace sync → before/after diff) keys entirely off the resolved source
+/// path. A bare positional component id resolves to the controller working
+/// directory for the sync/diff, but on the remote runner it re-resolves to the
+/// runner's registered component checkout — so write fixes land outside the
+/// captured workspace and no patch is produced (#4315). Rewriting to `--path`
+/// makes the synced workspace, the remote command's working tree, and the
+/// captured diff all reference the same directory.
+///
+/// Returns `None` (leaving args untouched) when there is nothing to rewrite:
+/// no component target, an explicit `--path` is already present, the component
+/// cannot be resolved, or the command is not a component-targeted lint/refactor.
+fn rewrite_component_target_to_path(
+    command: &Commands,
+    normalized_args: &[String],
+) -> Option<Vec<String>> {
+    let (component_id, has_path_override) = match command {
+        Commands::Lint(args) => (
+            args.lab_offload_positional_component(),
+            args.lab_offload_has_path_override(),
+        ),
+        Commands::Refactor(args) if args.is_hot_resource_command() => (
+            args.lab_offload_positional_component(),
+            args.lab_offload_has_path_override(),
+        ),
+        _ => return None,
+    };
+
+    if has_path_override {
+        return None;
+    }
+    let component_id = component_id?;
+
+    let source_path = resolve_component_source_path(&component_id)?;
+    Some(strip_component_target_args(
+        normalized_args,
+        &component_id,
+        &source_path,
+    ))
+}
+
+/// Resolve a component id to its canonical on-disk source path. Returns `None`
+/// when resolution fails so the caller can fall back to the original args and
+/// let the normal offload path surface any downstream error.
+fn resolve_component_source_path(component_id: &str) -> Option<String> {
+    use homeboy::core::engine::execution_context::{self, ResolveOptions};
+
+    let ctx = execution_context::resolve(&ResolveOptions {
+        component_id: Some(component_id.to_string()),
+        ..ResolveOptions::default()
+    })
+    .ok()?;
+    Some(ctx.source_path.to_string_lossy().to_string())
+}
+
+/// Drop component-targeting args (the bare positional id and any
+/// `-c`/`--component`/`--components` flags) and append `--path <source_path>`.
+fn strip_component_target_args(
+    normalized_args: &[String],
+    component_id: &str,
+    source_path: &str,
+) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(normalized_args.len() + 1);
+    let mut iter = normalized_args.iter().peekable();
+    let mut passthrough = false;
+    let mut positional_stripped = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            rewritten.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            rewritten.push(arg.clone());
+            continue;
+        }
+        // Flagged component selectors that consume a following value.
+        if arg == "-c" || arg == "--component" || arg == "--components" {
+            let _ = iter.next();
+            continue;
+        }
+        // Inline `--component=<id>` / `--components=<list>` / `-c<id>` forms.
+        if arg.starts_with("--component=")
+            || arg.starts_with("--components=")
+            || (arg.starts_with("-c") && arg.len() > 2 && !arg.starts_with("--"))
+        {
+            continue;
+        }
+        // The bare positional component token (strip only the first match so an
+        // unrelated later argument that happens to equal the id is preserved).
+        if !positional_stripped && !arg.starts_with('-') && arg == component_id {
+            positional_stripped = true;
+            continue;
+        }
+        rewritten.push(arg.clone());
+    }
+    rewritten.push("--path".to_string());
+    rewritten.push(source_path.to_string());
+    rewritten
 }
 
 #[cfg(test)]
@@ -826,5 +945,148 @@ mod tests {
         assert!(!command.portable);
         assert!(command.unsupported_reason.is_some());
         assert!(!command.routing_policy.requires_extension_parity);
+    }
+
+    #[test]
+    fn strip_component_target_replaces_positional_with_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--fix".to_string(),
+            "data-machine-code".to_string(),
+        ];
+
+        let rewritten = strip_component_target_args(&args, "data-machine-code", "/src/dmc");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "--fix".to_string(),
+                "--path".to_string(),
+                "/src/dmc".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_component_target_replaces_component_flag_with_path() {
+        let args = vec![
+            "homeboy".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "lint".to_string(),
+            "--write".to_string(),
+            "--component".to_string(),
+            "data-machine-code".to_string(),
+        ];
+
+        let rewritten = strip_component_target_args(&args, "data-machine-code", "/src/dmc");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "refactor".to_string(),
+                "--from".to_string(),
+                "lint".to_string(),
+                "--write".to_string(),
+                "--path".to_string(),
+                "/src/dmc".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_component_target_only_strips_first_positional_match() {
+        // A `--from` value equal to the component id must survive; only the bare
+        // positional component token is dropped.
+        let args = vec![
+            "homeboy".to_string(),
+            "refactor".to_string(),
+            "--from".to_string(),
+            "lint".to_string(),
+            "--write".to_string(),
+            "dmc".to_string(),
+        ];
+
+        let rewritten = strip_component_target_args(&args, "dmc", "/src/dmc");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "refactor".to_string(),
+                "--from".to_string(),
+                "lint".to_string(),
+                "--write".to_string(),
+                "--path".to_string(),
+                "/src/dmc".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_component_target_preserves_passthrough_args() {
+        let args = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--fix".to_string(),
+            "dmc".to_string(),
+            "--".to_string(),
+            "dmc".to_string(),
+        ];
+
+        let rewritten = strip_component_target_args(&args, "dmc", "/src/dmc");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "--fix".to_string(),
+                "--".to_string(),
+                "dmc".to_string(),
+                "--path".to_string(),
+                "/src/dmc".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_component_target_skips_when_path_override_present() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "lint",
+            "--fix",
+            "data-machine-code",
+            "--path",
+            "/explicit/path",
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--fix".to_string(),
+            "data-machine-code".to_string(),
+            "--path".to_string(),
+            "/explicit/path".to_string(),
+        ];
+
+        assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
+    }
+
+    #[test]
+    fn rewrite_component_target_skips_without_component() {
+        // No positional component and no --path: source resolves from CWD, so
+        // there is nothing to rewrite.
+        let cli = Cli::parse_from(["homeboy", "lint", "--fix"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--fix".to_string(),
+        ];
+
+        assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
     }
 }
