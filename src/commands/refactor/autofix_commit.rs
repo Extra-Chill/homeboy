@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use homeboy::core::git::{
-    configure_identity, execute_git_for_release, parse_git_identity, run_git,
+    commit_staged_with_author, configure_identity, has_staged_changes, parse_git_identity,
+    stage_all,
 };
 
 const AUTOFIX_PREFIX: &str = "chore(ci): homeboy autofix";
@@ -12,12 +13,10 @@ pub(super) fn commit_refactor_sources(
     sources: &homeboy::core::refactor::plan::RefactorSourceRun,
     git_identity: Option<&str>,
 ) -> homeboy::core::Result<()> {
-    run_git(Path::new(path), &["add", "-A"], "git add -A")?;
+    stage_all(Path::new(path))?;
 
     // Check if there's anything staged (fixes may have been no-ops after formatting)
-    let diff_check = execute_git_for_release(path, &["diff", "--cached", "--quiet"])
-        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git diff: {e}")))?;
-    if diff_check.status.success() {
+    if !has_staged_changes(Path::new(path))? {
         eprintln!("[refactor] No staged changes after git add — skipping commit");
         return Ok(());
     }
@@ -27,11 +26,7 @@ pub(super) fn commit_refactor_sources(
 
     let message = build_autofix_commit_message(sources);
     let author = format!("{} <{}>", identity.name, identity.email);
-    run_git(
-        Path::new(path),
-        &["commit", "-m", &message, "--author", &author],
-        "git commit",
-    )?;
+    commit_staged_with_author(Path::new(path), &message, &author)?;
 
     eprintln!(
         "[refactor] Committed autofix: {} files changed",
