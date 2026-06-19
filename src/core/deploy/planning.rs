@@ -552,6 +552,19 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
 
     let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
 
+    calculate_release_state_from_baseline(component, &baseline)
+}
+
+/// Calculate release state from an already-resolved baseline.
+///
+/// Status/dashboard callers batch baseline detection separately so repeated
+/// component probes do not repeat the same tag fetch and baseline discovery.
+pub fn calculate_release_state_from_baseline(
+    component: &Component,
+    baseline: &git::BaselineInfo,
+) -> Option<ReleaseState> {
+    let path = &component.local_path;
+
     let commits = git::get_commits_since_tag(path, baseline.reference.as_deref())
         .ok()
         .unwrap_or_default();
@@ -569,8 +582,8 @@ pub fn calculate_release_state(component: &Component) -> Option<ReleaseState> {
         code_commits: counts.code,
         docs_only_commits: counts.docs_only,
         has_uncommitted_changes: uncommitted,
-        baseline_ref: baseline.reference,
-        baseline_warning: baseline.warning,
+        baseline_ref: baseline.reference.clone(),
+        baseline_warning: baseline.warning.clone(),
     })
 }
 

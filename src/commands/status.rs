@@ -1,7 +1,7 @@
 use clap::Args;
 use homeboy::core::component;
 use homeboy::core::context;
-use homeboy::core::deploy::{self, DeployConfig, ReleaseStateStatus};
+use homeboy::core::deploy::{self, DeployConfig, ReleaseState, ReleaseStateStatus};
 use homeboy::core::git;
 use homeboy::core::release::version;
 use homeboy::core::scope::{self, Scope};
@@ -320,7 +320,7 @@ fn summarize_components(
             // measured against origin/<default-branch> (refreshed above), so a stale
             // local checkout does not hide unreleased merges.
             if include_unreleased_merges {
-                if let Some(merge) = detect_unreleased_merges_for(comp) {
+                if let Some(merge) = git_cache.detect_unreleased_merges_for(comp) {
                     unreleased_merges.push(merge);
                 }
             }
@@ -328,7 +328,8 @@ fn summarize_components(
     }
 
     for comp in &components {
-        let status = deploy::calculate_release_state(comp)
+        let status = git_cache
+            .release_state_for(comp)
             .map(|state| state.status())
             .unwrap_or(ReleaseStateStatus::Unknown);
 
@@ -464,7 +465,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         let remote_ver = remote_versions.get(&comp.id).cloned();
         let drift = upstream_drift_map.get(&comp.id);
 
-        let release_state = deploy::calculate_release_state(comp);
+        let release_state = git_cache.release_state_for(comp).cloned();
         let release_status = release_state
             .as_ref()
             .map(|s| s.status())
@@ -600,26 +601,104 @@ fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool
 struct StatusGitCache {
     upstream_drift: HashMap<String, Option<UpstreamDrift>>,
     fetched_tags: HashSet<String>,
+    release_states: HashMap<String, Option<ReleaseState>>,
+    baselines: HashMap<String, Option<git::BaselineInfo>>,
+    origin_branches: HashMap<String, Option<String>>,
 }
 
 impl StatusGitCache {
     fn fetch_origin_tags_for(&mut self, path: &str) {
-        if self.fetched_tags.insert(path.to_string()) {
+        let cache_key = upstream_drift_cache_key(path);
+        if self.fetched_tags.insert(cache_key) {
             fetch_origin_tags(path);
         }
     }
 
     fn fetch_upstream_drift_for(&mut self, path: &str, id: &str) -> Option<UpstreamDrift> {
         let cache_key = upstream_drift_cache_key(path);
-        let drift = self
-            .upstream_drift
-            .entry(cache_key)
-            .or_insert_with(|| fetch_upstream_drift(path));
+        if !self.upstream_drift.contains_key(&cache_key) {
+            self.fetch_origin_tags_for(path);
+            self.upstream_drift
+                .insert(cache_key.clone(), get_upstream_drift(path));
+        }
+
+        let drift = self.upstream_drift.get(&cache_key)?;
 
         drift.as_ref().map(|cached| {
             let mut drift = cached.clone();
             drift.component_id = id.to_string();
             drift
+        })
+    }
+
+    fn release_state_for(&mut self, component: &component::Component) -> Option<&ReleaseState> {
+        let cache_key = component_cache_key(component);
+        if !self.release_states.contains_key(&cache_key) {
+            let state = self.baseline_for(component).and_then(|baseline| {
+                deploy::calculate_release_state_from_baseline(component, baseline)
+            });
+            self.release_states.insert(cache_key.clone(), state);
+        }
+
+        self.release_states.get(&cache_key).and_then(Option::as_ref)
+    }
+
+    fn baseline_for(&mut self, component: &component::Component) -> Option<&git::BaselineInfo> {
+        let cache_key = component_cache_key(component);
+        if !self.baselines.contains_key(&cache_key) {
+            self.fetch_origin_tags_for(&component.local_path);
+            let current_version = version::read_component_version(component)
+                .ok()
+                .map(|info| info.version);
+            let baseline = git::detect_baseline_with_version_from_fetched_tags(
+                &component.local_path,
+                current_version.as_deref(),
+            )
+            .ok();
+            self.baselines.insert(cache_key.clone(), baseline);
+        }
+
+        self.baselines.get(&cache_key).and_then(Option::as_ref)
+    }
+
+    fn default_origin_branch_for(&mut self, path: &str) -> Option<&str> {
+        let cache_key = upstream_drift_cache_key(path);
+        if !self.origin_branches.contains_key(&cache_key) {
+            self.origin_branches
+                .insert(cache_key.clone(), default_origin_branch(path));
+        }
+
+        self.origin_branches
+            .get(&cache_key)
+            .and_then(Option::as_deref)
+    }
+
+    fn detect_unreleased_merges_for(
+        &mut self,
+        comp: &component::Component,
+    ) -> Option<UnreleasedMerge> {
+        let path = &comp.local_path;
+
+        let origin_branch = self.default_origin_branch_for(path)?.to_string();
+        let baseline = self.baseline_for(comp)?;
+        let baseline_ref = baseline.reference.as_deref()?;
+
+        let range = format!("{}..{}", baseline_ref, origin_branch);
+        let count_output = homeboy::core::engine::command::run_in_optional(
+            path,
+            "git",
+            &["rev-list", "--count", "--no-merges", &range],
+        )?;
+
+        let commits_since_tag: u32 = count_output.trim().parse().ok()?;
+        if commits_since_tag == 0 {
+            return None;
+        }
+
+        Some(UnreleasedMerge {
+            component_id: comp.id.clone(),
+            latest_tag: baseline.latest_tag.clone(),
+            commits_since_tag,
         })
     }
 }
@@ -628,13 +707,8 @@ fn upstream_drift_cache_key(path: &str) -> String {
     git::get_git_root(path).unwrap_or_else(|_| path.to_string())
 }
 
-/// Fetch from origin and compute upstream drift for a component.
-///
-/// Returns `None` if the path is not a git repo or has no upstream configured.
-fn fetch_upstream_drift(path: &str) -> Option<UpstreamDrift> {
-    fetch_origin_tags(path);
-
-    get_upstream_drift(path)
+fn component_cache_key(component: &component::Component) -> String {
+    format!("{}\0{}", component.id, component.local_path)
 }
 
 fn fetch_origin_tags(path: &str) {
@@ -678,53 +752,6 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
         .next()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Detect merged-but-unreleased work for a component (issue #4996).
-///
-/// Reuses existing primitives rather than introducing new ones:
-/// - `version::read_component_version` + `git::detect_baseline_with_version`
-///   resolve the same release baseline the local release-state uses (which also
-///   runs the best-effort tag fetch).
-/// - The default origin branch is resolved with the same precedence the deploy
-///   planner uses (`origin/HEAD` symbolic ref, then main/trunk/master).
-/// - Commits past the baseline are counted with `git rev-list --count
-///   --no-merges <baseline>..origin/<branch>`, mirroring the `--no-merges`
-///   counting in `get_commits_since_tag`.
-///
-/// Unlike `ready_to_deploy` (local HEAD vs tag), this measures
-/// `origin/<default-branch>` vs the latest tag, so a stale local checkout cannot
-/// mask unreleased merges. Returns `None` when there is no unreleased work, the
-/// path is not a git repo, or the origin branch cannot be resolved.
-fn detect_unreleased_merges_for(comp: &component::Component) -> Option<UnreleasedMerge> {
-    let path = &comp.local_path;
-
-    let origin_branch = default_origin_branch(path)?;
-
-    let current_version = version::read_component_version(comp)
-        .ok()
-        .map(|info| info.version);
-
-    let baseline = git::detect_baseline_with_version(path, current_version.as_deref()).ok()?;
-    let baseline_ref = baseline.reference.as_deref()?;
-
-    let range = format!("{}..{}", baseline_ref, origin_branch);
-    let count_output = homeboy::core::engine::command::run_in_optional(
-        path,
-        "git",
-        &["rev-list", "--count", "--no-merges", &range],
-    )?;
-
-    let commits_since_tag: u32 = count_output.trim().parse().ok()?;
-    if commits_since_tag == 0 {
-        return None;
-    }
-
-    Some(UnreleasedMerge {
-        component_id: comp.id.clone(),
-        latest_tag: baseline.latest_tag.clone(),
-        commits_since_tag,
-    })
 }
 
 /// Log merged-but-unreleased components to stderr for human-readable output.
