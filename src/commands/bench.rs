@@ -35,11 +35,33 @@ pub struct BenchArgs {
     #[command(subcommand)]
     command: Option<BenchCommand>,
 
+    /// Print the full JSON output instead of the compact human summary.
+    /// The compact summary is the default for terminals; the full
+    /// structured payload is always written to `--output <file>` and is
+    /// printed to stdout with this flag. No data differs between the two —
+    /// only the default presentation is compact.
+    #[arg(long)]
+    json: bool,
+
     #[command(flatten)]
     run: BenchRunArgs,
 }
 
 impl BenchArgs {
+    /// Whether the caller asked for the full JSON payload on stdout
+    /// (suppressing the compact human summary presentation).
+    pub fn wants_full_json(&self) -> bool {
+        self.json
+    }
+
+    /// Whether this invocation is a bench *run* (the variants that emit the
+    /// large `BenchCommandOutput`/comparison envelopes the compact summary
+    /// targets). Subcommands like `list`, `history`, `distribution`, and
+    /// `compare` keep their existing output.
+    pub fn is_run_invocation(&self) -> bool {
+        matches!(self.command, None | Some(BenchCommand::Matrix(_)))
+    }
+
     pub(crate) fn output_descriptor(
         &self,
         output_file_mode: CommandOutputFileMode,

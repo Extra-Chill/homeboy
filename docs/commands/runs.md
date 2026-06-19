@@ -9,7 +9,7 @@ homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
 homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
-homeboy runs show <run-id>
+homeboy runs show <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
 homeboy runs artifacts <run-id>
@@ -37,6 +37,8 @@ homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
+
+`homeboy runs show <run-id>` prints a compact human summary by default: run identity, status, component/rig/SHA, timestamps, and each recorded artifact's locator with a concise `homeboy runs artifact get <run-id> <artifact-id>` command to inspect it. This makes bench artifacts (shared-state files, WP Codebox bundles, scenario outputs) easy to find without spelunking temp directories. Pass `--json` for the full structured payload on stdout; it is also always written to `--output <file>`.
 
 `homeboy runs refs` emits a compact machine-readable ref index for matching runs. It is intended for matrix orchestration scripts and agents that need stable run refs and aggregate artifact refs without scraping human stdout. The output includes `homeboy://run/<id>` refs, `homeboy://run/<id>/artifact/<artifact-id>` refs, evidence/artifact follow-up commands, and detected aggregate artifact refs. Aggregate detection is schema-blind by default (`aggregate` in artifact id/kind/path); pass `--aggregate-artifact-kind <kind>` to mark additional artifact kinds as aggregate outputs.
 

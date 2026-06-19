@@ -61,6 +61,7 @@ fn bench_command_json_contract_matches_golden_fixture() {
                     failure: None,
                     diagnostics: Vec::new(),
                     ci_context: None,
+                    persisted_run: None,
                 })),
                 scenario("bench list", BenchOutput::List(BenchListWorkflowResult {
                     component: "homeboy".to_string(),

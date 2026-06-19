@@ -111,6 +111,22 @@ pub(super) fn finish_success(
     Some(summary)
 }
 
+/// Build the structured persisted-run pointer surfaced on the bench output
+/// envelope. Carries the run id plus the canonical `homeboy runs show` /
+/// `homeboy runs artifacts` follow-up commands so the compact summary and
+/// downstream tools can locate the full evidence (#3257, #3260).
+pub(super) fn persisted_run_pointer(
+    summary: &BenchObservationSummary,
+) -> homeboy::core::extension::bench::BenchPersistedRun {
+    homeboy::core::extension::bench::BenchPersistedRun {
+        run_id: summary.run_id.clone(),
+        component_id: (!summary.component_id.is_empty()).then(|| summary.component_id.clone()),
+        rig_id: summary.rig_id.clone(),
+        show_command: format!("homeboy runs show {}", summary.run_id),
+        artifacts_command: format!("homeboy runs artifacts {}", summary.run_id),
+    }
+}
+
 pub(super) fn history_hints(summary: &BenchObservationSummary) -> Vec<String> {
     let mut list_command = format!(
         "homeboy runs list --kind bench --component {}",
