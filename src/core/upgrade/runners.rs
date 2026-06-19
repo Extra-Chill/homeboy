@@ -2650,6 +2650,7 @@ mod tests {
         exit_code: i32,
     ) -> RunnerExecOutput {
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner_id.to_string(),
             dry_run: false,

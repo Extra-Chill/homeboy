@@ -161,6 +161,8 @@ mod tests {
         )
         .is_ok());
 
-        assert!(command_adapter(Commands::List, CommandOutputFileMode::None).is_err());
+        assert!(
+            command_adapter(Commands::List { json: false }, CommandOutputFileMode::None).is_err()
+        );
     }
 }

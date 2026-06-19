@@ -83,6 +83,7 @@ pub struct RunnerWorkspaceSyncOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerWorkspaceSyncOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub runner_id: String,
     pub local_path: String,
@@ -155,6 +156,7 @@ pub fn sync_workspace(
                 )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
+                    variant: "workspace_sync",
                     command: "runner.workspace.sync",
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),
@@ -226,6 +228,7 @@ pub fn sync_workspace(
                 )?;
             Ok((
                 RunnerWorkspaceSyncOutput {
+                    variant: "workspace_sync",
                     command: "runner.workspace.sync",
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),

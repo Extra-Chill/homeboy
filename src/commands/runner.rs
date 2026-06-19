@@ -25,14 +25,26 @@ pub mod doctor;
 mod policy;
 mod workspace;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct RunnerExtra {
+    pub variant: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_hints: Vec<String>,
+}
+
+impl Default for RunnerExtra {
+    fn default() -> Self {
+        Self {
+            variant: "registry",
+            connection: None,
+            sessions: Vec::new(),
+            operator_hints: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +74,7 @@ pub enum RunnerCommandOutput {
 
 #[derive(Debug, Serialize)]
 pub struct RunnerJobOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub runner_id: String,
     pub job_id: String,
@@ -72,6 +85,7 @@ pub struct RunnerJobOutput {
 
 #[derive(Debug, Serialize)]
 pub struct RunnerEnvOutput {
+    pub variant: &'static str,
     pub command: String,
     pub runner_id: String,
     pub source: String,
@@ -731,8 +745,26 @@ fn raw_exec_command_run(output: RunnerExecOutput, exit_code: i32) -> JsonCommand
 fn map_registry(result: CmdResult<RunnerOutput>) -> CmdResult<RunnerCommandOutput> {
     result.map(|(mut output, exit_code)| {
         redact_runner_output_env(&mut output);
+        output.extra.variant = runner_variant_from_command(&output.command);
         (RunnerCommandOutput::Registry(output), exit_code)
     })
+}
+
+fn runner_variant_from_command(command: &str) -> &'static str {
+    match command {
+        "runner.add" => "add",
+        "runner.enable" => "enable",
+        "runner.list" => "list",
+        "runner.show" => "show",
+        "runner.set" => "set",
+        "runner.trust" => "trust",
+        "runner.pair" => "pair",
+        "runner.remove" => "remove",
+        "runner.connect" => "connect",
+        "runner.status" => "status",
+        "runner.disconnect" => "disconnect",
+        _ => "registry",
+    }
 }
 
 fn redact_runner_output_env(output: &mut RunnerOutput) {
@@ -1324,6 +1356,7 @@ fn runner_exec_dry_run(
 
     Ok((
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id,
             dry_run: true,
@@ -1371,6 +1404,7 @@ fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
 
     Ok((
         RunnerEnvOutput {
+            variant: "env",
             command: "runner.env".to_string(),
             runner_id: runner_id.to_string(),
             source: "runner_job_env".to_string(),
@@ -1403,6 +1437,7 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
 
     Ok((
         RunnerJobOutput {
+            variant: "job_cancel",
             command: "runner.job.cancel",
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
@@ -1433,6 +1468,7 @@ fn job_logs(
 
     Ok((
         RunnerJobOutput {
+            variant: "job_logs",
             command: "runner.job.logs",
             runner_id: runner_id.to_string(),
             job_id: job_id.to_string(),
@@ -1541,6 +1577,7 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(value["variant"], "show");
         assert_eq!(
             value["entity"]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
@@ -1556,6 +1593,7 @@ mod tests {
     fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
         let run = raw_exec_command_run(
             RunnerExecOutput {
+                variant: "exec",
                 command: "runner.exec",
                 runner_id: "lab".to_string(),
                 dry_run: false,
@@ -1584,6 +1622,7 @@ mod tests {
 
         let value = run.stdout_result.expect("structured output");
         assert_eq!(value["command"], "runner.exec");
+        assert_eq!(value["variant"], "exec");
         assert_eq!(value["stdout"], "hello\n");
         assert_eq!(value["stderr"], "warn\n");
         assert_eq!(value["job_id"], "job-123");
@@ -1638,6 +1677,7 @@ mod tests {
         .expect("map output");
 
         let value = serde_json::to_value(output).expect("serialize output");
+        assert_eq!(value["variant"], "list");
         assert_eq!(
             value["entities"][0]["env"]["OPENCODE_API_KEY"],
             REDACTED_ENV_VALUE
@@ -1652,6 +1692,7 @@ mod tests {
     #[test]
     fn runner_env_output_redacts_values_by_default() {
         let output = RunnerEnvOutput {
+            variant: "env",
             command: "runner.env".to_string(),
             runner_id: "lab".to_string(),
             source: "runner_job_env".to_string(),
@@ -1667,6 +1708,7 @@ mod tests {
         let value = serde_json::to_value(output).expect("serialize output");
 
         assert_eq!(value["command"], "runner.env");
+        assert_eq!(value["variant"], "env");
         assert_eq!(value["source"], "runner_job_env");
         assert_eq!(value["values_redacted"], true);
         assert_eq!(value["env"]["TOKEN"], REDACTED_ENV_VALUE);
@@ -1675,6 +1717,7 @@ mod tests {
     #[test]
     fn runner_env_output_reports_secret_env_refs_without_values() {
         let output = RunnerEnvOutput {
+            variant: "env",
             command: "runner.env".to_string(),
             runner_id: "lab".to_string(),
             source: "runner_job_env".to_string(),
@@ -1718,6 +1761,7 @@ mod tests {
     #[test]
     fn runner_env_output_reports_secret_store_refs_without_values() {
         let output = RunnerEnvOutput {
+            variant: "env",
             command: "runner.env".to_string(),
             runner_id: "lab".to_string(),
             source: "runner_job_env".to_string(),

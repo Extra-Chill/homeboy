@@ -2,7 +2,7 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-use crate::cli_surface::{Cli, Commands};
+use crate::cli_surface::{current_command_safety_manifest, Cli, Commands};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -190,10 +190,14 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        if matches!(cli.command, Commands::List) {
-            let mut cmd = self.build_augmented_command();
-            cmd.print_help().expect("Failed to print help");
-            println!();
+        if let Commands::List { json } = &cli.command {
+            if *json {
+                print_command_safety_manifest_json();
+            } else {
+                let mut cmd = self.build_augmented_command();
+                cmd.print_help().expect("Failed to print help");
+                println!();
+            }
             return std::process::ExitCode::SUCCESS;
         }
 
@@ -231,6 +235,12 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info)
     }
+}
+
+fn print_command_safety_manifest_json() {
+    let manifest = current_command_safety_manifest();
+    let json = serde_json::to_string_pretty(&manifest).expect("command safety manifest serializes");
+    println!("{json}");
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {

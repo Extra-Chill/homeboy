@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn list_json_dispatch_reports_raw_output_mode() {
-        let (result, exit_code) = dispatch(Commands::List, &GlobalArgs {});
+        let (result, exit_code) = dispatch(Commands::List { json: false }, &GlobalArgs {});
 
         assert_ne!(exit_code, 0);
         assert!(result
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn json_dispatch_family_comes_from_command_registry() {
         assert_eq!(
-            dispatch_family(&Commands::List),
+            dispatch_family(&Commands::List { json: false }),
             CommandDispatchFamily::RawOnly
         );
     }
