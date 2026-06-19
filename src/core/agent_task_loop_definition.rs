@@ -1079,12 +1079,6 @@ fn validate_repo_loop_artifact_references(spec: &AgentTaskRepoLoopSpec) -> Resul
                     .iter()
                     .map(|artifact_id| ("consumes", artifact_id)),
             )
-            .chain(
-                workflow
-                    .dependencies
-                    .iter()
-                    .map(|artifact_id| ("dependencies", artifact_id)),
-            )
         {
             if !declared.contains(artifact_id.as_str()) {
                 diagnostics.push(format!(
