@@ -279,9 +279,7 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     assert!(lab.contains("routing helper, not a benchmark executor"));
 
     let extension = include_str!("../docs/commands/extension.md");
-    assert!(
-        extension.contains("install-for-component --source <source> [--path <component_path>]")
-    );
+    assert!(extension.contains("install-for-component --source <source> [--path <component_path>]"));
     assert!(!extension.contains("install-for-component") || !extension.contains("--revision"));
 
     let report = include_str!("../docs/commands/report.md");
