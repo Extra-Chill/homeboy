@@ -24,6 +24,7 @@ pub use controller::{
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
     AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs,
     AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
+    AgentTaskControllerValidateProofArgs,
 };
 
 #[derive(Args, Debug)]

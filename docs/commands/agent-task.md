@@ -107,6 +107,26 @@ repo-authored controller spec, applies dispatch defaults for the spec checkout,
 and initializes or resumes durable controller state. Use `materialize` first when
 the spec needs deterministic run-input expansion before `from-spec`.
 
+`agent-task controller validate-proof <JSON>` validates a proof, materialized spec,
+or controller record without writing controller state. It returns
+`homeboy/proof-validation/v1` and exits non-zero when the input is not ready for a
+deterministic reviewer handoff.
+
+The validator is provider-neutral. It checks Homeboy proof envelopes for declared
+artifact references, reviewer-visible evidence refs, completed gates, and unresolved
+proof gaps. For `controller materialize` output, it reuses the generic loop compiler
+diagnostics so unsupported controller-only joins, gates, or graph shapes are reported
+instead of being silently accepted. For controller records, completed records must
+include a terminal outcome and must not retain pending actions.
+
+```bash
+homeboy agent-task controller materialize @controller.json --inputs @run.json \
+  --output-file materialized.json
+
+homeboy agent-task controller validate-proof @materialized.json
+homeboy agent-task controller validate-proof @proof.json
+```
+
 ## Loop Spec Compilation
 
 `agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
