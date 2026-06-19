@@ -976,7 +976,8 @@ mod tests {
             .expect("runtime script dir");
         fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
 
-        let runtime_agent_ci_helper = root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
+        let runtime_agent_ci_helper =
+            root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
         fs::create_dir_all(
             runtime_agent_ci_helper
                 .parent()
