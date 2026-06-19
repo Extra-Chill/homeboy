@@ -584,11 +584,8 @@ mod tests {
                 })
                 .expect("submit job");
             let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let (broker_url, handle) = spawn_mock_broker_with_paths(
-                store.clone(),
-                3,
-                Some(seen_paths.clone()),
-            );
+            let (broker_url, handle) =
+                spawn_mock_broker_with_paths(store.clone(), 3, Some(seen_paths.clone()));
             write_reverse_controller_session(&broker_url);
 
             let (output, exit_code) =
