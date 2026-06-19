@@ -514,6 +514,45 @@ pub(crate) fn run_validation_dependency_lifecycle(
     run_dependency_build_lifecycle(component, path)
 }
 
+/// Materialize dependencies (e.g. `composer install`, `npm install`) for the
+/// component rooted at `path` so that downstream gates/tests run against a
+/// dependency-ready worktree rather than fataling on missing autoloaded deps.
+///
+/// This is generic and config-driven: it resolves the component's dependency
+/// providers (composer/npm/component-script/extension) and runs each provider's
+/// install step. When no component or dependency provider can be resolved for
+/// the path (nothing to install), it is a no-op and returns `Ok(false)`.
+/// Returns `Ok(true)` when at least one install step ran.
+///
+/// A provider install failure is propagated as an error so callers can
+/// distinguish a genuine setup failure from a real gate result.
+pub fn materialize_worktree_dependencies(path: &Path) -> Result<bool> {
+    let Some(component) = resolve_component_for_dependency_materialization(path) else {
+        return Ok(false);
+    };
+
+    let providers = match deps_provider::resolve_dependency_providers(&component, path) {
+        Ok(providers) => providers,
+        // No dependency provider resolved for this worktree -> nothing to do.
+        Err(_) => return Ok(false),
+    };
+
+    let mut ran = false;
+    for provider in providers {
+        if provider.install(&component, path)?.is_some() {
+            ran = true;
+        }
+    }
+    Ok(ran)
+}
+
+fn resolve_component_for_dependency_materialization(path: &Path) -> Option<Component> {
+    let path_arg = path.display().to_string();
+    let mut component = component::resolve_effective(None, Some(&path_arg), None).ok()?;
+    component.local_path = path_arg;
+    Some(component)
+}
+
 fn run_validation_dependency_lifecycle_isolated(component: &Component, path: &Path) -> Result<()> {
     let tempdir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
