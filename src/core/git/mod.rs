@@ -46,8 +46,9 @@ pub use operations::{
 };
 pub use operations_changes::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
-    changes_project_filtered, detect_baseline_with_version, BaselineInfo, BaselineSource,
-    ChangelogInfo, ChangesOutput, RepoBaselineSnapshot,
+    changes_project_filtered, detect_baseline_with_version,
+    detect_baseline_with_version_from_fetched_tags, BaselineInfo, BaselineSource, ChangelogInfo,
+    ChangesOutput, RepoBaselineSnapshot,
 };
 pub use operations_commit::{commit, commit_at, commit_from_json, CommitJsonOutput, CommitOptions};
 pub use operations_push::{push, push_at, push_bulk, PushOptions};

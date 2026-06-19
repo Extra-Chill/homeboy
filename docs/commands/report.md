@@ -11,8 +11,27 @@ homeboy report <COMMAND>
 ## Subcommands
 
 - `failure-digest` — render a markdown failure digest from Homeboy command output JSON files
+- `performance-digest` — render resource, budget, baseline-health, preview, and Lab offload details from Homeboy run artifacts
 - `bench-coverage` — report list-only benchmark coverage for hot command paths
 - `browser-evidence-compare` — compare baseline/candidate browser evidence artifact bundles, optionally including visual screenshot diffs through a declared provider
+
+## Performance Digest
+
+```sh
+homeboy report performance-digest \
+  --output-dir <DIR> \
+  [--metadata-json <JSON_OR_FILE>] \
+  [--run-url <URL>] \
+  [--min-samples 3] \
+  [--max-cv-pct 20] \
+  [--format markdown]
+```
+
+`performance-digest` reads run artifacts such as `resource-summary.json` and
+`bench.json`, then renders a Markdown summary of host pressure, extension child
+process usage, budget findings, benchmark memory peaks, baseline health, preview
+metadata, browser-origin evidence, and missing-artifact gaps. It is a report
+renderer only; it does not run benchmarks.
 
 ## Browser Evidence Compare
 

@@ -72,6 +72,7 @@ pub struct ChangesOutput {
     pub changelog: Option<ChangelogInfo>,
 }
 
+#[derive(Debug, Clone)]
 pub struct BaselineInfo {
     pub latest_tag: Option<String>,
     pub source: Option<BaselineSource>,
@@ -115,6 +116,17 @@ pub fn detect_baseline_with_version(
     let _ =
         crate::core::engine::command::run_in_optional(path, "git", &["fetch", "--tags", "--quiet"]);
 
+    detect_baseline_with_version_from_fetched_tags(path, current_version)
+}
+
+/// Detect baseline using tags already available locally.
+///
+/// Callers that batch status work can fetch tags once per repository and reuse
+/// this path to avoid repeating network fetches for every component probe.
+pub fn detect_baseline_with_version_from_fetched_tags(
+    path: &str,
+    current_version: Option<&str>,
+) -> Result<BaselineInfo> {
     // Priority 1: Check for latest tag
     if let Some(tag) = get_latest_tag(path)? {
         let tag_version = extract_version_from_tag(&tag);

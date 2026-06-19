@@ -216,6 +216,54 @@ pub struct CleanupArtifactDeclaration {
     pub glob: Option<String>,
 }
 
+/// Lifecycle state of a component.
+///
+/// Components are normally `Active` — independently versioned and deployable.
+/// When a formerly-standalone component is absorbed into another component
+/// (`Bundled`) or sunset entirely (`Retired`), Homeboy must stop treating it
+/// as an independent deploy obligation: it is suppressed from `--outdated`
+/// reports, deploy selection, and standalone version checks. This avoids
+/// chasing false deploy drift and accidentally re-shipping a stale standalone
+/// plugin that no longer owns the runtime contract.
+///
+/// This is config-driven and generic — no specific component names are
+/// hardcoded in core. A bundled component declares its host via
+/// [`Component::bundled_into`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentLifecycle {
+    /// Independently versioned and deployable (the default).
+    #[default]
+    Active,
+    /// Absorbed into another component; its version tracks the host.
+    /// Not independently deployable. See [`Component::bundled_into`].
+    Bundled,
+    /// Sunset entirely; no longer deployable and excluded from all
+    /// standalone version/deploy/outdated surfaces.
+    Retired,
+}
+
+impl ComponentLifecycle {
+    /// True only for `Active`. `Bundled` and `Retired` components are not
+    /// independently deployable.
+    pub fn is_active(self) -> bool {
+        matches!(self, ComponentLifecycle::Active)
+    }
+
+    /// Human-readable reason for why a non-active component is suppressed.
+    pub fn suppression_reason(self) -> Option<&'static str> {
+        match self {
+            ComponentLifecycle::Active => None,
+            ComponentLifecycle::Bundled => Some("Component is bundled into another component"),
+            ComponentLifecycle::Retired => Some("Component is retired"),
+        }
+    }
+}
+
+fn is_active_lifecycle(lifecycle: &ComponentLifecycle) -> bool {
+    lifecycle.is_active()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(from = "RawComponent", into = "RawComponent")]
 pub struct Component {
@@ -223,6 +271,13 @@ pub struct Component {
     pub aliases: Vec<String>,
     pub local_path: String,
     pub remote_path: String,
+    /// Lifecycle state. `Active` (default) means independently deployable;
+    /// `Bundled`/`Retired` suppress the component from deploy/outdated/version
+    /// surfaces. See [`ComponentLifecycle`].
+    pub lifecycle: ComponentLifecycle,
+    /// When `lifecycle` is `Bundled`, the component this one was absorbed into.
+    /// Informational/reporting only — its version tracks the host component.
+    pub bundled_into: Option<String>,
     pub build_artifact: Option<String>,
     pub build_command: Option<String>,
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
@@ -300,6 +355,10 @@ struct RawComponent {
     local_path: String,
     #[serde(default)]
     remote_path: String,
+    #[serde(default, skip_serializing_if = "is_active_lifecycle")]
+    lifecycle: ComponentLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundled_into: Option<String>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         default,
@@ -371,6 +430,8 @@ impl From<RawComponent> for Component {
             aliases: raw.aliases,
             local_path: raw.local_path,
             remote_path: raw.remote_path,
+            lifecycle: raw.lifecycle,
+            bundled_into: raw.bundled_into,
             build_artifact: raw.build_artifact,
             build_command: raw.build_command,
             extensions: raw.extensions,
@@ -411,6 +472,8 @@ impl From<Component> for RawComponent {
             aliases: c.aliases,
             local_path: c.local_path,
             remote_path: c.remote_path,
+            lifecycle: c.lifecycle,
+            bundled_into: c.bundled_into,
             build_artifact: c.build_artifact,
             build_command: c.build_command,
             extensions: c.extensions,
@@ -494,6 +557,8 @@ impl Component {
             aliases: Vec::new(),
             local_path,
             remote_path,
+            lifecycle: ComponentLifecycle::default(),
+            bundled_into: None,
             build_artifact,
             build_command: None,
             extensions: None,
@@ -595,6 +660,29 @@ impl Component {
         };
 
         content.contains(&rule.when_file_contains.text)
+    }
+
+    /// Whether this component is independently deployable per its lifecycle.
+    ///
+    /// `Bundled` and `Retired` components are not independently deployable —
+    /// they are suppressed from deploy selection, `--outdated` reports, and
+    /// standalone version checks. Callers should skip them rather than treat
+    /// them as deploy obligations.
+    pub fn is_active_lifecycle(&self) -> bool {
+        self.lifecycle.is_active()
+    }
+
+    /// Reason a non-active component is suppressed from deploy/outdated/version
+    /// surfaces, or `None` when the component is active. For `Bundled`
+    /// components the host (from `bundled_into`) is included when known.
+    pub fn lifecycle_suppression_reason(&self) -> Option<String> {
+        let base = self.lifecycle.suppression_reason()?;
+        match (self.lifecycle, self.bundled_into.as_deref()) {
+            (ComponentLifecycle::Bundled, Some(host)) => {
+                Some(format!("Component is bundled into '{host}'"))
+            }
+            _ => Some(base.to_string()),
+        }
     }
 
     /// Check if this component's local_path points to a file (not a directory).
@@ -737,6 +825,82 @@ mod tests {
         // Multiple targets per file with different patterns are now allowed
         // (e.g. plugin header Version: + PHP define() constant in same file)
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn component_lifecycle_defaults_to_active_and_is_omitted_when_serialized() {
+        let component = Component::new(
+            "sample-plugin".to_string(),
+            "/tmp/sample-plugin".to_string(),
+            "wp-content/plugins/sample-plugin".to_string(),
+            None,
+        );
+
+        assert_eq!(component.lifecycle, ComponentLifecycle::Active);
+        assert!(component.is_active_lifecycle());
+        assert!(component.lifecycle_suppression_reason().is_none());
+
+        // Active is the default and must not be written into config.
+        let json = serde_json::to_value(&component).unwrap();
+        assert!(json.get("lifecycle").is_none());
+        assert!(json.get("bundled_into").is_none());
+    }
+
+    #[test]
+    fn component_lifecycle_bundled_roundtrips_and_suppresses() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "agents-api",
+            "lifecycle": "bundled",
+            "bundled_into": "data-machine"
+        }))
+        .unwrap();
+
+        assert_eq!(component.lifecycle, ComponentLifecycle::Bundled);
+        assert!(!component.is_active_lifecycle());
+        assert_eq!(
+            component.bundled_into.as_deref(),
+            Some("data-machine"),
+            "bundled_into host should be preserved"
+        );
+        assert_eq!(
+            component.lifecycle_suppression_reason().as_deref(),
+            Some("Component is bundled into 'data-machine'")
+        );
+
+        // Roundtrip must preserve the lifecycle marker so config is stable.
+        let json = serde_json::to_value(&component).unwrap();
+        assert_eq!(json["lifecycle"], serde_json::json!("bundled"));
+        assert_eq!(json["bundled_into"], serde_json::json!("data-machine"));
+        let reparsed: Component = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed.lifecycle, ComponentLifecycle::Bundled);
+    }
+
+    #[test]
+    fn component_lifecycle_retired_is_not_active() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "old-plugin",
+            "lifecycle": "retired"
+        }))
+        .unwrap();
+
+        assert_eq!(component.lifecycle, ComponentLifecycle::Retired);
+        assert!(!component.is_active_lifecycle());
+        assert!(component.bundled_into.is_none());
+        assert_eq!(
+            component.lifecycle_suppression_reason().as_deref(),
+            Some("Component is retired")
+        );
+    }
+
+    #[test]
+    fn component_lifecycle_unknown_value_is_rejected() {
+        // A typo in the lifecycle should fail loudly rather than silently
+        // defaulting to active (which would re-expose deploy drift).
+        let result: std::result::Result<Component, _> = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "lifecycle": "archived"
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

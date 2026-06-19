@@ -11,6 +11,7 @@ use crate::core::config::read_json_spec_to_string;
 use crate::core::defaults;
 use crate::core::{Error, Result};
 
+use super::envelope::ExecutionEnvelope;
 use super::path_remap::{remap_paths_in_value, LabPathRemap};
 
 /// Rewrite controller-local absolute paths inside a `--provider-config` value to
@@ -28,6 +29,7 @@ pub(in crate::core::runner) fn remap_provider_config_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
 ) -> Vec<String> {
+    let envelope = ExecutionEnvelope::from_args(args);
     // NOTE: do not early-return on empty mappings. A `--provider-config @file`
     // (or `-` stdin) spec must always be inlined to JSON before offload, because
     // the controller-local file path is meaningless on the remote runner and the
@@ -45,42 +47,14 @@ pub(in crate::core::runner) fn remap_provider_config_in_args(
         )
     });
 
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--provider-config" {
-            out.push(arg.clone());
-            if let Some(spec) = iter.next() {
-                out.push(remap_provider_config_spec(spec, &ordered));
-            }
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix("--provider-config=") {
-            out.push(format!(
-                "--provider-config={}",
-                remap_provider_config_spec(spec, &ordered)
-            ));
-            continue;
-        }
-        out.push(arg.clone());
-    }
-    out
+    envelope.rewrite_provider_config_values(|spec| remap_provider_config_spec(spec, &ordered))
 }
 
 pub(in crate::core::runner) fn inject_agent_task_default_provider_config_in_args(
     args: &[String],
 ) -> Result<Vec<String>> {
-    if !is_agent_task_dispatch_or_cook(args) || args_have_provider_config(args) {
+    let envelope = ExecutionEnvelope::from_args(args);
+    if !is_agent_task_dispatch_or_cook(args) || !envelope.inputs.provider_configs.is_empty() {
         return Ok(args.to_vec());
     }
 
@@ -128,23 +102,6 @@ fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {
         .skip(agent_task_index + 1)
         .find(|arg| !arg.starts_with('-'))
         .is_some_and(|command| matches!(command.as_str(), "dispatch" | "cook"))
-}
-
-fn args_have_provider_config(args: &[String]) -> bool {
-    let mut passthrough = false;
-    for arg in args {
-        if passthrough {
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            continue;
-        }
-        if arg == "--provider-config" || arg.starts_with("--provider-config=") {
-            return true;
-        }
-    }
-    false
 }
 
 /// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its

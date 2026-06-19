@@ -39,11 +39,66 @@ pub fn run_command_output(command: Commands, global: &GlobalArgs) -> JsonCommand
             )
         }
         Commands::Runner(args) => runner::run_command_output(args, global),
+        Commands::Bench(args) => {
+            let summarize = bench_summary_eligible(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::Bench(args), global);
+            let summary_stdout = summarize
+                .then(|| {
+                    stdout_result
+                        .as_ref()
+                        .ok()
+                        .and_then(super::bench_summary::render_bench_summary)
+                })
+                .flatten();
+
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                CommandPresentation {
+                    stdout: summary_stdout,
+                    stderr: None,
+                },
+            )
+        }
+        Commands::Runs(args) => {
+            let summarize = runs_show_summary_eligible(&args);
+            let (stdout_result, exit_code) = dispatch(Commands::Runs(args), global);
+            let summary_stdout = summarize
+                .then(|| {
+                    stdout_result
+                        .as_ref()
+                        .ok()
+                        .and_then(super::runs_summary::render_runs_show_summary)
+                })
+                .flatten();
+
+            JsonCommandRun::from_stdout_result(stdout_result, exit_code).with_presentation(
+                CommandPresentation {
+                    stdout: summary_stdout,
+                    stderr: None,
+                },
+            )
+        }
         command => {
             let (stdout_result, exit_code) = dispatch(command, global);
             JsonCommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }
+}
+
+/// Whether `homeboy runs show` should render the compact human summary
+/// instead of the full JSON envelope (#3260). Suppressed by `--json` and in
+/// lab-offload subprocesses whose stdout must remain machine-readable.
+fn runs_show_summary_eligible(args: &crate::commands::runs::RunsArgs) -> bool {
+    args.show_summary_eligible() && !homeboy::core::lab_routing::is_lab_offload_subprocess()
+}
+
+/// Whether `homeboy bench` should render the compact human summary instead
+/// of dumping the full JSON envelope. The full payload is kept for `--json`,
+/// for non-run subcommands, and for lab-offload subprocesses (whose stdout
+/// must stay machine-readable for the parent process).
+fn bench_summary_eligible(args: &crate::commands::bench::BenchArgs) -> bool {
+    args.is_run_invocation()
+        && !args.wants_full_json()
+        && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
 fn agent_task_summary_kind_for_output(

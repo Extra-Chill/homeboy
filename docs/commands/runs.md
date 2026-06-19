@@ -7,19 +7,27 @@ Inspect and maintain persisted observation-store runs and artifacts.
 ```bash
 homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
+homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
-homeboy runs show <run-id>
+homeboy runs show <run-id> [--json]
 homeboy runs resume-plan <run-id>
+homeboy runs evidence <run-id>
 homeboy runs artifacts <run-id>
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact get <run-id> <artifact-id> [--output <path>]
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
+homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <fingerprint>] [--limit 100]
+homeboy runs finding <finding-id>
+homeboy runs latest-finding [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--tool <tool>] [--file <path>]
 homeboy runs export --run <run-id> --output <dir>
 homeboy runs export --since <duration> --output <dir>
 homeboy runs import <dir>
 homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --workflow <workflow.yml> --artifact-glob <glob>
 homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run-id <gh-run-id> --artifact-glob <glob>
+homeboy runs query --select <jsonpath>[,<jsonpath>...] [--group-by <jsonpath>] [--count] [--format json|table|csv]
+homeboy runs drift --metric <jsonpath> [--window 7d] [--threshold 0.0] [--baseline <duration>] [--format json|table]
+homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <label>] [--dry-run]
 ```
 
 ## Description
@@ -29,6 +37,8 @@ homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
+
+`homeboy runs show <run-id>` prints a compact human summary by default: run identity, status, component/rig/SHA, timestamps, and each recorded artifact's locator with a concise `homeboy runs artifact get <run-id> <artifact-id>` command to inspect it. This makes bench artifacts (shared-state files, WP Codebox bundles, scenario outputs) easy to find without spelunking temp directories. Pass `--json` for the full structured payload on stdout; it is also always written to `--output <file>`.
 
 `homeboy runs refs` emits a compact machine-readable ref index for matching runs. It is intended for matrix orchestration scripts and agents that need stable run refs and aggregate artifact refs without scraping human stdout. The output includes `homeboy://run/<id>` refs, `homeboy://run/<id>/artifact/<artifact-id>` refs, evidence/artifact follow-up commands, and detected aggregate artifact refs. Aggregate detection is schema-blind by default (`aggregate` in artifact id/kind/path); pass `--aggregate-artifact-kind <kind>` to mark additional artifact kinds as aggregate outputs.
 
@@ -48,6 +58,24 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 `homeboy runs reconcile` marks orphaned `running` observation records stale. Treat it as a mutating maintenance command, not a reader.
 
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
+
+`homeboy runs latest-run` and `homeboy runs latest-finding` select the newest run
+or finding that matches the provided filters. They are useful when automation
+starts from component/kind/status context instead of a known run id.
+
+`homeboy runs findings` lists recorded findings for a run, while `homeboy runs
+finding` reads one finding by id.
+
+`homeboy runs query` projects JSONPath expressions over imported run artifact
+rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or
+CSV without baking domain-specific artifact schemas into Homeboy core.
+
+`homeboy runs drift` calculates window-based distribution drift for one JSONPath
+metric across imported artifact rows. It reports value shares for the selected
+window and can compare them against a longer baseline window.
+
+`homeboy runs loop-sync` inventories continuous-loop archive directories and,
+unless `--dry-run` is passed, records the triage summary as observation evidence.
 
 ## Compare Metrics Across History
 

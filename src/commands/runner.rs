@@ -12,7 +12,8 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{
     self as runner, runner_job_log_snapshot, ReverseRunnerConnectOptions,
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerStatusReport,
+    RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
@@ -30,6 +31,8 @@ pub struct RunnerExtra {
     pub connection: Option<RunnerConnectionOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub operator_hints: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -999,15 +1002,15 @@ fn connect(
 
 fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     if let Some(id) = id {
-        let mut report = runner::status(id)?;
-        report.active_jobs = active_runner_jobs(id);
-        report.active_job_count = report.active_jobs.len();
+        let report = runner::status(id)?;
+        let operator_hints = runner_status_operator_hints(&report);
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     connection: Some(RunnerConnectionOutput::Status(report)),
+                    operator_hints,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1016,18 +1019,17 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         ));
     }
 
+    let sessions = runner::statuses()?;
+    let operator_hints = sessions
+        .iter()
+        .flat_map(runner_status_operator_hints)
+        .collect();
     Ok((
         RunnerOutput {
             command: "runner.status".to_string(),
             extra: RunnerExtra {
-                sessions: runner::statuses()?
-                    .into_iter()
-                    .map(|mut report| {
-                        report.active_jobs = active_runner_jobs(&report.runner_id);
-                        report.active_job_count = report.active_jobs.len();
-                        report
-                    })
-                    .collect(),
+                sessions,
+                operator_hints,
                 ..Default::default()
             },
             ..Default::default()
@@ -1036,20 +1038,47 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     ))
 }
 
-fn active_runner_jobs(runner_id: &str) -> Vec<homeboy::core::api_jobs::ActiveRunnerJobSummary> {
-    runner::daemon_api_get(runner_id, "/jobs")
-        .ok()
-        .and_then(|data| data.get("body").cloned())
-        .and_then(|body| body.get("active_runner_jobs").cloned())
-        .and_then(|jobs| serde_json::from_value(jobs).ok())
-        .map(
-            |jobs: Vec<homeboy::core::api_jobs::ActiveRunnerJobSummary>| {
-                jobs.into_iter()
-                    .filter(|job| job.runner_id == runner_id)
-                    .collect()
-            },
-        )
-        .unwrap_or_default()
+fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
+    let Some(session) = report.session.as_ref().filter(|_| report.connected) else {
+        return Vec::new();
+    };
+    let mut hints = Vec::new();
+    match session.mode {
+        RunnerTunnelMode::DirectSsh => {
+            if report.active_job_count > 0 {
+                hints.push(format!(
+                    "Active daemon jobs for `{}` are listed from the direct daemon; inspect with `homeboy runner job logs {} <job-id> --follow` and cancel known jobs with `homeboy runner job cancel {} <job-id>`.",
+                    report.runner_id, report.runner_id, report.runner_id
+                ));
+            }
+        }
+        RunnerTunnelMode::Reverse => reverse_runner_status_hints(report, session, &mut hints),
+    }
+    hints
+}
+
+fn reverse_runner_status_hints(
+    report: &RunnerStatusReport,
+    session: &RunnerSession,
+    hints: &mut Vec<String>,
+) {
+    if session.broker_url.is_none() {
+        hints.push(format!(
+            "Reverse runner `{}` has no broker URL; active-job listing, logs, and cancel require reconnecting with `homeboy runner connect <controller-id> --reverse --reverse-runner {} --broker-url <url>`.",
+            report.runner_id, report.runner_id
+        ));
+        return;
+    }
+    hints.push(format!(
+        "Reverse runner `{}` active jobs are listed through the broker; inspect with `homeboy runner job logs {} <job-id> --follow`.",
+        report.runner_id, report.runner_id
+    ));
+    if report.active_job_count > 0 {
+        hints.push(format!(
+            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if the broker rejects an already-claimed job, runner-side interrupt-on-cancel needs claim/heartbeat support rather than a local workaround.",
+            report.runner_id
+        ));
+    }
 }
 
 fn disconnect(id: &str) -> CmdResult<RunnerOutput> {

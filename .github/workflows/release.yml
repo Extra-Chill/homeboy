@@ -259,6 +259,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: lint
           expected-commands: audit,lint,test
+          args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -296,6 +297,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: test
           expected-commands: audit,lint,test
+          args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 

@@ -8,11 +8,13 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::api_jobs::ActiveRunnerJobSummary;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
 use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
+use super::broker_http;
 use super::session::{
     ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
@@ -255,16 +257,87 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
+    let active_jobs = if connected {
+        match session.as_ref() {
+            Some(session) => active_runner_jobs(runner_id, session)?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let active_job_count = active_jobs.len();
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
         state,
         session,
         stale_daemon,
-        active_jobs: Vec::new(),
-        active_job_count: 0,
+        active_jobs,
+        active_job_count,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn active_runner_jobs(
+    runner_id: &str,
+    session: &RunnerSession,
+) -> Result<Vec<ActiveRunnerJobSummary>> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
+    let body = if let Some(local_url) = session.local_url.as_deref() {
+        let data = daemon_get(&client, local_url, "/jobs")?;
+        data.get("body")
+            .cloned()
+            .ok_or_else(|| Error::internal_unexpected("daemon jobs response missing data.body"))?
+    } else if session.mode == RunnerTunnelMode::Reverse {
+        let Some(broker_url) = session.broker_url.as_deref() else {
+            return Ok(Vec::new());
+        };
+        broker_http::get_json(
+            &client,
+            broker_url,
+            "/jobs",
+            "list reverse runner broker jobs",
+        )?
+    } else {
+        return Ok(Vec::new());
+    };
+    let jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
+        body.get("active_runner_jobs")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    )
+    .map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse active runner jobs".to_string()),
+        )
+    })?;
+    Ok(jobs
+        .into_iter()
+        .filter(|job| job.runner_id == runner_id)
+        .collect())
+}
+
+fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
+    let response = client
+        .get(format!("{}{}", local_url.trim_end_matches('/'), path))
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
+    let envelope: CliEnvelope = response.json().map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
+    })?;
+    if !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "daemon request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
 fn stale_daemon_warning(

@@ -77,6 +77,14 @@ pub struct RunsArgs {
     command: RunsCommand,
 }
 
+impl RunsArgs {
+    /// Whether this is a `runs show <id>` invocation eligible for the
+    /// compact human summary (i.e. the caller did not pass `--json`).
+    pub fn show_summary_eligible(&self) -> bool {
+        matches!(self.command, RunsCommand::Show { json: false, .. })
+    }
+}
+
 #[derive(Subcommand, Clone)]
 enum RunsCommand {
     /// List persisted observation runs
@@ -90,7 +98,15 @@ enum RunsCommand {
     /// Mark orphaned running observation records stale
     Reconcile(RunsReconcileArgs),
     /// Show one persisted observation run
-    Show { run_id: String },
+    Show {
+        run_id: String,
+        /// Print the full JSON output instead of the compact human summary.
+        /// The compact summary surfaces status, key metadata, and artifact
+        /// pointers with inspect commands; the full payload is unchanged and
+        /// always available with this flag or via `--output <file>`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a generic resume plan for a validation-progress run
     ResumePlan { run_id: String },
     /// Show stable evidence registry data for one run
@@ -337,7 +353,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::LatestRun(args) => latest::latest_run(args),
         RunsCommand::Compare(args) => compare_runs(args),
         RunsCommand::Reconcile(args) => reconcile_runs(args),
-        RunsCommand::Show { run_id } => show_run(&run_id),
+        RunsCommand::Show { run_id, json: _ } => show_run(&run_id),
         RunsCommand::ResumePlan { run_id } => resume_plan(&run_id),
         RunsCommand::Evidence { run_id } => evidence(&run_id),
         RunsCommand::Artifacts { run_id } => artifacts(&run_id),
@@ -410,7 +426,7 @@ impl RunsArgs {
                     format!("Run `homeboy runs list --runner {runner_id}` to query the connected runner daemon."),
                 ],
             ),
-            RunsCommand::Show { run_id }
+            RunsCommand::Show { run_id, .. }
             | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id }
             | RunsCommand::Artifacts { run_id } => (
@@ -482,22 +498,13 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
         .unwrap_or_default()
         .into_iter()
         .filter(|report| report.connected)
-        .flat_map(|report| active_runner_jobs(&report.runner_id))
+        .flat_map(|report| report.active_jobs)
         .filter(|job| match status {
             Some(status) => status == job.status.run_status_label(),
             None => true,
         })
         .map(active_runner_job_run_summary)
         .collect()
-}
-
-fn active_runner_jobs(runner_id: &str) -> Vec<ActiveRunnerJobSummary> {
-    runner::daemon_api_get(runner_id, "/jobs")
-        .ok()
-        .and_then(|data| data.get("body").cloned())
-        .and_then(|body| body.get("active_runner_jobs").cloned())
-        .and_then(|jobs| serde_json::from_value(jobs).ok())
-        .unwrap_or_default()
 }
 
 fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {

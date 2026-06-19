@@ -22,6 +22,7 @@ use super::utils::args::{
 use super::{runs, CmdResult, GlobalArgs};
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    BENCH_LAB_LABEL,
 };
 
 mod fanout;
@@ -34,11 +35,33 @@ pub struct BenchArgs {
     #[command(subcommand)]
     command: Option<BenchCommand>,
 
+    /// Print the full JSON output instead of the compact human summary.
+    /// The compact summary is the default for terminals; the full
+    /// structured payload is always written to `--output <file>` and is
+    /// printed to stdout with this flag. No data differs between the two —
+    /// only the default presentation is compact.
+    #[arg(long)]
+    json: bool,
+
     #[command(flatten)]
     run: BenchRunArgs,
 }
 
 impl BenchArgs {
+    /// Whether the caller asked for the full JSON payload on stdout
+    /// (suppressing the compact human summary presentation).
+    pub fn wants_full_json(&self) -> bool {
+        self.json
+    }
+
+    /// Whether this invocation is a bench *run* (the variants that emit the
+    /// large `BenchCommandOutput`/comparison envelopes the compact summary
+    /// targets). Subcommands like `list`, `history`, `distribution`, and
+    /// `compare` keep their existing output.
+    pub fn is_run_invocation(&self) -> bool {
+        matches!(self.command, None | Some(BenchCommand::Matrix(_)))
+    }
+
     pub(crate) fn output_descriptor(
         &self,
         output_file_mode: CommandOutputFileMode,
@@ -49,7 +72,7 @@ impl BenchArgs {
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         self.is_lab_offload_command().then(|| {
             LabCommandContract::portable(
-                "bench",
+                BENCH_LAB_LABEL,
                 self.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
                 true,
@@ -89,6 +112,7 @@ impl BenchArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum BenchCommand {
     /// Run a local settings matrix and aggregate child bench runs
     Matrix(settings_matrix::BenchMatrixArgs),
