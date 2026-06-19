@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.21] - 2026-06-19
+
+### Changed
+- Extract audit fanout runtime provider seam
+
 ## [3.7.20] - 2026-06-19
 
 ### Changed
