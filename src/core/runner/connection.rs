@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +19,8 @@ use super::session::{
     RunnerStatusReport, RunnerTunnelMode,
 };
 use super::{load, Runner, RunnerKind};
+
+const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
@@ -106,6 +108,9 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
         homeboy_version: version,
         homeboy_build_identity: Some(identity.display),
         connected_at: Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
     };
     write_session(&session)?;
 
@@ -154,6 +159,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
     let session_path = session_path(&runner.id)?;
     let homeboy_identity = crate::core::build_identity::current();
     let homeboy_version = homeboy_identity.version.clone();
+    let now = Utc::now().to_rfc3339();
     let session = RunnerSession {
         runner_id: runner.id.clone(),
         mode: RunnerTunnelMode::Reverse,
@@ -168,7 +174,10 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
         remote_daemon_pid: None,
         homeboy_version,
         homeboy_build_identity: Some(homeboy_identity.display),
-        connected_at: Utc::now().to_rfc3339(),
+        connected_at: now.clone(),
+        worker_identity: Some(format!("{}@{}", std::process::id(), hostname_fallback())),
+        worker_pid: Some(std::process::id()),
+        last_seen_at: Some(now),
     };
     write_session(&session)?;
     let broker_registered = match session.broker_url.as_deref() {
@@ -215,6 +224,9 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
             "broker_url": session.broker_url,
             "homeboy_version": session.homeboy_version,
             "homeboy_build_identity": session.homeboy_build_identity,
+            "worker_identity": session.worker_identity,
+            "worker_pid": session.worker_pid,
+            "last_seen_at": session.last_seen_at,
         }))
         .send()
         .map_err(|err| {
@@ -741,19 +753,43 @@ fn session_is_live(session: &RunnerSession) -> bool {
         .is_some_and(|port| wait_for_tcp(port, Duration::from_millis(200)))
 }
 
+fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
+    let Some(last_seen_at) = session.last_seen_at.as_deref() else {
+        return false;
+    };
+    let Ok(last_seen_at) = DateTime::parse_from_rfc3339(last_seen_at) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(last_seen_at.with_timezone(&Utc));
+    match age.to_std() {
+        Ok(age) => age <= REVERSE_RUNNER_HEARTBEAT_TTL,
+        Err(_) => true,
+    }
+}
+
 fn session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
     match session {
         Some(session)
             if session.mode == RunnerTunnelMode::Reverse
                 && session.role == RunnerSessionRole::Controller =>
         {
-            RunnerSessionState::Connected
+            if reverse_controller_session_is_live(session) {
+                RunnerSessionState::Connected
+            } else {
+                RunnerSessionState::Recorded
+            }
         }
         Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
         Some(session) if session_is_live(session) => RunnerSessionState::Connected,
         Some(_) => RunnerSessionState::Disconnected,
         None => RunnerSessionState::Disconnected,
     }
+}
+
+fn hostname_fallback() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown-host".to_string())
 }
 
 fn session_path(runner_id: &str) -> Result<PathBuf> {
@@ -1055,6 +1091,9 @@ mod tests {
                 homeboy_version: "test".to_string(),
                 homeboy_build_identity: Some("homeboy test+abc123".to_string()),
                 connected_at: Utc::now().to_rfc3339(),
+                worker_identity: None,
+                worker_pid: None,
+                last_seen_at: None,
             };
             write_session(&session).expect("write session");
             let path = session_path("lab-local").expect("session path");
@@ -1122,5 +1161,36 @@ mod tests {
             assert_eq!(reports[0].runner_id, "homeboy-lab");
             assert_eq!(reports[0].state, RunnerSessionState::Recorded);
         });
+    }
+
+    #[test]
+    fn reverse_controller_session_requires_fresh_heartbeat() {
+        let mut session = RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::Reverse,
+            role: RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some("extra-chill".to_string()),
+            broker_url: Some("http://127.0.0.1:9876".to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+abc123".to_string()),
+            connected_at: Utc::now().to_rfc3339(),
+            worker_identity: Some("worker-1".to_string()),
+            worker_pid: Some(1234),
+            last_seen_at: Some(Utc::now().to_rfc3339()),
+        };
+
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Connected);
+
+        session.last_seen_at = Some((Utc::now() - chrono::Duration::seconds(120)).to_rfc3339());
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
+
+        session.last_seen_at = None;
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
     }
 }
