@@ -1490,14 +1490,16 @@ mod tests {
         let job = store
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
             .expect("remote runner job queues");
-        store
+        let claim = store
             .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
         store
             .append_remote_runner_event(
                 job.id,
                 "homeboy-lab",
+                &claim_id,
                 JobEventKind::Stdout,
                 Some("running tests".to_string()),
                 None,
@@ -1508,6 +1510,7 @@ mod tests {
             .finish_remote_runner_job(
                 job.id,
                 "homeboy-lab",
+                &claim_id,
                 RemoteRunnerJobResult {
                     exit_code: 0,
                     stdout: Some("ok".to_string()),
@@ -1551,15 +1554,17 @@ mod tests {
         let job = store
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
             .expect("remote runner job queues");
-        store
+        let claim = store
             .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
 
         let failed = store
             .finish_remote_runner_job(
                 job.id,
                 "homeboy-lab",
+                &claim_id,
                 RemoteRunnerJobResult {
                     exit_code: 1,
                     stdout: None,
@@ -1580,6 +1585,84 @@ mod tests {
                     .as_deref()
                     .is_some_and(|message| message.contains("code 1"))
         }));
+    }
+
+    #[test]
+    fn remote_runner_job_writes_require_matching_claim_id() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
+
+        let wrong_claim_event = store.append_remote_runner_event(
+            job.id,
+            "homeboy-lab",
+            "wrong-claim",
+            JobEventKind::Progress,
+            Some("late progress".to_string()),
+            None,
+        );
+        assert!(wrong_claim_event.is_err());
+
+        store
+            .append_remote_runner_event(
+                job.id,
+                "homeboy-lab",
+                &claim_id,
+                JobEventKind::Progress,
+                Some("valid progress".to_string()),
+                None,
+            )
+            .expect("matching claim appends progress");
+        let events = store.events(job.id).expect("events are readable");
+        assert!(!events
+            .iter()
+            .any(|event| event.message.as_deref() == Some("late progress")));
+        assert!(events
+            .iter()
+            .any(|event| event.message.as_deref() == Some("valid progress")));
+    }
+
+    #[test]
+    fn remote_runner_job_writes_reject_expired_claims() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
+        {
+            let mut inner = store.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .get_mut(&job.id)
+                .expect("job exists")
+                .job
+                .claim_expires_at_ms = Some(timestamp_ms().saturating_sub(1));
+        }
+
+        let expired_event = store.append_remote_runner_event(
+            job.id,
+            "homeboy-lab",
+            &claim_id,
+            JobEventKind::Progress,
+            Some("expired progress".to_string()),
+            None,
+        );
+        assert!(expired_event.is_err());
+
+        let events = store.events(job.id).expect("events are readable");
+        assert!(!events
+            .iter()
+            .any(|event| event.message.as_deref() == Some("expired progress")));
     }
 
     #[test]

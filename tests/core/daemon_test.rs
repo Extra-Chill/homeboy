@@ -341,6 +341,10 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(claim.status_code, 200);
     assert_eq!(claim.body["endpoint"], "runner.jobs.claim");
     assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
+    let claim_id = claim.body["body"]["claim"]["claim_id"]
+        .as_str()
+        .expect("claim id")
+        .to_string();
     assert_eq!(
         claim.body["body"]["claim"]["request"]["command"],
         serde_json::json!(["homeboy", "test", "sample-plugin"])
@@ -351,6 +355,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
         &format!("/runner/jobs/{job_id}/events"),
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
+            "claim_id": claim_id.clone(),
             "kind": "progress",
             "data": { "phase": "running" }
         })),
@@ -366,6 +371,7 @@ fn routes_remote_runner_job_broker_lifecycle() {
         &format!("/runner/jobs/{job_id}/finish"),
         Some(serde_json::json!({
             "runner_id": "homeboy-lab",
+            "claim_id": claim_id,
             "result": {
                 "exit_code": 0,
                 "stdout": "ok",
