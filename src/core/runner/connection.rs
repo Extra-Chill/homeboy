@@ -8,6 +8,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::core::api_jobs::ActiveRunnerJobSummary;
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
@@ -255,16 +256,36 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
+    let active_jobs = if connected {
+        active_runner_jobs(runner_id)
+    } else {
+        Vec::new()
+    };
+    let active_job_count = active_jobs.len();
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
         state,
         session,
         stale_daemon,
-        active_jobs: Vec::new(),
-        active_job_count: 0,
+        active_jobs,
+        active_job_count,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn active_runner_jobs(runner_id: &str) -> Vec<ActiveRunnerJobSummary> {
+    super::daemon_api_get(runner_id, "/jobs")
+        .ok()
+        .and_then(|data| data.get("body").cloned())
+        .and_then(|body| body.get("active_runner_jobs").cloned())
+        .and_then(|jobs| serde_json::from_value(jobs).ok())
+        .map(|jobs: Vec<ActiveRunnerJobSummary>| {
+            jobs.into_iter()
+                .filter(|job| job.runner_id == runner_id)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn stale_daemon_warning(
