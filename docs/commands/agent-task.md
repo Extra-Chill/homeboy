@@ -6,13 +6,22 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Boundaries
+
+`agent-task` is split into four operator-facing seams:
+
+- **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
+- **Cook/review:** repo-cooking conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
+- **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
+- **Controller:** durable multi-agent loop state that can create or observe lifecycle runs over time.
+
 ## Subcommands
+
+### Lifecycle
 
 | Subcommand | Purpose |
 |---|---|
-| `cook` | Sync a workspace when `--runner` is supplied, dispatch a repo-cooking task, and return the durable run id. |
-| `loop` | Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize. |
-| `dispatch` | Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON. |
+| `dispatch` | Build and queue common repo-cooking agent tasks without hand-authored provider JSON. |
 | `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
 | `run <run-id>` | Execute a previously submitted durable run. |
 | `run-next` | Claim and execute the oldest queued durable run. |
@@ -26,14 +35,31 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
+
+### Cook/Review
+
+| Subcommand | Purpose |
+|---|---|
+| `cook` | Sync a workspace when `--runner` is supplied, dispatch a repo-cooking task, and return the durable run id. |
+| `loop` | Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook-loop retry or stop decision. |
+
+### Provider
+
+| Subcommand | Purpose |
+|---|---|
 | `providers` | List extension-declared executor providers and optional secret readiness. |
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
-| `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
 | `auth` | Configure and inspect provider authentication secrets. |
+
+### Controller
+
+| Subcommand | Purpose |
+|---|---|
+| `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
 ## Controller Events

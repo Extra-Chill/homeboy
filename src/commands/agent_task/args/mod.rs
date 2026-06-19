@@ -2,7 +2,11 @@
 //!
 //! These types are the durable CLI contract surface. Keeping them in one
 //! sibling module lets the `agent_task` root stay a thin dispatcher over the
-//! handler modules (`auth`, `controller`, `run`, `status`, `review`).
+//! handler modules (`auth`, `controller`, `run`, `status`, `review`). The
+//! command tree is grouped by boundary: lifecycle commands own durable run
+//! records, cook-loop commands compose lifecycle primitives into reviewer
+//! workflows, provider commands expose executor contracts/auth, and controller
+//! commands own long-running loop state.
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
@@ -35,55 +39,55 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
-    /// Sync a workspace if --runner is supplied, dispatch a repo-cooking task, and return the durable run id.
+    /// Cook loop: sync a workspace when needed, dispatch a repo-cooking task, and return the durable run id.
     Cook(DispatchArgs),
-    /// Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize.
+    /// Cook loop: dispatch, promote, verify, retry red gates, and finalize.
     Loop(AgentTaskLoopArgs),
-    /// Build and dispatch common repo-cooking agent tasks without hand-authored provider JSON.
+    /// Lifecycle: build and queue common repo-cooking agent tasks without hand-authored provider JSON.
     Dispatch(DispatchArgs),
-    /// Run an agent-task plan through extension-declared executor providers.
+    /// Lifecycle: run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
-    /// Execute a previously submitted durable agent-task run.
+    /// Lifecycle: execute a previously submitted durable agent-task run.
     Run(StatusArgs),
-    /// Claim and execute the oldest queued durable agent-task run.
+    /// Lifecycle: claim and execute the oldest queued durable agent-task run.
     RunNext,
-    /// Persist an agent-task plan and return a durable run id without executing it.
+    /// Lifecycle: persist an agent-task plan and return a durable run id without executing it.
     Submit(SubmitArgs),
-    /// Read durable agent-task run status.
+    /// Lifecycle: read durable agent-task run status.
     Status(StatusArgs),
-    /// List durable agent-task runs, newest first.
+    /// Lifecycle: list durable agent-task runs, newest first.
     List,
-    /// List queued and running durable agent-task runs, newest first.
+    /// Lifecycle: list queued and running durable agent-task runs, newest first.
     Active,
-    /// Show the latest durable agent-task run.
+    /// Lifecycle: show the latest durable agent-task run.
     Latest,
-    /// Read durable agent-task run scheduler events.
+    /// Lifecycle: read durable agent-task run scheduler events.
     Logs(StatusArgs),
-    /// List artifacts and evidence refs recorded for a completed run.
+    /// Lifecycle: list artifacts and evidence refs recorded for a completed run.
     Artifacts(StatusArgs),
-    /// Mark a queued or stale-running durable agent-task run as cancelled.
+    /// Lifecycle: mark a queued or stale-running durable agent-task run as cancelled.
     Cancel(CancelArgs),
-    /// Resume a queued or stale-running durable run.
+    /// Lifecycle: resume a queued or stale-running durable run.
     Resume(StatusArgs),
-    /// Submit a fresh durable run from an existing run's plan.
+    /// Lifecycle: submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
-    /// Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints.
+    /// Review: build a durable aggregate envelope from run state, logs, artifacts, and promotion hints.
     Review(ReviewArgs),
-    /// Promote a completed generic patch artifact into a managed worktree.
+    /// Review: promote a completed generic patch artifact into a managed worktree.
     Promote(PromoteArgs),
-    /// Finalize a green cook run into a review-ready pull request.
+    /// Review: finalize a green cook run into a review-ready pull request.
     FinalizePr(FinalizePrArgs),
-    /// Convert deterministic gate results into a cook-loop retry or stop decision.
+    /// Review: convert deterministic gate results into a cook-loop retry or stop decision.
     GateFeedback(GateFeedbackArgs),
-    /// List extension-declared agent-task executor providers and optional secret readiness.
+    /// Provider: list extension-declared agent-task executor providers and optional secret readiness.
     Providers(ProvidersArgs),
-    /// Export Homeboy's machine-readable agent-task core contract metadata.
+    /// Provider: export Homeboy's machine-readable agent-task core contract metadata.
     Contract(ContractArgs),
-    /// Compile a declarative loop definition into an agent-task plan.
+    /// Controller: compile a declarative loop definition into an agent-task plan.
     CompileLoop(CompileLoopArgs),
-    /// Configure and inspect agent-task provider authentication secrets.
+    /// Provider: configure and inspect agent-task provider authentication secrets.
     Auth(AgentTaskAuthArgs),
-    /// Create, inspect, and resume durable multi-agent loop controller state.
+    /// Controller: create, inspect, and resume durable multi-agent loop controller state.
     Controller(AgentTaskControllerArgs),
     /// Internal bridge for provider-runtime agent tool requests.
     #[command(hide = true)]
