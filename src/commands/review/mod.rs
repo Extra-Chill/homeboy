@@ -90,7 +90,7 @@ pub fn is_markdown_mode(args: &ReviewArgs) -> bool {
 struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
     name: &'static str,
     include_changed_only_scope: bool,
-    build_args: fn(&ReviewArgs) -> Args,
+    build_args: fn(&ReviewArgs, Option<&[String]>) -> Args,
     run: fn(Args, &GlobalArgs) -> CmdResult<Output>,
     finding_count: fn(&Output) -> usize,
 }
@@ -107,8 +107,12 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
         review_args: &ReviewArgs,
         global: &GlobalArgs,
         component_label: &str,
+        precomputed_changed_files: Option<&[String]>,
     ) -> CmdResult<ReviewStage<Output>> {
-        let (output, exit_code) = (self.run)((self.build_args)(review_args), global)?;
+        let (output, exit_code) = (self.run)(
+            (self.build_args)(review_args, precomputed_changed_files),
+            global,
+        )?;
         let finding_count = (self.finding_count)(&output);
 
         Ok((
@@ -137,6 +141,7 @@ fn dispatch_review_plan_step(
     args: &ReviewArgs,
     global: &GlobalArgs,
     component_label: &str,
+    precomputed_changed_files: Option<&[String]>,
 ) -> homeboy::core::Result<Option<ReviewStageRun>> {
     match step.kind.as_str() {
         "review.audit" => {
@@ -147,7 +152,8 @@ fn dispatch_review_plan_step(
                 run: audit::run,
                 finding_count: audit_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label)?;
+            let (stage, _) =
+                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
             Ok(Some(ReviewStageRun::Audit(stage)))
         }
         "review.lint" => {
@@ -158,7 +164,8 @@ fn dispatch_review_plan_step(
                 run: lint::run,
                 finding_count: lint_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label)?;
+            let (stage, _) =
+                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
             Ok(Some(ReviewStageRun::Lint(stage)))
         }
         "review.test" => {
@@ -169,7 +176,8 @@ fn dispatch_review_plan_step(
                 run: test::run,
                 finding_count: test_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label)?;
+            let (stage, _) =
+                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
             Ok(Some(ReviewStageRun::Test(stage)))
         }
         other => Err(homeboy::core::Error::internal_unexpected(format!(
@@ -196,15 +204,14 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
 
-    // Probe the changed set once at the umbrella level so we can short-circuit
-    // before paying for any extension setup. Each stage will re-derive its
-    // own scope internally (and that's fine — `get_files_changed_since` is
-    // cheap, and lint/audit/test must remain independently invocable).
-    let changed_file_count = match (&args.changed_since, args.changed_only) {
-        (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?.len()),
-        (_, true) => Some(git::get_dirty_files(&source_path)?.len()),
+    // Probe the changed set once at the umbrella level so review can
+    // short-circuit early and pass the same scope into the internal stages.
+    let precomputed_changed_files = match (&args.changed_since, args.changed_only) {
+        (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?),
+        (_, true) => Some(git::get_dirty_files(&source_path)?),
         _ => None,
     };
+    let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
 
     if let Some(0) = changed_file_count {
         let scope_label = if let Some(ref r) = args.changed_since {
@@ -262,7 +269,13 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let mut test_stage = None;
 
     let stage_run = match review::execute_review_plan_steps(&quality_plan.steps, |step| {
-        dispatch_review_plan_step(step, &args, global, &component_label)
+        dispatch_review_plan_step(
+            step,
+            &args,
+            global,
+            &component_label,
+            precomputed_changed_files.as_deref(),
+        )
     }) {
         Ok(run) => run,
         Err(error) => {
@@ -437,7 +450,10 @@ fn scope_flag_suffix(args: &ReviewArgs, include_changed_only: bool) -> String {
     }
 }
 
-fn build_audit_args(args: &ReviewArgs) -> audit::AuditArgs {
+fn build_audit_args(
+    args: &ReviewArgs,
+    precomputed_changed_files: Option<&[String]>,
+) -> audit::AuditArgs {
     audit::AuditArgs {
         comp: args.comp.clone(),
         extension_override: args.extension_override.clone(),
@@ -446,12 +462,16 @@ fn build_audit_args(args: &ReviewArgs) -> audit::AuditArgs {
         exclude: Vec::new(),
         baseline_args: args.baseline_args.clone(),
         changed_since: args.changed_since.clone(),
+        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
         json_summary: args.summary,
         fixability: false,
     }
 }
 
-fn build_lint_args(args: &ReviewArgs) -> lint::LintArgs {
+fn build_lint_args(
+    args: &ReviewArgs,
+    precomputed_changed_files: Option<&[String]>,
+) -> lint::LintArgs {
     lint::LintArgs {
         comp: args.comp.clone(),
         summary: args.summary,
@@ -459,6 +479,7 @@ fn build_lint_args(args: &ReviewArgs) -> lint::LintArgs {
         glob: None,
         changed_only: args.changed_only,
         changed_since: args.changed_since.clone(),
+        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
         ci_job: None,
         errors_only: false,
         sniffs: None,
@@ -473,7 +494,10 @@ fn build_lint_args(args: &ReviewArgs) -> lint::LintArgs {
     }
 }
 
-fn build_test_args(args: &ReviewArgs) -> test::TestArgs {
+fn build_test_args(
+    args: &ReviewArgs,
+    precomputed_changed_files: Option<&[String]>,
+) -> test::TestArgs {
     test::TestArgs {
         comp: args.comp.clone(),
         extension_override: args.extension_override.clone(),
@@ -486,6 +510,7 @@ fn build_test_args(args: &ReviewArgs) -> test::TestArgs {
         write: false,
         since: "HEAD~10".to_string(),
         changed_since: args.changed_since.clone(),
+        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
         ci_job: None,
         setting_args: Default::default(),
         args: Vec::new(),

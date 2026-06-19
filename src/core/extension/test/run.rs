@@ -32,6 +32,7 @@ pub struct TestRunWorkflowArgs {
     pub analyze: bool,
     pub baseline_flags: BaselineFlags,
     pub changed_since: Option<String>,
+    pub precomputed_changed_files: Option<Vec<String>>,
     pub json_summary: bool,
     pub ci_env: Vec<(String, String)>,
     pub passthrough_args: Vec<String>,
@@ -162,7 +163,16 @@ pub fn run_main_test_workflow(
     run_dir: &RunDir,
 ) -> crate::core::Result<TestRunWorkflowResult> {
     let changed_scope = if let Some(ref git_ref) = args.changed_since {
-        Some(compute_changed_test_scope(component, git_ref)?)
+        Some(match args.precomputed_changed_files.as_ref() {
+            Some(changed_files) => {
+                crate::core::extension::test::compute_changed_test_scope_for_files(
+                    component,
+                    git_ref,
+                    changed_files,
+                )?
+            }
+            None => compute_changed_test_scope(component, git_ref)?,
+        })
     } else {
         None
     };
