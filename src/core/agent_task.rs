@@ -296,7 +296,8 @@ impl AgentTaskExecutor {
             .unwrap_or(&self.backend)
     }
 
-    pub fn executor_provider_id(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn executor_provider_id(&self) -> Option<&str> {
         self.runtime_selection
             .as_ref()
             .and_then(|selection| selection.executor_provider_id.as_deref())
@@ -317,7 +318,8 @@ impl AgentTaskExecutor {
             .or(self.model.as_deref())
     }
 
-    pub fn substrate_ref(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn substrate_ref(&self) -> Option<&str> {
         self.runtime_selection
             .as_ref()
             .and_then(|selection| selection.substrate_ref.as_deref())
