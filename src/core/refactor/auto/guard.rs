@@ -14,14 +14,13 @@
 use serde::Serialize;
 use std::process::Command;
 
+use crate::core::git::BOT_NAME;
+
 /// Prefix used for all autofix commits. Must match the action's prefix.
 const AUTOFIX_COMMIT_PREFIX: &str = "chore(ci): homeboy autofix";
 
 /// Label that permanently disables autofix on a PR.
 const AUTOFIX_DISABLED_LABEL: &str = "autofix-disabled";
-
-/// Bot identity for authored commits.
-const BOT_NAME: &str = "homeboy-ci[bot]";
 
 /// Why autofix was blocked.
 #[derive(Debug, Clone, Serialize)]
