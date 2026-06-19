@@ -1,3 +1,7 @@
+use crate::core::artifact_ref::{
+    ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
+};
+
 /// Typed runtime-facing execution surface shared by runner, Lab, daemon, and
 /// extension code paths.
 ///
@@ -30,17 +34,18 @@ impl ArtifactUriContract {
     }
 
     pub fn runner_artifact_ref(self, runner_id: &str, run_id: &str, artifact_id: &str) -> String {
-        format!(
+        ArtifactReference::parse(format!(
             "{}{}/{}/{}",
             self.runner_artifact_scheme,
             encode_uri_component(runner_id),
             encode_uri_component(run_id),
             encode_uri_component(artifact_id)
-        )
+        ))
+        .to_string()
     }
 
     pub fn metadata_only_ref(self, label: &str) -> String {
-        format!("{}{label}", self.metadata_only_scheme)
+        ArtifactReference::parse(format!("{}{label}", self.metadata_only_scheme)).to_string()
     }
 }
 
@@ -65,8 +70,8 @@ pub struct ApplyChangeContract {
 
 pub const EXECUTION_CONTRACT: ExecutionContract = ExecutionContract {
     artifacts: ArtifactUriContract {
-        runner_artifact_scheme: "runner-artifact://",
-        metadata_only_scheme: "metadata-only:",
+        runner_artifact_scheme: RUNNER_ARTIFACT_REF_SCHEME,
+        metadata_only_scheme: METADATA_ONLY_REF_SCHEME,
     },
     lab_offload: LabOffloadExecutionContract {
         metadata_schema: "homeboy/lab-offload/v1",
