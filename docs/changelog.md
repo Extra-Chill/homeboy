@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.243.0] - 2026-06-19
+
+### Added
+- feat(agent-task): materialize policy result inputs
+
 ## [0.242.0] - 2026-06-19
 
 ### Added
