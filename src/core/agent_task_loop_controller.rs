@@ -1323,13 +1323,17 @@ impl AgentTaskLoopControllerRecord {
             return;
         }
         match action {
-            AgentTaskLoopPolicyAction::RouteFinding { entity_id, .. } => {
-                if let Some(entity_id) = entity_id {
-                    if let Some(entity) = self.entities.get_mut(entity_id) {
-                        entity.state = Some("routed".to_string());
-                    }
+            AgentTaskLoopPolicyAction::RouteFinding {
+                entity_id: Some(entity_id),
+                ..
+            } => {
+                if let Some(entity) = self.entities.get_mut(entity_id) {
+                    entity.state = Some("routed".to_string());
                 }
             }
+            AgentTaskLoopPolicyAction::RouteFinding {
+                entity_id: None, ..
+            } => {}
             AgentTaskLoopPolicyAction::ValidateCandidatePatch {
                 candidate,
                 validation,
@@ -1477,6 +1481,7 @@ impl AgentTaskLoopControllerRecord {
         self.updated_at = now_timestamp();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_subcontroller_ref(
         &mut self,
         loop_id: &str,
