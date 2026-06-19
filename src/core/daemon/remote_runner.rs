@@ -92,7 +92,7 @@ pub(super) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, or /runner/jobs/<job-id>/heartbeat."
+                    "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
@@ -195,7 +195,7 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
                 "unknown remote runner job path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, or /runner/jobs/<job-id>/heartbeat.".to_string(),
+                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel.".to_string(),
                 ]),
             ),
         );
@@ -214,6 +214,10 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
             Ok(body) => daemon_endpoint_response("runner.jobs.heartbeat", body),
             Err(err) => error_response(400, err),
         },
+        "cancel" => match cancel(job_id, job_store) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.cancel", body),
+            Err(err) => error_response(400, err),
+        },
         _ => error_response(
             404,
             Error::validation_invalid_argument(
@@ -221,7 +225,7 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
                 "unknown remote runner job operation",
                 Some(operation.to_string()),
                 Some(vec![
-                    "Supported operations are events, finish, and heartbeat.".to_string(),
+                    "Supported operations are events, finish, heartbeat, and cancel.".to_string(),
                 ]),
             ),
         ),
@@ -279,6 +283,16 @@ fn heartbeat(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<
     Ok(json!({
         "command": "api.runner.jobs.heartbeat",
         "job": job,
+    }))
+}
+
+fn cancel(job_id: Uuid, job_store: &JobStore) -> Result<Value> {
+    let job = job_store.cancel_remote_runner_job(job_id, "cancel requested via broker API")?;
+    let events = job_store.events(job_id)?;
+    Ok(json!({
+        "command": "api.runner.jobs.cancel",
+        "job": job,
+        "events": events,
     }))
 }
 

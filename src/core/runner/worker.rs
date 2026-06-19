@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::core::api_jobs::{
-    Job, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    Job, JobStatus, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
 use crate::core::error::{Error, Result};
 
@@ -270,6 +270,17 @@ fn run_once_output(
         ));
     };
 
+    if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+        return Ok(cancelled_output(
+            options,
+            iterations,
+            jobs_claimed,
+            broker_failures,
+            stopped,
+            job,
+        ));
+    }
+
     append_progress(&client, &options.broker_url, &options.runner_id, &claim.job)?;
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
@@ -308,6 +319,16 @@ fn run_once_output(
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
+            if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+                return Ok(cancelled_output(
+                    options,
+                    iterations,
+                    jobs_claimed,
+                    broker_failures,
+                    stopped,
+                    job,
+                ));
+            }
             let job = finish(RemoteRunnerJobResult {
                 exit_code: 1,
                 stdout: None,
@@ -333,6 +354,16 @@ fn run_once_output(
             ));
         }
     };
+    if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+        return Ok(cancelled_output(
+            options,
+            iterations,
+            jobs_claimed,
+            broker_failures,
+            stopped,
+            job,
+        ));
+    }
     let job = finish(RemoteRunnerJobResult {
         exit_code,
         stdout: Some(exec_output.stdout),
@@ -357,6 +388,29 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+fn cancelled_output(
+    options: ReverseRunnerWorkerOptions,
+    iterations: u64,
+    jobs_claimed: u64,
+    broker_failures: u32,
+    stopped: bool,
+    job: Job,
+) -> (ReverseRunnerWorkerOutput, i32) {
+    let exit_code = 0;
+    (
+        claimed_output(
+            options,
+            iterations,
+            jobs_claimed,
+            broker_failures,
+            stopped,
+            job,
+            exit_code,
+        ),
+        exit_code,
+    )
 }
 
 /// Build the remote capability-parity preflight for a claimed reverse-runner
@@ -505,6 +559,26 @@ fn finish_job(
     })
 }
 
+fn cancelled_job_snapshot(client: &Client, broker_url: &str, job: &Job) -> Result<Option<Job>> {
+    let data = broker_http::get_json(
+        client,
+        broker_url,
+        &format!("/jobs/{}", job.id),
+        "inspect reverse runner job cancellation state",
+    )?;
+    let snapshot: Job = serde_json::from_value(data["job"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse reverse runner job snapshot".to_string()),
+        )
+    })?;
+    if snapshot.status == JobStatus::Cancelled {
+        Ok(Some(snapshot))
+    } else {
+        Ok(None)
+    }
+}
+
 fn remote_runner_claim_id(job: &Job) -> Result<&str> {
     job.claim_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -585,7 +659,7 @@ mod tests {
                 .expect("submit job");
             let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
             let (broker_url, handle) =
-                spawn_mock_broker_with_paths(store.clone(), 3, Some(seen_paths.clone()));
+                spawn_mock_broker_with_paths(store.clone(), 5, Some(seen_paths.clone()));
             write_reverse_controller_session(&broker_url);
 
             let (output, exit_code) =
@@ -685,7 +759,7 @@ mod tests {
                     metadata: None,
                 })
                 .expect("submit job");
-            let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+            let (broker_url, handle) = spawn_mock_broker(store.clone(), 5);
 
             let (output, exit_code) =
                 run_reverse_worker(worker_options(broker_url)).expect("run worker");
@@ -724,7 +798,7 @@ mod tests {
                     metadata: None,
                 })
                 .expect("submit job");
-            let (broker_url, handle) = spawn_mock_broker(store.clone(), 4);
+            let (broker_url, handle) = spawn_mock_broker(store.clone(), 6);
             let stop = Arc::new(AtomicBool::new(false));
             let stop_after_sleep = stop.clone();
             let mut options = worker_options(broker_url);
@@ -764,6 +838,118 @@ mod tests {
         assert_eq!(output.last_claim, None);
         assert_eq!(output.last_result, None);
         assert_eq!(output.last_error, None);
+    }
+
+    #[test]
+    fn reverse_worker_skips_execution_when_claim_is_cancelled_before_start() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create runner");
+            let store = JobStore::default();
+            store
+                .submit_remote_runner_job(RemoteRunnerJobRequest {
+                    runner_id: "lab".to_string(),
+                    project_id: None,
+                    operation: "runner.exec".to_string(),
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf should-not-run".to_string(),
+                    ],
+                    cwd: Some("/tmp".to_string()),
+                    env: Default::default(),
+                    secret_env_names: Vec::new(),
+                    capture_patch: false,
+                    source_snapshot: None,
+                    require_paths: Vec::new(),
+                    metadata: None,
+                })
+                .expect("submit job");
+            let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (broker_url, handle) =
+                spawn_cancelling_after_claim_broker(store.clone(), 2, Some(seen_paths.clone()));
+
+            let (output, exit_code) =
+                run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+            assert_eq!(exit_code, 0);
+            assert!(output.claimed);
+            let job = output.job.expect("job");
+            assert_eq!(job.status, JobStatus::Cancelled);
+            handle.join().expect("mock broker joins");
+            let seen_paths = seen_paths.lock().expect("seen paths");
+            assert!(!seen_paths.iter().any(|path| path.ends_with("/events")));
+            assert!(!seen_paths.iter().any(|path| path.ends_with("/finish")));
+        });
+    }
+
+    #[test]
+    fn reverse_worker_skips_finish_when_cancelled_after_execution() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create runner");
+            crate::core::runner::merge(
+                Some("lab"),
+                &serde_json::json!({
+                    "policy": RunnerPolicy {
+                        allow_raw_exec: Some(true),
+                        workspace_roots: vec!["/tmp".to_string()],
+                        allowed_commands: vec!["sh".to_string()],
+                        ..Default::default()
+                    }
+                })
+                .to_string(),
+                &[],
+            )
+            .expect("set policy");
+            let store = JobStore::default();
+            store
+                .submit_remote_runner_job(RemoteRunnerJobRequest {
+                    runner_id: "lab".to_string(),
+                    project_id: None,
+                    operation: "runner.exec".to_string(),
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf worker-ok".to_string(),
+                    ],
+                    cwd: Some("/tmp".to_string()),
+                    env: Default::default(),
+                    secret_env_names: Vec::new(),
+                    capture_patch: false,
+                    source_snapshot: None,
+                    require_paths: Vec::new(),
+                    metadata: None,
+                })
+                .expect("submit job");
+            let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (broker_url, handle) = spawn_cancelling_on_second_snapshot_broker(
+                store.clone(),
+                4,
+                Some(seen_paths.clone()),
+            );
+            write_reverse_controller_session(&broker_url);
+
+            let (output, exit_code) =
+                run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+            assert_eq!(exit_code, 0);
+            let job = output.job.expect("job");
+            assert_eq!(job.status, JobStatus::Cancelled);
+            handle.join().expect("mock broker joins");
+            let seen_paths = seen_paths.lock().expect("seen paths");
+            assert!(!seen_paths.iter().any(|path| path.ends_with("/finish")));
+            let events = store.events(job.id).expect("events");
+            assert!(!events
+                .iter()
+                .any(|event| event.kind == JobEventKind::Result));
+        });
     }
 
     #[test]
@@ -814,6 +1000,87 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn spawn_cancelling_after_claim_broker(
+        store: JobStore,
+        expected_requests: usize,
+        seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        spawn_custom_broker(store, expected_requests, seen_paths, |store, request| {
+            if request.path == "/runner/jobs/claim" {
+                let claim = store
+                    .claim_remote_runner_job("lab", None, 30_000, None)
+                    .expect("claim job");
+                if let Some(claim) = &claim {
+                    store
+                        .cancel(claim.job.id, "user requested")
+                        .expect("cancel job");
+                }
+                return serde_json::json!({
+                    "success": true,
+                    "data": { "body": { "claim": claim } }
+                });
+            }
+            handle_request(store, request)
+        })
+    }
+
+    fn spawn_cancelling_on_second_snapshot_broker(
+        store: JobStore,
+        expected_requests: usize,
+        seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let snapshots = Arc::new(std::sync::Mutex::new(0_u8));
+        spawn_custom_broker(
+            store,
+            expected_requests,
+            seen_paths,
+            move |store, request| {
+                if let Some(job_id) = request.path.strip_prefix("/jobs/") {
+                    let job_id = uuid::Uuid::parse_str(job_id).expect("job id");
+                    let mut snapshots = snapshots.lock().expect("snapshot count");
+                    *snapshots += 1;
+                    if *snapshots == 2 {
+                        store.cancel(job_id, "user requested").expect("cancel job");
+                    }
+                    let job = store.get(job_id).expect("job");
+                    return serde_json::json!({
+                        "success": true,
+                        "data": { "body": { "job": job } }
+                    });
+                }
+                handle_request(store, request)
+            },
+        )
+    }
+
+    fn spawn_custom_broker<F>(
+        store: JobStore,
+        expected_requests: usize,
+        seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+        mut handle: F,
+    ) -> (String, std::thread::JoinHandle<()>)
+    where
+        F: FnMut(&JobStore, &MockRequest) -> Value + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let request = read_request(&mut stream);
+                if let Some(seen_paths) = &seen_paths {
+                    seen_paths
+                        .lock()
+                        .expect("record request path")
+                        .push(request.path.clone());
+                }
+                let response = handle(&store, &request);
+                write_response(&mut stream, response);
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     fn write_reverse_controller_session(broker_url: &str) {
         let path = crate::core::paths::runner_session_file("lab").expect("session path");
         if let Some(parent) = path.parent() {
@@ -846,6 +1113,7 @@ mod tests {
     }
 
     struct MockRequest {
+        method: String,
         path: String,
         body: Value,
     }
@@ -862,12 +1130,13 @@ mod tests {
             }
         };
         let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
-        let path = headers
+        let mut request_line = headers
             .lines()
             .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .expect("request path")
-            .to_string();
+            .expect("request line")
+            .split_whitespace();
+        let method = request_line.next().expect("request method").to_string();
+        let path = request_line.next().expect("request path").to_string();
         let content_length = headers
             .lines()
             .find_map(|line| line.strip_prefix("content-length: "))
@@ -890,7 +1159,7 @@ mod tests {
             serde_json::from_slice(&buffer[body_start..body_start + content_length])
                 .expect("request json")
         };
-        MockRequest { path, body }
+        MockRequest { method, path, body }
     }
 
     fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -898,6 +1167,16 @@ mod tests {
     }
 
     fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
+        if request.method == "GET" {
+            if let Some(job_id) = request.path.strip_prefix("/jobs/") {
+                let job_id = uuid::Uuid::parse_str(job_id).expect("job id");
+                let job = store.get(job_id).expect("job");
+                return serde_json::json!({
+                    "success": true,
+                    "data": { "body": { "job": job } }
+                });
+            }
+        }
         if request.path == "/runner/jobs/claim" {
             let claim = store
                 .claim_remote_runner_job("lab", None, 30_000, None)
