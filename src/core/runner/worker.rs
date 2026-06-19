@@ -33,6 +33,7 @@ pub struct ReverseRunnerWorkerOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReverseRunnerWorkerOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub runner_id: String,
     pub broker_url: String,
@@ -207,6 +208,7 @@ fn run_loop(
     );
     Ok((
         ReverseRunnerWorkerOutput {
+            variant: "work",
             command: "runner.work",
             runner_id: options.runner_id,
             broker_url: options.broker_url,
@@ -251,6 +253,7 @@ fn run_once_output(
         let loop_mode = options.loop_mode;
         return Ok((
             ReverseRunnerWorkerOutput {
+                variant: "work",
                 command: "runner.work",
                 runner_id: options.runner_id,
                 broker_url: options.broker_url,
@@ -448,6 +451,7 @@ fn claimed_output(
 ) -> ReverseRunnerWorkerOutput {
     let loop_mode = options.loop_mode;
     ReverseRunnerWorkerOutput {
+        variant: "work",
         command: "runner.work",
         runner_id: options.runner_id,
         broker_url: options.broker_url,
