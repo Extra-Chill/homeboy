@@ -587,6 +587,7 @@ pub(super) fn load_project_components(
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
     let mut extension_skipped = Vec::new();
+    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
 
     for attachment in project
         .components
@@ -598,7 +599,11 @@ pub(super) fn load_project_components(
         // should not block deploying the ones you asked for.
         let is_requested = requested_ids.is_empty() || requested_ids.contains(&attachment.id);
 
-        let mut loaded = project::resolve_project_component(project, &attachment.id)?;
+        let mut loaded = project::resolve_project_component_with_standalone_snapshot(
+            project,
+            &attachment.id,
+            Some(&standalone_snapshot),
+        )?;
 
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently

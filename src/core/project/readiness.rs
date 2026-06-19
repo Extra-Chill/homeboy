@@ -40,8 +40,13 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
             project.id
         ));
     } else {
+        let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
         let has_deployable = project.components.iter().any(|attachment| {
-            if let Ok(comp) = super::resolve_project_component(project, &attachment.id) {
+            if let Ok(comp) = super::resolve_project_component_with_standalone_snapshot(
+                project,
+                &attachment.id,
+                Some(&standalone_snapshot),
+            ) {
                 let is_git = comp.deploy_strategy.as_deref() == Some("git");
                 let has_artifact = component::resolve_artifact(&comp).is_some();
                 is_git || has_artifact
