@@ -275,11 +275,19 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
 
     let mut messages = Vec::new();
     if matches!(selection.source, LabRunnerSelectionSource::Default) {
-        messages.push(format!(
-            "Lab offload: auto-selected default {} runner `{}`.",
+        // Make the auto-offload visible up front (#3815): the operator did not
+        // ask for a runner explicitly, so spell out that this command is about
+        // to leave the local machine and run remotely, on which runner, and how
+        // to keep it local. Without this the first sign of remote execution is
+        // a confusing remote-specific failure (e.g. a local `@file` that does
+        // not exist on the runner).
+        let auto_offload_signal = format!(
+            "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine. Pass `--force-hot --allow-local-hot` to run it locally instead.",
             selection.mode.label(),
             selection.runner_id
-        ));
+        );
+        eprintln!("{auto_offload_signal}");
+        messages.push(auto_offload_signal);
     }
 
     plan = with_step(
@@ -1229,6 +1237,17 @@ fn run_lab_offload_inner(
     }
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
+        // Remote-failure clarity (#3815): a non-zero offloaded exit can be
+        // confusing because the failure surfaces controller-side as if it ran
+        // locally. Lead with an explicit banner that names the runner and
+        // remote workspace so a controller-vs-runner mismatch (a path/file that
+        // exists locally but not on the runner, a missing remote dependency,
+        // etc.) is obviously a remote failure, not a bug in the command itself.
+        // This runs for every offloaded failure, including plain cooks that
+        // have no agent-task run id.
+        stderr.push_str(&format!(
+            "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
+        ));
         if let Some(run_id) = agent_task_run_id.as_deref() {
             if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
                 &exec_output.stdout,
