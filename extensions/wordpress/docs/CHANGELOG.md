@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.35] - 2026-06-19
+
+### Changed
+- Normalize runtime agent task contracts
+
 ## [3.7.34] - 2026-06-19
 
 ### Changed
