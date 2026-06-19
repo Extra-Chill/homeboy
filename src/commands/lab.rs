@@ -377,6 +377,7 @@ fn materialize_lab_extension_source(
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
         },
     )?;
 

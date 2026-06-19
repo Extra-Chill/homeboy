@@ -170,6 +170,7 @@ fn sync_inline_agent_task_file(
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
         },
     )?
     .0;
@@ -337,6 +338,17 @@ pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<St
 }
 
 pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<String>, String)> {
+    ensure_agent_task_dispatch_run_id_with(args, None)
+}
+
+/// Like [`ensure_agent_task_dispatch_run_id`] but, when no `--run-id` is already
+/// present, uses `preferred` as the injected run id instead of generating a
+/// fresh UUID. This lets the offload orchestrator keep the workspace-isolation
+/// token and the dispatched `--run-id` identical for a given run (#4393).
+pub(super) fn ensure_agent_task_dispatch_run_id_with(
+    args: &[String],
+    preferred: Option<&str>,
+) -> Option<(Vec<String>, String)> {
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
     let action_index = invocation.child_index_matching(&["dispatch", "cook"])?;
 
@@ -344,11 +356,25 @@ pub(super) fn ensure_agent_task_dispatch_run_id(args: &[String]) -> Option<(Vec<
         return Some((args.to_vec(), run_id));
     }
 
-    let run_id = format!("agent-task-{}", uuid::Uuid::new_v4());
+    let run_id = preferred
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
     let out = ArgEditor::new(args)
         .insert_after(action_index, ["--run-id".to_string(), run_id.clone()])
         .into_args();
     Some((out, run_id))
+}
+
+/// Resolves the stable per-run isolation token for an agent-task `dispatch`/`cook`
+/// offload: the explicit `--run-id` when provided, otherwise a freshly generated
+/// run id. Returns `None` for non-dispatch/cook invocations (which already use
+/// unique snapshot workspaces and need no extra isolation).
+pub(super) fn agent_task_dispatch_run_isolation_token(args: &[String]) -> Option<String> {
+    if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
+        return Some(run_id);
+    }
+    ensure_agent_task_dispatch_run_id(args).map(|(_, run_id)| run_id)
 }
 
 pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
@@ -669,6 +695,84 @@ mod tests {
         assert_eq!(out[5], run_id);
         assert_eq!(out[6], "--repo");
         assert_eq!(out[7], "homeboy");
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_with_uses_preferred_id_when_unset() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token"))
+            .expect("agent task args");
+
+        assert_eq!(run_id, "iso-token");
+        assert!(out.contains(&"--run-id".to_string()));
+        assert!(out.contains(&"iso-token".to_string()));
+    }
+
+    #[test]
+    fn ensure_agent_task_dispatch_run_id_with_preserves_explicit_run_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--run-id".to_string(),
+            "explicit-run".to_string(),
+        ];
+
+        let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token"))
+            .expect("agent task args");
+
+        // An explicit --run-id always wins over the preferred isolation token.
+        assert_eq!(run_id, "explicit-run");
+        assert_eq!(out, args);
+    }
+
+    #[test]
+    fn dispatch_run_isolation_token_reuses_explicit_run_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "dispatch".to_string(),
+            "--run-id".to_string(),
+            "explicit-run".to_string(),
+        ];
+
+        assert_eq!(
+            agent_task_dispatch_run_isolation_token(&args),
+            Some("explicit-run".to_string())
+        );
+    }
+
+    #[test]
+    fn dispatch_run_isolation_token_generates_for_unset_run_id() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--repo".to_string(),
+            "homeboy".to_string(),
+        ];
+
+        let token = agent_task_dispatch_run_isolation_token(&args).expect("token");
+        assert!(token.starts_with("agent-task-"));
+    }
+
+    #[test]
+    fn dispatch_run_isolation_token_none_for_non_dispatch_commands() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "status".to_string(),
+            "run-1".to_string(),
+        ];
+
+        assert!(agent_task_dispatch_run_isolation_token(&args).is_none());
     }
 
     #[test]

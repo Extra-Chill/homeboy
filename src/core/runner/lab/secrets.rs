@@ -1107,10 +1107,14 @@ mod tests {
             .expect("provider default source should resolve on controller");
 
             assert!(matches!(
-                env.get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN").map(String::as_str),
+                env.get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+                    .map(String::as_str),
                 Some("controller-access-token")
             ));
-            assert_eq!(diagnostics["runner_deferred_secret_env"], serde_json::json!([]));
+            assert_eq!(
+                diagnostics["runner_deferred_secret_env"],
+                serde_json::json!([])
+            );
             assert_eq!(
                 diagnostics["secret_env"],
                 serde_json::json!([
