@@ -47,6 +47,12 @@ struct SessionRequest {
     homeboy_version: Option<String>,
     #[serde(default)]
     homeboy_build_identity: Option<String>,
+    #[serde(default)]
+    worker_identity: Option<String>,
+    #[serde(default)]
+    worker_pid: Option<u32>,
+    #[serde(default)]
+    last_seen_at: Option<String>,
 }
 
 pub(super) fn route(
@@ -104,6 +110,7 @@ fn register_session(body: Option<Value>) -> Result<Value> {
         ));
     }
 
+    let now = chrono::Utc::now().to_rfc3339();
     let session = RunnerSession {
         runner_id: request.runner_id.clone(),
         mode: RunnerTunnelMode::Reverse,
@@ -121,26 +128,12 @@ fn register_session(body: Option<Value>) -> Result<Value> {
             .clone()
             .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
         homeboy_build_identity: request.homeboy_build_identity.clone(),
-        connected_at: chrono::Utc::now().to_rfc3339(),
+        connected_at: now.clone(),
+        worker_identity: request.worker_identity.clone(),
+        worker_pid: request.worker_pid,
+        last_seen_at: request.last_seen_at.clone().or(Some(now)),
     };
-    let path = paths::runner_session_file(&session.runner_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-    let serialized = serde_json::to_string_pretty(&session).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("serialize runner session".to_string()),
-        )
-    })?;
-    std::fs::write(&path, serialized).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
-    })?;
+    let path = write_session(&session)?;
 
     Ok(json!({
         "command": "api.runner.sessions.register",
@@ -165,6 +158,7 @@ fn enqueue(body: Option<Value>, job_store: &JobStore) -> Result<Value> {
 
 fn claim(body: Option<Value>, job_store: &JobStore) -> Result<Value> {
     let request: ClaimRequest = parse_body(body, "remote runner claim request")?;
+    touch_reverse_session(&request.runner_id)?;
     let claim = job_store.claim_remote_runner_job(
         &request.runner_id,
         request.project_id.as_deref(),
@@ -223,6 +217,7 @@ fn job_path(path: &str) -> Option<(Uuid, &str)> {
 
 fn append_event(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Value> {
     let request: EventRequest = parse_body(body, "remote runner event request")?;
+    touch_reverse_session(&request.runner_id)?;
     let event = job_store.append_remote_runner_event(
         job_id,
         &request.runner_id,
@@ -239,6 +234,7 @@ fn append_event(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Resu
 
 fn finish(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Value> {
     let request: FinishRequest = parse_body(body, "remote runner finish request")?;
+    touch_reverse_session(&request.runner_id)?;
     let job = job_store.finish_remote_runner_job(
         job_id,
         &request.runner_id,
@@ -255,4 +251,43 @@ fn parse_body<T: for<'de> Deserialize<'de>>(body: Option<Value>, label: &str) ->
     serde_json::from_value(body.unwrap_or_else(|| json!({}))).map_err(|err| {
         Error::validation_invalid_argument("body", format!("invalid {label}: {err}"), None, None)
     })
+}
+
+fn touch_reverse_session(runner_id: &str) -> Result<()> {
+    let path = paths::runner_session_file(runner_id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    let mut session: RunnerSession = serde_json::from_str(&raw)
+        .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
+    if session.mode == RunnerTunnelMode::Reverse && session.role == RunnerSessionRole::Controller {
+        session.last_seen_at = Some(chrono::Utc::now().to_rfc3339());
+        write_session(&session)?;
+    }
+    Ok(())
+}
+
+fn write_session(session: &RunnerSession) -> Result<std::path::PathBuf> {
+    let path = paths::runner_session_file(&session.runner_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let serialized = serde_json::to_string_pretty(session).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize runner session".to_string()),
+        )
+    })?;
+    std::fs::write(&path, serialized).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
+    })?;
+    Ok(path)
 }
