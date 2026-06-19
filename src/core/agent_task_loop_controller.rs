@@ -1859,7 +1859,7 @@ fn jsonpath_match_is_truthy(value: &Value) -> bool {
     }
 }
 
-fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
+pub(crate) fn action_entity_id(action: &AgentTaskLoopPolicyAction) -> Option<String> {
     match action {
         AgentTaskLoopPolicyAction::SpawnTask { entity_id, .. }
         | AgentTaskLoopPolicyAction::SpawnController { entity_id, .. }
