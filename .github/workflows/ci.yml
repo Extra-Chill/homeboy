@@ -1,8 +1,8 @@
 # PR quality pipeline.
 #
 # Homeboy Action owns the CI DAG so command failures aggregate instead of
-# skipping later quality checks. Build remains the hard gate because this repo
-# validates the Homeboy binary produced from the PR source.
+# skipping later quality checks. Ordinary PR quality gates use the action-provided
+# Homeboy binary instead of compiling a release binary on every pull request.
 
 name: CI
 
@@ -32,6 +32,4 @@ jobs:
       # lands a bot commit mid-review and supersedes in-flight CI runs,
       # which reads as a spurious failure (see #3819). Require manual fixes.
       autofix: 'false'
-      build-command: cargo build --release
-      build-artifact-path: target/release/homeboy
     secrets: inherit
