@@ -13,8 +13,8 @@ use super::execution::{
 use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
-    calculate_component_status, calculate_release_state, load_project_components, plan_components,
-    ExtensionSkippedComponent,
+    calculate_component_status_with_git_cache, calculate_release_state, load_project_components,
+    plan_components, ExtensionSkippedComponent, GitProbeCache,
 };
 use super::types::{
     ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
@@ -318,10 +318,12 @@ fn run_check_mode(
     base_path: &str,
     config: &DeployConfig,
 ) -> DeployOrchestrationResult {
+    let mut git_probe_cache = GitProbeCache::default();
     let mut results: Vec<ComponentDeployResult> = components
         .iter()
         .map(|c| {
-            let status = calculate_component_status(c, remote_versions);
+            let status =
+                calculate_component_status_with_git_cache(c, remote_versions, &mut git_probe_cache);
             let release_state = calculate_release_state(c);
             let mut result = ComponentDeployResult::new_for_project(c, project, base_path)
                 .with_status("checked")
@@ -389,11 +391,12 @@ fn run_dry_run_mode(
     base_path: &str,
     config: &DeployConfig,
 ) -> DeployOrchestrationResult {
+    let mut git_probe_cache = GitProbeCache::default();
     let results: Vec<ComponentDeployResult> = components
         .iter()
         .map(|c| {
             let status = if config.check {
-                calculate_component_status(c, remote_versions)
+                calculate_component_status_with_git_cache(c, remote_versions, &mut git_probe_cache)
             } else {
                 ComponentStatus::Unknown
             };
