@@ -29,6 +29,7 @@ const {
 const {
   artifactNameFromDeclaration,
   artifactPath,
+  artifactRoleFromCodeboxArtifact,
   normalizeTypedArtifactEntry: normalizeCodeboxTypedArtifactEntry,
   normalizeTypedArtifacts: normalizeCodeboxTypedArtifacts,
   typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
@@ -47,6 +48,7 @@ const {
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
   WP_CODEBOX_ROLE_ALIASES,
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
+  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,
@@ -150,6 +152,7 @@ function providerContract(options = {}) {
     provider_preflight: runtimeProviderPreflight(),
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
+    upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
     status: 'active',
     integration_contract: 'homeboy-wordpress-agent-task/v1',
     runtime_gap_trackers: WP_CODEBOX_RUNTIME_GAP_TRACKERS,
@@ -2222,7 +2225,7 @@ function normalizeCodeboxArtifactOutcome(artifact, rawArtifact = {}) {
     return artifact;
   }
   const nativeKind = rawArtifact.kind || rawArtifact.type || artifact.kind || '';
-  const role = providerNeutralArtifactRole({ ...artifact, kind: nativeKind });
+  const role = artifactRoleFromCodeboxArtifact({ ...artifact, kind: nativeKind }, WP_CODEBOX_ROLE_ALIASES);
   const metadata = artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
     ? artifact.metadata
     : {};
@@ -2239,50 +2242,6 @@ function normalizeCodeboxArtifactOutcome(artifact, rawArtifact = {}) {
       },
     }),
   };
-}
-
-function providerNeutralArtifactRole(artifact = {}) {
-  const label = `${artifact.kind || ''} ${artifact.name || ''} ${artifact.id || ''} ${artifact.path || ''} ${artifact.url || ''}`;
-  if (/patch|diff/i.test(label)) {
-    return 'patch';
-  }
-  if (/changed[-_ ]?files/i.test(label)) {
-    return 'changed_files';
-  }
-  if (/transcript|conversation|messages/i.test(label)) {
-    return 'transcript';
-  }
-  if (/typed[-_ ]?bundle[-_ ]?output|typed[-_ ]?artifact/i.test(label)) {
-    return 'typed_artifact';
-  }
-  if (/replay[-_ ]?bundle/i.test(label)) {
-    return 'replay_bundle';
-  }
-  if (/pull[-_ ]?request/i.test(label)) {
-    return 'pull_request';
-  }
-  if (/screenshot/i.test(label)) {
-    return 'screenshot';
-  }
-  if (/probe/i.test(label)) {
-    return 'probe_result';
-  }
-  if (/side[-_ ]?effects?/i.test(label)) {
-    return 'side_effects';
-  }
-  if (/command[-_ ]?evidence|agent[-_ ]?task[-_ ]?input|homeboy-codebox-task-runner\.json/i.test(label)) {
-    return 'preflight_evidence';
-  }
-  if (/command[-_ ]?log/i.test(label)) {
-    return 'command_log';
-  }
-  if (/runtime[-_ ]?log|startup[-_ ]?log/i.test(label)) {
-    return 'runtime_log';
-  }
-  if (/artifact[-_ ]?bundle|artifact[-_ ]?directory|session[-_ ]?artifacts/i.test(label)) {
-    return 'artifact_bundle';
-  }
-  return 'artifact';
 }
 
 function pathValue(source, dottedPath) {

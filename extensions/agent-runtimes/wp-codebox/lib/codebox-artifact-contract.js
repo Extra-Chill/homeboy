@@ -2,6 +2,22 @@
 
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 
+const ARTIFACT_ROLE_FALLBACK_PATTERNS = [
+  ['patch', /patch|diff/i],
+  ['changed_files', /changed[-_ ]?files/i],
+  ['transcript', /transcript|conversation|messages/i],
+  ['typed_artifact', /typed[-_ ]?bundle[-_ ]?output|typed[-_ ]?artifact/i],
+  ['replay_bundle', /replay[-_ ]?bundle/i],
+  ['pull_request', /pull[-_ ]?request/i],
+  ['screenshot', /screenshot/i],
+  ['probe_result', /probe/i],
+  ['side_effects', /side[-_ ]?effects?/i],
+  ['preflight_evidence', /command[-_ ]?evidence|agent[-_ ]?task[-_ ]?input|homeboy-codebox-task-runner\.json/i],
+  ['command_log', /command[-_ ]?log/i],
+  ['runtime_log', /runtime[-_ ]?log|startup[-_ ]?log/i],
+  ['artifact_bundle', /artifact[-_ ]?bundle|artifact[-_ ]?directory|session[-_ ]?artifacts/i],
+];
+
 function normalizeTypedArtifactEntry(name, artifact, options = {}) {
   if (!plainObject(artifact)) {
     return null;
@@ -66,8 +82,63 @@ function artifactPath(root, relativePath) {
   return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
 }
 
+function artifactRoleFromCodeboxArtifact(artifact = {}, roleAliases = {}) {
+  const labels = artifactLabels(artifact);
+  const explicitRole = roleFromAliases(labels, roleAliases);
+  if (explicitRole) {
+    return explicitRole;
+  }
+  const fallbackLabel = labels.join(' ');
+  const fallback = ARTIFACT_ROLE_FALLBACK_PATTERNS.find(([, pattern]) => pattern.test(fallbackLabel));
+  return fallback?.[0] || 'artifact';
+}
+
+function roleFromAliases(labels, roleAliases = {}) {
+  const normalizedLabels = labels.map(normalizeLabel).filter(Boolean);
+  const aliasGroups = [
+    roleAliases.artifact_roles,
+    roleAliases.artifact_kinds,
+    roleAliases.artifact_filenames,
+  ].filter(plainObject);
+  for (const aliases of aliasGroups) {
+    for (const [role, values] of Object.entries(aliases)) {
+      if (normalizeArray(values).map(normalizeLabel).some((alias) => normalizedLabels.includes(alias))) {
+        return role;
+      }
+    }
+  }
+  return '';
+}
+
+function artifactLabels(artifact = {}) {
+  return [
+    artifact.role,
+    artifact.kind,
+    artifact.type,
+    artifact.name,
+    artifact.id,
+    artifact.path,
+    artifact.url,
+    artifact.file,
+    artifact.directory,
+    basename(artifact.path || artifact.url || artifact.file || artifact.directory || ''),
+  ].filter(Boolean).map(String);
+}
+
+function basename(value) {
+  return String(value).split(/[\\/]/).filter(Boolean).pop() || '';
+}
+
+function normalizeLabel(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function cleanObject(value) {
@@ -77,6 +148,7 @@ function cleanObject(value) {
 
 module.exports = {
   TYPED_ARTIFACT_SCHEMA,
+  artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
   normalizeTypedArtifactEntry,

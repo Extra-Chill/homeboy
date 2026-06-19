@@ -15,6 +15,7 @@ const {
 	WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
 	WP_CODEBOX_ROLE_ALIASES,
 	WP_CODEBOX_TASK_REQUEST_SCHEMA,
+	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
 	wpCodeboxProviderRuntimeInvocationContract,
 	wpCodeboxProviderRuntimeOperationConfig,
 	wpCodeboxProviderRuntimeOperationEntry,
@@ -57,5 +58,11 @@ assert.deepEqual(wpCodeboxProviderRuntimeOperationConfig('toolCallTranscriptReco
 });
 
 assert.deepEqual(WP_CODEBOX_ROLE_ALIASES.artifact_roles.patch, ['codebox-patch']);
+assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) => requirement.id), [
+	'runtime-profile',
+	'parent-tool-bridge',
+	'provider-runtime-invocation',
+	'artifact-result-envelope',
+]);
 
 console.log('wp-codebox adapter contract smoke passed');
