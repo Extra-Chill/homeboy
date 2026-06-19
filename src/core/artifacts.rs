@@ -27,6 +27,9 @@ pub use super::artifact_origin::{
     inspect, serve, status, status_with_command, ArtifactOriginInspect, ArtifactOriginServeSpec,
     ArtifactOriginStatus,
 };
+pub use super::artifact_ref::{
+    ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
+};
 pub use super::browser_evidence::{
     validate_bench_results_payload, validate_trace_results_payload, BrowserArtifactMetadata,
     BrowserBottleneckRow, BrowserNetworkRequestRow, BrowserOriginDeclaredService,

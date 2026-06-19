@@ -102,6 +102,11 @@ For exhaustive command docs, see
 [docs/commands/commands-index.md](docs/commands/commands-index.md) or run
 `homeboy docs list`.
 
+Agents can inspect the recursive command safety manifest with `homeboy list --json`.
+The manifest includes command paths, mutation/operator classification, dry-run
+flags, dangerous flags, structured-output notes, Lab routing metadata, and docs
+paths while `homeboy list` continues to print the raw top-level help.
+
 ## Quick Start
 
 ### 1. Add `homeboy.json`

@@ -41,6 +41,9 @@ enum FileCommand {
         project_id: String,
         /// Remote file path
         path: String,
+        /// Apply the destructive write. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
     },
     /// Create a directory
     Mkdir {
@@ -58,6 +61,9 @@ enum FileCommand {
         /// Delete directories recursively
         #[arg(short, long)]
         recursive: bool,
+        /// Apply the destructive delete. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
     },
     /// Rename or move a file
     Rename {
@@ -278,10 +284,18 @@ pub struct FileOutput {
     content: Option<String>,
     size: Option<i64>,
     bytes_written: Option<usize>,
+    #[serde(skip_serializing_if = "is_false")]
+    dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_required: Option<String>,
     stdout: Option<String>,
     stderr: Option<String>,
     exit_code: i32,
     success: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Serialize)]
@@ -368,8 +382,12 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
                 Ok((FileCommandOutput::Standard(out), code))
             }
         }
-        FileCommand::Write { project_id, path } => {
-            let (out, code) = write(&project_id, &path)?;
+        FileCommand::Write {
+            project_id,
+            path,
+            apply,
+        } => {
+            let (out, code) = write(&project_id, &path, apply)?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Mkdir { project_id, path } => {
@@ -395,6 +413,8 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
                     content: None,
                     size: None,
                     bytes_written: None,
+                    dry_run: false,
+                    action_required: None,
                     stdout: None,
                     stderr: None,
                     exit_code: 0,
@@ -407,8 +427,9 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             project_id,
             path,
             recursive,
+            apply,
         } => {
-            let (out, code) = delete(&project_id, &path, recursive)?;
+            let (out, code) = delete(&project_id, &path, recursive, apply)?;
             Ok((FileCommandOutput::Standard(out), code))
         }
         FileCommand::Rename {
@@ -521,6 +542,8 @@ fn list(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             content: None,
             size: None,
             bytes_written: None,
+            dry_run: false,
+            action_required: None,
             stdout: None,
             stderr: None,
             exit_code: 0,
@@ -546,6 +569,8 @@ fn read(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             content: Some(result.content),
             size: result.size,
             bytes_written: None,
+            dry_run: false,
+            action_required: None,
             stdout: None,
             stderr: None,
             exit_code: 0,
@@ -555,8 +580,38 @@ fn read(project_id: &str, path: &str) -> CmdResult<FileOutput> {
     ))
 }
 
-fn write(project_id: &str, path: &str) -> CmdResult<FileOutput> {
+fn write(project_id: &str, path: &str, apply: bool) -> CmdResult<FileOutput> {
     let content = files::read_stdin()?;
+    if !apply {
+        let project = project::load(project_id)?;
+        let project_base_path = require_project_base_path(project_id, &project)?;
+        let full_path = join_remote_path(Some(&project_base_path), path)?;
+
+        return Ok((
+            FileOutput {
+                command: "file.write".to_string(),
+                project_id: project_id.to_string(),
+                base_path: Some(project_base_path),
+                path: Some(full_path),
+                old_path: None,
+                new_path: None,
+                recursive: None,
+                entries: None,
+                content: None,
+                size: None,
+                bytes_written: Some(content.len()),
+                dry_run: true,
+                action_required: Some(
+                    "Re-run with --apply to write stdin to the remote file.".to_string(),
+                ),
+                stdout: None,
+                stderr: None,
+                exit_code: 0,
+                success: true,
+            },
+            0,
+        ));
+    }
     let result = files::write(project_id, path, &content)?;
 
     Ok((
@@ -572,6 +627,8 @@ fn write(project_id: &str, path: &str) -> CmdResult<FileOutput> {
             content: None,
             size: None,
             bytes_written: Some(result.bytes_written),
+            dry_run: false,
+            action_required: None,
             stdout: None,
             stderr: None,
             exit_code: 0,
@@ -581,7 +638,35 @@ fn write(project_id: &str, path: &str) -> CmdResult<FileOutput> {
     ))
 }
 
-fn delete(project_id: &str, path: &str, recursive: bool) -> CmdResult<FileOutput> {
+fn delete(project_id: &str, path: &str, recursive: bool, apply: bool) -> CmdResult<FileOutput> {
+    if !apply {
+        let project = project::load(project_id)?;
+        let project_base_path = require_project_base_path(project_id, &project)?;
+        let full_path = join_remote_path(Some(&project_base_path), path)?;
+
+        return Ok((
+            FileOutput {
+                command: "file.delete".to_string(),
+                project_id: project_id.to_string(),
+                base_path: Some(project_base_path),
+                path: Some(full_path),
+                old_path: None,
+                new_path: None,
+                recursive: Some(recursive),
+                entries: None,
+                content: None,
+                size: None,
+                bytes_written: None,
+                dry_run: true,
+                action_required: Some("Re-run with --apply to delete the remote path.".to_string()),
+                stdout: None,
+                stderr: None,
+                exit_code: 0,
+                success: true,
+            },
+            0,
+        ));
+    }
     let result = files::delete(project_id, path, recursive)?;
 
     Ok((
@@ -597,6 +682,8 @@ fn delete(project_id: &str, path: &str, recursive: bool) -> CmdResult<FileOutput
             content: None,
             size: None,
             bytes_written: None,
+            dry_run: false,
+            action_required: None,
             stdout: None,
             stderr: None,
             exit_code: 0,
@@ -622,6 +709,8 @@ fn rename(project_id: &str, old_path: &str, new_path: &str) -> CmdResult<FileOut
             content: None,
             size: None,
             bytes_written: None,
+            dry_run: false,
+            action_required: None,
             stdout: None,
             stderr: None,
             exit_code: 0,

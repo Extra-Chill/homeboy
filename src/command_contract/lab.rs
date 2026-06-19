@@ -106,6 +106,13 @@ struct LabSupportedCommandSummary {
     hint_label: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabRunnerSupportSummary {
+    pub supported_labels: Vec<&'static str>,
+    pub unsupported_message: String,
+    pub hint: String,
+}
+
 const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         #[cfg(test)]
@@ -209,18 +216,29 @@ pub fn lab_runner_supported_labels() -> Vec<&'static str> {
         .collect()
 }
 
+pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
+    let supported_labels = lab_runner_supported_labels();
+    let hint_labels = lab_runner_supported_hint_labels();
+
+    LabRunnerSupportSummary {
+        unsupported_message: format!(
+            "--runner is only supported for commands with portable Lab offload support: {}",
+            human_join(&supported_labels)
+        ),
+        hint: format!(
+            "Current Lab offload support: {}.",
+            human_join(&hint_labels)
+        ),
+        supported_labels,
+    }
+}
+
 pub fn lab_runner_unsupported_message() -> String {
-    format!(
-        "--runner is only supported for commands with portable Lab offload support: {}",
-        human_join(&lab_runner_supported_labels())
-    )
+    lab_runner_support_summary().unsupported_message
 }
 
 pub fn lab_runner_unsupported_hint() -> String {
-    format!(
-        "Current Lab offload support: {}.",
-        human_join(&lab_runner_supported_hint_labels())
-    )
+    lab_runner_support_summary().hint
 }
 
 fn lab_runner_supported_hint_labels() -> Vec<&'static str> {

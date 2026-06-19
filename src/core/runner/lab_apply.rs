@@ -108,6 +108,7 @@ mod tests {
         )
         .expect("patch file");
         let exec_output = RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,
@@ -166,6 +167,7 @@ mod tests {
         )
         .expect("patch file");
         let exec_output = RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,

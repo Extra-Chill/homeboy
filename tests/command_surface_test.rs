@@ -1,5 +1,8 @@
 use clap::{CommandFactory, Parser};
-use homeboy::cli_surface::{command_surface_from_with_depth, current_command_surface, Cli};
+use homeboy::cli_surface::{
+    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
+    Commands,
+};
 use std::collections::BTreeSet;
 use std::fs;
 
@@ -122,6 +125,31 @@ fn command_surface_depth_is_configurable() {
 
     assert!(surface.contains_path(&["runner", "job"]));
     assert!(!surface.contains_path(&["runner", "job", "logs"]));
+}
+
+#[test]
+fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
+    let cli = Cli::try_parse_from(["homeboy", "list", "--json"])
+        .expect("hidden list --json should parse");
+    assert!(matches!(cli.command, Commands::List { json: true }));
+
+    let value = serde_json::to_value(current_command_safety_manifest())
+        .expect("safety manifest should serialize");
+    assert_eq!(value["commands"][0]["path"].as_array().unwrap().len(), 1);
+    assert!(value["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["subcommands"]
+            .as_array()
+            .is_some_and(|subcommands| !subcommands.is_empty())));
+    assert!(value["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.get("mutates").is_some()
+            && entry.get("operator").is_some()
+            && entry.get("dangerous_flags").is_some()));
 }
 
 #[test]
