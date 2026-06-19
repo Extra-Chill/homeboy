@@ -40,7 +40,8 @@ pub fn run_summaries_with_artifact_indexes(
 ) -> homeboy::core::Result<Vec<RunSummary>> {
     let rig_run_ids = run_records
         .iter()
-        .filter_map(|run| (run.kind == "rig" && run.rig_id.is_some()).then(|| run.id.clone()))
+        .filter(|run| run.kind == "rig" && run.rig_id.is_some())
+        .map(|run| run.id.clone())
         .collect::<Vec<_>>();
     let mut artifacts_by_run = store.list_artifacts_for_runs(&rig_run_ids)?;
     Ok(run_records

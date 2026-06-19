@@ -722,8 +722,7 @@ impl ObservationStore {
         }
 
         for chunk in run_ids.chunks(900) {
-            let placeholders = std::iter::repeat("?")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             let sql = format!(
