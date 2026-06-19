@@ -303,6 +303,9 @@ where
         | ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
         | ("GET", "/runner/jobs/claim") => method_not_allowed(),
+        ("GET", path) if path.starts_with("/runner/jobs/") => {
+            remote_runner::route(method, path, body, job_store)
+        }
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store)
         }
