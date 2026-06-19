@@ -305,6 +305,7 @@ fn scenario_id_for_workload_path(path: &std::path::Path) -> String {
     let name = basename
         .split_once(".bench.")
         .map(|(stem, _)| stem)
+        .or_else(|| basename.split_once(".workload.").map(|(stem, _)| stem))
         .unwrap_or_else(|| {
             basename
                 .rsplit_once('.')
