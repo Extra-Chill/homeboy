@@ -83,6 +83,7 @@ fn test_args(root: &Path) -> TestArgs {
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
+        precomputed_changed_files: None,
         json_summary: false,
     }
 }
