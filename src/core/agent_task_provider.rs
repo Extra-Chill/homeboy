@@ -2614,10 +2614,10 @@ fn provider_command_env(
         ),
         ("HOMEBOY_RUNTIME_PATH".to_string(), runtime_path.clone()),
         (
-            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            "HOMEBOY_AGENT_RUNTIME_ID".to_string(),
             provider.runtime_id.clone().unwrap_or_default(),
         ),
-        ("HOMEBOY_AI_RUNTIME_PATH".to_string(), runtime_path),
+        ("HOMEBOY_AGENT_RUNTIME_PATH".to_string(), runtime_path),
     ];
     env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
     env.extend(
@@ -3769,11 +3769,11 @@ process.stdout.write(JSON.stringify({
         let env = provider_command_env(&request, &provider).expect("provider env");
 
         assert!(env.contains(&(
-            "HOMEBOY_AI_RUNTIME_ID".to_string(),
+            "HOMEBOY_AGENT_RUNTIME_ID".to_string(),
             "custom-runtime".to_string()
         )));
         assert!(env.contains(&(
-            "HOMEBOY_AI_RUNTIME_PATH".to_string(),
+            "HOMEBOY_AGENT_RUNTIME_PATH".to_string(),
             "/tmp/custom-runtime".to_string()
         )));
         assert_eq!(
