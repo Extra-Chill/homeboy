@@ -74,7 +74,7 @@ use output::{
 };
 use probes::trace_probes_for_args;
 use repeat::run_repeat;
-pub(super) use run_service::{execute_trace_run, TraceRunExecution};
+use run_service::{execute_trace_run, TraceRunExecution};
 pub(super) use schedule::{
     plan_trace_run_order, TraceRunPlanEntry, TraceSchedule, TraceVariantMatrixMode,
 };
