@@ -27,6 +27,13 @@ const {
   providerFailureClassification,
 } = require('./provider-outcome-normalizer');
 const {
+  artifactNameFromDeclaration,
+  artifactPath,
+  normalizeTypedArtifactEntry: normalizeCodeboxTypedArtifactEntry,
+  normalizeTypedArtifacts: normalizeCodeboxTypedArtifacts,
+  typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
+} = require('./codebox-artifact-contract');
+const {
   codeboxRuntimeProfilePayload,
   componentContractsFromRuntimeProfileDependencies,
 } = require('./codebox-runtime-profile');
@@ -1875,13 +1882,6 @@ function appendUniqueEvidenceRef(refs, ref) {
   refs.push(ref);
 }
 
-function artifactPath(root, relativePath) {
-  if (!root || !relativePath) {
-    return '';
-  }
-  return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
-}
-
 function codeboxBundleArtifacts(result) {
   const artifacts = [];
   const artifactRefs = Array.isArray(result.run?.artifactRefs) ? result.run.artifactRefs : [];
@@ -2093,50 +2093,11 @@ function sanitizePublicMetadata(value) {
 }
 
 function normalizeTypedArtifactEntry(name, artifact) {
-  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) {
-    return null;
-  }
-  const artifactName = artifact.name || name;
-  if (!artifactName) {
-    return null;
-  }
-  const fileRefs = typedArtifactOutputFileRefs(artifact);
-  return sanitizePublicMetadata(Object.fromEntries(Object.entries({
-    schema: 'homeboy/agent-task-typed-artifact/v1',
-    name: artifactName,
-    type: artifact.type || artifact.kind || artifact.artifact_type || artifact.artifactType,
-    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
-    payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
-    provenance: artifact.provenance && typeof artifact.provenance === 'object' && !Array.isArray(artifact.provenance) ? artifact.provenance : {},
-    file_refs: fileRefs,
-    metadata: artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata) ? artifact.metadata : {},
-  }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0))));
-}
-
-function typedArtifactOutputFileRefs(artifact) {
-  if (Array.isArray(artifact.file_refs)) {
-    return artifact.file_refs;
-  }
-  if (Array.isArray(artifact.fileRefs)) {
-    return artifact.fileRefs;
-  }
-  return [];
+  return normalizeCodeboxTypedArtifactEntry(name, artifact, { sanitize: sanitizePublicMetadata });
 }
 
 function normalizeTypedArtifacts(value) {
-  if (Array.isArray(value)) {
-    return Object.fromEntries(value
-      .map((artifact, index) => normalizeTypedArtifactEntry(artifact?.name || artifact?.id || `artifact_${index + 1}`, artifact))
-      .filter(Boolean)
-      .map((artifact) => [artifact.name, artifact]));
-  }
-  if (!value || typeof value !== 'object') {
-    return {};
-  }
-  return Object.fromEntries(Object.entries(value)
-    .map(([name, artifact]) => normalizeTypedArtifactEntry(name, artifact))
-    .filter(Boolean)
-    .map((artifact) => [artifact.name, artifact]));
+  return normalizeCodeboxTypedArtifacts(value, { sanitize: sanitizePublicMetadata });
 }
 
 function typedArtifactsFromResult(result) {
@@ -2284,7 +2245,7 @@ function typedArtifactProjectionFromOutputPath(outputPath, value, typedArtifacts
 }
 
 function typedArtifactFileRefs(typedArtifact) {
-  const refs = Array.isArray(typedArtifact.file_refs) ? typedArtifact.file_refs : [];
+  const refs = codeboxTypedArtifactFileRefs(typedArtifact);
   const directRefs = [typedArtifact.path, typedArtifact.url, typedArtifact.file, typedArtifact.directory].filter(Boolean);
   return [
     ...directRefs.map((ref) => ({ path: ref })),
@@ -2293,13 +2254,7 @@ function typedArtifactFileRefs(typedArtifact) {
 }
 
 function typedArtifactNameFromDeclaration(declaration) {
-  if (typeof declaration === 'string') {
-    return declaration;
-  }
-  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) {
-    return '';
-  }
-  return declaration.name || declaration.id || '';
+  return artifactNameFromDeclaration(declaration);
 }
 
 function requiredArtifactDeclarationsFromRequest(request) {
