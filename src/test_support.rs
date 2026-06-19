@@ -53,6 +53,7 @@ impl AuditHomeGuard {
 impl HomeGuard {
     pub(crate) fn new() -> Self {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        crate::core::defaults::reset_config_cache_for_test();
         let prior = std::env::var("HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
@@ -137,6 +138,7 @@ impl Drop for HomeGuard {
                 crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
             ),
         }
+        crate::core::defaults::reset_config_cache_for_test();
     }
 }
 
