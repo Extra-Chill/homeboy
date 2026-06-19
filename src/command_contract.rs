@@ -20,9 +20,10 @@ mod output;
 mod public_variants;
 
 pub use lab::{
-    lab_runner_supported_labels, lab_runner_unsupported_hint, lab_runner_unsupported_message,
-    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabRoutingPolicy,
-    LabSourcePathMode, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
+    lab_runner_support_summary, lab_runner_supported_labels, lab_runner_unsupported_hint,
+    lab_runner_unsupported_message, LabCommandContract, LabCommandPortability,
+    LabCommandRequiredTool, LabRoutingPolicy, LabRunnerSupportSummary, LabSourcePathMode,
+    LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
 };
 pub(crate) use lab::{AUDIT_LAB_LABEL, BENCH_LAB_LABEL, LINT_LAB_LABEL, TEST_LAB_LABEL};
 pub use output::{
