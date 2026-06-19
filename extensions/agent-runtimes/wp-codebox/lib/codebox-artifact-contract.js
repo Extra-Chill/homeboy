@@ -71,6 +71,8 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
 
 function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) {
   const candidates = [
+    artifactResult?.typed_artifacts,
+    artifactResult?.typedArtifacts,
     artifactResult?.result?.typed_artifacts,
     artifactResult?.result?.typedArtifacts,
     artifactResult?.result?.outputs?.typed_artifacts,
@@ -140,8 +142,16 @@ function normalizeArtifactResultEnvelope(envelope) {
   const artifactBundle = normalizeArtifactResultRef(envelope.artifactBundle || envelope.artifact_bundle);
   const artifactRefs = [
     artifactBundle,
+    ...(Array.isArray(envelope.artifactBundleRefs) ? envelope.artifactBundleRefs.map(normalizeArtifactResultRef) : []),
+    ...(Array.isArray(envelope.artifact_bundle_refs) ? envelope.artifact_bundle_refs.map(normalizeArtifactResultRef) : []),
     ...(Array.isArray(envelope.artifactRefs) ? envelope.artifactRefs.map(normalizeArtifactResultRef) : []),
     ...(Array.isArray(envelope.artifact_refs) ? envelope.artifact_refs.map(normalizeArtifactResultRef) : []),
+  ].filter(Boolean);
+  const evidenceRefs = [
+    ...(Array.isArray(envelope.evidenceRefs) ? envelope.evidenceRefs.map(normalizeArtifactResultRef) : []),
+    ...(Array.isArray(envelope.evidence_refs) ? envelope.evidence_refs.map(normalizeArtifactResultRef) : []),
+    ...(Array.isArray(envelope.transcriptRefs) ? envelope.transcriptRefs.map(normalizeArtifactResultRef) : []),
+    ...(Array.isArray(envelope.transcript_refs) ? envelope.transcript_refs.map(normalizeArtifactResultRef) : []),
   ].filter(Boolean);
   return cleanObject({
     schema: WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
@@ -151,6 +161,9 @@ function normalizeArtifactResultEnvelope(envelope) {
     success: envelope.success === undefined ? ['created', 'existing', 'updated'].includes(envelope.status) : envelope.success === true,
     artifactBundle,
     artifactRefs: uniqueArtifactResultRefs(artifactRefs),
+    evidenceRefs: uniqueArtifactResultRefs(evidenceRefs),
+    structured_artifacts: Array.isArray(envelope.structured_artifacts) ? envelope.structured_artifacts : envelope.structuredArtifacts,
+    typed_artifacts: Array.isArray(envelope.typed_artifacts) ? envelope.typed_artifacts : envelope.typedArtifacts,
     verification: plainObject(envelope.verification) ? envelope.verification : undefined,
     result: plainObject(envelope.result) ? envelope.result : undefined,
     diagnostics: Array.isArray(envelope.diagnostics) ? envelope.diagnostics : [],
@@ -168,8 +181,9 @@ function normalizeArtifactResultRef(ref) {
   return cleanObject({
     id: ref.id || ref.artifact_id,
     kind: ref.kind || ref.type || 'artifact-bundle',
-    name: ref.name,
-    path: ref.path || ref.artifacts_path || ref.directory,
+    name: ref.name || ref.label,
+    path: ref.path || ref.artifacts_path || ref.directory || ref.uri,
+    uri: ref.uri,
     url: ref.url,
     sha256: ref.sha256 || digest.value,
     metadata: cleanObject({
