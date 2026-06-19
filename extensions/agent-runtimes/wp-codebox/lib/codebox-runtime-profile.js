@@ -5,6 +5,11 @@ const WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA = 'wp-codebox/parent-tool-bridge/v1';
 const WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA = 'wp-codebox/upstream-primitive-requirement/v1';
 
 const RUNTIME_PROFILE_DEPENDENCY_FIELDS = ['components', 'plugins', 'mu_plugins', 'themes', 'overlays'];
+const COMPONENT_CONTRACT_DEPENDENCY_FIELDS = {
+  components: { loadAs: 'mu-plugin', activate: false },
+  mu_plugins: { loadAs: 'mu-plugin', activate: false },
+  plugins: { loadAs: 'plugin', activate: true },
+};
 
 function codeboxRuntimeProfilePayload({
   id,
@@ -32,15 +37,16 @@ function codeboxRuntimeProfilePayload({
     ...plainObject(normalizedRuntimeRequirements.runtime_env),
     ...plainObject(runtimeEnv),
   };
-  const normalizedComponentContracts = uniqueObjectsByRuntimeIdentity([
-    ...normalizeArray(normalizedProfile.component_contracts),
-    ...normalizeArray(normalizedRuntimeRequirements.component_contracts),
-    ...normalizeArray(componentContracts),
-  ]);
-  const normalizedExtraPlugins = uniqueObjectsByRuntimeIdentity([
-    ...normalizeArray(normalizedProfile.extra_plugins),
-    ...normalizeArray(normalizedRuntimeRequirements.extra_plugins),
-  ]);
+  const normalizedComponentContracts = codeboxRuntimeComponentContracts({
+    profile: normalizedProfile,
+    runtimeRequirements: normalizedRuntimeRequirements,
+    componentContracts,
+  });
+  const normalizedExtraPlugins = codeboxRuntimeExtraPlugins({
+    profile: normalizedProfile,
+    runtimeRequirements: normalizedRuntimeRequirements,
+    componentContracts,
+  });
   const normalizedProviderPlugins = uniqueObjectsByRuntimeIdentity([
     ...providerPluginEntries(normalizedProfile.provider_plugins),
     ...providerPluginEntries(normalizedRuntimeRequirements.provider_plugins),
@@ -70,6 +76,53 @@ function providerPluginEntries(value) {
       return [{ path: entry }];
     }
     return entry;
+  });
+}
+
+function codeboxRuntimeComponentContracts({ profile = {}, runtimeRequirements = {}, componentContracts = [] } = {}) {
+  return uniqueObjectsByRuntimeIdentity([
+    ...normalizeArray(profile.component_contracts),
+    ...normalizeArray(runtimeRequirements.component_contracts),
+    ...normalizeArray(profile.extra_plugins),
+    ...normalizeArray(runtimeRequirements.extra_plugins),
+    ...normalizeRuntimeDependencyComponentContracts(profile),
+    ...normalizeRuntimeDependencyComponentContracts(runtimeRequirements),
+    ...normalizeArray(componentContracts),
+  ]);
+}
+
+function codeboxRuntimeExtraPlugins({ profile = {}, runtimeRequirements = {}, componentContracts = [] } = {}) {
+  return uniqueObjectsByRuntimeIdentity([
+    ...normalizeArray(profile.extra_plugins),
+    ...normalizeArray(runtimeRequirements.extra_plugins),
+    ...normalizeArray(componentContracts),
+  ]);
+}
+
+function normalizeRuntimeDependencyComponentContracts(source = {}) {
+  if (!isPlainObject(source)) {
+    return [];
+  }
+  return Object.entries(COMPONENT_CONTRACT_DEPENDENCY_FIELDS).flatMap(([field, defaults]) => (
+    normalizeArray(source[field]).map((entry) => componentContractFromRuntimeDependency(entry, defaults)).filter(Boolean)
+  ));
+}
+
+function componentContractFromRuntimeDependency(entry, defaults = {}) {
+  if (!isPlainObject(entry)) {
+    return null;
+  }
+  const source = entry.path || entry.source || entry.target;
+  const slug = entry.slug || entry.id || slugFromPath(source);
+  if (!slug || !source) {
+    return null;
+  }
+  return cleanObject({
+    ...entry,
+    slug,
+    path: entry.path || entry.source || source,
+    loadAs: entry.loadAs || entry.load_as || defaults.loadAs,
+    activate: entry.activate === undefined ? defaults.activate : entry.activate,
   });
 }
 
@@ -156,6 +209,14 @@ function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function isPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function slugFromPath(value) {
+  return String(value || '').split(/[\\/]/).filter(Boolean).pop() || '';
+}
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -190,10 +251,16 @@ function withoutEmptyObjectValues(value) {
   }));
 }
 
+function cleanObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== ''));
+}
+
 module.exports = {
   WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
   WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
   WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA,
+  codeboxRuntimeComponentContracts,
+  codeboxRuntimeExtraPlugins,
   codeboxRuntimeProfilePayload,
   codeboxParentToolBridgeRequirement,
   hasCodeboxParentToolBridge,
