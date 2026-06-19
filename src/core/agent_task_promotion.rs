@@ -275,6 +275,7 @@ fn promote_with_provider(
     }
 
     let mut deterministic_gates = Vec::new();
+    let mut dependencies_materialized = false;
     if !options.dry_run
         && (!options.gates.verify.is_empty() || !options.gates.private_verify.is_empty())
     {
@@ -286,6 +287,13 @@ fn promote_with_provider(
                 None,
             )
         })?;
+        // Materialize dependencies (composer install / npm install / component
+        // deps script) in the freshly created worktree before running the
+        // verify gates. Without this, a fresh worktree has no vendor/ or
+        // node_modules/ and PHP/JS gates fatal on missing autoloaded deps,
+        // masking the real pass/fail signal (#3771).
+        dependencies_materialized =
+            crate::core::hygiene::materialize_worktree_dependencies(Path::new(worktree_path))?;
         for (index, command) in options.gates.verify.iter().enumerate() {
             deterministic_gates.push(provider.verify(
                 worktree_path,
@@ -350,6 +358,7 @@ fn promote_with_provider(
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
+            "dependencies_materialized": dependencies_materialized,
         }),
         operator_notification,
     })
@@ -1392,6 +1401,72 @@ mod tests {
             report.deterministic_gates[1].visibility,
             AgentTaskGateVisibility::Private
         );
+    }
+
+    #[test]
+    fn promote_materializes_worktree_dependencies_before_verify_gate() {
+        // #3771: a freshly created worktree has no installed dependencies, so a
+        // verify gate that touches autoloaded deps fatals on missing deps
+        // instead of reporting a real pass/fail. Promotion must run the
+        // component's dependency install step against the worktree before the
+        // verify gate executes. This uses a runtime-agnostic component `deps`
+        // script (no composer/npm binary required) to prove the install ran.
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (source_path, source) = write_patch_source(&temp);
+
+            let worktree_path = temp.path().join("worktree");
+            std::fs::create_dir_all(&worktree_path).expect("worktree dir");
+            let deps_marker = worktree_path.join("deps-installed.txt");
+            std::fs::write(
+                worktree_path.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "deps-worktree",
+                    "scripts": {
+                        "deps": ["sh -c 'printf installed > deps-installed.txt'"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("worktree manifest");
+
+            let mut provider = FakePromotionWorkspaceProvider {
+                workspace_path: Some(worktree_path.clone()),
+                ..Default::default()
+            };
+
+            let report = promote_with_provider(
+                AgentTaskPromotionOptions {
+                    source,
+                    source_run_id: Some("run-3771".to_string()),
+                    source_path: Some(source_path),
+                    to_worktree: "repo@worktree".to_string(),
+                    task_id: None,
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: VerifyGateOptions {
+                        verify: vec!["true".to_string()],
+                        private_verify: Vec::new(),
+                        private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                    },
+                    provider_command: None,
+                },
+                &mut provider,
+            )
+            .expect("promotion materializes deps then verifies");
+
+            assert!(
+                deps_marker.exists(),
+                "dependency install step should run against the worktree before the verify gate"
+            );
+            assert_eq!(
+                report.provenance["dependencies_materialized"].as_bool(),
+                Some(true),
+                "promotion report should record that dependencies were materialized"
+            );
+            assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+            assert_eq!(provider.verify_calls.len(), 1);
+        });
     }
 
     #[test]
