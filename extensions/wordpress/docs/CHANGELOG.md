@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.39] - 2026-06-19
+
+### Changed
+- Add WordPress REST route matrix helper
+
 ## [3.7.38] - 2026-06-19
 
 ### Changed
