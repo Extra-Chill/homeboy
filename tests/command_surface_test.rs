@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{command_surface_from_with_depth, current_command_surface, Cli};
 use std::collections::BTreeSet;
+use std::fs;
 
 #[test]
 fn includes_current_top_level_commands() {
@@ -169,6 +170,35 @@ fn command_index_matches_top_level_command_surface() {
         stale.is_empty(),
         "docs/commands/commands-index.md lists stale top-level commands: {stale:?}"
     );
+
+    for command in &expected {
+        assert!(
+            command_doc_path(command).is_file(),
+            "docs/commands/commands-index.md lists `{command}` but docs/commands/{command}.md is missing"
+        );
+    }
+}
+
+#[test]
+fn command_docs_files_match_command_index_snapshot() {
+    let documented = documented_command_index_entries();
+    let companion_topics = BTreeSet::from([
+        "audit-rules".to_string(),
+        "commands-index".to_string(),
+        "rig-spec".to_string(),
+    ]);
+    let docs_files = documented_command_doc_files();
+
+    let missing_from_index: Vec<_> = docs_files
+        .difference(&documented)
+        .filter(|entry| !companion_topics.contains(*entry))
+        .cloned()
+        .collect();
+
+    assert!(
+        missing_from_index.is_empty(),
+        "docs/commands/*.md contains command docs that are not listed in commands-index.md: {missing_from_index:?}"
+    );
 }
 
 #[test]
@@ -248,10 +278,26 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     let lab = include_str!("../docs/commands/lab.md");
     assert!(lab.contains("routing helper, not a benchmark executor"));
 
+    let extension = include_str!("../docs/commands/extension.md");
+    assert!(extension.contains("install-for-component --source <source> [--path <component_path>]"));
+    assert!(!extension.contains("install-for-component") || !extension.contains("--revision"));
+
+    let report = include_str!("../docs/commands/report.md");
+    assert!(report.contains("`performance-digest`"));
+
     let runs = include_str!("../docs/commands/runs.md");
     assert!(runs.contains("## Mutating Subcommands"));
     assert!(runs.contains("artifact cleanup-persisted"));
     assert!(runs.contains("`reconcile`"));
+    assert!(runs.contains("`latest-run`"));
+    assert!(runs.contains("`query`"));
+    assert!(runs.contains("`drift`"));
+    assert!(runs.contains("`loop-sync`"));
+
+    let cargo = include_str!("../docs/commands/cargo.md");
+    assert!(cargo.contains("extension-provided"));
+    let wp = include_str!("../docs/commands/wp.md");
+    assert!(wp.contains("extension-provided"));
 
     for args in [
         ["homeboy", "auth", "profile", "set-basic", "dev"].as_slice(),
@@ -265,7 +311,21 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
             "14",
         ]
         .as_slice(),
+        [
+            "homeboy",
+            "report",
+            "performance-digest",
+            "--output-dir",
+            ".",
+        ]
+        .as_slice(),
         ["homeboy", "runs", "artifact", "get", "run-1", "artifact-1"].as_slice(),
+        ["homeboy", "runs", "latest-run"].as_slice(),
+        ["homeboy", "runs", "evidence", "run-1"].as_slice(),
+        ["homeboy", "runs", "findings", "run-1"].as_slice(),
+        ["homeboy", "runs", "query", "--select", "$.status"].as_slice(),
+        ["homeboy", "runs", "drift", "--metric", "$.status"].as_slice(),
+        ["homeboy", "runs", "loop-sync", ".", "--dry-run"].as_slice(),
         [
             "homeboy",
             "runs",
@@ -280,6 +340,20 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
             panic!("documented cleanup target failed to parse: {args:?}\n{error}")
         });
     }
+
+    assert!(
+        Cli::try_parse_from([
+            "homeboy",
+            "extension",
+            "install-for-component",
+            "--source",
+            "https://example.com/extensions.git",
+            "--revision",
+            "main",
+        ])
+        .is_err(),
+        "extension install-for-component should not advertise or accept stale --revision/--ref flags"
+    );
 }
 
 #[test]
@@ -351,4 +425,28 @@ fn documented_command_index_entries() -> BTreeSet<String> {
         .filter_map(|rest| rest.split(']').next())
         .map(str::to_string)
         .collect()
+}
+
+fn documented_command_doc_files() -> BTreeSet<String> {
+    let commands_dir = command_doc_path("");
+    fs::read_dir(&commands_dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", commands_dir.display()))
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn command_doc_path(command: &str) -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("docs/commands");
+    if !command.is_empty() {
+        path.push(format!("{command}.md"));
+    }
+    path
 }

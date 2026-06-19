@@ -95,7 +95,7 @@ servers, fleets, rigs, stacks, and extensions.
 | **Release** | `release`, `version`, `changelog`, `changes` | Turn commit history into versions, tags, and release notes. |
 | **Attention** | `deps`, `triage`, `issues` | Find dependency drift, failing work, and tracked findings. |
 | **Remote ops** | `deploy`, `ssh`, `file`, `db`, `logs`, `server`, `project`, `component`, `fleet` | Operate configured projects, servers, and fleets. |
-| **Platforms** | `extension`, `wp`, `cargo` | Route platform-specific behavior through extensions. |
+| **Platforms** | `extension`, extension-provided verbs such as `wp` and `cargo` | Route platform-specific behavior through extensions. |
 | **Meta** | `config`, `docs`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade` | Manage Homeboy itself and its API surfaces. |
 
 For exhaustive command docs, see
