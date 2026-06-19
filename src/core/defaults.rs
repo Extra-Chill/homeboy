@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{OnceLock, RwLock};
 
 use crate::core::engine::local_files;
 use crate::core::paths;
@@ -393,6 +394,16 @@ pub fn load_defaults() -> Defaults {
 /// Warns to stderr if the file exists but fails to parse, so the user knows
 /// their config is being ignored rather than silently resetting to defaults.
 pub fn load_config() -> HomeboyConfig {
+    if let Some(config) = cached_config() {
+        return config;
+    }
+
+    let config = load_config_uncached();
+    store_cached_config(&config);
+    config
+}
+
+fn load_config_uncached() -> HomeboyConfig {
     match load_config_from_file() {
         Ok(config) => config,
         Err(err) => {
@@ -408,6 +419,37 @@ pub fn load_config() -> HomeboyConfig {
             HomeboyConfig::default()
         }
     }
+}
+
+fn config_cache() -> &'static RwLock<Option<HomeboyConfig>> {
+    static CONFIG: OnceLock<RwLock<Option<HomeboyConfig>>> = OnceLock::new();
+    CONFIG.get_or_init(|| RwLock::new(None))
+}
+
+fn cached_config() -> Option<HomeboyConfig> {
+    match config_cache().read() {
+        Ok(slot) => slot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn store_cached_config(config: &HomeboyConfig) {
+    match config_cache().write() {
+        Ok(mut slot) => *slot = Some(config.clone()),
+        Err(poisoned) => *poisoned.into_inner() = Some(config.clone()),
+    }
+}
+
+fn clear_config_cache() {
+    match config_cache().write() {
+        Ok(mut slot) => *slot = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_config_cache_for_test() {
+    clear_config_cache();
 }
 
 /// Attempt to load config from the product config file.
@@ -457,6 +499,7 @@ pub fn save_config(config: &HomeboyConfig) -> crate::core::Result<()> {
     let content = crate::core::config::to_string_pretty(config)?;
 
     local_files::write_file_atomic(&path, &content, &format!("write {}", path.display()))?;
+    store_cached_config(config);
 
     Ok(())
 }
@@ -477,8 +520,10 @@ pub fn reset_config() -> crate::core::Result<bool> {
                 Some(format!("delete {}", path.display())),
             )
         })?;
+        clear_config_cache();
         Ok(true)
     } else {
+        clear_config_cache();
         Ok(false)
     }
 }
