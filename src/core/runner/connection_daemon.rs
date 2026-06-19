@@ -4,12 +4,11 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::Value;
 
-use crate::core::engine::shell;
 use crate::core::server::{Server, SshClient};
 
 use super::{
-    command_failure_message, failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr,
-    remote_daemon_start, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
+    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_start,
+    remote_daemon_stop, reserve_loopback_port, terminate_pid, wait_for_tcp, RemoteDaemon,
 };
 use crate::core::runner::{RunnerConnectReport, RunnerFailureKind};
 
@@ -237,16 +236,4 @@ fn daemon_freshness_mismatch(
     }
 
     Ok(None)
-}
-
-fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
-    let command = format!("{} daemon stop", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote daemon stop failed while refreshing stale daemon",
-            &output,
-        ));
-    }
-    Ok(())
 }

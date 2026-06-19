@@ -21,6 +21,7 @@ use super::broker_http;
 use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
+use super::daemon_http_get::daemon_get;
 use super::evidence::{
     mirror_daemon_evidence, mirror_daemon_job_progress, mirror_reverse_broker_evidence,
 };
@@ -493,15 +494,8 @@ fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
-    let mirror = mirror_reverse_broker_evidence(
-        runner,
-        broker_url,
-        &cwd,
-        &command,
-        &job,
-        &events,
-        &result,
-    )?;
+    let mirror =
+        mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
 
@@ -1007,25 +1001,6 @@ fn runner_exec_wait_timeout() -> Duration {
 pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
     data.get("body")
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
-}
-
-fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
-    let response = client
-        .get(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
-    if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {

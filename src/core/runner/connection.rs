@@ -29,6 +29,8 @@ mod connection_daemon;
 use connection_daemon::{connect_remote_daemon, daemon_http_version, versions_match};
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 
+use super::daemon_http_get::daemon_get;
+
 #[derive(Debug, Clone, Deserialize)]
 struct CliEnvelope {
     success: bool,
@@ -324,25 +326,6 @@ fn active_runner_jobs(
         .collect())
 }
 
-fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
-    let response = client
-        .get(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let envelope: CliEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
-    if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
-}
-
 fn stale_daemon_warning(
     runner: &Runner,
     session: Option<&RunnerSession>,
@@ -634,12 +617,18 @@ fn remote_daemon_binary_stale(
     }
 }
 
-fn remote_daemon_stop(client: &SshClient, homeboy: &str) -> std::result::Result<(), String> {
+/// Stop a remote homeboy daemon over SSH, surfacing a command-failure message on
+/// non-zero exit. Shared by the connection and connection-daemon refresh paths
+/// so the stop command + error handling lives in one place (#5362).
+pub(super) fn remote_daemon_stop(
+    client: &SshClient,
+    homeboy: &str,
+) -> std::result::Result<(), String> {
     let command = format!("{} daemon stop", shell::quote_arg(homeboy));
     let output = client.execute(&command);
     if !output.success {
         return Err(command_failure_message(
-            "remote daemon stop failed while refreshing stale managed daemon",
+            "remote daemon stop failed while refreshing stale daemon",
             &output,
         ));
     }

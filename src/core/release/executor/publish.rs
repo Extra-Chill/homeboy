@@ -267,9 +267,7 @@ fn verify_publish_response(
     expected_version: Option<&str>,
 ) -> Option<String> {
     let verification = publish_registry_verification(response, expected_version)?;
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+    let client = match crate::core::http_probe::blocking_client(std::time::Duration::from_secs(30))
     {
         Ok(client) => client,
         Err(err) => {
