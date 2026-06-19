@@ -12,6 +12,7 @@ const {
 	buildRestRouteMatrixArtifact,
 	classifyRestRoute,
 	formatRestRouteMatrixMarkdownReport,
+	normalizeRestDbProfile,
 	normalizeRestRouteMatrixBudgetManifest,
 	normalizeWordPressRestRouteMatrix,
 	restRouteMatrixKey,
@@ -129,8 +130,12 @@ const artifact = buildRestRouteMatrixArtifact({
 	routes: restIndex,
 	caseResults: [
 		{ method: 'GET', route: '/wp/v2/posts', status: 200, durationMs: 40, queryCount: 3 },
-		{ method: 'GET', route: '/wc/store/v1/cart', status: 200, durationMs: 95, queryCount: 14 },
+		{ method: 'GET', route: '/wc/store/v1/cart', status: 200, durationMs: 95 },
 		{ method: 'POST', route: '/wc/store/v1/cart', status: 500, durationMs: 80, queryCount: 2 },
+	],
+	dbProfiles: [
+		{ method: 'GET', route: '/wc/store/v1/cart', queryCount: 14, queryTimeMs: 22.5, totalQueries: 40 },
+		{ method: 'GET', route: '/demo/v1/private', query_count: 1, query_time_ms: 1.25 },
 	],
 	budgets: {
 		maxDurationMs: 90,
@@ -145,12 +150,20 @@ const artifact = buildRestRouteMatrixArtifact({
 assert.equal(artifact.schema, 'homeboy/wordpress-rest-route-matrix-artifact/v1');
 assert.equal(artifact.totals.routeCount, 6);
 assert.equal(artifact.totals.resultCount, 3);
-assert.equal(artifact.totals.coveredCount, 3);
-assert.equal(artifact.totals.uncoveredCount, 3);
+assert.equal(artifact.totals.dbProfileCount, 2);
+assert.equal(artifact.totals.coveredCount, 4);
+assert.equal(artifact.totals.uncoveredCount, 2);
+assert.equal(artifact.routes.find((row) => row.id === 'rest:get:wc-store-v1-cart').queryCount, 14);
+assert.equal(artifact.routes.find((row) => row.id === 'rest:get:wc-store-v1-cart').queryTimeMs, 22.5);
+assert.deepEqual(artifact.routes.find((row) => row.id === 'rest:get:wc-store-v1-cart').dbProfile, {
+	queryCount: 14,
+	queryTimeMs: 22.5,
+	totalQueries: 40,
+});
 assert.equal(artifact.coverage.byNamespace['wc/store/v1'].total, 2);
 assert.equal(artifact.coverage.byNamespace['wc/store/v1'].covered, 2);
 assert.equal(artifact.coverage.byMethod.GET.total, 4);
-assert.equal(artifact.coverage.byMethod.GET.uncovered, 2);
+assert.equal(artifact.coverage.byMethod.GET.uncovered, 1);
 assert.equal(artifact.coverage.byStatus['200'].covered, 2);
 assert.equal(artifact.coverage.byStatus['500'].covered, 1);
 assert.deepEqual(artifact.slowestByDuration.map((row) => row.id), [
@@ -162,9 +175,13 @@ assert.deepEqual(artifact.slowestByQueryCount.map((row) => row.id), [
 	'rest:get:wc-store-v1-cart',
 	'rest:get:wp-v2-posts',
 	'rest:post:wc-store-v1-cart',
+	'rest:get:demo-v1-private',
+]);
+assert.deepEqual(artifact.slowestByQueryTime.map((row) => row.id), [
+	'rest:get:wc-store-v1-cart',
+	'rest:get:demo-v1-private',
 ]);
 assert.deepEqual(artifact.missingRoutes.map((row) => row.id), [
-	'rest:get:demo-v1-private',
 	'rest:get:wp-v2-posts-id',
 	'rest:post:wp-v2-posts',
 ]);
@@ -176,14 +193,28 @@ assert.deepEqual(artifact.budgetFindings.map((finding) => finding.type), [
 
 const markdown = formatRestRouteMatrixMarkdownReport(artifact, { limit: 5 });
 assert.match(markdown, /## WordPress REST route matrix/);
-assert.match(markdown, /Routes: 6; results: 3; covered: 3; uncovered: 3; budget findings: 3/);
+assert.match(markdown, /Routes: 6; results: 3; covered: 4; uncovered: 2; budget findings: 3/);
 assert.match(markdown, /## Coverage by namespace/);
 assert.match(markdown, /\| wc\/store\/v1 \| 2 \| 2 \| 0 \|/);
 assert.match(markdown, /## Slowest routes by duration/);
 assert.match(markdown, /`GET \/wc\/store\/v1\/cart` \| 200 \| 95 \| 14/);
+assert.match(markdown, /## Slowest routes by query time/);
 assert.match(markdown, /## Missing or uncovered routes/);
-assert.match(markdown, /`GET \/demo\/v1\/private`/);
+assert.match(markdown, /`GET \/wp\/v2\/posts\/\{id\}`/);
 assert.match(markdown, /## Budget findings/);
+
+assert.deepEqual(normalizeRestDbProfile({ method: 'get', route: '/wp-json/wp/v2/posts', query_time_ms: 3.5 }), {
+	id: 'rest:get:wp-v2-posts',
+	key: 'rest:get:wp-v2-posts',
+	method: 'GET',
+	path: '/wp/v2/posts',
+	route: '/wp/v2/posts',
+	status: undefined,
+	durationMs: undefined,
+	queryCount: undefined,
+	queryTimeMs: 3.5,
+	totalQueries: undefined,
+});
 
 const budgetManifest = normalizeRestRouteMatrixBudgetManifest({
 	defaults: { maxDurationMs: 200, maxQueryCount: 30, allowedStatuses: [200] },

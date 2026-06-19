@@ -183,8 +183,9 @@ function normalizeRestMatrixResult(entry = {}) {
 	const status = entry.status ?? entry.statusCode ?? entry.responseStatus;
 	const durationMs = maybeNumericValue(entry.durationMs ?? entry.duration_ms ?? entry.totalMs ?? entry.total_ms);
 	const queryCount = maybeNumericValue(entry.queryCount ?? entry.query_count ?? entry.dbQueryCount ?? entry.db_query_count);
+	const queryTimeMs = maybeNumericValue(entry.queryTimeMs ?? entry.query_time_ms ?? entry.dbQueryTimeMs ?? entry.db_query_time_ms);
 	const responseBytes = maybeNumericValue(entry.responseBytes ?? entry.response_bytes ?? entry.bytes ?? entry.bodyBytes ?? entry.body_bytes);
-	const covered = entry.covered === false ? false : Boolean(entry.covered === true || status !== undefined || entry.ok !== undefined || durationMs !== undefined || queryCount !== undefined);
+	const covered = entry.covered === false ? false : Boolean(entry.covered === true || status !== undefined || entry.ok !== undefined || durationMs !== undefined || queryCount !== undefined || queryTimeMs !== undefined);
 
 	return {
 		id,
@@ -196,9 +197,58 @@ function normalizeRestMatrixResult(entry = {}) {
 		status,
 		durationMs,
 		queryCount,
+		queryTimeMs,
 		responseBytes,
 		covered,
 		findings: Array.isArray(entry.findings) ? entry.findings : [],
+	};
+}
+
+function normalizeRestDbProfile(entry = {}) {
+	if (!isPlainObject(entry)) {
+		throw new TypeError('REST DB profile records must be objects');
+	}
+	const route = resultRoutePath(entry);
+	const method = normalizeRestRouteMethod(entry.method);
+	const id = resultCaseKey({ ...entry, method, route });
+	return {
+		id,
+		key: id,
+		method,
+		path: route ? routeDisplayPath(route) : '',
+		route,
+		status: entry.status ?? entry.statusCode ?? entry.responseStatus,
+		durationMs: maybeNumericValue(entry.durationMs ?? entry.duration_ms),
+		queryCount: maybeNumericValue(entry.queryCount ?? entry.query_count ?? entry.dbQueryCount ?? entry.db_query_count),
+		queryTimeMs: maybeNumericValue(entry.queryTimeMs ?? entry.query_time_ms ?? entry.dbQueryTimeMs ?? entry.db_query_time_ms),
+		totalQueries: maybeNumericValue(entry.totalQueries ?? entry.total_queries),
+	};
+}
+
+function normalizeInputDbProfiles(input = {}) {
+	const profiles = input.dbProfiles || input.db_profiles || input.queryProfiles || input.query_profiles || [];
+	if (!Array.isArray(profiles)) {
+		throw new TypeError('REST DB profile records must be an array');
+	}
+	return profiles.map(normalizeRestDbProfile).filter((profile) => profile.id).sort((a, b) => sortText(a.id, b.id));
+}
+
+function mergeRestDbProfile(row, profile) {
+	if (!profile) {
+		return row;
+	}
+	return {
+		...row,
+		status: row.status ?? profile.status,
+		durationMs: row.durationMs ?? profile.durationMs,
+		queryCount: row.queryCount ?? profile.queryCount,
+		queryTimeMs: row.queryTimeMs ?? profile.queryTimeMs,
+		dbProfile: {
+			queryCount: profile.queryCount,
+			queryTimeMs: profile.queryTimeMs,
+			totalQueries: profile.totalQueries,
+		},
+		covered: row.covered || profile.queryCount !== undefined || profile.queryTimeMs !== undefined,
 	};
 }
 
@@ -382,13 +432,15 @@ function normalizeInputResults(input = {}) {
 function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 	const cases = normalizeInputCases(input, options);
 	const results = normalizeInputResults(input);
+	const dbProfiles = normalizeInputDbProfiles(input);
 	const budgetManifest = normalizeRestRouteMatrixBudgetManifest(options.budgets || input.budgets || {});
 	const resultById = new Map(results.filter((result) => result.id).map((result) => [result.id, result]));
+	const dbProfileById = new Map(dbProfiles.map((profile) => [profile.id, profile]));
 	const rowsById = new Map();
 
 	for (const inventoryCase of cases) {
 		const result = resultById.get(inventoryCase.id);
-		rowsById.set(inventoryCase.id, {
+		rowsById.set(inventoryCase.id, mergeRestDbProfile({
 			...inventoryCase,
 			...(result || {}),
 			id: inventoryCase.id,
@@ -399,15 +451,25 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 			namespace: result?.namespace || inventoryCase.namespace,
 			classification: result?.classification || inventoryCase.classification,
 			covered: result ? result.covered : false,
-		});
+		}, dbProfileById.get(inventoryCase.id)));
 	}
 
 	for (const result of results) {
 		if (result.id && !rowsById.has(result.id)) {
-			rowsById.set(result.id, {
+			rowsById.set(result.id, mergeRestDbProfile({
 				...result,
 				label: result.route ? `${result.method} ${result.path}` : result.id,
-			});
+			}, dbProfileById.get(result.id)));
+		}
+	}
+
+	for (const profile of dbProfiles) {
+		if (profile.id && !rowsById.has(profile.id)) {
+			rowsById.set(profile.id, mergeRestDbProfile({
+				...profile,
+				label: profile.route ? `${profile.method} ${profile.path}` : profile.id,
+				covered: true,
+			}, profile));
 		}
 	}
 
@@ -442,6 +504,10 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 		.filter((row) => row.queryCount !== undefined)
 		.sort((a, b) => b.queryCount - a.queryCount || sortText(a.id, b.id))
 		.slice(0, Math.max(0, Math.floor(numericValue(options.slowestLimit ?? DEFAULT_REPORT_LIMIT))));
+	const slowestByQueryTime = rows
+		.filter((row) => row.queryTimeMs !== undefined)
+		.sort((a, b) => b.queryTimeMs - a.queryTimeMs || sortText(a.id, b.id))
+		.slice(0, Math.max(0, Math.floor(numericValue(options.slowestLimit ?? DEFAULT_REPORT_LIMIT))));
 
 	return {
 		schema: 'homeboy/wordpress-rest-route-matrix-artifact/v1',
@@ -449,6 +515,7 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 		totals: {
 			routeCount: cases.length,
 			resultCount: results.length,
+			dbProfileCount: dbProfiles.length,
 			caseCount: rows.length,
 			coveredCount: rows.filter((row) => row.covered).length,
 			uncoveredCount: rows.filter((row) => !row.covered).length,
@@ -461,6 +528,7 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 		},
 		slowestByDuration,
 		slowestByQueryCount,
+		slowestByQueryTime,
 		missingRoutes: missingRoutes.sort((a, b) => sortText(a.id, b.id)),
 		uncoveredRoutes: uncoveredRoutes.sort((a, b) => sortText(a.id, b.id)),
 		budgetFindings: budgetFindings.sort((a, b) => sortText(a.id, b.id) || sortText(a.type, b.type)),
@@ -489,9 +557,9 @@ function formatCoverageTable(group, label) {
 function formatRouteRows(rows, options = {}) {
 	const limit = Math.max(0, Math.floor(numericValue(options.limit ?? DEFAULT_REPORT_LIMIT)));
 	const visibleRows = limit > 0 ? rows.slice(0, limit) : rows;
-	const lines = ['| Route | Status | Duration ms | Query count | Findings |', '| --- | ---: | ---: | ---: | ---: |'];
+	const lines = ['| Route | Status | Duration ms | Query count | Query time ms | Findings |', '| --- | ---: | ---: | ---: | ---: | ---: |'];
 	for (const row of visibleRows) {
-		lines.push(`| \`${escapeMarkdownCell(`${row.method} ${row.path || row.route || row.id}`)}\` | ${escapeMarkdownCell(statusKey(row.status))} | ${formatNumber(row.durationMs)} | ${formatNumber(row.queryCount)} | ${(row.findings || []).length} |`);
+		lines.push(`| \`${escapeMarkdownCell(`${row.method} ${row.path || row.route || row.id}`)}\` | ${escapeMarkdownCell(statusKey(row.status))} | ${formatNumber(row.durationMs)} | ${formatNumber(row.queryCount)} | ${formatNumber(row.queryTimeMs)} | ${(row.findings || []).length} |`);
 	}
 	return lines;
 }
@@ -524,6 +592,9 @@ function formatRestRouteMatrixMarkdownReport(input = {}, options = {}) {
 	}
 	if (artifact.slowestByQueryCount.length > 0) {
 		lines.push('', '## Slowest routes by query count', '', ...formatRouteRows(artifact.slowestByQueryCount, { limit }));
+	}
+	if (artifact.slowestByQueryTime.length > 0) {
+		lines.push('', '## Slowest routes by query time', '', ...formatRouteRows(artifact.slowestByQueryTime, { limit }));
 	}
 	if (artifact.uncoveredRoutes.length > 0) {
 		lines.push('', '## Missing or uncovered routes', '', ...formatRouteRows(artifact.uncoveredRoutes, { limit }));
@@ -949,6 +1020,7 @@ module.exports = {
 	buildRestRouteMatrixArtifact,
 	classifyRestRoute,
 	formatRestRouteMatrixMarkdownReport,
+	normalizeRestDbProfile,
 	normalizeRestRouteMethod,
 	normalizeRestRouteMatrixBudgetManifest,
 	normalizeWordPressRestRouteMatrix,
