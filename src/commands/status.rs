@@ -6,6 +6,7 @@ use homeboy::core::git;
 use homeboy::core::release::version;
 use homeboy::core::scope::{self, Scope};
 use serde::Serialize;
+use std::collections::HashMap;
 
 use super::CmdResult;
 
@@ -294,6 +295,7 @@ fn summarize_components(
     let mut upstream_drift = Vec::new();
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
+    let mut git_cache = StatusGitCache::default();
 
     let has_filter =
         args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
@@ -302,16 +304,16 @@ fn summarize_components(
 
     if include_upstream_drift || include_unreleased_merges {
         for comp in &components {
-            fetch_origin_tags(&comp.local_path);
-
             if include_upstream_drift {
-                if let Some(mut drift) = get_upstream_drift(&comp.local_path) {
-                    drift.component_id = comp.id.clone();
+                if let Some(drift) = git_cache.fetch_upstream_drift_for(&comp.local_path, &comp.id)
+                {
                     if drift.is_behind() {
                         behind_upstream.push(comp.id.clone());
                     }
                     upstream_drift.push(drift);
                 }
+            } else if include_unreleased_merges {
+                fetch_origin_tags(&comp.local_path);
             }
 
             // Detect merged-but-unreleased work per component (issue #4996). This is
@@ -432,10 +434,16 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
     // Gather remote versions via deploy check mode (handles SSH internally)
     let remote_versions = fetch_project_remote_versions(project_id);
 
+    let mut git_cache = StatusGitCache::default();
+
     // Fetch upstream drift for all components
     let upstream_drift_map: std::collections::HashMap<String, UpstreamDrift> = components
         .iter()
-        .filter_map(|c| fetch_upstream_drift_for(&c.local_path, &c.id).map(|d| (c.id.clone(), d)))
+        .filter_map(|c| {
+            git_cache
+                .fetch_upstream_drift_for(&c.local_path, &c.id)
+                .map(|d| (c.id.clone(), d))
+        })
         .collect();
 
     // Build per-component rows
@@ -588,6 +596,26 @@ fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool
         .is_some_and(|(origin, local)| origin > local)
 }
 
+#[derive(Default)]
+struct StatusGitCache {
+    upstream_drift: HashMap<String, Option<UpstreamDrift>>,
+}
+
+impl StatusGitCache {
+    fn fetch_upstream_drift_for(&mut self, path: &str, id: &str) -> Option<UpstreamDrift> {
+        let drift = self
+            .upstream_drift
+            .entry(path.to_string())
+            .or_insert_with(|| fetch_upstream_drift(path));
+
+        drift.as_ref().map(|cached| {
+            let mut drift = cached.clone();
+            drift.component_id = id.to_string();
+            drift
+        })
+    }
+}
+
 /// Fetch from origin and compute upstream drift for a component.
 ///
 /// Returns `None` if the path is not a git repo or has no upstream configured.
@@ -638,13 +666,6 @@ fn get_latest_tag_overall(path: &str) -> Option<String> {
         .next()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Like `fetch_upstream_drift` but sets the component ID in the result.
-fn fetch_upstream_drift_for(path: &str, id: &str) -> Option<UpstreamDrift> {
-    let mut drift = fetch_upstream_drift(path)?;
-    drift.component_id = id.to_string();
-    Some(drift)
 }
 
 /// Detect merged-but-unreleased work for a component (issue #4996).
