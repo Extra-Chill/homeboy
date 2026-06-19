@@ -6,7 +6,7 @@ use homeboy::core::git;
 use homeboy::core::release::version;
 use homeboy::core::scope::{self, Scope};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::CmdResult;
 
@@ -313,7 +313,7 @@ fn summarize_components(
                     upstream_drift.push(drift);
                 }
             } else if include_unreleased_merges {
-                fetch_origin_tags(&comp.local_path);
+                git_cache.fetch_origin_tags_for(&comp.local_path);
             }
 
             // Detect merged-but-unreleased work per component (issue #4996). This is
@@ -599,9 +599,16 @@ fn origin_tag_is_newer_than_local(origin_tag: Option<&str>, local: &str) -> bool
 #[derive(Default)]
 struct StatusGitCache {
     upstream_drift: HashMap<String, Option<UpstreamDrift>>,
+    fetched_tags: HashSet<String>,
 }
 
 impl StatusGitCache {
+    fn fetch_origin_tags_for(&mut self, path: &str) {
+        if self.fetched_tags.insert(path.to_string()) {
+            fetch_origin_tags(path);
+        }
+    }
+
     fn fetch_upstream_drift_for(&mut self, path: &str, id: &str) -> Option<UpstreamDrift> {
         let drift = self
             .upstream_drift
