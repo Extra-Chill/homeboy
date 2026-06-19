@@ -3,7 +3,6 @@
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
-use std::process::Command;
 
 use crate::core::ci_profile::CiRunOutput;
 use crate::core::code_audit::AuditCommandOutput;
@@ -325,15 +324,7 @@ pub fn artifact_status(commands: &[ReviewArtifactCommand]) -> &'static str {
 }
 
 pub fn git_ref(path: &str, git_ref: &str) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", git_ref])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    crate::core::git::rev_parse(std::path::Path::new(path), git_ref)
 }
 
 fn generated_at_now() -> String {
