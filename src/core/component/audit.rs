@@ -153,6 +153,11 @@ pub struct DetectorProfileConfig {
     /// The first source that yields a parseable semver wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub version_sources: Vec<VersionSource>,
+    /// File extensions (without dot) the repeated-array-literal-shape detector
+    /// scans. Core ships no default; components opt in their
+    /// associative-array-literal languages so the detector stays agnostic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repeated_literal_shape_extensions: Vec<String>,
 }
 
 /// How to resolve a component version from a file (language/ecosystem-agnostic).
@@ -198,6 +203,7 @@ impl Default for DetectorProfileConfig {
             lifecycle_path_segments: Vec::new(),
             deprecation_languages: Vec::new(),
             version_sources: Vec::new(),
+            repeated_literal_shape_extensions: Vec::new(),
         }
     }
 }
@@ -223,6 +229,7 @@ impl DetectorProfileConfig {
             && self.lifecycle_path_segments.is_empty()
             && self.deprecation_languages.is_empty()
             && self.version_sources.is_empty()
+            && self.repeated_literal_shape_extensions.is_empty()
     }
 
     fn merge(&mut self, other: &DetectorProfileConfig) {
@@ -291,6 +298,10 @@ impl DetectorProfileConfig {
                 self.version_sources.push(source.clone());
             }
         }
+        extend_unique(
+            &mut self.repeated_literal_shape_extensions,
+            &other.repeated_literal_shape_extensions,
+        );
     }
 }
 

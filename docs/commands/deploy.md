@@ -35,7 +35,7 @@ Options:
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
 - `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
-- `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. The build artifact is reused across projects.
+- `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. Each project deployment builds independently.
 - `-f`, `--fleet`: deploy to all projects in a fleet. Resolves fleet to project IDs, then runs multi-project deployment.
 - `-s`, `--shared`: deploy to all projects using the specified component(s). Auto-detects which projects have the component configured and deploys to all of them.
 - `--keep-deps`: keep build dependencies and skip post-deploy cleanup.
@@ -151,7 +151,7 @@ homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin extrachill-api
 homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin --dry-run
 ```
 
-The component is built once and the artifact is reused for all subsequent project deployments.
+Each project deployment builds independently; build artifacts are scoped to the individual project run.
 
 ### Multi-project JSON output
 

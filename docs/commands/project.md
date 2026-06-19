@@ -40,6 +40,14 @@ Arguments:
 
 - `<project_id>`: project ID
 
+### `resolve-path`
+
+```sh
+homeboy project resolve-path <path>
+```
+
+Resolves a filesystem path inside a configured project `base_path` to its Homeboy project.
+
 ### `create`
 
 ```sh

@@ -101,6 +101,12 @@ enum ReviewStageRun {
     Test(Box<ReviewStage<TestCommandOutput>>),
 }
 
+struct ReviewScopePreflight {
+    scope: String,
+    changed_file_count: Option<usize>,
+    precomputed_changed_files: Option<Vec<String>>,
+}
+
 impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Args, Output> {
     fn execute(
         &self,
@@ -193,25 +199,12 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
-    let scope = if args.changed_since.is_some() {
-        "changed-since"
-    } else if args.changed_only {
-        "changed-only"
-    } else {
-        "full"
-    }
-    .to_string();
+    let preflight = preflight_review_scope(&args, &source_path)?;
+    let scope = preflight.scope;
+    let changed_file_count = preflight.changed_file_count;
+    let precomputed_changed_files = preflight.precomputed_changed_files;
 
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
-
-    // Probe the changed set once at the umbrella level so review can
-    // short-circuit early and pass the same scope into the internal stages.
-    let precomputed_changed_files = match (&args.changed_since, args.changed_only) {
-        (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?),
-        (_, true) => Some(git::get_dirty_files(&source_path)?),
-        _ => None,
-    };
-    let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
 
     if let Some(0) = changed_file_count {
         let scope_label = if let Some(ref r) = args.changed_since {
@@ -378,6 +371,36 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+fn preflight_review_scope(
+    args: &ReviewArgs,
+    source_path: &str,
+) -> homeboy::core::Result<ReviewScopePreflight> {
+    let scope = if args.changed_since.is_some() {
+        "changed-since"
+    } else if args.changed_only {
+        "changed-only"
+    } else {
+        "full"
+    }
+    .to_string();
+
+    // Probe once at the umbrella level so review can short-circuit before
+    // extension setup, include a stable changed-file count in its artifact,
+    // and pass the same resolved scope to each internal stage.
+    let precomputed_changed_files = match (&args.changed_since, args.changed_only) {
+        (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?),
+        (_, true) => Some(git::get_dirty_files(source_path)?),
+        _ => None,
+    };
+    let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
+
+    Ok(ReviewScopePreflight {
+        scope,
+        changed_file_count,
+        precomputed_changed_files,
+    })
 }
 
 /// Markdown output mode — runs the JSON path internally and renders the
