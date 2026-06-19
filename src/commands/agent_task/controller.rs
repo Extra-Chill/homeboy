@@ -23,7 +23,7 @@ use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
 
-use super::super::agent_task_dispatch::DispatchArgs;
+use super::super::agent_task_dispatch::{DispatchArgs, DispatchCoreArgs};
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
@@ -303,7 +303,6 @@ pub(super) fn dispatch_args_from_controller_request(
     Ok(DispatchArgs {
         prompt: optional_string(dispatch, "prompt"),
         tasks: optional_string_array(dispatch, "tasks")?,
-        tasks_json: optional_string(dispatch, "tasks_json"),
         cwd: optional_string(dispatch, "cwd")
             .or_else(|| optional_string(request, "cwd"))
             .or_else(|| optional_string(request, "workspace_root")),
@@ -316,12 +315,15 @@ pub(super) fn dispatch_args_from_controller_request(
         model: optional_string(dispatch, "model"),
         required_capabilities: optional_string_array(dispatch, "required_capabilities")?,
         secret_env: optional_string_array(dispatch, "secret_env")?,
-        provider_config: optional_string(dispatch, "provider_config"),
-        client_context: optional_string(dispatch, "client_context"),
         concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
-        attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
         run_id: optional_string(dispatch, "run_id"),
-        queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
+        core: DispatchCoreArgs {
+            tasks_json: optional_string(dispatch, "tasks_json"),
+            provider_config: optional_string(dispatch, "provider_config"),
+            client_context: optional_string(dispatch, "client_context"),
+            attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
+            queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
+        },
     })
 }
 

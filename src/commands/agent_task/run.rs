@@ -32,7 +32,7 @@ where
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
     }
-    dispatch_args.queue_only = false;
+    dispatch_args.core.queue_only = false;
     let (dispatch_value, _dispatch_exit) =
         dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
     let run_id = dispatch_value["run_id"]
