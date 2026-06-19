@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.36] - 2026-06-19
+
+### Changed
+- Restore generic runtime CI inputs
+
 ## [3.7.35] - 2026-06-19
 
 ### Changed
