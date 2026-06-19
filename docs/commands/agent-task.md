@@ -75,6 +75,33 @@ homeboy agent-task controller materialize \
   --inputs @run-inputs.json
 ```
 
+Domains that evaluate their own policies can pass deterministic policy decisions
+without teaching Homeboy the policy semantics:
+
+```bash
+homeboy agent-task controller materialize \
+  @.github/homeboy/controllers/site-loop.json \
+  --policy-result @policy-result.json
+```
+
+The generic policy result envelope is:
+
+```json
+{
+  "policy_id": "example-policy",
+  "policy_inputs": { "requested_tier": "foundation" },
+  "policy_results": { "selected_tier": "foundation", "decision": "hold" },
+  "provenance": { "source": "policy-evaluator", "sha256": "..." }
+}
+```
+
+`policy_id` is required and must be unique per materialization. The other fields
+are optional JSON objects. Homeboy projects `policy_inputs` and `policy_results`
+under the same keys in every workflow's `inputs`, keyed by `policy_id`, and records
+the full envelope under top-level `metadata.policy_materialization`. Homeboy does
+not evaluate expressions, choose tiers, generate random seeds, or interpret the
+policy result; repo-owned evaluators supply the envelope.
+
 `agent-task controller from-spec` keeps its existing behavior: it reads a complete
 repo-authored controller spec, applies dispatch defaults for the spec checkout,
 and initializes or resumes durable controller state. Use `materialize` first when

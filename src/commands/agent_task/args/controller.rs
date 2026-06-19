@@ -64,6 +64,10 @@ pub struct AgentTaskControllerMaterializeArgs {
     /// Explicit run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
     #[arg(long, value_name = "JSON")]
     pub inputs: Option<String>,
+
+    /// Declarative policy result JSON, @file, or - for stdin. Repeatable.
+    #[arg(long = "policy-result", value_name = "JSON")]
+    pub policy_results: Vec<String>,
 }
 
 #[derive(Args, Debug)]
