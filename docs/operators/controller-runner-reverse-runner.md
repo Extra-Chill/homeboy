@@ -21,6 +21,7 @@ follow-up work:
 | Long-running runner worker service | Not available as a durable service yet | #2991 |
 | Controller broker service deployment | Not available as a packaged service recipe yet | #2992 |
 | Reverse workspace sync | Not available for controller-to-runner workspaces without direct SSH | #2947 |
+| Mid-process reverse cancellation interrupt | Follow-up needed; broker cancel state is honored before start and before finish | TBD |
 
 Until those issues land, use this guide as scaffolding for local/private smoke
 tests and operator preparation. Do not expose the broker publicly or rely on this

@@ -389,10 +389,14 @@ where
             "job_id": id,
             "events": job_store.events(parse_job_id(id)?)?,
         }),
-        HttpEndpoint::JobCancel { id } => json!({
-            "command": "api.jobs.cancel",
-            "job": job_store.cancel(parse_job_id(id)?, "cancel requested via HTTP API")?,
-        }),
+        HttpEndpoint::JobCancel { id } => {
+            let job_id = parse_job_id(id)?;
+            json!({
+                "command": "api.jobs.cancel",
+                "job": job_store.cancel(job_id, "cancel requested via HTTP API")?,
+                "events": job_store.events(job_id)?,
+            })
+        }
         HttpEndpoint::JobReadyRun { kind } => {
             enqueue_analysis_job(job_store, *kind, request.body, analysis_runner)?
         }

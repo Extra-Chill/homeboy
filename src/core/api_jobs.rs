@@ -1734,6 +1734,27 @@ mod tests {
     }
 
     #[test]
+    fn running_remote_runner_job_can_be_cancelled_by_broker() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+
+        let cancelled = store
+            .cancel_remote_runner_job(job.id, "user requested")
+            .expect("remote runner job cancels");
+
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert!(store.events(job.id).expect("events").iter().any(|event| {
+            event.kind == JobEventKind::Status && event.message.as_deref() == Some("user requested")
+        }));
+    }
+
+    #[test]
     fn expired_remote_runner_claims_are_reconciled_as_failed() {
         let store = JobStore::default();
         let job = store
