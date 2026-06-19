@@ -4,6 +4,72 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.245.0] - 2026-06-19
+
+### Added
+- signal Lab auto-offload target and clarify remote failures (#3815)
+- feat(agent-task): surface root-cause diagnostics in failure output (#3806)
+- restart declared resident services after binary swap (#5197)
+
+### Changed
+- Document list command
+- Normalize agent task provider contract fields
+- reuse changed scope across stages
+- extract core git intent helpers
+- cache planning git probes
+- purge ecosystem literals from core detectors + commands (#5232, #5233)
+- add scoped audit groundwork
+- centralize changed scope preflight
+- introduce run service boundary
+- mark display-only plan dependencies
+- dedupe git_probe_path and path-resolution helpers (#5237, #5239)
+- remove redundant dead-code markers and unused fns (#5250)
+- centralize output file writing
+- remove/narrow dead code flagged by audit (#5234)
+- refactor(agent-task): split agent_task_controller_service god file + dedup (#5208, #5207)
+- Resolve provider secrets before Lab run-plan offload
+- reuse contract support copy
+- extract offload workspace planning
+- make active runner jobs opt-in
+- cache standalone config fallbacks
+- share JSON envelope descriptor
+- reduce artifact IO overhead
+- Refactor git process helpers
+- cache explicit tag fetches
+- Keep workflow abilities out of provider capability gates
+- Execute loop retry and request changes actions
+- Allow controller dispatch defaults at runtime
+- cache git drift during status
+- reuse central git helpers
+
+### Fixed
+- remove duplicate self-check changed-file fields
+- add missing precomputed_changed_files to LintArgs/TestArgs initializers (#5266)
+- Fix self check test args
+- unblock base test bootstrap
+- complete quality check compatibility
+- unblock quality checks
+- neutralize agent runtime package env
+- require fresh reverse heartbeat
+- install shared runtime agent CI assets
+- import dependency kind in spec compiler
+- keep runtime product names out of core
+- support controller Codebox contracts
+- set dependency kind on agent task steps
+- keep run service import private
+- import Path for review output writer
+- cache upstream drift by git root
+- avoid extension loading for root help/version
+- preflight agent-task loop providers
+- bound command output capture with truncation metadata (#5238)
+- accept named refs after extension sync
+- repair core_owned_source_stays_language_and_framework_agnostic after dependency-materialization comments (#5227)
+- isolate per-run workspaces to prevent cross-run contamination (#4393)
+- materialize worktree dependencies before verify gate (#3771)
+- repair core_owned_source_stays_language_and_framework_agnostic failure (#5217)
+- capture write-fix patch in lint/refactor offload results (#4315)
+- fix(agent-task): align cook preflight with providers --runner resolution (#4860)
+
 ## [0.244.0] - 2026-06-19
 
 ### Added
