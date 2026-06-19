@@ -22,8 +22,9 @@ pub use component::{
     apply_component_overrides, attach_component_path, attach_component_path_report,
     attach_discovered_component_path, clear_component_attachments, clear_components, has_component,
     list_components, project_component_ids, remove_components, remove_components_report,
-    resolve_project_component, resolve_project_components, set_component_attachments,
-    set_components, ProjectComponentsOutput,
+    resolve_project_component, resolve_project_component_with_standalone_snapshot,
+    resolve_project_components, set_component_attachments, set_components, ProjectComponentsOutput,
+    StandaloneComponentConfigSnapshot,
 };
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};

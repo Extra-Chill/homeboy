@@ -13,4 +13,7 @@ pub use report::{
     attach_component_path_report, clear_components, list_components, remove_components_report,
     set_components, ProjectComponentsOutput,
 };
-pub use resolution::{resolve_project_component, resolve_project_components};
+pub use resolution::{
+    resolve_project_component, resolve_project_component_with_standalone_snapshot,
+    resolve_project_components, StandaloneComponentConfigSnapshot,
+};

@@ -1,5 +1,6 @@
 use crate::core::error::{Error, Result};
 use crate::core::project::Project;
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::discovery::discover_attached_component;
@@ -8,6 +9,14 @@ use super::overrides::apply_component_overrides;
 pub fn resolve_project_component(
     project: &Project,
     component_id: &str,
+) -> Result<crate::core::component::Component> {
+    resolve_project_component_with_standalone_snapshot(project, component_id, None)
+}
+
+pub fn resolve_project_component_with_standalone_snapshot(
+    project: &Project,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) -> Result<crate::core::component::Component> {
     let (mut component, attachment_local_path, attachment_remote_path) = if let Some(attachment) =
         project
@@ -48,7 +57,7 @@ pub fn resolve_project_component(
         }
     }
 
-    apply_standalone_component_fallbacks(&mut component);
+    apply_standalone_component_fallbacks(&mut component, standalone_snapshot);
 
     let mut resolved = apply_component_overrides(&component, project);
     resolved.local_path = attachment_local_path;
@@ -72,8 +81,15 @@ pub fn resolve_project_component(
     Ok(resolved)
 }
 
-fn apply_standalone_component_fallbacks(component: &mut crate::core::component::Component) {
-    let Some(standalone) = load_standalone_component_config(&component.id) else {
+fn apply_standalone_component_fallbacks(
+    component: &mut crate::core::component::Component,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) {
+    let standalone = match standalone_snapshot {
+        Some(snapshot) => snapshot.get(&component.id).cloned(),
+        None => load_standalone_component_config(&component.id),
+    };
+    let Some(standalone) = standalone else {
         return;
     };
 
@@ -90,11 +106,60 @@ fn apply_standalone_component_fallbacks(component: &mut crate::core::component::
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct StandaloneComponentConfigSnapshot {
+    components: HashMap<String, crate::core::component::Component>,
+}
+
+impl StandaloneComponentConfigSnapshot {
+    pub fn load() -> Self {
+        let mut snapshot = Self::default();
+        let Ok(dir) = crate::core::paths::components() else {
+            return snapshot;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return snapshot;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let Some(component_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(component) = load_standalone_component_config_from_path(component_id, &path)
+            else {
+                continue;
+            };
+
+            snapshot
+                .components
+                .insert(component_id.to_string(), component);
+        }
+
+        snapshot
+    }
+
+    fn get(&self, component_id: &str) -> Option<&crate::core::component::Component> {
+        self.components.get(component_id)
+    }
+}
+
 fn load_standalone_component_config(
     component_id: &str,
 ) -> Option<crate::core::component::Component> {
     let dir = crate::core::paths::components().ok()?;
     let path = dir.join(format!("{component_id}.json"));
+    load_standalone_component_config_from_path(component_id, &path)
+}
+
+fn load_standalone_component_config_from_path(
+    component_id: &str,
+    path: &Path,
+) -> Option<crate::core::component::Component> {
     let content = std::fs::read_to_string(path).ok()?;
     let mut json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
@@ -111,10 +176,17 @@ fn load_standalone_component_config(
 pub fn resolve_project_components(
     project: &Project,
 ) -> Result<Vec<crate::core::component::Component>> {
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
     project
         .components
         .iter()
-        .map(|component| resolve_project_component(project, &component.id))
+        .map(|component| {
+            resolve_project_component_with_standalone_snapshot(
+                project,
+                &component.id,
+                Some(&standalone_snapshot),
+            )
+        })
         .collect()
 }
 

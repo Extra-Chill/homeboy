@@ -68,9 +68,14 @@ pub fn inventory() -> Result<Vec<Component>> {
     };
 
     // 1. Project-attached components (highest priority)
+    let standalone_snapshot = project::StandaloneComponentConfigSnapshot::load();
     for project in &projects {
         for attachment in &project.components {
-            if let Ok(component) = project::resolve_project_component(project, &attachment.id) {
+            if let Ok(component) = project::resolve_project_component_with_standalone_snapshot(
+                project,
+                &attachment.id,
+                Some(&standalone_snapshot),
+            ) {
                 add_component(component);
             }
         }
