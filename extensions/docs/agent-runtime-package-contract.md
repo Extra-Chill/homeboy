@@ -4,9 +4,8 @@ Agent runtime packages live under `agent-runtimes/<runtime-id>/`. They expose
 provider commands that Homeboy can invoke without encoding backend-specific
 knowledge in core or in domain extensions.
 
-This contract is intentionally backend-neutral. A browser sandbox runtime, a
-local shell fixture, or a CLI agent runtime can all satisfy the same request and
-outcome schemas.
+This contract is intentionally backend-neutral. A browser sandbox runtime or a
+CLI agent runtime can satisfy the same request and outcome schemas.
 
 ## Package Layout
 
@@ -38,7 +37,7 @@ Each `agent_task_executors[]` entry must declare:
 - `schema`: provider declaration schema, currently `homeboy/agent-task-executor-provider/v1`.
 - `id`: stable provider id. Use a namespaced id such as `runtime-id.provider-id`.
 - `label`: human-readable provider label.
-- `backend`: backend selector value used by requests, for example `fake-runtime` or `codebox`.
+- `backend`: backend selector value used by requests, for example `codebox` or `opencode`.
 - `command`: shell command Homeboy runs after interpolation.
 - `request_schema`: accepted request schema, currently `homeboy/agent-task-request/v1`.
 - `outcome_schema`: emitted outcome schema, currently `homeboy/agent-task-outcome/v1`.
@@ -47,8 +46,11 @@ Each `agent_task_executors[]` entry must declare:
 - `failure_classifications`: normalized failure classes used for diagnostics.
 - `redacted_metadata_keys`: metadata keys that must never expose secret values.
 - `capabilities`: explicit capabilities orchestration may rely on.
+- `runner_readiness`: executable, path, or environment checks operators can inspect before dispatch.
+- `role_aliases`: mappings from provider-native artifact/output names to generic Homeboy roles.
 - `workspace_materialization`: workspace shape required by the provider.
-- `secret_requirements`: environment variable names or groups the provider needs.
+- `secret_requirements` and `secret_env_requirements`: secret names or groups the provider may need. Core lists and resolves explicitly requested env names; runtime packages own provider-specific default selection.
+- `provider_defaults`: provider-specific defaults such as model names, secret env names, and source hints.
 - `diagnostics`: diagnostic artifacts and metadata the provider writes or returns.
 - `status`: lifecycle state, usually `active`, `experimental`, or `deprecated`.
 - `integration_contract`: higher-level contract name when the provider serves a domain extension.
@@ -116,8 +118,8 @@ validation logic.
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of
 copying schema strings or selector paths into each backend. Domain policy, such
-as WordPress or project-specific defaults, belongs in the caller/runtime package and
-not in the generic adapter.
+as project-specific defaults, belongs in the caller/runtime package and not in
+the generic adapter.
 
 ## Secret Requirements
 
@@ -206,18 +208,9 @@ default; a different workflow may choose another runtime with the same generic
 capabilities. Homeboy core should route explicit requests and evaluate declared
 capabilities, not hard-code a global default backend.
 
-## Fake Runtime Fixture
+## Static Contract Fixture
 
-`agent-runtimes/fake-runtime` is the smallest reference fixture for this
-contract. It accepts `homeboy/agent-task-request/v1`, requires an explicit
-`executor.backend`, writes an outcome JSON file plus a transcript log artifact,
-and emits `homeboy/agent-task-outcome/v1` without any secret inputs. It exists to
-prove future runtimes can satisfy Homeboy's generic runtime package shape without
-copying another runtime package structure or domain behavior.
-
-## Local Shell Runtime
-
-`agent-runtimes/local-shell` is the smallest generic non-WordPress runtime. It
-runs an explicit local command from the `AgentTaskRequest` and emits a
-normalized `AgentTaskOutcome`. It is intended for deterministic loops where the
-caller owns domain policy and command safety.
+`tests/fixtures/agent-runtime-manifest.json` is the smallest reference fixture
+for this contract. It is intentionally outside `agent-runtimes/` so it validates
+the generic manifest shape without advertising a smoke-test runtime as an
+installable adapter.

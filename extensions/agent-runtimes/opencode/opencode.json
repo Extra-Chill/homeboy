@@ -10,7 +10,7 @@
       "id": "opencode.agent-task-executor",
       "label": "OpenCode agent task executor",
       "backend": "opencode",
-      "runtime": "opencode",
+      "runtime_id": "opencode",
       "command": "node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs",
       "invocation": {
         "schema": "homeboy/command-invocation/v1",
@@ -88,7 +88,10 @@
         "nested_orchestrator"
       ],
       "workspace_materialization": {
-        "cwd": "git_checkout"
+        "cwd": "git_checkout",
+        "requires_git": true,
+        "write_scope": "workspace",
+        "artifact_paths": [".homeboy/opencode"]
       },
       "runner_readiness": [
         {
@@ -184,7 +187,21 @@
         "patch": ["git-diff", "patch"],
         "report": ["json", "markdown"]
       },
-      "status": "available",
+      "role_aliases": {
+        "artifact_kinds": {
+          "patch": ["opencode-patch", "git-diff", "patch"],
+          "transcript": ["opencode-transcript", "agent-runtime-transcript"],
+          "runtime_log": ["opencode-runtime-log"],
+          "report": ["opencode-report", "agent-runtime-report"]
+        },
+        "outputs": {
+          "provider_run_result": ["opencode_run_result"]
+        },
+        "metadata": {
+          "provider_run_result": ["opencode_run_result"]
+        }
+      },
+      "status": "active",
       "integration_contract": "homeboy-opencode-agent-task/v1"
     }
   ]

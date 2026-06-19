@@ -81,6 +81,28 @@ const OPENCODE_WORKSPACE_TOOLS = {
 	],
 };
 
+const OPENCODE_WORKSPACE_MATERIALIZATION = {
+	cwd: 'git_checkout',
+	requires_git: true,
+	write_scope: 'workspace',
+	artifact_paths: ['.homeboy/opencode'],
+};
+
+const OPENCODE_ROLE_ALIASES = {
+	artifact_kinds: {
+		patch: ['opencode-patch', 'git-diff', 'patch'],
+		transcript: ['opencode-transcript', 'agent-runtime-transcript'],
+		runtime_log: ['opencode-runtime-log'],
+		report: ['opencode-report', 'agent-runtime-report'],
+	},
+	outputs: {
+		provider_run_result: ['opencode_run_result'],
+	},
+	metadata: {
+		provider_run_result: ['opencode_run_result'],
+	},
+};
+
 const OPENCODE_PROVIDER_DEFAULTS = {
 	codex: {
 		model: 'gpt-5.5',
@@ -143,15 +165,13 @@ function providerContract(options = {}) {
 		id: options.id || OPENCODE_PROVIDER_ID,
 		label: options.label || OPENCODE_PROVIDER_LABEL,
 		backend: 'opencode',
-		runtime: 'opencode',
+		runtime_id: 'opencode',
 		command: options.command || OPENCODE_COMMAND,
 		invocation: options.invocation || OPENCODE_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV)],
 		capabilities: OPENCODE_CAPABILITIES,
-		workspace_materialization: {
-			cwd: 'git_checkout',
-		},
+		workspace_materialization: OPENCODE_WORKSPACE_MATERIALIZATION,
 		runner_readiness: OPENCODE_RUNNER_READINESS,
 		workspace_tools: OPENCODE_WORKSPACE_TOOLS,
 		provider_defaults: OPENCODE_PROVIDER_DEFAULTS,
@@ -165,7 +185,8 @@ function providerContract(options = {}) {
 			patch: ['git-diff', 'patch'],
 			report: ['json', 'markdown'],
 		},
-		status: 'available',
+		role_aliases: OPENCODE_ROLE_ALIASES,
+		status: 'active',
 		integration_contract: 'homeboy-opencode-agent-task/v1',
 	};
 }
@@ -335,8 +356,10 @@ module.exports = {
 	OPENCODE_INVOCATION,
 	OPENCODE_PROVIDER_DEFAULTS,
 	OPENCODE_PROVIDER_PREFLIGHT,
+	OPENCODE_ROLE_ALIASES,
 	OPENCODE_RUNNER_READINESS,
 	OPENCODE_WORKSPACE_TOOLS,
+	OPENCODE_WORKSPACE_MATERIALIZATION,
 	executeOpenCodeAgentTask,
 	outcome,
 	providerContract,
