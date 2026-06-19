@@ -673,6 +673,19 @@ pub(super) fn load_project_components(
             Some(&standalone_snapshot),
         )?;
 
+        // Bundled/retired components are no longer standalone deploy targets.
+        // Skip them before extension validation and artifact resolution so they
+        // never appear as deploy obligations or `--outdated` drift. Their
+        // version tracks the host component (when bundled) or is moot (retired).
+        if !loaded.is_active_lifecycle() {
+            let reason = loaded
+                .lifecycle_suppression_reason()
+                .unwrap_or_else(|| "Component is not an active deploy target".to_string());
+            log_status!("deploy", "Skipping '{}': {}", loaded.id, reason);
+            skipped.push(loaded.id.clone());
+            continue;
+        }
+
         // Validate required extensions are installed before attempting artifact resolution.
         // Without this check, missing extensions cause resolve_artifact() to silently
         // return None, and the component gets skipped with a vague "no artifact" message.
@@ -1162,5 +1175,67 @@ mod tests {
         let selected = select_behind_upstream_components(&[current]);
 
         assert!(selected.is_empty());
+    }
+
+    /// Write a deployable component repo (homeboy.json + a deploy artifact) at
+    /// `dir`, optionally declaring a non-active `lifecycle`.
+    fn write_component_repo(dir: &Path, id: &str, lifecycle: Option<&str>) {
+        let mut config = serde_json::json!({
+            "id": id,
+            "remote_path": format!("wp-content/plugins/{id}"),
+            "build_artifact": "dist/plugin.zip",
+        });
+        if let Some(lifecycle) = lifecycle {
+            config["lifecycle"] = serde_json::json!(lifecycle);
+        }
+        std::fs::write(dir.join("homeboy.json"), config.to_string()).expect("write homeboy.json");
+        std::fs::create_dir_all(dir.join("dist")).expect("dist dir");
+        std::fs::write(dir.join("dist/plugin.zip"), b"zip").expect("artifact");
+    }
+
+    #[test]
+    fn load_project_components_skips_bundled_and_retired_lifecycle() {
+        crate::test_support::with_isolated_home(|home| {
+            let workspace = home.path().join("workspace");
+            let active_dir = workspace.join("active");
+            let bundled_dir = workspace.join("bundled");
+            let retired_dir = workspace.join("retired");
+            std::fs::create_dir_all(&active_dir).expect("active dir");
+            std::fs::create_dir_all(&bundled_dir).expect("bundled dir");
+            std::fs::create_dir_all(&retired_dir).expect("retired dir");
+
+            write_component_repo(&active_dir, "active", None);
+            write_component_repo(&bundled_dir, "bundled", Some("bundled"));
+            write_component_repo(&retired_dir, "retired", Some("retired"));
+
+            let attach = |id: &str, dir: &Path| crate::core::project::ProjectComponentAttachment {
+                id: id.to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                remote_path: None,
+            };
+
+            let project = Project {
+                id: "site".to_string(),
+                components: vec![
+                    attach("active", &active_dir),
+                    attach("bundled", &bundled_dir),
+                    attach("retired", &retired_dir),
+                ],
+                ..Project::default()
+            };
+
+            let loaded =
+                load_project_components(&project, &[], false).expect("load components succeeds");
+
+            // Only the active component is a deploy obligation.
+            let deployable_ids: Vec<&str> =
+                loaded.deployable.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(deployable_ids, vec!["active"]);
+
+            // Bundled/retired components are suppressed (not a hard error, not
+            // deployable) — exactly the agents-api scenario from #3489.
+            assert!(loaded.skipped.contains(&"bundled".to_string()));
+            assert!(loaded.skipped.contains(&"retired".to_string()));
+        });
     }
 }

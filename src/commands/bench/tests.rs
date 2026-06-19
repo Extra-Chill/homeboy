@@ -262,6 +262,7 @@ pub(super) fn run_args(
 ) -> BenchArgs {
     BenchArgs {
         command: None,
+        json: false,
         run: BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: component.map(str::to_string),
@@ -1405,6 +1406,7 @@ fn bench_output_single_serializes_with_tagged_payload() {
         failure: None,
         diagnostics: Vec::new(),
         ci_context: None,
+        persisted_run: None,
     };
     let value = serde_json::to_value(BenchOutput::Single(single)).unwrap();
     assert_eq!(

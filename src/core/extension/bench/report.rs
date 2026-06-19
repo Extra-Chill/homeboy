@@ -52,6 +52,29 @@ pub struct BenchCommandOutput {
     pub diagnostics: Vec<BenchDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_context: Option<CiContext>,
+    /// Pointer to the persisted observation run for this bench, populated
+    /// once results are stored. Surfaces the run id, runner, and the
+    /// `homeboy runs show/artifacts` follow-up commands so consumers can
+    /// find the full evidence without scraping the `hints` array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_run: Option<BenchPersistedRun>,
+}
+
+/// Compact, structured pointer to the persisted observation run backing a
+/// bench invocation. Mirrors the human `hints` entries but in a stable,
+/// machine-readable shape so the compact summary and downstream tools can
+/// surface artifacts and run inspection commands directly.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct BenchPersistedRun {
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig_id: Option<String>,
+    /// `homeboy runs show <run-id>` — full run detail and metadata.
+    pub show_command: String,
+    /// `homeboy runs artifacts <run-id>` — list recorded artifacts.
+    pub artifacts_command: String,
 }
 
 pub fn from_main_workflow(result: BenchRunWorkflowResult) -> (BenchCommandOutput, i32) {
@@ -102,6 +125,7 @@ pub fn from_main_workflow_with_rig_and_ci_context(
             failure: result.failure,
             diagnostics: result.diagnostics,
             ci_context,
+            persisted_run: None,
         },
         exit_code,
     )

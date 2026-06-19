@@ -39,6 +39,27 @@ pub(crate) fn post_json(
     canonical_broker_body(&data)
 }
 
+pub(crate) fn get_json(client: &Client, base_url: &str, path: &str, action: &str) -> Result<Value> {
+    let response = client
+        .get(format!("{}{}", base_url.trim_end_matches('/'), path))
+        .send()
+        .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))?;
+    let status_code = response.status().as_u16();
+    let envelope: BrokerEnvelope = response.json().map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse broker response".to_string()))
+    })?;
+    if status_code >= 400 || !envelope.success {
+        return Err(Error::internal_unexpected(format!(
+            "broker request failed: {}",
+            envelope.error.unwrap_or(Value::Null)
+        )));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| Error::internal_unexpected("broker response missing data"))?;
+    canonical_broker_body(&data)
+}
+
 fn canonical_broker_body(data: &Value) -> Result<Value> {
     data.get("body")
         .cloned()

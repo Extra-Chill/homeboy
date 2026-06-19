@@ -90,7 +90,7 @@ pub fn is_markdown_mode(args: &ReviewArgs) -> bool {
 struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
     name: &'static str,
     include_changed_only_scope: bool,
-    build_args: fn(&ReviewArgs, Option<&[String]>) -> Args,
+    build_args: fn(&ReviewArgs, &ReviewExecutionContext) -> Args,
     run: fn(Args, &GlobalArgs) -> CmdResult<Output>,
     finding_count: fn(&Output) -> usize,
 }
@@ -101,10 +101,16 @@ enum ReviewStageRun {
     Test(Box<ReviewStage<TestCommandOutput>>),
 }
 
-struct ReviewScopePreflight {
+struct ReviewExecutionContext {
     scope: String,
     changed_file_count: Option<usize>,
     precomputed_changed_files: Option<Vec<String>>,
+}
+
+impl ReviewExecutionContext {
+    fn precomputed_changed_files(&self) -> Option<&[String]> {
+        self.precomputed_changed_files.as_deref()
+    }
 }
 
 impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Args, Output> {
@@ -113,12 +119,10 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
         review_args: &ReviewArgs,
         global: &GlobalArgs,
         component_label: &str,
-        precomputed_changed_files: Option<&[String]>,
+        review_context: &ReviewExecutionContext,
     ) -> CmdResult<ReviewStage<Output>> {
-        let (output, exit_code) = (self.run)(
-            (self.build_args)(review_args, precomputed_changed_files),
-            global,
-        )?;
+        let (output, exit_code) =
+            (self.run)((self.build_args)(review_args, review_context), global)?;
         let finding_count = (self.finding_count)(&output);
 
         Ok((
@@ -147,7 +151,7 @@ fn dispatch_review_plan_step(
     args: &ReviewArgs,
     global: &GlobalArgs,
     component_label: &str,
-    precomputed_changed_files: Option<&[String]>,
+    review_context: &ReviewExecutionContext,
 ) -> homeboy::core::Result<Option<ReviewStageRun>> {
     match step.kind.as_str() {
         "review.audit" => {
@@ -158,8 +162,7 @@ fn dispatch_review_plan_step(
                 run: audit::run,
                 finding_count: audit_finding_count,
             };
-            let (stage, _) =
-                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
+            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Audit(Box::new(stage))))
         }
         "review.lint" => {
@@ -170,8 +173,7 @@ fn dispatch_review_plan_step(
                 run: lint::run,
                 finding_count: lint_finding_count,
             };
-            let (stage, _) =
-                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
+            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Lint(Box::new(stage))))
         }
         "review.test" => {
@@ -182,8 +184,7 @@ fn dispatch_review_plan_step(
                 run: test::run,
                 finding_count: test_finding_count,
             };
-            let (stage, _) =
-                descriptor.execute(args, global, component_label, precomputed_changed_files)?;
+            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Test(Box::new(stage))))
         }
         other => Err(homeboy::core::Error::internal_unexpected(format!(
@@ -199,10 +200,9 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
-    let preflight = preflight_review_scope(&args, &source_path)?;
-    let scope = preflight.scope;
-    let changed_file_count = preflight.changed_file_count;
-    let precomputed_changed_files = preflight.precomputed_changed_files;
+    let review_context = preflight_review_scope(&args, &source_path)?;
+    let scope = review_context.scope.clone();
+    let changed_file_count = review_context.changed_file_count;
 
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
 
@@ -267,7 +267,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
             &args,
             global,
             &component_label,
-            precomputed_changed_files.as_deref(),
+            &review_context,
         )
     }) {
         Ok(run) => run,
@@ -376,7 +376,7 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
 fn preflight_review_scope(
     args: &ReviewArgs,
     source_path: &str,
-) -> homeboy::core::Result<ReviewScopePreflight> {
+) -> homeboy::core::Result<ReviewExecutionContext> {
     let scope = if args.changed_since.is_some() {
         "changed-since"
     } else if args.changed_only {
@@ -396,7 +396,7 @@ fn preflight_review_scope(
     };
     let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
 
-    Ok(ReviewScopePreflight {
+    Ok(ReviewExecutionContext {
         scope,
         changed_file_count,
         precomputed_changed_files,
@@ -462,7 +462,7 @@ fn scope_flag_suffix(args: &ReviewArgs, include_changed_only: bool) -> String {
 
 fn build_audit_args(
     args: &ReviewArgs,
-    precomputed_changed_files: Option<&[String]>,
+    review_context: &ReviewExecutionContext,
 ) -> audit::AuditArgs {
     audit::AuditArgs {
         comp: args.comp.clone(),
@@ -472,7 +472,9 @@ fn build_audit_args(
         exclude: Vec::new(),
         baseline_args: args.baseline_args.clone(),
         changed_since: args.changed_since.clone(),
-        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
+        precomputed_changed_files: review_context
+            .precomputed_changed_files()
+            .map(<[String]>::to_vec),
         json_summary: args.summary,
         fixability: false,
     }
@@ -480,7 +482,7 @@ fn build_audit_args(
 
 fn build_lint_args(
     args: &ReviewArgs,
-    precomputed_changed_files: Option<&[String]>,
+    review_context: &ReviewExecutionContext,
 ) -> lint::LintArgs {
     lint::LintArgs {
         comp: args.comp.clone(),
@@ -489,7 +491,9 @@ fn build_lint_args(
         glob: None,
         changed_only: args.changed_only,
         changed_since: args.changed_since.clone(),
-        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
+        precomputed_changed_files: review_context
+            .precomputed_changed_files()
+            .map(<[String]>::to_vec),
         ci_job: None,
         errors_only: false,
         sniffs: None,
@@ -506,7 +510,7 @@ fn build_lint_args(
 
 fn build_test_args(
     args: &ReviewArgs,
-    precomputed_changed_files: Option<&[String]>,
+    review_context: &ReviewExecutionContext,
 ) -> test::TestArgs {
     test::TestArgs {
         comp: args.comp.clone(),
@@ -520,7 +524,9 @@ fn build_test_args(
         write: false,
         since: "HEAD~10".to_string(),
         changed_since: args.changed_since.clone(),
-        precomputed_changed_files: precomputed_changed_files.map(<[String]>::to_vec),
+        precomputed_changed_files: review_context
+            .precomputed_changed_files()
+            .map(<[String]>::to_vec),
         ci_job: None,
         setting_args: Default::default(),
         args: Vec::new(),

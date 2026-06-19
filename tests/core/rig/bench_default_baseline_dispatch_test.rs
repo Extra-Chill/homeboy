@@ -34,6 +34,7 @@ fn make_args(
 ) -> BenchArgs {
     BenchArgs {
         command: None,
+        json: false,
         run: BenchRunArgs {
             comp: PositionalComponentArgs {
                 component: None,

@@ -455,6 +455,9 @@ pub(super) fn run_single_rig(
                 .flat_map(|output| output.diagnostics.clone())
                 .collect(),
             ci_context: None,
+            persisted_run: outputs
+                .iter()
+                .find_map(|output| output.persisted_run.clone()),
         },
         exit_code,
     ))
@@ -594,6 +597,7 @@ fn run_component_with_rig_context(
         observation::finish_error(observation, &error, &run_dir);
         return Err(error);
     }
+    let mut persisted_run = None;
     let workflow = match workflow {
         Ok(mut workflow) => {
             apply_declared_scenario_gates(&mut workflow, declared_scenario_gates(rig_spec));
@@ -601,6 +605,7 @@ fn run_component_with_rig_context(
             {
                 let hints = workflow.hints.get_or_insert_with(Vec::new);
                 hints.extend(observation::history_hints(&summary));
+                persisted_run = Some(observation::persisted_run_pointer(&summary));
             }
             workflow
         }
@@ -612,18 +617,17 @@ fn run_component_with_rig_context(
 
     let ci_context =
         ci_profile::ci_context_for_job(ci_profile_job.as_ref(), args.ci_profile.as_deref());
-    if ci_context.is_some() {
-        Ok(extension_bench::from_main_workflow_with_rig_and_ci_context(
+    let (mut output, exit_code) = if ci_context.is_some() {
+        extension_bench::from_main_workflow_with_rig_and_ci_context(
             workflow,
             rig_snapshot,
             ci_context,
-        ))
+        )
     } else {
-        Ok(extension_bench::from_main_workflow_with_rig(
-            workflow,
-            rig_snapshot,
-        ))
-    }
+        extension_bench::from_main_workflow_with_rig(workflow, rig_snapshot)
+    };
+    output.persisted_run = persisted_run;
+    Ok((output, exit_code))
 }
 
 fn resolve_ci_profile_job(
@@ -1058,6 +1062,7 @@ mod tests {
             failure: None,
             diagnostics: Vec::new(),
             ci_context: None,
+            persisted_run: None,
         }
     }
 

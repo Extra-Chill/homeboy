@@ -341,14 +341,36 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(claim.status_code, 200);
     assert_eq!(claim.body["endpoint"], "runner.jobs.claim");
     assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
-    let claim_id = claim.body["body"]["claim"]["claim_id"]
+    let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
         .as_str()
         .expect("claim id")
         .to_string();
+    let original_expiry = claim.body["body"]["claim"]["job"]["claim_expires_at_ms"]
+        .as_u64()
+        .expect("claim expiry");
     assert_eq!(
         claim.body["body"]["claim"]["request"]["command"],
         serde_json::json!(["homeboy", "test", "sample-plugin"])
     );
+
+    let heartbeat = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/heartbeat"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "claim_id": claim_id.clone(),
+            "lease_ms": 60000
+        })),
+        &store,
+    );
+
+    assert_eq!(heartbeat.status_code, 200);
+    assert_eq!(heartbeat.body["endpoint"], "runner.jobs.heartbeat");
+    assert_eq!(heartbeat.body["body"]["job"]["id"], job_id);
+    assert!(heartbeat.body["body"]["job"]["claim_expires_at_ms"]
+        .as_u64()
+        .expect("renewed expiry")
+        > original_expiry);
 
     let event = route_with_job_store_and_body(
         "POST",
@@ -384,6 +406,104 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.status_code, 200);
     assert_eq!(finish.body["endpoint"], "runner.jobs.finish");
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+}
+
+#[test]
+fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
+    let store = JobStore::default();
+    let submit = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "command": ["homeboy", "test", "sample-plugin"]
+        })),
+        &store,
+    );
+    let job_id = submit.body["body"]["job"]["id"].as_str().expect("job id");
+    let claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "lease_ms": 30000
+        })),
+        &store,
+    );
+    let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+        .as_str()
+        .expect("claim id");
+
+    let missing_claim = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/events"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "kind": "progress"
+        })),
+        &store,
+    );
+    assert_eq!(missing_claim.status_code, 400);
+
+    let wrong_claim = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/finish"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "claim_id": "wrong-claim",
+            "result": { "exit_code": 0 }
+        })),
+        &store,
+    );
+    assert_eq!(wrong_claim.status_code, 400);
+
+    let expired_job = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "command": ["homeboy", "test", "sample-plugin"]
+        })),
+        &store,
+    );
+    let expired_job_id = expired_job.body["body"]["job"]["id"].as_str().expect("job id");
+    let expired_claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "lease_ms": 1
+        })),
+        &store,
+    );
+    let expired_claim_id = expired_claim.body["body"]["claim"]["job"]["claim_id"]
+        .as_str()
+        .expect("claim id");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let expired_event = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{expired_job_id}/events"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "claim_id": expired_claim_id,
+            "kind": "progress"
+        })),
+        &store,
+    );
+    assert_eq!(expired_event.status_code, 400);
+
+    let valid_event = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/events"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "claim_id": claim_id,
+            "kind": "progress"
+        })),
+        &store,
+    );
+    assert_eq!(valid_event.status_code, 200);
 }
 
 #[test]
