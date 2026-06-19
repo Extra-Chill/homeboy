@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/index.js'));
-const datamachineAgentCi = require(path.join(repoRoot, 'datamachine-agent-ci/index.js'));
 
 const genericBoundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const genericFiles = [
@@ -101,12 +100,11 @@ const genericBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
 });
 
 assert.equal(genericBundleConfig.runtime_task.ability, 'runtime/run-agent-bundle');
+assert.equal(genericBundleConfig.runtime_execution.schema, 'homeboy/runtime-execution/v1');
 assert.equal(genericBundleConfig.runtime_task.input.source, '/workspace/example-repo/bundles/example-agent');
 assert.deepEqual(genericBundleConfig.runtime_task.input.workflow, { name: 'materialize-artifact' });
 assert.equal(genericBundleConfig.runtime_task.input.prompt, 'Cook a packet.');
 assert.equal(genericBundleConfig.runtime_execution.kind, 'bundle');
-assert.notEqual(genericBundleConfig.runtime_task.ability, 'datamachine/run-agent-bundle');
-
 const genericPackageConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeProfile: runtimeProfile.id,
   runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
@@ -154,33 +152,5 @@ assert.equal(genericRequest.executor.backend, 'codebox');
 assert.equal(genericRequest.executor.runtime, 'codebox');
 assert.deepEqual(genericRequest.expected_artifacts, ['packet']);
 assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
-
-const adapterConfig = datamachineAgentCi.datamachineAgentCiTaskExecutorConfig({
-  taskId: 'task-2',
-  source: 'bundle',
-  agentSlug: 'agent',
-  pipelineSlug: 'pipeline',
-  flowSlug: 'flow',
-});
-
-assert.equal(adapterConfig.runtime_profile, datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID);
-assert.equal(
-  adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].runtime_task_ability,
-  datamachineAgentCi.DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY
-);
-assert.equal(adapterConfig.runtime_execution.kind, 'bundle');
-assert.equal(adapterConfig.runtime_task.ability, datamachineAgentCi.DATAMACHINE_RUN_AGENT_BUNDLE_ABILITY);
-assert.deepEqual(
-  adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].component_path_defaults,
-  datamachineAgentCi.DATAMACHINE_AGENT_CI_COMPONENT_PATH_DEFAULTS
-);
-assert.deepEqual(
-  adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].ability_requirements,
-  datamachineAgentCi.DATAMACHINE_AGENT_CI_ABILITY_REQUIREMENTS
-);
-assert.deepEqual(
-  adapterConfig.runtime_profiles[datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].runtime_env_aliases,
-  datamachineAgentCi.DATAMACHINE_AGENT_CI_RUNTIME_ENV_ALIASES
-);
 
 console.log('runtime agent CI contract smoke passed');

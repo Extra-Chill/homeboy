@@ -21,7 +21,7 @@ const {
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
   providerDefaultsContract,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,
@@ -35,8 +35,8 @@ const {
   typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
 } = require('./codebox-artifact-contract');
 const {
+  codeboxRuntimeComponentContracts,
   codeboxRuntimeProfilePayload,
-  componentContractsFromRuntimeProfileDependencies,
 } = require('./codebox-runtime-profile');
 const {
   WP_CODEBOX_BACKEND,
@@ -56,6 +56,7 @@ const {
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
+const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -82,6 +83,8 @@ const AGENT_BUNDLE_CONFIG_FIELDS = [
   'ability_tools',
   'engine_data_outputs',
   'runtime_output_projections',
+  'runtime_task_ability',
+  'runtime_bundle_ability',
   'engine_key',
   'tool_results_key',
   'artifact_export_config',
@@ -137,6 +140,7 @@ function providerContract(options = {}) {
     id: options.id || WP_CODEBOX_PROVIDER_ID,
     label: options.label || WP_CODEBOX_PROVIDER_LABEL,
     backend: WP_CODEBOX_BACKEND,
+    runtime_id: options.runtimeId || options.runtime_id || runtimeManifest().id || 'wp-codebox',
     command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',
     invocation: runtimeCommandInvocation(options),
     ...agentTaskProviderContractFields(),
@@ -296,15 +300,15 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
   const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || runtimeOptions.mounts || []);
-  const componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
-  const components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
+  let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
+  let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
   const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions);
   const homeboyToolPolicy = homeboyAgentToolPolicy();
   const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, runtimeOptions, defaults);
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools, homeboyToolPolicy);
-  const sandboxAllowedTools = allowedToolsForSandboxPolicy(allowedTools, sandboxToolPolicy);
+  const sandboxAllowedTools = allowedToolsForHomeboyToolPolicy(allowedTools, homeboyToolPolicy);
   const provider = config.provider || runtimeOptions.provider || defaults.provider || '';
   const model = request.executor.model || config.model || runtimeOptions.model || defaults.model || '';
   const homeboySecretEnvPlan = homeboyAgentTaskSecretEnvPlan();
@@ -325,6 +329,13 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
   const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
+  componentContracts = codeboxRuntimeComponentContracts({
+    componentContracts: [
+      ...componentContracts,
+      ...normalizeArray(runtimeRequirements.component_contracts),
+    ],
+  });
+  components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const context = {
     ...(inputs.context || {}),
     agent_task_id: request.task_id,
@@ -371,7 +382,6 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     runtime_requirements: runtimeRequirements,
     runtime_env: {
       ...firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeOptions.runtimeEnv, defaults.runtimeEnv, {}),
-      ...homeboyAgentToolContractEnv(),
       ...runtimeEnvAliasesFromSourceEnv(runtimeOptions.runtimeEnvAliases),
     },
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
@@ -610,17 +620,15 @@ function runtimeOverlayDiagnostic(index, field, offendingField, value, message) 
 }
 
 function componentContractsFromAgentTaskRequest(request, config, options = {}) {
-  return uniqueComponentContracts([
-    ...normalizeArray(request.component_contracts),
-    ...normalizeArray(config.component_contracts),
-    ...normalizeArray(config.runtime_requirements?.component_contracts),
-    ...normalizeArray(config.runtime_requirements?.extra_plugins),
-    ...normalizeArray(options.runtimeProfile?.component_contracts),
-    ...normalizeArray(options.runtimeProfile?.extra_plugins),
-    ...componentContractsFromRuntimeProfileDependencies(options.runtimeProfile),
-    ...componentContractsFromRuntimeProfileDependencies(config.runtime_requirements),
-    ...normalizeArray(options.componentContracts),
-  ]);
+  return codeboxRuntimeComponentContracts({
+    profile: options.runtimeProfile,
+    runtimeRequirements: firstObject(config.runtime_requirements, config.runtimeRequirements) || {},
+    componentContracts: [
+      ...normalizeArray(request.component_contracts),
+      ...normalizeArray(config.component_contracts),
+      ...normalizeArray(options.componentContracts),
+    ],
+  });
 }
 
 function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
@@ -667,21 +675,6 @@ function providerPluginPathEntries(value) {
   });
 }
 
-function uniqueComponentContracts(contracts) {
-  const seen = new Set();
-  return contracts.filter((contract) => {
-    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
-      return false;
-    }
-    const key = `${contract.slug || ''}:${contract.path || contract.source || ''}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
 function abilityRuntimeTaskFromAgentTaskRequest(request, config, inputs) {
   const genericAbilityTask = genericAbilityRuntimeTask(request, config, inputs);
   if (genericAbilityTask) {
@@ -720,12 +713,93 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 }
 
 function runtimeTaskInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
-  const workflowInputs = workflowInputsFromAgentTaskRequest(request, config, inputs);
+  const defaultInput = firstObject(
+    declared?.input_defaults,
+    declared?.inputDefaults,
+    inputs.ability_input_defaults,
+    inputs.abilityInputDefaults,
+    config.ability_input_defaults,
+    config.abilityInputDefaults,
+  ) || {};
+  const mappedInput = runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared);
+  const legacyWorkflowInputs = legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared);
   const explicitInput = firstObject(declared?.input, declared?.args, inputs.ability_input, inputs.abilityInput, inputs.input, config.ability_input, config.abilityInput, config.input) || {};
-  return { ...workflowInputs, ...explicitInput };
+  return { ...defaultInput, ...mappedInput, ...legacyWorkflowInputs, ...explicitInput };
 }
 
-function workflowInputsFromAgentTaskRequest(request, config, inputs) {
+function runtimeMappedInputFromAgentTaskRequest(request, config, inputs, declared = {}) {
+  const mappings = normalizeArray(firstDefined(
+    declared?.input_mapping,
+    declared?.inputMapping,
+    declared?.context_mapping,
+    declared?.contextMapping,
+    inputs.runtime_input_mapping,
+    inputs.runtimeInputMapping,
+    inputs.context_mapping,
+    inputs.contextMapping,
+    config.runtime_input_mapping,
+    config.runtimeInputMapping,
+    config.context_mapping,
+    config.contextMapping,
+  ));
+  if (mappings.length === 0) {
+    return {};
+  }
+  const sources = runtimeInputMappingSources(request, config, inputs);
+  return mappings.reduce((mapped, mapping) => {
+    const entry = runtimeInputMappingEntry(mapping);
+    if (!entry) {
+      return mapped;
+    }
+    const value = valueAtPath(sources, entry.from);
+    if (value === undefined) {
+      if (entry.default !== undefined) {
+        setValueAtPath(mapped, entry.to, entry.default);
+      }
+      return mapped;
+    }
+    setValueAtPath(mapped, entry.to, value);
+    return mapped;
+  }, {});
+}
+
+function runtimeInputMappingSources(request, config, inputs) {
+  return {
+    request,
+    inputs,
+    config,
+    client_context: firstObject(inputs.client_context, inputs.clientContext, request.client_context, request.clientContext, config.client_context, config.clientContext) || {},
+    context: firstObject(inputs.context, request.context, config.context) || {},
+  };
+}
+
+function runtimeInputMappingEntry(mapping) {
+  if (typeof mapping === 'string' && mapping.trim()) {
+    return { from: mapping.trim(), to: pathLeaf(mapping.trim()) };
+  }
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+    return null;
+  }
+  const from = firstValue(mapping.from, mapping.source, mapping.path);
+  const to = firstValue(mapping.to, mapping.target, mapping.name, mapping.input);
+  if (!from || !to) {
+    return null;
+  }
+  return { from, to, default: mapping.default };
+}
+
+function legacyWorkflowInputsFromAgentTaskRequest(request, config, inputs, declared = {}) {
+  const legacyMerge = firstDefined(
+    declared?.allow_legacy_client_context_input_merge,
+    declared?.allowLegacyClientContextInputMerge,
+    inputs.allow_legacy_client_context_input_merge,
+    inputs.allowLegacyClientContextInputMerge,
+    config.allow_legacy_client_context_input_merge,
+    config.allowLegacyClientContextInputMerge,
+  );
+  if (legacyMerge !== true) {
+    return {};
+  }
   return firstObject(
     inputs.client_context?.inputs,
     inputs.clientContext?.inputs,
@@ -734,6 +808,38 @@ function workflowInputsFromAgentTaskRequest(request, config, inputs) {
     config.client_context?.inputs,
     config.clientContext?.inputs,
   ) || {};
+}
+
+function valueAtPath(source, fieldPath) {
+  if (!fieldPath || typeof fieldPath !== 'string') {
+    return undefined;
+  }
+  return fieldPath.split('.').filter(Boolean).reduce((value, segment) => {
+    if (value === undefined || value === null || typeof value !== 'object') {
+      return undefined;
+    }
+    return value[segment];
+  }, source);
+}
+
+function setValueAtPath(target, fieldPath, value) {
+  const segments = String(fieldPath || '').split('.').filter(Boolean);
+  if (segments.length === 0) {
+    return;
+  }
+  let cursor = target;
+  segments.slice(0, -1).forEach((segment) => {
+    if (!cursor[segment] || typeof cursor[segment] !== 'object' || Array.isArray(cursor[segment])) {
+      cursor[segment] = {};
+    }
+    cursor = cursor[segment];
+  });
+  cursor[segments[segments.length - 1]] = value;
+}
+
+function pathLeaf(fieldPath) {
+  const segments = String(fieldPath || '').split('.').filter(Boolean);
+  return segments[segments.length - 1] || fieldPath;
 }
 
 function allowedToolsFromAgentTaskRequest(request, config, inputs, options, defaults) {
@@ -772,8 +878,7 @@ function sandboxToolPolicyFromAgentTaskRequest(config, inputs, options, defaults
   if (explicit !== undefined) {
     return explicit;
   }
-  const homeboySandboxPolicy = sandboxToolPolicyFromHomeboyAgentToolPolicy(homeboyToolPolicy);
-  return workspaceSandboxToolPolicyWithAllowedTools(homeboySandboxPolicy || defaults.sandboxToolPolicy, allowedTools);
+  return workspaceSandboxToolPolicyWithAllowedTools(defaults.sandboxToolPolicy, allowedToolsForHomeboyToolPolicy(allowedTools, homeboyToolPolicy));
 }
 
 function homeboyAgentToolPolicy() {
@@ -782,15 +887,6 @@ function homeboyAgentToolPolicy() {
     return null;
   }
   return policy;
-}
-
-function homeboyAgentToolContractEnv() {
-  return Object.fromEntries([
-    'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-    'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-    'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-    'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-  ].map((name) => [name, process.env[name]]).filter(([, value]) => typeof value === 'string' && value !== ''));
 }
 
 function runtimeEnvAliasesFromSourceEnv(aliases = {}) {
@@ -812,71 +908,24 @@ function runtimeEnvAliasesFromSourceEnv(aliases = {}) {
   return env;
 }
 
-function sandboxToolPolicyFromHomeboyAgentToolPolicy(policy) {
-  const tools = Object.entries(policy?.tools || {})
-    .map(([toolId, rule]) => sandboxToolFromHomeboyToolPolicyRule(toolId, rule, policy))
-    .filter(Boolean);
-  if (tools.length === 0) {
-    return null;
-  }
-  return {
-    schema: 'wp-codebox/sandbox-tool-policy/v1',
-    version: 1,
-    tools,
-    metadata: {
-      source: 'homeboy_agent_tool_policy',
-      homeboy_policy_schema: policy.schema,
-      homeboy_default_location: policy.default_location || 'disabled',
-    },
-  };
-}
-
-function sandboxToolFromHomeboyToolPolicyRule(toolId, rule = {}, policy = {}) {
-  const id = typeof toolId === 'string' ? toolId.trim() : '';
-  if (!id) {
-    return null;
-  }
-  const location = rule.execution_location || policy.default_location || 'disabled';
-  const runnerOwned = location === 'runner';
-  const controlPlaneOwned = location === 'control_plane';
-  return {
-    id,
-    runtime_tool_id: runtimeToolIdFromHomeboyToolId(id),
-    execution_location: runnerOwned ? 'sandbox' : 'parent',
-    transport_visibility: runnerOwned ? 'sandbox' : controlPlaneOwned ? 'parent' : 'hidden',
-    allowed: runnerOwned,
-    runtime: {
-      environment: runnerOwned ? 'runtime_local' : 'control_plane',
-      capability_scope: runnerOwned ? 'runtime_local' : 'control_plane',
-    },
-    metadata: Object.fromEntries(Object.entries({
-      source: 'homeboy_agent_tool_policy',
-      homeboy_execution_location: location,
-      timeout_ms: rule.timeout_ms,
-      reason: rule.reason,
-    }).filter(([, value]) => value !== undefined && value !== '')),
-  };
-}
-
 function runtimeToolIdFromHomeboyToolId(toolId) {
   return String(toolId || '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'homeboy_tool';
 }
 
-function allowedToolsForSandboxPolicy(allowedTools, sandboxToolPolicy) {
-  if (!Array.isArray(allowedTools) || !sandboxToolPolicy || sandboxToolPolicy.metadata?.source !== 'homeboy_agent_tool_policy') {
+function allowedToolsForHomeboyToolPolicy(allowedTools, policy) {
+  if (!Array.isArray(allowedTools) || !policy || policy.schema !== 'homeboy/agent-tool-policy/v1') {
     return allowedTools;
   }
-  const explicitHomeboyTools = new Map((sandboxToolPolicy.tools || [])
-    .filter((tool) => tool?.metadata?.source === 'homeboy_agent_tool_policy')
-    .flatMap((tool) => [[tool.id, tool], [tool.runtime_tool_id, tool]]));
-  return allowedTools.filter((tool) => {
-    const policyTool = explicitHomeboyTools.get(tool) || explicitHomeboyTools.get(runtimeToolIdFromHomeboyToolId(tool));
-    if (!policyTool) {
-      return true;
+  const explicitHomeboyTools = new Map(Object.entries(policy.tools || {}).flatMap(([toolId, rule]) => {
+    const id = typeof toolId === 'string' ? toolId.trim() : '';
+    if (!id) {
+      return [];
     }
-    return policyTool.allowed === true
-      && policyTool.runtime?.environment === 'runtime_local'
-      && policyTool.runtime?.capability_scope === 'runtime_local';
+    return [[id, rule || {}], [runtimeToolIdFromHomeboyToolId(id), rule || {}]];
+  }));
+  return allowedTools.filter((tool) => {
+    const rule = explicitHomeboyTools.get(tool) || explicitHomeboyTools.get(runtimeToolIdFromHomeboyToolId(tool));
+    return !rule || (rule.execution_location || policy.default_location) === 'runner';
   });
 }
 
@@ -2736,6 +2785,7 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
   WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+  RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
   providerContract,
   providerRuntimeInvocationContract,
   codeboxTaskRequestFromAgentTaskRequest,

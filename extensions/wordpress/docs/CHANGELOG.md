@@ -2,6 +2,39 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.30] - 2026-06-19
+
+### Changed
+- Centralize Codebox runtime profile compatibility
+
+## [3.7.29] - 2026-06-19
+
+### Changed
+- Consume canonical WordPress runtime settings
+
+## [3.7.28] - 2026-06-19
+
+### Changed
+- Extract generic replay envelope primitives
+- Extract deterministic workspace lifecycle
+- Add explicit runtime execution descriptors
+
+## [3.7.27] - 2026-06-19
+
+### Changed
+- Add generic finding packet fanout helpers
+
+## [3.7.26] - 2026-06-19
+
+### Changed
+- Thin Codebox runtime adapter boundary
+
+## [3.7.25] - 2026-06-19
+
+### Changed
+- Remove Data Machine-specific runtime coupling
+- Decouple agent runtime selection from Codebox
+
 ## [3.7.24] - 2026-06-19
 
 ### Changed

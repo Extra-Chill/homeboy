@@ -109,6 +109,10 @@ homeboy_resolve_context() {
       },
     ],
     wp_codebox_core_module: fixtureCoreModule,
+    wordpress_runtime_blueprint: { features: { canonicalRuntimeSettings: true } },
+    wordpress_runtime_workloads: [
+      { id: 'canonical-workload', steps: [{ type: 'php', code: 'return [];' }] },
+    ],
     wp_codebox_extra_plugins: [
       { source: '/tmp/runtime-prerequisite', slug: 'runtime-prerequisite', activate: true },
     ],
@@ -155,6 +159,8 @@ homeboy_resolve_context() {
   assert.equal(recipe.inputs.extra_plugins.some((plugin) => plugin.slug === 'woocommerce-gateway-stripe'), true);
   assert.deepEqual(recipe.inputs.extra_plugins.find((plugin) => plugin.slug === 'runtime-prerequisite'), settings.wp_codebox_extra_plugins[0]);
   assert.deepEqual(recipe.inputs.pluginRuntime.setup, settings.wp_codebox_bootstrap_steps);
+  assert.deepEqual(recipe.runtime.blueprint.features, { canonicalRuntimeSettings: true });
+  assert.deepEqual(recipe.inputs.workloads, settings.wordpress_runtime_workloads);
   assert.equal(recipe.workflow.steps[0].command, 'wordpress.bench');
 
   const successResults = JSON.parse(fs.readFileSync(path.join(root, 'success-results.json'), 'utf8'));

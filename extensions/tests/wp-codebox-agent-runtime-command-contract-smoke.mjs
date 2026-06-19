@@ -11,6 +11,8 @@ const provider = manifest.agent_task_executors[0];
 
 assert.equal(provider.schema, 'homeboy/agent-task-executor-provider/v1');
 assert.equal(provider.invocation.schema, 'homeboy/command-invocation/v1');
+assert.equal(provider.backend, 'codebox');
+assert.equal(provider.runtime_id, 'wp-codebox');
 assert.deepEqual(provider.invocation.argv, [
 	'node',
 	'{{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs',

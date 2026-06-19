@@ -22,8 +22,8 @@ helper contract.
 Generic fanout/reconcile JSON planning is documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
-Integration-specific examples, including Data Machine Code promotion and Data
-Machine runtime-agent callers, live under [`docs/integrations/`](docs/integrations/).
+Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
+when a reusable integration needs documentation outside its owning project.
 
 ## Available Extensions
 
@@ -128,8 +128,10 @@ ability execution. Mount downloaded GitHub Actions artifacts with
 `runtime_output_projections`.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. See [`.github/workflows/README.md`](.github/workflows/README.md) for
-workflow inputs and integration examples.
+agent runs. Former domain-specific reusable workflow wrappers have been removed
+after active default-branch consumers migrated to the generic workflow.
+See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
+inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
@@ -140,17 +142,14 @@ WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
 `themes`, `overlays`, `runtime_overlays`, `env`, and `provider_plugins`.
 Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
-and derives `component_contracts` / `extra_plugins` only as adapter
-compatibility for Codebox agent-task entry points that still consume component
-contracts directly. Data Machine ability selection, tool policy, hook/tool
-registration, and Homeboy schemas stay in Homeboy Extensions.
+without expanding them into Codebox orchestration internals. Data Machine ability
+selection, Homeboy task schemas, and caller-owned artifact declarations stay in
+Homeboy Extensions.
 
-Homeboy Extensions declares the temporary `homeboy_parent_tool_bridge`
-compatibility field in the runtime profile only when the profile does not already
-expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`, `parent_tool_bridge`,
-or generic parent-tool bridge component descriptor. The expected upstream
-primitive is a Codebox-owned parent-tool bridge that maps parent-owned tools into
-sandbox-visible descriptors without Homeboy injecting the bridge env directly.
+Homeboy Extensions consumes a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
+when the runtime profile exposes one. When it is missing, the adapter only
+declares an upstream primitive requirement in the runtime profile; it does not
+inject bridge environment variables or synthesize sandbox bridge descriptors.
 
 Each extension also exposes a CLI binding for direct use against a project or component:
 

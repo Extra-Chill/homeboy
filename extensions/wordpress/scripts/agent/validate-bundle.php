@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * Validate a Data Machine agent bundle from a thin JSON spec.
+ * Validate an agent bundle from a thin JSON spec.
  *
  * Usage:
  *   php wordpress/scripts/agent/validate-bundle.php path/to/spec.json

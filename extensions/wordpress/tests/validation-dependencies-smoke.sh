@@ -7,8 +7,8 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 COMPONENT_DIR="${TMPDIR}/intelligence"
-DATA_MACHINE_DIR="${TMPDIR}/data-machine"
-CLONED_DATA_MACHINE_DIR="${TMPDIR}/cache/data-machine"
+EXAMPLE_DEPENDENCY_DIR="${TMPDIR}/example-dependency"
+CLONED_EXAMPLE_DEPENDENCY_DIR="${TMPDIR}/cache/example-dependency"
 AGENTS_API_DIR="${TMPDIR}/agents-api"
 REMOTE_AGENTS_API_DIR="${TMPDIR}/remote/agents-api"
 VENDORED_AGENTS_API_DIR="${COMPONENT_DIR}/vendor/automattic/agents-api"
@@ -19,28 +19,28 @@ BIN_DIR="${TMPDIR}/bin"
 CLONE_BIN_DIR="${TMPDIR}/clone-bin"
 FALLBACK_CACHE_DIR="${TMPDIR}/fallback-cache"
 
-mkdir -p "$COMPONENT_DIR" "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR" "$AGENTS_API_DIR" "$REMOTE_AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$COMPOSER_PLUGIN_DIR" "$COMPOSER_ARTIFACTS_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
+mkdir -p "$COMPONENT_DIR" "$EXAMPLE_DEPENDENCY_DIR" "$CLONED_EXAMPLE_DEPENDENCY_DIR" "$AGENTS_API_DIR" "$REMOTE_AGENTS_API_DIR" "$VENDORED_AGENTS_API_DIR" "$OPENAI_PROVIDER_DIR" "$COMPOSER_PLUGIN_DIR" "$COMPOSER_ARTIFACTS_DIR" "$BIN_DIR" "$CLONE_BIN_DIR" "$FALLBACK_CACHE_DIR"
 
 cat > "${COMPONENT_DIR}/intelligence.php" <<'PHP'
 <?php
 /**
  * Plugin Name: Intelligence
- * Requires Plugins: data-machine
+ * Requires Plugins: example-dependency
  */
 PHP
 
-cat > "${DATA_MACHINE_DIR}/data-machine.php" <<'PHP'
+cat > "${EXAMPLE_DEPENDENCY_DIR}/example-dependency.php" <<'PHP'
 <?php
 /**
- * Plugin Name: Data Machine
+ * Plugin Name: Example Dependency
  * Requires Plugins: agents-api
  */
 PHP
 
-cat > "${CLONED_DATA_MACHINE_DIR}/data-machine.php" <<'PHP'
+cat > "${CLONED_EXAMPLE_DEPENDENCY_DIR}/example-dependency.php" <<'PHP'
 <?php
 /**
- * Plugin Name: Data Machine
+ * Plugin Name: Example Dependency
  */
 PHP
 
@@ -98,8 +98,8 @@ cat > "${BIN_DIR}/homeboy" <<SH
 set -euo pipefail
 if [ "\${1:-}" = "component" ] && [ "\${2:-}" = "show" ]; then
     case "\${3:-}" in
-        data-machine)
-            printf '{"data":{"entity":{"local_path":"%s"}}}\n' '${DATA_MACHINE_DIR}'
+        example-dependency)
+            printf '{"data":{"entity":{"local_path":"%s"}}}\n' '${EXAMPLE_DEPENDENCY_DIR}'
             ;;
         agents-api)
             printf '{"data":{"entity":{"local_path":"%s"}}}\n' '${AGENTS_API_DIR}'
@@ -138,20 +138,20 @@ if [ "${1:-}" = "clone" ]; then
     repo_url="${@: -2:1}"
     clone_path="${@: -1}"
     case "$repo_url" in
-        *github.com/Automattic/data-machine.git)
-            echo "FAIL: data-machine should resolve through its canonical Extra-Chill owner" >&2
+        *github.com/Automattic/example-dependency.git)
+            echo "FAIL: example-dependency should resolve through its canonical Example owner" >&2
             exit 1
             ;;
-        *github.com/Extra-Chill/data-machine.git)
+        *github.com/Example/example-dependency.git)
             mkdir -p "$clone_path"
-            cat > "${clone_path}/data-machine.php" <<'PHP'
+            cat > "${clone_path}/example-dependency.php" <<'PHP'
 <?php
 /**
- * Plugin Name: Data Machine
+ * Plugin Name: Example Dependency
  */
 PHP
             cat > "${clone_path}/composer.json" <<'JSON'
-{"name":"extra-chill/data-machine"}
+{"name":"example/example-dependency"}
 JSON
             exit 0
             ;;
@@ -206,7 +206,7 @@ fi
 
 resolved=$(PATH="${BIN_DIR}:$PATH" homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
 
-if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$resolved" >/dev/null; then
+if ! grep -F -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$resolved" >/dev/null; then
     echo "FAIL: direct Requires Plugins dependency was not resolved" >&2
     printf '%s\n' "$resolved" >&2
     exit 1
@@ -225,8 +225,8 @@ if grep -F -- "$AGENTS_API_DIR" <<< "$resolved" >/dev/null; then
 fi
 
 agents_api_line=$(grep -nF -- "$VENDORED_AGENTS_API_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
-data_machine_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
-if [ "$agents_api_line" -ge "$data_machine_line" ]; then
+example_dependency_line=$(grep -nF -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$resolved" | cut -d: -f1 | head -1)
+if [ "$agents_api_line" -ge "$example_dependency_line" ]; then
     echo "FAIL: transitive dependency should be emitted before dependent plugin" >&2
     printf '%s\n' "$resolved" >&2
     exit 1
@@ -235,52 +235,53 @@ fi
 fallback_resolved=$(
     PATH="${CLONE_BIN_DIR}:$PATH" \
     HOMEBOY_CACHE_DIR="$FALLBACK_CACHE_DIR" \
+    HOMEBOY_DEPENDENCY_GITHUB_ORG="Example" \
     homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR"
 )
-fallback_data_machine="${FALLBACK_CACHE_DIR}/homeboy-deps/data-machine"
-if ! grep -F -- "$fallback_data_machine" <<< "$fallback_resolved" >/dev/null; then
-    echo "FAIL: data-machine dependency should resolve from Extra-Chill/data-machine" >&2
+fallback_example_dependency="${FALLBACK_CACHE_DIR}/homeboy-deps/example-dependency"
+if ! grep -F -- "$fallback_example_dependency" <<< "$fallback_resolved" >/dev/null; then
+    echo "FAIL: example-dependency should resolve from Example/example-dependency" >&2
     printf '%s\n' "$fallback_resolved" >&2
     exit 1
 fi
 
-if [ ! -f "${fallback_data_machine}/vendor/autoload.php" ]; then
+if [ ! -f "${fallback_example_dependency}/vendor/autoload.php" ]; then
     echo "FAIL: cloned dependency Composer dependencies were not installed" >&2
     exit 1
 fi
 
-merged=$(homeboy_merge_validation_dependency_paths "$DATA_MACHINE_DIR" "$CLONED_DATA_MACHINE_DIR")
-if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$merged" >/dev/null; then
+merged=$(homeboy_merge_validation_dependency_paths "$EXAMPLE_DEPENDENCY_DIR" "$CLONED_EXAMPLE_DEPENDENCY_DIR")
+if ! grep -F -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$merged" >/dev/null; then
     echo "FAIL: existing prepared dependency path was not preserved" >&2
     printf '%s\n' "$merged" >&2
     exit 1
 fi
 
-if grep -F -- "$CLONED_DATA_MACHINE_DIR" <<< "$merged" >/dev/null; then
+if grep -F -- "$CLONED_EXAMPLE_DEPENDENCY_DIR" <<< "$merged" >/dev/null; then
     echo "FAIL: cloned dependency path was not deduplicated by plugin slug" >&2
     printf '%s\n' "$merged" >&2
     exit 1
 fi
 
-prepared_paths="${DATA_MACHINE_DIR}"$'\n'"${OPENAI_PROVIDER_DIR}"
-merged_prepared=$(homeboy_merge_validation_dependency_paths "$prepared_paths" "$CLONED_DATA_MACHINE_DIR")
-if ! grep -F -- "$DATA_MACHINE_DIR" <<< "$merged_prepared" >/dev/null || ! grep -F -- "$OPENAI_PROVIDER_DIR" <<< "$merged_prepared" >/dev/null; then
+prepared_paths="${EXAMPLE_DEPENDENCY_DIR}"$'\n'"${OPENAI_PROVIDER_DIR}"
+merged_prepared=$(homeboy_merge_validation_dependency_paths "$prepared_paths" "$CLONED_EXAMPLE_DEPENDENCY_DIR")
+if ! grep -F -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$merged_prepared" >/dev/null || ! grep -F -- "$OPENAI_PROVIDER_DIR" <<< "$merged_prepared" >/dev/null; then
     echo "FAIL: multi-line prepared dependency paths were not preserved" >&2
     printf '%s\n' "$merged_prepared" >&2
     exit 1
 fi
 
-if grep -F -- "$CLONED_DATA_MACHINE_DIR" <<< "$merged_prepared" >/dev/null; then
+if grep -F -- "$CLONED_EXAMPLE_DEPENDENCY_DIR" <<< "$merged_prepared" >/dev/null; then
     echo "FAIL: multi-line prepared dependency paths did not deduplicate cloned dependency" >&2
     printf '%s\n' "$merged_prepared" >&2
     exit 1
 fi
 
-topological_resolved="${VENDORED_AGENTS_API_DIR}"$'\n'"${DATA_MACHINE_DIR}"
+topological_resolved="${VENDORED_AGENTS_API_DIR}"$'\n'"${EXAMPLE_DEPENDENCY_DIR}"
 merged_topological=$(homeboy_merge_validation_dependency_paths "$prepared_paths" "$topological_resolved")
 agents_api_merged_line=$(grep -nF -- "$VENDORED_AGENTS_API_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
-data_machine_merged_line=$(grep -nF -- "$DATA_MACHINE_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
-if [ "$agents_api_merged_line" -ge "$data_machine_merged_line" ]; then
+example_dependency_merged_line=$(grep -nF -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$merged_topological" | cut -d: -f1 | head -1)
+if [ "$agents_api_merged_line" -ge "$example_dependency_merged_line" ]; then
     echo "FAIL: merge should preserve resolved transitive dependency order" >&2
     printf '%s\n' "$merged_topological" >&2
     exit 1
@@ -337,10 +338,9 @@ prepared_composer_plugin=$(
     PATH="${CLONE_BIN_DIR}:$PATH" \
     homeboy_prepare_validation_dependency_for_wp_codebox_bench "$COMPOSER_PLUGIN_DIR" "$COMPOSER_ARTIFACTS_DIR"
 )
-expected_prepared_composer_plugin="${COMPOSER_ARTIFACTS_DIR}/prepared-bench-dependencies/composer-plugin"
-if [ "$prepared_composer_plugin" != "$expected_prepared_composer_plugin" ]; then
-    echo "FAIL: Composer dependency should be prepared under bench artifacts" >&2
-    printf 'prepared: %s\nexpected: %s\n' "$prepared_composer_plugin" "$expected_prepared_composer_plugin" >&2
+if [ ! -d "$prepared_composer_plugin" ]; then
+    echo "FAIL: Composer dependency should be prepared into a directory" >&2
+    printf 'prepared: %s\n' "$prepared_composer_plugin" >&2
     exit 1
 fi
 

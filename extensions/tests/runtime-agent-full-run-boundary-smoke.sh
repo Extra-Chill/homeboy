@@ -31,7 +31,7 @@ for (const file of files) {
     failures.push(`${file}: ${match[0]}`);
   }
 
-  if (body.includes('datamachine-agent-ci')) {
+  if (body.includes('domain-specific-agent-ci')) {
     compatibilityReferences.push(file);
   }
 }

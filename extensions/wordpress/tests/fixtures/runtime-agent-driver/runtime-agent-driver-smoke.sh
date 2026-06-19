@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_FILE="${SCRIPT_DIR}/datamachine-agent-ci-driver.php"
+PLUGIN_FILE="${SCRIPT_DIR}/runtime-agent-driver.php"
 
 if [ ! -f "$PLUGIN_FILE" ]; then
     echo "ERROR: plugin fixture not found at $PLUGIN_FILE" >&2
@@ -30,4 +30,4 @@ for runtime_pattern in \
     fi
 done
 
-echo "✓ Data Machine agent CI driver fixture smoke test PASSED"
+echo "Runtime agent driver fixture smoke test PASSED"

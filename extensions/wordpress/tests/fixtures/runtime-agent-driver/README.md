@@ -1,10 +1,10 @@
-# Data Machine Agent CI Driver fixture
+# Runtime Agent Driver Fixture
 
-Generic WP Codebox plugin scaffold consumed by Data Machine agent CI runs.
+Generic WP Codebox plugin scaffold consumed by runtime agent runs.
 
 ## Why
 
-Data Machine agent CI workflows need a stable plugin path inside WP Codebox
+Runtime agent workflows need a stable plugin path inside WP Codebox
 to host workloads, bundle copies, and transcript artifacts. Without a fixture
 each consumer ships its own near-identical `<repo>-ci-driver.php`.
 
@@ -19,15 +19,15 @@ In the agent runner config JSON:
 ```json
 {
   "wp_codebox_mounts": [
-    "/host/path/homeboy-extensions/wordpress/tests/fixtures/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:/wordpress/wp-content/plugins/datamachine-agent-ci-driver/datamachine-agent-ci-driver.php:readonly"
+    "/host/path/homeboy-extensions/wordpress/tests/fixtures/runtime-agent-driver/runtime-agent-driver.php:/wordpress/wp-content/plugins/runtime-agent-driver/runtime-agent-driver.php:readonly"
   ],
-  "transcript_dir": "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/artifacts/<agent-slug>",
+  "transcript_dir": "/wordpress/wp-content/plugins/runtime-agent-driver/artifacts/<agent-slug>",
   "wp_codebox_workloads": [
     {
       "id": "<scenario-id>",
       "label": "<human label>",
       "run": [
-        { "type": "php", "file": "/wordpress/wp-content/plugins/datamachine-agent-ci-driver/<workload>.php" }
+        { "type": "php", "file": "/wordpress/wp-content/plugins/runtime-agent-driver/<workload>.php" }
       ]
     }
   ]

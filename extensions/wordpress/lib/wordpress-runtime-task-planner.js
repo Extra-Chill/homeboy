@@ -10,11 +10,11 @@ const crypto = require('node:crypto');
  */
 const {
 	AGENT_TASK_REQUEST_SCHEMA,
-} = require('../../agent-runtimes/lib/agent-task-provider-contract');
+} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
 const {
 	agentTaskRequestFromRunnerSpec,
 	agentTaskRunnerSpec,
-} = require('../../agent-runtimes/lib/agent-task-runner-contract');
+} = require('../../runtime-agent-ci/lib/agent-task-runner-contract');
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = 'codebox';

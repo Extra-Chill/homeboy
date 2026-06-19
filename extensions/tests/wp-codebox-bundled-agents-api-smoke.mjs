@@ -11,19 +11,13 @@ const runner = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'scripts', 'ag
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'homeboy-codebox-agents-api-'));
 
 try {
-	const dataMachine = path.join(fixtureRoot, 'data-machine');
-	const agentsApi = path.join(dataMachine, 'vendor', 'wordpress', 'agents-api');
-	const dataMachineCode = path.join(fixtureRoot, 'data-machine-code');
-	const sandboxDataMachine = '/sandbox/runtime/data-machine';
+	const agentsApi = path.join(fixtureRoot, 'agents-api');
 	const artifacts = path.join(fixtureRoot, 'artifacts');
 	const capturePath = path.join(fixtureRoot, 'captured-input.json');
 	const fakeCodeboxBin = path.join(fixtureRoot, 'wp-codebox-fake.mjs');
 
 	mkdirSync(agentsApi, { recursive: true });
-	mkdirSync(dataMachineCode, { recursive: true });
 	mkdirSync(artifacts, { recursive: true });
-	writeFileSync(path.join(dataMachine, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
-	writeFileSync(path.join(dataMachineCode, 'data-machine-code.php'), "<?php\n/* Plugin Name: Data Machine Code */\n");
 	writeFileSync(path.join(agentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
 	writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -55,12 +49,8 @@ process.stdout.write(JSON.stringify({
 		wp_codebox_bin: fakeCodeboxBin,
 		artifacts_path: artifacts,
 		runtime_component_paths: {
-			agent_runtime: sandboxDataMachine,
-			agent_runtime_tools: dataMachineCode,
+			agents_api: agentsApi,
 		},
-		component_contracts: [
-			{ slug: 'data-machine', path: dataMachine, loadAs: 'mu-plugin', activate: false },
-		],
 	};
 
 	const result = spawnSync(process.execPath, [runner], {
@@ -78,12 +68,11 @@ process.stdout.write(JSON.stringify({
 	const agentsApiContract = captured.component_contracts.find((contract) => contract.slug === 'agents-api');
 	const agentsApiPlugin = captured.extra_plugins.find((plugin) => plugin.slug === 'agents-api');
 
-	assert.ok(agentsApiContract, 'agents-api component contract is inferred from Data Machine vendor dependencies');
+	assert.ok(agentsApiContract, 'agents-api component contract is emitted from runtime component paths');
 	assert.ok(agentsApiPlugin, 'agents-api extra plugin is emitted for WP Codebox recipe mounting');
-	assert.equal(captured.runtime_component_paths.agent_runtime, sandboxDataMachine, 'sandbox runtime path is preserved for the mounted Data Machine component');
 	assert.equal(agentsApiPlugin.loadAs, 'mu-plugin');
 	assert.equal(agentsApiPlugin.activate, false);
-	assert.ok(agentsApiPlugin.source.endsWith(`${path.sep}vendor${path.sep}wordpress${path.sep}agents-api`), `agents-api source points at the bundled Composer dependency: ${agentsApiPlugin.source}`);
+	assert.ok(agentsApiPlugin.source.endsWith(`${path.sep}prepared-plugins${path.sep}agents-api`), `agents-api source is prepared for recipe mounting: ${agentsApiPlugin.source}`);
 
 	const runtimeRequirementsCapturePath = path.join(fixtureRoot, 'captured-runtime-requirements-input.json');
 	const runtimeRequirementsRequest = {

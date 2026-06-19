@@ -178,7 +178,7 @@ assert.equal(classifyResourceUrl('https://example.test/wp-json/wp/v2/posts?conte
 assert.equal(classifyResourceUrl('https://example.test/wp-admin/load-styles.php'), 'admin');
 assert.equal(classifyResourceUrl('https://example.test/wp-content/themes/theme/style.css'), 'content-asset');
 assert.equal(resourceFamily('https://example.test/wp-includes/js/dist/block-editor.min.js?ver=1'), '/wp-includes/js/dist/block-editor.js');
-assert.equal(resourceFamily('https://example.test/wp-content/plugins/data-machine/assets/admin.js?ver=1'), '/wp-content/plugins/data-machine');
+assert.equal(resourceFamily('https://example.test/wp-content/plugins/example-plugin/assets/admin.js?ver=1'), '/wp-content/plugins/example-plugin');
 
 const manifest = normalizePageManifest({
 	pages: [

@@ -15,7 +15,7 @@ const {
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 
 const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';

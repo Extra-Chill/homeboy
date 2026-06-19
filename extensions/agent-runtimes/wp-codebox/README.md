@@ -16,9 +16,23 @@ override through the provider contract or task conversion options:
   discovery hints into generic runtime component path keys.
 
 The JavaScript executor consumes these manifest fields instead of owning product
-policy in code. Existing Data Machine and GitHub-oriented defaults remain declared
-there for compatibility, while alternate callers can supply their own generic
-manifest values without adding new runtime-specific branches.
+policy in code. Callers can supply generic manifest values without adding new
+runtime-specific branches.
+
+## Adapter Boundary
+
+Homeboy Extensions is a thin adapter for Codebox-owned runtime primitives. It
+forwards `wp-codebox/runtime-profile/v1` dependencies, provider plugins, overlays,
+env, and mounts as runtime profile data. It no longer expands profile
+dependencies into `component_contracts` / `extra_plugins` or injects parent tool
+bridge environment variables.
+
+Codebox owns these primitives:
+
+- `wp-codebox/runtime-profile/v1` for runtime dependencies and mounts.
+- `wp-codebox/parent-tool-bridge/v1` for exposing parent-owned tools inside the sandbox.
+- `wp-codebox/provider-runtime-invocation-contract/v1` for runner workspace, transcript, and artifact handoff operations.
+- `wp-codebox/evidence-artifact-envelope/v1` for typed artifacts, evidence refs, and run summaries.
 
 ## Delegated Run Preparation
 

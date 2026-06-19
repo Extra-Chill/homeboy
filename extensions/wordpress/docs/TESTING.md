@@ -66,7 +66,7 @@ This focused path preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers, and fails fast with the selected script name.
 
-## Data Machine agent bundle validator
+## Agent Bundle Validator
 
 Agent bundle repositories can run the shared bundle validator as a standalone
 CI smoke without booting WordPress:
@@ -81,8 +81,8 @@ dot-path assertions against the manifest or example runner config. `bundle_dir`
 and `example_runner_config` are resolved relative to the spec file's parent
 directory so specs can live at repo root or under `tests/`.
 
-For full CI agent runs on the WP Codebox WordPress execution substrate, see
-[`AGENT_CI_WP_CODEBOX.md`](AGENT_CI_WP_CODEBOX.md).
+For full CI agent runs on the WP Codebox WordPress execution substrate, use the
+generic `runtime-agent-full-run.yml` workflow.
 
 ## WordPress test runtime status
 
@@ -101,7 +101,7 @@ If your plugin depends on other local plugins at runtime, declare them:
   "extensions": {
     "wordpress": {
       "settings": {
-        "validation_dependencies": "data-machine, other-plugin"
+        "validation_dependencies": "example-dependency, other-plugin"
       }
     }
   }

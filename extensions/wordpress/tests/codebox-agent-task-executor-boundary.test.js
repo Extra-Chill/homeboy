@@ -10,11 +10,6 @@ const {
   providerContract,
   providerRuntimeInvocationContract,
 } = require('../../agent-runtimes/wp-codebox');
-const {
-  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE,
-  DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID,
-  datamachineAgentCiCodeboxExecutorConfig,
-} = require('../lib/datamachine-agent-ci-codebox-adapter');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 const codexSecretEnv = [
@@ -48,6 +43,7 @@ const provider = providerContract();
 assert.equal(provider.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
+assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
@@ -103,14 +99,8 @@ assert.deepEqual(provider.workspace_tools.readonly, [
   'workspace_git_status',
 ]);
 assert.deepEqual(provider.component_path_defaults, {});
-assert.equal(provider.capabilities.includes('tool:datamachine/run-agent-bundle'), false);
-assert.equal(provider.capabilities.includes('ability:datamachine/run-agent-bundle'), false);
-
-const datamachineAdapterConfig = datamachineAgentCiCodeboxExecutorConfig({ provider: 'openai' });
-assert.equal(datamachineAdapterConfig.runtime_profile, DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID);
-assert.deepEqual(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID], DATAMACHINE_AGENT_CI_RUNTIME_PROFILE);
-assert.equal(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].component_path_defaults.contract_slug_map['data-machine'], 'agent_runtime');
-assert.equal(datamachineAdapterConfig.runtime_profiles[DATAMACHINE_AGENT_CI_RUNTIME_PROFILE_ID].capabilities.includes('ability:datamachine/run-agent-bundle'), true);
+assert.equal(provider.capabilities.includes('tool:example/run-agent-bundle'), false);
+assert.equal(provider.capabilities.includes('ability:example/run-agent-bundle'), false);
 
 const customContract = providerContract({
   capabilities: ['wordpress_sandbox', 'tool:example/run-workflow'],
@@ -123,6 +113,7 @@ const customContract = providerContract({
     path_aliases: { agent_runtime: ['runtime_component:example_runtime'] },
   },
 });
+assert.equal(customContract.runtime_id, 'wp-codebox');
 assert.deepEqual(customContract.capabilities, ['wordpress_sandbox', 'tool:example/run-workflow']);
 assert.deepEqual(customContract.workspace_tools.readwrite, ['example_workspace_write']);
 assert.deepEqual(customContract.component_path_defaults.contract_slug_map, { 'example-runtime': 'agent_runtime' });
@@ -203,22 +194,66 @@ restoreEnv('HOMEBOY_AGENT_TOOL_POLICY_SCHEMA', originalToolPolicySchemaEnv);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('workspace_read'), true);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_issue_publish'), false);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_pull_request_publish'), false);
-assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, 'homeboy/agent-tool-request/v1');
-assert.deepEqual(
-  JSON.parse(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_POLICY_JSON),
-  JSON.parse(homeboyAgentToolPolicyJson)
-);
+assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, undefined);
+assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_POLICY_JSON, undefined);
 assert.equal(homeboyToolPolicyTaskInput.runtime_env.DATAMACHINE_HOST_TOOL_POLICY_JSON, undefined);
-const homeboySandboxTools = Object.fromEntries(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.map((tool) => [tool.id, tool]));
-assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy_agent_tool_policy');
-assert.equal(homeboySandboxTools.workspace_read.allowed, true);
-assert.equal(homeboySandboxTools.workspace_read.runtime.environment, 'runtime_local');
-assert.equal(homeboySandboxTools.github_issue_publish.allowed, false);
-assert.equal(homeboySandboxTools.github_issue_publish.execution_location, 'parent');
-assert.equal(homeboySandboxTools.github_issue_publish.transport_visibility, 'parent');
-assert.equal(homeboySandboxTools.github_issue_publish.runtime.environment, 'control_plane');
-assert.equal(homeboySandboxTools.github_issue_publish.metadata.timeout_ms, 30000);
-assert.equal(homeboySandboxTools.github_pull_request_publish.transport_visibility, 'hidden');
+assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy.codebox-agent-task.default-workspace-tools');
+assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'github_issue_publish'), false);
+
+const codeboxOwnedBridgeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'codebox-owned-parent-tool-bridge-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      runtime_profile: {
+        schema: 'wp-codebox/runtime-profile/v1',
+        id: 'codebox-owned-bridge',
+        parent_tool_bridge: {
+          schema: 'wp-codebox/parent-tool-bridge/v1',
+        },
+      },
+    },
+  },
+  instructions: 'Run with a Codebox-owned parent tool bridge.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+  tools: ['workspace_read'],
+});
+assert.equal(codeboxOwnedBridgeTaskInput.runtime_requirements.parent_tool_bridge.schema, 'wp-codebox/parent-tool-bridge/v1');
+assert.equal(codeboxOwnedBridgeTaskInput.runtime_requirements.upstream_primitive_requirements, undefined);
+
+const runtimeProfileDependencyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'runtime-profile-dependencies-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      runtime_requirements: {
+        components: [{ slug: 'runtime-component', path: '/components/runtime-component' }],
+        plugins: [{ slug: 'runtime-plugin', path: '/plugins/runtime-plugin' }],
+      },
+    },
+  },
+  instructions: 'Forward Codebox-owned runtime profile dependencies.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+});
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.components, [{ slug: 'runtime-component', path: '/components/runtime-component' }]);
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.plugins, [{ slug: 'runtime-plugin', path: '/plugins/runtime-plugin' }]);
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.component_contracts.map((contract) => ({
+  slug: contract.slug,
+  path: contract.path,
+  loadAs: contract.loadAs,
+  activate: contract.activate,
+})), [
+  { slug: 'runtime-component', path: '/components/runtime-component', loadAs: 'mu-plugin', activate: false },
+  { slug: 'runtime-plugin', path: '/plugins/runtime-plugin', loadAs: 'plugin', activate: true },
+]);
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.extra_plugins.map((plugin) => plugin.slug), ['runtime-component', 'runtime-plugin']);
+assert.deepEqual(runtimeProfileDependencyTaskInput.component_contracts.map((contract) => contract.slug), ['runtime-component', 'runtime-plugin']);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].id, 'parent-tool-bridge');
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].adapter_behavior, 'declare_requirement_only');
 
 const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
@@ -335,7 +370,12 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     },
   },
   inputs: {
-    ability_request: { name: 'datamachine/run-agent-bundle' },
+    ability_request: { name: 'example/run-agent-bundle' },
+    runtime_input_mapping: [
+      { from: 'client_context.inputs.source', to: 'source' },
+      { from: 'client_context.inputs.flow', to: 'flow' },
+      { from: 'client_context.inputs.wait_for_completion', to: 'wait_for_completion' },
+    ],
     client_context: {
       inputs: {
         source: 'bundles/example-agent',
@@ -346,7 +386,7 @@ const repoLoopBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   },
 });
 
-assert.equal(repoLoopBundleTaskInput.runtime_task.ability, 'datamachine/run-agent-bundle');
+assert.equal(repoLoopBundleTaskInput.runtime_task.ability, 'example/run-agent-bundle');
 assert.deepEqual(repoLoopBundleTaskInput.runtime_task.input, {
   source: 'bundles/example-agent',
   flow: 'example-artifact-flow',
@@ -374,6 +414,11 @@ const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   inputs: {
     ability_request: {
       name: 'example/materialize-artifact',
+      input_defaults: { dry_run: true, format: 'json' },
+      input_mapping: [
+        { from: 'client_context.inputs.packet', to: 'packet' },
+        { from: 'client_context.inputs.dry_run', to: 'dry_run' },
+      ],
       input: { dry_run: false },
     },
     context: {
@@ -385,6 +430,51 @@ const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 assert.equal(genericRepoLoopTaskInput.runtime_task.ability, 'example/materialize-artifact');
 assert.deepEqual(genericRepoLoopTaskInput.runtime_task.input, {
   packet: 'artifact-42',
+  format: 'json',
+  dry_run: false,
+});
+
+const noImplicitClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'generic-ability-no-ambient-client-context-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a generic declared ability without ambient client context merge.',
+  client_context: {
+    inputs: {
+      packet: 'ambient-artifact',
+      dry_run: true,
+    },
+  },
+  inputs: {
+    ability_request: {
+      name: 'example/materialize-artifact',
+      input: { explicit: true },
+    },
+  },
+});
+assert.deepEqual(noImplicitClientContextTaskInput.runtime_task.input, { explicit: true });
+
+const legacyClientContextTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'generic-ability-legacy-client-context-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a queued legacy declared ability with explicit legacy context merge.',
+  client_context: {
+    inputs: {
+      packet: 'legacy-artifact',
+      dry_run: true,
+    },
+  },
+  inputs: {
+    allow_legacy_client_context_input_merge: true,
+    ability_request: {
+      name: 'example/materialize-artifact',
+      input: { dry_run: false },
+    },
+  },
+});
+assert.deepEqual(legacyClientContextTaskInput.runtime_task.input, {
+  packet: 'legacy-artifact',
   dry_run: false,
 });
 
@@ -396,14 +486,14 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   repo: 'example-repo@example-loop-main-20260616',
   executor: {
     backend: 'codebox',
-    config: datamachineAgentCiCodeboxExecutorConfig({
+    config: {
       provider: 'openai',
       workspace_required: true,
-    }),
+    },
   },
   instructions: 'Run a repo-loop workflow against the current checkout.',
   inputs: {
-    ability_request: { name: 'datamachine/run-agent-bundle' },
+    ability_request: { name: 'example/run-agent-bundle' },
   },
 });
 
@@ -414,7 +504,6 @@ assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox works
 assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
 assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
 assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
-assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('datamachine/run-agent-bundle'), true);
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
   repo: 'example-repo@example-loop-main-20260616',
@@ -439,7 +528,7 @@ const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
     }],
   },
   inputs: {
-    ability_request: { name: 'datamachine/run-agent-bundle' },
+    ability_request: { name: 'example/run-agent-bundle' },
   },
 });
 

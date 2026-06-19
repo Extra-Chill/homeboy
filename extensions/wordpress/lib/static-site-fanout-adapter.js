@@ -17,6 +17,7 @@ const RECONCILIATION_SCHEMA = 'homeboy/static-site-fanout-reconciliation/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
 const CODEBOX_COMPATIBILITY_TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const DEFAULT_PRESET = 'static-site/import-validation';
+const COMPATIBILITY_AGENT_TASK_BACKEND = 'codebox';
 const CODEBOX_COMPATIBILITY_PROVIDER = 'wp-codebox';
 const DEFAULT_AGENT_TASK_PRESET = {
   runtime_task: 'static-site/import-validation',
@@ -494,6 +495,7 @@ module.exports = {
   AGENT_TASK_REQUEST_SCHEMA,
   CODEBOX_COMPATIBILITY_PROVIDER,
   DEFAULT_PRESET,
+  COMPATIBILITY_AGENT_TASK_BACKEND,
   createStaticSiteFanoutPlan,
   executeStaticSiteFanout,
   normalizeArtifactRefs,
