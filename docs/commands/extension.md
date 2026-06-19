@@ -63,15 +63,26 @@ homeboy extension setup <extension_id>
 ### `install`
 
 ```sh
-homeboy extension install <source> [--id <extension_id>] [--ref <git-ref>] [--revision <git-ref>] [--replace]
+homeboy extension install <source> [--id <extension_id>] [--ref <git-ref>] [--replace]
 ```
 
 Installs an extension into Homeboy's extensions directory.
 
 - If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed extension's `<extension_id>.json` manifest.
-- For git URL installs, `--ref` (alias `--revision`) checks out a branch, tag, or commit after cloning. The installed metadata still records the resolved `source_revision` SHA.
+- For git URL installs, `--ref` checks out a branch, tag, or commit after cloning. The installed metadata still records the resolved `source_revision` SHA.
 - If `<source>` is a local path, Homeboy symlinks the directory into the extensions directory.
 - By default, install refuses to overwrite an existing extension. Use `--replace` to explicitly replace an existing install or link.
+
+### `install-for-component`
+
+```sh
+homeboy extension install-for-component --source <source> [--path <component_path>]
+```
+
+Installs every extension configured by a component.
+
+- `--source <source>`: git URL or local path to the extension repository or directory.
+- `--path <component_path>`: component path containing `homeboy.json` (defaults to the current directory).
 
 ### `relink`
 

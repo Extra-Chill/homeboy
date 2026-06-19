@@ -57,8 +57,8 @@ pub use pr_policy::{
 };
 pub use primitives::{
     clone_repo, clone_repo_at_ref, commit_staged_with_author, current_branch,
-    get_component_path_prefix, get_git_root, has_staged_changes, head_sha, head_sha_short,
-    is_workdir_clean_or_not_git, output_optional, output_optional_bytes, pull_repo,
+    get_component_path_prefix, get_git_root, git_probe_path, has_staged_changes, head_sha,
+    head_sha_short, is_workdir_clean_or_not_git, output_optional, output_optional_bytes, pull_repo,
     remote_origin_url, remote_url, repo_root, rev_parse, run_git, run_git_output,
     short_head_revision, stage_all, status_porcelain, status_porcelain_bytes, toplevel,
     update_to_remote_default_branch,

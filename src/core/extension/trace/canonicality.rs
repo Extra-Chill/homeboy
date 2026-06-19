@@ -241,7 +241,7 @@ fn check_declared_toolchain_provenance(
         match value {
             Some(path) if !path.trim().is_empty() => checks.push(check_git_checkout(
                 &format!("toolchain:{} ({key}, {source})", requirement.id),
-                &git_probe_path(Path::new(path)),
+                &crate::core::git::git_probe_path(Path::new(path)),
                 None,
                 reasons,
             )),
@@ -250,16 +250,6 @@ fn check_declared_toolchain_provenance(
                 requirement.label, key, source
             )),
         }
-    }
-}
-
-fn git_probe_path(path: &Path) -> std::path::PathBuf {
-    if path.is_file() {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.to_path_buf())
-    } else {
-        path.to_path_buf()
     }
 }
 

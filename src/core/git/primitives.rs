@@ -328,6 +328,22 @@ pub fn get_git_root(path: &str) -> Result<String> {
     .map(|s| s.trim().to_string())
 }
 
+/// Normalize a path into a directory suitable for probing git provenance.
+///
+/// Git commands need a directory to run inside; when the caller hands us a file
+/// path (e.g. a toolchain binary or component artifact), probe its parent
+/// directory instead. Directories (and files with no parent) are returned
+/// unchanged.
+pub fn git_probe_path(path: &Path) -> std::path::PathBuf {
+    if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Compute the relative path prefix of a component within a monorepo.
 ///
 /// If `local_path` is a subdirectory of the git root, returns the relative path

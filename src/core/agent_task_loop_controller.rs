@@ -528,8 +528,8 @@ pub enum AgentTaskGateBundleCheckKind {
 }
 
 impl AgentTaskGateBundle {
-    // Part of the loop-controller API exercised by tests; production wiring is pending.
-    #[allow(dead_code)]
+    // Part of the loop-controller API exercised only by tests; production wiring is pending.
+    #[cfg(test)]
     pub(crate) fn from_verify_commands(
         bundle_id: impl Into<String>,
         commands: Vec<String>,
@@ -990,8 +990,8 @@ impl AgentTaskLoopControllerRecord {
         record
     }
 
-    // Part of the loop-controller API exercised by tests; production wiring is pending.
-    #[allow(dead_code)]
+    // Part of the loop-controller API exercised only by tests; production wiring is pending.
+    #[cfg(test)]
     pub(crate) fn block_action_for_runner_policy(
         &mut self,
         action_id: &str,
@@ -1164,8 +1164,8 @@ impl AgentTaskLoopControllerRecord {
         Ok(())
     }
 
-    // Part of the loop-controller API exercised by tests; production wiring is pending.
-    #[allow(dead_code)]
+    // Part of the loop-controller API exercised only by tests; production wiring is pending.
+    #[cfg(test)]
     pub(crate) fn route_finding_packet(
         &mut self,
         finding: AgentTaskLoopFindingPacket,
@@ -1229,8 +1229,8 @@ impl AgentTaskLoopControllerRecord {
         )
     }
 
-    // Part of the loop-controller API exercised by tests; production wiring is pending.
-    #[allow(dead_code)]
+    // Part of the loop-controller API exercised only by tests; production wiring is pending.
+    #[cfg(test)]
     pub(crate) fn record_candidate_patch_validation(
         &mut self,
         candidate: AgentTaskLoopCandidatePatch,
