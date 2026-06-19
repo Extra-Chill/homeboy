@@ -1414,7 +1414,7 @@ fn resolve_runner_secret_env_for_command_with_fallbacks(
         if fallback_sources.contains_key(name) {
             if let Ok(values) = agent_task_secrets::resolve_secret_env_with_fallbacks(
                 std::slice::from_ref(name),
-                &fallback_sources,
+                fallback_sources,
             ) {
                 for (name, value) in values {
                     resolved.insert(name, value);
@@ -1845,6 +1845,7 @@ fn command_output_until_cancelled(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_output(
     runner: &Runner,
     mode: RunnerExecMode,
