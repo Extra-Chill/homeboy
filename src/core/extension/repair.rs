@@ -466,6 +466,19 @@ mod tests {
         fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
             .expect("runtime script dir");
         fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
+
+        let runtime_agent_ci_helper = root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
+        fs::create_dir_all(
+            runtime_agent_ci_helper
+                .parent()
+                .expect("runtime agent ci helper parent"),
+        )
+        .expect("runtime agent ci helper dir");
+        fs::write(
+            &runtime_agent_ci_helper,
+            "module.exports = { schema: 'fixture' };\n",
+        )
+        .expect("runtime agent ci helper");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -656,6 +669,9 @@ mod tests {
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
+            assert!(home
+                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .exists());
         });
     }
 
@@ -686,6 +702,9 @@ mod tests {
             );
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
                 .exists());
         });
     }
