@@ -191,6 +191,7 @@ pub(super) fn controller_action_plan_step(
             .map(|value| vec![value.clone()])
             .unwrap_or_default(),
         needs: Vec::new(),
+        needs_kind: PlanStepDependencyKind::Execution,
         status,
         inputs,
         outputs,
@@ -687,6 +688,7 @@ pub(super) fn workflow_homeboy_plan(
         blocking: true,
         scope: workflow.entity_ids.clone(),
         needs: workflow.dependencies.clone(),
+        needs_kind: PlanStepDependencyKind::Execution,
         status: PlanStepStatus::Ready,
         inputs: HashMap::from([(
             "workflow".to_string(),
