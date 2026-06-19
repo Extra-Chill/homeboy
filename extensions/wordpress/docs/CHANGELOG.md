@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.31] - 2026-06-19
+
+### Fixed
+- Fix Codebox runtime requirements and workspace contract
+
 ## [3.7.30] - 2026-06-19
 
 ### Changed
