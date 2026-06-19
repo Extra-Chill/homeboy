@@ -1,7 +1,9 @@
-use std::process::Command;
+use std::path::Path;
 
-const BOT_NAME: &str = "homeboy-ci[bot]";
-const BOT_EMAIL: &str = "266378653+homeboy-ci[bot]@users.noreply.github.com";
+use homeboy::core::git::{
+    configure_identity, execute_git_for_release, parse_git_identity, run_git,
+};
+
 const AUTOFIX_PREFIX: &str = "chore(ci): homeboy autofix";
 
 /// Stage all changes and create a commit after refactor --write.
@@ -10,85 +12,32 @@ pub(super) fn commit_refactor_sources(
     sources: &homeboy::core::refactor::plan::RefactorSourceRun,
     git_identity: Option<&str>,
 ) -> homeboy::core::Result<()> {
-    let add = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git add: {e}")))?;
-    if !add.status.success() {
-        let stderr = String::from_utf8_lossy(&add.stderr);
-        return Err(homeboy::core::Error::git_command_failed(format!(
-            "git add -A failed: {stderr}"
-        )));
-    }
+    run_git(Path::new(path), &["add", "-A"], "git add -A")?;
 
     // Check if there's anything staged (fixes may have been no-ops after formatting)
-    let diff_check = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(path)
-        .output()
+    let diff_check = execute_git_for_release(path, &["diff", "--cached", "--quiet"])
         .map_err(|e| homeboy::core::Error::git_command_failed(format!("git diff: {e}")))?;
     if diff_check.status.success() {
         eprintln!("[refactor] No staged changes after git add — skipping commit");
         return Ok(());
     }
 
-    let (name, email) = resolve_git_identity(git_identity);
-
-    for (key, value) in [("user.name", name.as_str()), ("user.email", email.as_str())] {
-        let config = Command::new("git")
-            .args(["config", key, value])
-            .current_dir(path)
-            .output()
-            .map_err(|e| homeboy::core::Error::git_command_failed(format!("git config: {e}")))?;
-        if !config.status.success() {
-            let stderr = String::from_utf8_lossy(&config.stderr);
-            return Err(homeboy::core::Error::git_command_failed(format!(
-                "git config {key} failed: {stderr}"
-            )));
-        }
-    }
+    let identity = parse_git_identity(git_identity);
+    configure_identity(path, &identity)?;
 
     let message = build_autofix_commit_message(sources);
-    let author = format!("{name} <{email}>");
-    let commit = Command::new("git")
-        .args(["commit", "-m", &message, "--author", &author])
-        .current_dir(path)
-        .output()
-        .map_err(|e| homeboy::core::Error::git_command_failed(format!("git commit: {e}")))?;
-    if !commit.status.success() {
-        let stderr = String::from_utf8_lossy(&commit.stderr);
-        return Err(homeboy::core::Error::git_command_failed(format!(
-            "git commit failed: {stderr}"
-        )));
-    }
+    let author = format!("{} <{}>", identity.name, identity.email);
+    run_git(
+        Path::new(path),
+        &["commit", "-m", &message, "--author", &author],
+        "git commit",
+    )?;
 
     eprintln!(
         "[refactor] Committed autofix: {} files changed",
         sources.files_modified
     );
     Ok(())
-}
-
-/// Resolve git identity from the --git-identity flag.
-/// "bot" -> default CI bot. "Name <email>" -> parsed. None -> default bot.
-fn resolve_git_identity(identity: Option<&str>) -> (String, String) {
-    match identity {
-        None | Some("bot") => (BOT_NAME.to_string(), BOT_EMAIL.to_string()),
-        Some(custom) => {
-            if let Some(angle_start) = custom.find('<') {
-                let name = custom[..angle_start].trim().to_string();
-                let email = custom[angle_start + 1..]
-                    .trim_end_matches('>')
-                    .trim()
-                    .to_string();
-                if !name.is_empty() && !email.is_empty() {
-                    return (name, email);
-                }
-            }
-            (custom.to_string(), BOT_EMAIL.to_string())
-        }
-    }
 }
 
 /// Build a structured commit message from refactor results.
@@ -142,38 +91,5 @@ fn build_autofix_commit_message(
         subject
     } else {
         format!("{subject}\n\n{}", body_lines.join("\n"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_git_identity_bot_shorthand() {
-        let (name, email) = resolve_git_identity(Some("bot"));
-        assert_eq!(name, BOT_NAME);
-        assert_eq!(email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn resolve_git_identity_none_defaults_to_bot() {
-        let (name, email) = resolve_git_identity(None);
-        assert_eq!(name, BOT_NAME);
-        assert_eq!(email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn resolve_git_identity_custom_parsed() {
-        let (name, email) = resolve_git_identity(Some("My Bot <my-bot@example.com>"));
-        assert_eq!(name, "My Bot");
-        assert_eq!(email, "my-bot@example.com");
-    }
-
-    #[test]
-    fn resolve_git_identity_name_only_uses_bot_email() {
-        let (name, email) = resolve_git_identity(Some("Just A Name"));
-        assert_eq!(name, "Just A Name");
-        assert_eq!(email, BOT_EMAIL);
     }
 }

@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::process::Command;
 
 use crate::core::config::read_json_spec_to_string;
 use crate::core::error::{Error, Result};
 use crate::core::output::BulkResult;
 
 use super::operation_output::{run_bulk_ids, GitOutput};
-use super::primitives::is_git_repo;
+use super::primitives::{is_git_repo, run_git, short_head_revision};
 use super::{execute_git, resolve_target};
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,15 +42,13 @@ pub fn get_repo_snapshot(path: &str) -> Result<RepoSnapshot> {
         "git branch",
     )?;
 
-    // Use direct Command to properly handle empty output (clean repo).
-    // run_in_optional returns None for empty stdout, which would incorrectly
-    // indicate a dirty repo when used with .unwrap_or(false).
-    let clean = Command::new("git")
-        .args(["status", "--porcelain=v1"])
-        .current_dir(path)
-        .output()
-        .map(|o| o.status.success() && o.stdout.is_empty())
-        .unwrap_or(false);
+    let clean = run_git(
+        Path::new(path),
+        &["status", "--porcelain=v1"],
+        "git status --porcelain",
+    )
+    .map(|output| output.is_empty())
+    .unwrap_or(false);
 
     let (ahead, behind) = crate::core::engine::command::run_in_optional(
         path,
@@ -488,18 +485,7 @@ pub fn delete_remote_tag(path: &str, tag_name: &str) -> Result<GitOutput> {
 
 /// Get the current HEAD short commit SHA, returning `None` outside git checkouts.
 pub fn short_head_revision_at(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let revision = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!revision.is_empty()).then_some(revision)
+    short_head_revision(path)
 }
 
 /// Fetch from remote and return count of commits behind upstream.
@@ -572,6 +558,7 @@ pub fn fetch_and_fast_forward(path: &str) -> Result<Option<u32>> {
 #[cfg(test)]
 mod is_ancestor_tests {
     use super::*;
+    use std::process::Command;
 
     fn run_in(dir: &std::path::Path, args: &[&str]) {
         let output = Command::new(args[0])

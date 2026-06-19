@@ -1,7 +1,6 @@
-use std::path::Path;
-use std::process::Command;
-
 use crate::core::error::{Error, Result};
+use crate::core::git::run_git;
+use std::path::Path;
 
 pub(super) fn advertised_origin_refs_for_commit(
     path: &Path,
@@ -11,25 +10,25 @@ pub(super) fn advertised_origin_refs_for_commit(
     error_id: String,
     error_hints: Vec<String>,
 ) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["ls-remote", "origin"])
-        .current_dir(path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("run git ls-remote".to_string()))
+    let stdout =
+        run_git(path, &["ls-remote", "origin"], "git ls-remote origin").map_err(|err| {
+            let mut hints = err
+                .details
+                .get("stderr")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(|value| vec![value.to_string()])
+                .unwrap_or_default();
+            hints.extend(error_hints);
+            Error::validation_invalid_argument(
+                error_field,
+                error_message,
+                Some(error_id),
+                Some(hints),
+            )
         })?;
-    if !output.status.success() {
-        let mut hints = vec![String::from_utf8_lossy(&output.stderr).trim().to_string()];
-        hints.extend(error_hints);
-        return Err(Error::validation_invalid_argument(
-            error_field,
-            error_message,
-            Some(error_id),
-            Some(hints),
-        ));
-    }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
+    Ok(stdout
         .lines()
         .filter_map(|line| {
             let (sha, git_ref) = line.split_once('\t')?;
