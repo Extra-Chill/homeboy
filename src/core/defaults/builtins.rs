@@ -134,8 +134,12 @@ mod tests {
 
         assert!(config
             .upgrade_command
-            .contains("cargo install --path . --force"));
-        assert!(!config.upgrade_command.contains("cargo build --release"));
+            .contains("cargo build --release"));
+        assert!(config
+            .upgrade_command
+            .contains("target/release/homeboy"));
+        assert!(config.upgrade_command.contains("--version"));
+        assert!(!config.upgrade_command.contains("cargo install --path"));
     }
 
     #[test]

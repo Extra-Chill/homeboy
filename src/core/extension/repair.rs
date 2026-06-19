@@ -36,12 +36,12 @@ pub fn replace_with_revision(
     if is_git_url(source) {
         replace_from_url(source, id_override, revision)
     } else {
-        replace_from_path(source, id_override, false)
+        replace_from_path(source, id_override, false, revision)
     }
 }
 
 pub fn relink(extension_id: &str, source: &str) -> Result<ReplaceResult> {
-    replace_from_path(source, Some(extension_id), true)
+    replace_from_path(source, Some(extension_id), true, None)
 }
 
 fn replace_from_url(
@@ -112,10 +112,16 @@ fn replace_from_path(
     source_path: &str,
     id_override: Option<&str>,
     require_existing_link: bool,
+    requested_revision: Option<&str>,
 ) -> Result<ReplaceResult> {
-    let source = resolve_local_source(source_path)?;
+    let mut source = resolve_local_source(source_path)?;
     let extension_id = local_extension_id(&source, source_path, id_override)?;
     config::check_id_collision(&extension_id, "extension")?;
+    let source_root = resolve_local_monorepo_extension(&source, &extension_id).map(|root| {
+        let extension_source = root.join(&extension_id);
+        source = extension_source;
+        root
+    });
     validate_local_extension_source(&source, source_path, &extension_id)?;
 
     let extension_dir = paths::extension(&extension_id)?;
@@ -135,10 +141,14 @@ fn replace_from_path(
     }
 
     local_files::ensure_app_dirs()?;
-    install_linked_shared_assets(&source, &extension_dir, None)?;
+    install_linked_shared_assets(&source, &extension_dir, source_root.as_deref())?;
 
     let old_path = installed_source_path(&extension_dir);
-    let source_revision = git::short_head_revision(&source);
+    let source_revision = git::short_head_revision(&source).or_else(|| {
+        requested_revision
+            .filter(|revision| !revision.trim().is_empty())
+            .map(str::to_string)
+    });
     let staged_link = extension_dir.with_file_name(format!(".replace-link-tmp-{}", extension_id));
     clean_replace_temp(&staged_link)?;
 
@@ -163,6 +173,21 @@ fn replace_from_path(
         linked: true,
         source_revision,
     })
+}
+
+fn resolve_local_monorepo_extension(source: &Path, extension_id: &str) -> Option<PathBuf> {
+    let direct_manifest = source.join(format!("{}.json", extension_id));
+    if direct_manifest.exists() {
+        return None;
+    }
+
+    let nested_source = source.join(extension_id);
+    let nested_manifest = nested_source.join(format!("{}.json", extension_id));
+    if nested_manifest.exists() {
+        return Some(source.to_path_buf());
+    }
+
+    None
 }
 
 fn resolve_local_source(source_path: &str) -> Result<PathBuf> {
@@ -631,6 +656,66 @@ mod tests {
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn replace_from_monorepo_root_with_id_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "wordpress");
+            write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
+            write_shared_runtime_fixture(&new_source);
+
+            install(
+                &old_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            replace(&new_source.to_string_lossy(), Some("wordpress"))
+                .expect("replace should resolve monorepo root and materialize shared runtime");
+
+            let installed_path = home.join(".config/homeboy/extensions/wordpress");
+            assert!(installed_path.is_symlink());
+            assert_eq!(
+                fs::read_link(installed_path).expect("read replacement link"),
+                new_source.join("wordpress")
+            );
+            assert!(home
+                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn replace_from_local_path_uses_requested_revision_when_git_metadata_is_missing() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "wordpress");
+            write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
+
+            install(
+                &old_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            let result = replace_with_revision(
+                &new_source.to_string_lossy(),
+                Some("wordpress"),
+                Some("fix/codebox-bundled-agents-api"),
+            )
+            .expect("replace should preserve requested revision");
+
+            assert_eq!(
+                result.source_revision.as_deref(),
+                Some("fix/codebox-bundled-agents-api")
+            );
         });
     }
 

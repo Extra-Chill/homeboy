@@ -454,6 +454,18 @@ fn install_from_path(
 
     let manifest_path = manifest_path_for_extension(&source, &extension_id);
     if !manifest_path.exists() {
+        if id_override.is_some() {
+            let monorepo_extension = source.join(&extension_id);
+            let monorepo_manifest = manifest_path_for_extension(&monorepo_extension, &extension_id);
+            if monorepo_manifest.exists() {
+                return install_from_path(
+                    &monorepo_extension.to_string_lossy(),
+                    Some(&extension_id),
+                    Some(&source),
+                );
+            }
+        }
+
         return Err(Error::validation_invalid_argument(
             "source",
             format!("No {}.json found at {}", extension_id, source.display()),
@@ -1421,6 +1433,27 @@ exec '{}' "$@"
                 Some("wordpress"),
             )
             .expect("install linked extension");
+
+            assert!(home
+                .join(".config/homeboy/extensions/wordpress/wordpress.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn linked_monorepo_root_install_with_id_materializes_shared_agent_runtimes() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture(&source, "wordpress");
+            write_shared_runtime_fixture(&source);
+
+            install(&source.to_string_lossy(), Some("wordpress"))
+                .expect("install linked extension from monorepo root");
 
             assert!(home
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")

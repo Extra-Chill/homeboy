@@ -12,7 +12,7 @@
     },
     "source": {
       "path_patterns": ["/target/release/", "/target/debug/"],
-      "upgrade_command": "git pull && . \"$HOME/.cargo/env\" && cargo install --path . --force",
+      "upgrade_command": "set -e\n\ngit pull\n. \"$HOME/.cargo/env\"\ncargo build --release\n\nBIN_PATH=\"$(command -v homeboy)\"\nARTIFACT=\"target/release/homeboy\"\nTMP_BIN=\"$(dirname \"$BIN_PATH\")/.homeboy-upgrade.$$\"\ncleanup() { [ -e \"$TMP_BIN\" ] && rm -f \"$TMP_BIN\"; }\ntrap cleanup EXIT\n\n\"$ARTIFACT\" --version >/dev/null\ninstall -m 0755 \"$ARTIFACT\" \"$TMP_BIN\"\n\"$TMP_BIN\" --version >/dev/null\nmv \"$TMP_BIN\" \"$BIN_PATH\"\ntrap - EXIT\n\"$BIN_PATH\" --version >/dev/null",
       "list_command": null
     },
     "binary": {

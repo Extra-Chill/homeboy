@@ -176,7 +176,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
         ..AgentTaskRetryPolicy::default()
     };
     plan.metadata = serde_json::json!({
-        "kind": "repo-cooking-dispatch",
+        "kind": "agent-task-dispatch",
         "repo": repo,
         "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
         "workspace_root": workspace_root.map(|path| path.display().to_string()),
@@ -472,12 +472,12 @@ fn dispatch_provider_config(
         ));
     }
     let map = config.as_object_mut().expect("provider config object");
-    map.entry("task_kind".to_string())
-        .or_insert_with(|| serde_json::json!("repo-cooking"));
     map.entry("repo".to_string())
         .or_insert_with(|| serde_json::json!(repo));
     map.entry("workspace".to_string())
         .or_insert_with(|| serde_json::json!(workspace.map(|target| target.metadata.clone())));
+    map.entry("workspace_required".to_string())
+        .or_insert_with(|| serde_json::json!(workspace.is_some()));
     map.entry("workspace_root".to_string()).or_insert_with(|| {
         serde_json::json!(workspace.map(|target| target.root.display().to_string()))
     });
@@ -651,7 +651,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn builds_repo_cooking_plan_from_prompt_file_and_client_context() {
+    fn builds_dispatch_plan_from_prompt_file_and_client_context() {
         let workspace = tempfile::tempdir().expect("workspace");
         let prompt = tempfile::NamedTempFile::new().expect("prompt file");
         std::fs::write(prompt.path(), "Cook the issue cleanly.").expect("write prompt");

@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::core::error::{Error, Result};
 use serde::Serialize;
 
-pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
+pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
     let output = Command::new(program).args(args).output().map_err(|e| {

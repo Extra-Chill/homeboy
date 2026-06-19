@@ -55,6 +55,18 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Execute pending actions after applying the spec.
     #[arg(long)]
     pub resume: bool,
+
+    /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+
+    /// Provider selector/id to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-selector", value_name = "SELECTOR")]
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
 }
 
 #[derive(Args, Debug)]
