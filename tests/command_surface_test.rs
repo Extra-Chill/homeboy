@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
-    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
-    Commands,
+    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface,
+    CommandSafetyEntry, Cli, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -176,13 +176,14 @@ fn rejects_stale_or_unrepresented_paths() {
 
 #[test]
 fn command_index_matches_top_level_command_surface() {
-    let surface = current_command_surface();
+    let manifest = current_command_safety_manifest();
     let documented = documented_command_index_entries();
 
     let extension_commands = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
-    let expected: BTreeSet<String> = surface
+    let expected: BTreeSet<String> = manifest
         .commands
         .iter()
+        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
         .map(|entry| entry.name.clone())
         .chain(extension_commands.iter().cloned())
         .collect();
@@ -203,6 +204,43 @@ fn command_index_matches_top_level_command_surface() {
         assert!(
             command_doc_path(command).is_file(),
             "docs/commands/commands-index.md lists `{command}` but docs/commands/{command}.md is missing"
+        );
+    }
+}
+
+#[test]
+fn command_safety_manifest_docs_paths_match_command_docs() {
+    let manifest = current_command_safety_manifest();
+    let hidden_top_level_commands = BTreeSet::from(["list"]);
+
+    for entry in &manifest.commands {
+        if entry.hidden {
+            assert!(
+                hidden_top_level_commands.contains(entry.name.as_str()),
+                "hidden top-level command `{}` must be added to the explicit internal-command exemption list before it can skip command docs",
+                entry.name
+            );
+            assert!(
+                entry.docs.path.is_none(),
+                "hidden internal command `{}` should not advertise a command docs path",
+                entry.name
+            );
+            continue;
+        }
+
+        let Some(path) = &entry.docs.path else {
+            continue;
+        };
+        assert_eq!(
+            path,
+            &format!("docs/commands/{}.md", entry.name),
+            "visible top-level command `{}` has an unexpected docs path in the safety manifest",
+            entry.name
+        );
+        assert!(
+            command_doc_manifest_path(path).is_file(),
+            "visible top-level command `{}` advertises `{path}` in the safety manifest, but that file is missing",
+            entry.name
         );
     }
 }
@@ -468,6 +506,16 @@ fn documented_command_doc_files() -> BTreeSet<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
+    !entry.hidden && entry.docs.path.is_some()
+}
+
+fn command_doc_manifest_path(path: &str) -> std::path::PathBuf {
+    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.push(path);
+    root
 }
 
 fn command_doc_path(command: &str) -> std::path::PathBuf {
