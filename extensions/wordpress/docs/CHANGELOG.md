@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.49] - 2026-06-19
+
+### Changed
+- Normalize browser request coverage evidence
+
 ## [3.7.48] - 2026-06-19
 
 ### Changed
