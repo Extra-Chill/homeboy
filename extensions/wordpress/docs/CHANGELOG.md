@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.24] - 2026-06-19
+
+### Changed
+- Add standalone agent runtime integrations
+
 ## [3.7.23] - 2026-06-19
 
 ### Changed
