@@ -225,10 +225,7 @@ pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
             "--runner is only supported for commands with portable Lab offload support: {}",
             human_join(&supported_labels)
         ),
-        hint: format!(
-            "Current Lab offload support: {}.",
-            human_join(&hint_labels)
-        ),
+        hint: format!("Current Lab offload support: {}.", human_join(&hint_labels)),
         supported_labels,
     }
 }
