@@ -20,7 +20,7 @@ use std::path::Path;
 
 use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
 use crate::core::agent_task_lifecycle;
-use crate::core::agent_task_provider::provider_available_for_backend;
+use crate::core::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
 use crate::core::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
@@ -1708,14 +1708,19 @@ fn preflight_agent_task_provider_on_runner(
             None,
         )
     })?;
-    let mut runner_available = provider_available(
-        &runner_providers,
-        &selection.backend,
-        selection.selector.as_deref(),
-    );
+    // Resolve against the SAME provider list that `agent-task providers
+    // --runner` shows the operator, using the SAME resolution contract
+    // (`resolve_provider_for_backend`) that execution-time selection uses. This
+    // guarantees discovery and preflight can never disagree about whether a
+    // listed provider is selectable for the requested backend/selector.
+    let mut runner_unavailable_reason =
+        runner_provider_unavailable_reason(&runner_providers, &selection);
     let mut refresh_result = None;
 
-    if local_available && !runner_available && runner_provider_refresh_is_safe(runner_status) {
+    if local_available
+        && runner_unavailable_reason.is_some()
+        && runner_provider_refresh_is_safe(runner_status)
+    {
         refresh_result = Some(refresh_runner_provider_session_if_still_safe(runner_id));
         if refresh_result.as_ref().is_some_and(|result| result.is_ok()) {
             let probe = probe_agent_task_providers_on_runner(
@@ -1729,30 +1734,85 @@ fn preflight_agent_task_provider_on_runner(
             )?;
             if probe.exit_code == 0 {
                 if let Ok(providers) = parse_agent_task_providers_output(&probe.stdout) {
-                    runner_available = provider_available(
-                        &providers,
-                        &selection.backend,
-                        selection.selector.as_deref(),
-                    );
+                    runner_unavailable_reason =
+                        runner_provider_unavailable_reason(&providers, &selection);
                 }
             }
         }
     }
 
-    if !runner_available {
+    if let Some(reason) = runner_unavailable_reason {
         return Err(agent_task_provider_selection_preflight_error(
             runner_id,
             &selection,
             local_available,
             Some(false),
             runner_homeboy,
-            None,
+            Some(reason),
             &command,
             refresh_result,
         ));
     }
 
     Ok(())
+}
+
+/// Resolve the requested backend/selector against the runner-reported provider
+/// list and, when it is not selectable, return a precise reason that names the
+/// exact mapping mismatch in terms of the listed providers. Returns `None` when
+/// the provider resolves cleanly.
+///
+/// This is what keeps the cook preflight aligned with `agent-task providers
+/// --runner`: the same provider documents discovery shows are run through the
+/// shared `resolve_provider_for_backend` contract, so a provider that discovery
+/// lists is either accepted here or rejected with a specific selector/backend
+/// explanation — never a bare "availability is false".
+fn runner_provider_unavailable_reason(
+    providers: &[AgentTaskExecutorProvider],
+    selection: &AgentTaskProviderSelection,
+) -> Option<String> {
+    match resolve_provider_for_backend(
+        providers,
+        &selection.backend,
+        selection.selector.as_deref(),
+    ) {
+        ProviderResolution::Resolved(_) => None,
+        ProviderResolution::NotFound => Some(format!(
+            "runner provider discovery returned {} provider(s) ({}), but none declare backend `{}`{}",
+            providers.len(),
+            provider_inventory_summary(providers),
+            selection.backend,
+            selection
+                .selector
+                .as_deref()
+                .map(|selector| format!(" with selector/id `{selector}`"))
+                .unwrap_or_default()
+        )),
+        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => Some(format!(
+            "backend `{}` matches extension alias for {} runner providers ({}); re-run with `--selector <id>` to pick one",
+            selection.backend,
+            candidate_ids.len(),
+            candidate_ids.join(", ")
+        )),
+        ProviderResolution::SelectorMismatch { available_ids } => Some(format!(
+            "backend `{}` matches runner providers ({}), but selector/id `{}` does not match any of them",
+            selection.backend,
+            available_ids.join(", "),
+            selection.selector.as_deref().unwrap_or("<default>")
+        )),
+    }
+}
+
+/// Compact `id (backend)` inventory of discovered providers for diagnostics.
+fn provider_inventory_summary(providers: &[AgentTaskExecutorProvider]) -> String {
+    if providers.is_empty() {
+        return "<none>".to_string();
+    }
+    providers
+        .iter()
+        .map(|provider| format!("{} (backend `{}`)", provider.id, provider.backend))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 struct AgentTaskProviderProbeOutput {
@@ -1902,7 +1962,10 @@ fn provider_available(
     backend: &str,
     selector: Option<&str>,
 ) -> bool {
-    provider_available_for_backend(providers, backend, selector)
+    matches!(
+        resolve_provider_for_backend(providers, backend, selector),
+        ProviderResolution::Resolved(_)
+    )
 }
 
 fn agent_task_provider_selection_preflight_error(
