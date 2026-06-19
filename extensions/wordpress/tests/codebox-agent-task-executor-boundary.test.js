@@ -7,8 +7,11 @@ const path = require('node:path');
 
 const {
   codeboxTaskRequestFromAgentTaskRequest,
+  normalizeCodeboxArtifactDeclaration,
+  normalizeCodeboxArtifactOutcome,
   providerContract,
   providerRuntimeInvocationContract,
+  typedArtifactsFromCodeboxResult,
 } = require('../../agent-runtimes/wp-codebox');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
@@ -48,8 +51,40 @@ assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
+assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'artifact-apply-execution'), true);
+assert.equal(
+  provider.upstream_primitive_requirements.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
+  'consume_when_available'
+);
 assert.doesNotMatch(JSON.stringify(provider.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
+
+assert.deepEqual(normalizeCodeboxArtifactDeclaration('fallback', {
+  schema: 'homeboy/agent-task-artifact-declaration/v1',
+  id: 'review-report',
+  artifactSchema: 'example/report/v1',
+}), {
+  schema: 'wp-codebox/artifact-declaration/v1',
+  name: 'review-report',
+  artifact_schema: 'example/report/v1',
+  required: true,
+});
+assert.deepEqual(typedArtifactsFromCodeboxResult({
+  metadata: {
+    agent_runtime: {
+      result: {
+        outputs: {
+          typed_artifacts: {
+            review: { type: 'json', payload: { ok: true } },
+          },
+        },
+      },
+    },
+  },
+}).review.payload, { ok: true });
+assert.equal(normalizeCodeboxArtifactOutcome({ id: 'patch.diff', kind: 'codebox-patch' }, {}, {
+  roleAliases: provider.role_aliases,
+}).role, 'patch');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);

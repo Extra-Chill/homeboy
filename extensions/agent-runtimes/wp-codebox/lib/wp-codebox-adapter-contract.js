@@ -131,8 +131,15 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     id: 'artifact-result-envelope',
     schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.evidence_artifact_envelope,
     owner: 'wp-codebox',
-    adapter_behavior: 'normalize_declared_artifacts',
-    requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts.',
+    adapter_behavior: 'consume_when_available',
+    requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Until this is complete, compatibility is centralized in codebox-artifact-contract.js.',
+  },
+  {
+    id: 'artifact-apply-execution',
+    schema: 'wp-codebox/artifact-apply-result/v1',
+    owner: 'wp-codebox',
+    adapter_behavior: 'local_git_apply_until_primitive_exists',
+    requirement: 'Expose approved artifact patch application as a Codebox-owned primitive. Homeboy Extensions already delegates preflight and apply request creation when runtime-core exports are available; the remaining local code maps Homeboy worktree, commit, and publish policy around git apply.',
   },
 ];
 

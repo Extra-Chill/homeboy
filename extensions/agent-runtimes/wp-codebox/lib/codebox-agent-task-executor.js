@@ -29,9 +29,11 @@ const {
 const {
   artifactNameFromDeclaration,
   artifactPath,
-  artifactRoleFromCodeboxArtifact,
+  normalizeCodeboxArtifactDeclaration,
+  normalizeCodeboxArtifactOutcome: normalizeCodeboxArtifactOutcomeContract,
   normalizeTypedArtifactEntry: normalizeCodeboxTypedArtifactEntry,
   normalizeTypedArtifacts: normalizeCodeboxTypedArtifacts,
+  typedArtifactsFromCodeboxResult,
   typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
 } = require('./codebox-artifact-contract');
 const {
@@ -50,7 +52,6 @@ const {
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   wpCodeboxProviderRuntimeInvocationContract,
-  wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
 
@@ -263,14 +264,6 @@ function providerRuntimeOperationEntries(requested) {
 
 function providerRuntimeOperationEntry(operation, fallbackKey = '') {
   return wpCodeboxProviderRuntimeOperationEntry(operation, fallbackKey);
-}
-
-function providerRuntimeOperationConfig(key, operation) {
-  return wpCodeboxProviderRuntimeOperationConfig(key, operation);
-}
-
-function withoutUndefinedValues(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 function runtimeProviderDefaults() {
@@ -532,38 +525,9 @@ function wpCodeboxArtifactDeclarationFromHomeboy(declaration) {
 }
 
 function wpCodeboxArtifactDeclarationFromLegacy(defaultName, declaration) {
-  if (typeof declaration === 'string') {
-    return {
-      schema: 'wp-codebox/artifact-declaration/v1',
-      name: declaration,
-      required: true,
-    };
-  }
-  if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) {
-    return null;
-  }
-  const name = declaration.name || declaration.id || declaration.output || declaration.artifact || defaultName;
-  if (!name || typeof name !== 'string') {
-    return null;
-  }
-  const artifactSchema = declaration.artifact_schema
-    || declaration.artifactSchema
-    || declaration.content_schema
-    || declaration.contentSchema
-    || (declaration.schema && ![
-      AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA,
-      'wp-codebox/artifact-declaration/v1',
-    ].includes(declaration.schema) ? declaration.schema : undefined);
-  return Object.fromEntries(Object.entries({
-    schema: 'wp-codebox/artifact-declaration/v1',
-    name,
-    type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType,
-    artifact_schema: artifactSchema,
-    path: declaration.path,
-    required: declaration.required === undefined ? true : declaration.required === true,
-    description: declaration.description,
-    metadata: declaration.metadata,
-  }).filter(([, value]) => value !== undefined));
+  return normalizeCodeboxArtifactDeclaration(defaultName, declaration, {
+    ignoredSchemas: [AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA],
+  });
 }
 
 class RuntimeOverlayConfigError extends Error {
@@ -2040,41 +2004,7 @@ function normalizeTypedArtifacts(value) {
 }
 
 function typedArtifactsFromResult(result) {
-  const workload = agentRuntimeWorkload(result) || {};
-  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
-  const candidates = [
-    result.outputs?.typed_artifacts,
-    result.outputs?.typedArtifacts,
-    result.run?.agentResult?.typed_artifacts,
-    result.run?.agentResult?.typedArtifacts,
-    result.run?.agentResult?.outputs?.typed_artifacts,
-    result.run?.agentResult?.outputs?.typedArtifacts,
-    result.agentResult?.outputs?.typed_artifacts,
-    result.agentResult?.outputs?.typedArtifacts,
-    result.agent_result?.outputs?.typed_artifacts,
-    result.agent_result?.outputs?.typedArtifacts,
-    result.metadata?.agent_runtime?.result?.typed_artifacts,
-    result.metadata?.agent_runtime?.result?.typedArtifacts,
-    result.metadata?.agent_runtime?.result?.outputs?.typed_artifacts,
-    result.metadata?.agent_runtime?.result?.outputs?.typedArtifacts,
-    result.metadata?.agent_runtime?.result?.outputs?.outputs?.typed_artifacts,
-    result.metadata?.agent_runtime?.result?.outputs?.outputs?.typedArtifacts,
-    workload.typed_artifacts,
-    workload.typedArtifacts,
-    workload.outputs?.typed_artifacts,
-    workload.outputs?.typedArtifacts,
-    workload.outputs?.outputs?.typed_artifacts,
-    workload.outputs?.outputs?.typedArtifacts,
-    ...scenarios.map((scenario) => scenario?.typed_artifacts),
-    ...scenarios.map((scenario) => scenario?.typedArtifacts),
-    ...scenarios.map((scenario) => scenario?.outputs?.typed_artifacts),
-    ...scenarios.map((scenario) => scenario?.outputs?.typedArtifacts),
-    ...scenarios.map((scenario) => scenario?.metadata?.outputs?.typed_artifacts),
-    ...scenarios.map((scenario) => scenario?.metadata?.outputs?.typedArtifacts),
-    ...scenarios.map((scenario) => scenario?.metadata?.typed_artifacts),
-    ...scenarios.map((scenario) => scenario?.metadata?.typedArtifacts),
-  ];
-  return Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
+  return typedArtifactsFromCodeboxResult(result, { sanitize: sanitizePublicMetadata });
 }
 
 function codeboxAgentResultFromResult(result) {
@@ -2270,27 +2200,10 @@ function artifactFromCodeboxArtifact(artifact, index) {
 }
 
 function normalizeCodeboxArtifactOutcome(artifact, rawArtifact = {}) {
-  if (!artifact) {
-    return artifact;
-  }
-  const nativeKind = rawArtifact.kind || rawArtifact.type || artifact.kind || '';
-  const role = artifactRoleFromCodeboxArtifact({ ...artifact, kind: nativeKind }, WP_CODEBOX_ROLE_ALIASES);
-  const metadata = artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
-    ? artifact.metadata
-    : {};
-  return {
-    ...artifact,
-    role,
-    metadata: sanitizePublicMetadata({
-      ...metadata,
-      wp_codebox: {
-        id: rawArtifact.id || artifact.id,
-        kind: nativeKind,
-        name: rawArtifact.name || artifact.name,
-        raw: rawArtifact,
-      },
-    }),
-  };
+  return normalizeCodeboxArtifactOutcomeContract(artifact, rawArtifact, {
+    roleAliases: WP_CODEBOX_ROLE_ALIASES,
+    sanitize: sanitizePublicMetadata,
+  });
 }
 
 function pathValue(source, dottedPath) {
