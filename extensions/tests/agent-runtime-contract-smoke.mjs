@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,10 +71,11 @@ assert.equal(provider.workspace_materialization.cwd, 'git_checkout');
 assert.equal(provider.workspace_materialization.requires_git, true);
 assert.equal(provider.workspace_materialization.write_scope, 'artifacts');
 assert.deepEqual(provider.workspace_materialization.artifact_paths, ['.homeboy/fake-runtime']);
-assert.ok(provider.secret_requirements.some((secret) => secret.name === 'FAKE_RUNTIME_TOKEN'));
-assert.deepEqual(provider.secret_env_requirements[0].env, ['FAKE_RUNTIME_TOKEN']);
-assert.deepEqual(provider.provider_defaults['fake-runtime'].secret_env, ['FAKE_RUNTIME_TOKEN']);
+assert.deepEqual(provider.secret_requirements, []);
+assert.deepEqual(provider.secret_env_requirements, []);
+assert.deepEqual(provider.provider_defaults['fake-runtime'].secret_env, []);
 assert.ok(provider.diagnostics.outcome_fields.includes('diagnostics'));
+assert.deepEqual(provider.diagnostics.artifact_kinds, ['fake-runtime-outcome', 'fake-runtime-transcript']);
 
 const command = provider.command.replace('{{runtime_path}}', runtimeDir);
 assert.equal(command, `node ${runtimeDir}/scripts/agent/fake-agent-task-executor.cjs`);
@@ -87,13 +89,11 @@ const request = {
 	instructions: 'Validate the generic runtime provider command contract.',
 };
 
+const workspaceDir = mkdtempSync(path.join(os.tmpdir(), 'homeboy-fake-runtime-'));
 const result = spawnSync('node', [path.join(runtimeDir, 'scripts', 'agent', 'fake-agent-task-executor.cjs')], {
 	input: JSON.stringify(request),
 	encoding: 'utf8',
-	env: {
-		...process.env,
-		FAKE_RUNTIME_TOKEN: 'redacted-fixture-token',
-	},
+	cwd: workspaceDir,
 });
 
 assert.equal(result.status, 0, result.stderr);
@@ -105,7 +105,13 @@ assert.equal(outcome.task_id, request.task_id);
 assert.ok(provider.outcome_statuses.includes(outcome.status));
 assert.equal(outcome.status, 'succeeded');
 assert.equal(outcome.metadata.provider, provider.backend);
-assert.deepEqual(outcome.metadata.secret_env_names, ['FAKE_RUNTIME_TOKEN']);
-assert.doesNotMatch(result.stdout, /redacted-fixture-token/, 'provider outcome leaked secret value');
+assert.deepEqual(outcome.artifacts.map((artifact) => artifact.kind), ['fake-runtime-outcome', 'fake-runtime-transcript']);
+
+const writtenOutcome = JSON.parse(readFileSync(path.join(workspaceDir, '.homeboy', 'fake-runtime', 'outcome.json'), 'utf8'));
+const writtenTranscript = readFileSync(path.join(workspaceDir, '.homeboy', 'fake-runtime', 'transcript.log'), 'utf8');
+assert.deepEqual(writtenOutcome, outcome);
+assert.match(writtenTranscript, /task_id=fake-runtime-contract-smoke/);
+assert.match(writtenTranscript, /status=succeeded/);
+rmSync(workspaceDir, { recursive: true, force: true });
 
 console.log('agent runtime contract smoke passed');

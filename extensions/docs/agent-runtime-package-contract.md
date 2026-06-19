@@ -4,8 +4,9 @@ Agent runtime packages live under `agent-runtimes/<runtime-id>/`. They expose
 provider commands that Homeboy can invoke without encoding backend-specific
 knowledge in core or in domain extensions.
 
-This contract is intentionally backend-neutral. WP Codebox is one runtime, not
-the template every future runtime should copy.
+This contract is intentionally backend-neutral. A browser sandbox runtime, a
+local shell fixture, or a CLI agent runtime can all satisfy the same request and
+outcome schemas.
 
 ## Package Layout
 
@@ -58,7 +59,7 @@ invoke the provider.
 
 Generic runner specs must declare `executor.backend` explicitly. Runtime-specific
 planners may provide their own defaults, but the shared contract does not assume
-WP Codebox or any other backend.
+any particular backend.
 
 ## `runtime_path` Interpolation
 
@@ -109,14 +110,13 @@ Reusable CI callers that need to describe a runner without embedding workflow
 glue should consume `agent-runtimes/lib/agent-task-runner-contract.js`. That
 adapter owns `homeboy/agent-task-runner-spec/v1` validation and projection into
 the generic request fields consumed by executor providers. Extension-specific
-exports, such as the WordPress `agent-task-runner-spec` module, should re-export
-that adapter instead of copying schema and lifecycle validation logic.
+exports should re-export that adapter instead of copying schema and lifecycle
+validation logic.
 
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of
-copying schema strings or selector paths into each backend. Domain policy, such
-as WordPress or Data Machine defaults, belongs in the caller/runtime package and
-not in the generic adapter.
+copying schema strings or selector paths into each backend. Domain policy belongs
+in the caller/runtime package and not in the generic adapter.
 
 ## Secret Requirements
 
@@ -126,9 +126,9 @@ Runtime manifests should declare secret inputs by name, never by value:
 {
   "secret_requirements": [
     {
-      "name": "FAKE_RUNTIME_TOKEN",
+      "name": "EXAMPLE_RUNTIME_TOKEN",
       "required": false,
-      "purpose": "Authenticates optional fake runtime provider calls."
+      "purpose": "Authenticates optional provider calls."
     }
   ]
 }
@@ -168,13 +168,11 @@ Common fields:
 - `write_scope`: where the provider may write, such as `workspace`, `artifacts`, or `none`.
 - `artifact_paths`: relative paths the provider may create or update.
 
-The provider must not infer workspace shape from WP Codebox, WordPress, or any
-other current runtime unless that shape is declared here.
+The provider must not infer workspace shape from any current runtime unless that
+shape is declared here.
 
-Caller-owned wrappers should pass domain-specific runtime requirements explicitly.
-For example, Data Machine Agent CI supplies its Agents API, Data Machine, Data
-Machine Code, workspace-tool, and ability-policy defaults before invoking the
-generic WP Codebox provider.
+Caller-owned wrappers should pass domain-specific runtime requirements
+explicitly before invoking the selected generic provider.
 
 ## Outcome And Diagnostic Contracts
 
@@ -200,7 +198,7 @@ the default for a domain workflow.
 
 Default-backend policy belongs to the caller that understands the domain and
 deployment context, for example a Homeboy extension, workflow, component config,
-or operator-supplied setting. A WordPress workflow may choose WP Codebox by
+or operator-supplied setting. One workflow may choose a browser sandbox by
 default; a different workflow may choose another runtime with the same generic
 capabilities. Homeboy core should route explicit requests and evaluate declared
 capabilities, not hard-code a global default backend.
@@ -208,6 +206,8 @@ capabilities, not hard-code a global default backend.
 ## Fake Runtime Fixture
 
 `agent-runtimes/fake-runtime` is the smallest reference fixture for this
-contract. It exists to prove future runtimes can satisfy Homeboy's generic
-runtime package shape without copying WP Codebox package structure or WordPress
-behavior.
+contract. It accepts `homeboy/agent-task-request/v1`, requires an explicit
+`executor.backend`, writes an outcome JSON file plus a transcript log artifact,
+and emits `homeboy/agent-task-outcome/v1` without any secret inputs. It exists to
+prove future runtimes can satisfy Homeboy's generic runtime package shape without
+copying another runtime package structure or domain behavior.

@@ -35,8 +35,7 @@
       "redacted_metadata_keys": [
         "secret_env_values",
         "secretEnvValues",
-        "secrets",
-        "fake_runtime_token"
+        "secrets"
       ],
       "capabilities": [
         "workspace_materialization",
@@ -75,27 +74,11 @@
           ".homeboy/fake-runtime"
         ]
       },
-      "secret_requirements": [
-        {
-          "name": "FAKE_RUNTIME_TOKEN",
-          "required": false,
-          "purpose": "Optional fake credential used by the contract fixture."
-        }
-      ],
-      "secret_env_requirements": [
-        {
-          "schema": "homeboy/secret-env-requirement/v1",
-          "source": "provider_default",
-          "env": ["FAKE_RUNTIME_TOKEN"],
-          "when": {
-            "path": "executor.config.provider",
-            "equals": "fake-runtime"
-          }
-        }
-      ],
+      "secret_requirements": [],
+      "secret_env_requirements": [],
       "provider_defaults": {
         "fake-runtime": {
-          "secret_env": ["FAKE_RUNTIME_TOKEN"]
+          "secret_env": []
         }
       },
       "diagnostics": {
@@ -105,7 +88,8 @@
           "metadata"
         ],
         "artifact_kinds": [
-          "fake-runtime-diagnostic"
+          "fake-runtime-outcome",
+          "fake-runtime-transcript"
         ]
       },
       "status": "experimental",

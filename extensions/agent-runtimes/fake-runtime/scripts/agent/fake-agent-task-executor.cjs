@@ -2,13 +2,34 @@
 'use strict';
 
 const fs = require('node:fs');
+const path = require('node:path');
+
+const ARTIFACT_DIR = path.join(process.cwd(), '.homeboy', 'fake-runtime');
+const OUTCOME_PATH = path.join(ARTIFACT_DIR, 'outcome.json');
+const TRANSCRIPT_PATH = path.join(ARTIFACT_DIR, 'transcript.log');
 
 function readStdin() {
 	return fs.readFileSync(0, 'utf8');
 }
 
 function emit(outcome) {
+	writeArtifactFiles(outcome);
 	process.stdout.write(`${JSON.stringify(outcome)}\n`);
+}
+
+function writeArtifactFiles(outcome) {
+	fs.mkdirSync(ARTIFACT_DIR, { recursive: true });
+	fs.writeFileSync(OUTCOME_PATH, `${JSON.stringify(outcome, null, 2)}\n`);
+	fs.writeFileSync(TRANSCRIPT_PATH, transcriptForOutcome(outcome));
+}
+
+function transcriptForOutcome(outcome) {
+	return [
+		`task_id=${outcome.task_id || ''}`,
+		`status=${outcome.status}`,
+		`summary=${outcome.summary}`,
+		'',
+	].join('\n');
 }
 
 function failure(taskId, summary, details) {
@@ -23,11 +44,32 @@ function failure(taskId, summary, details) {
 				message: details,
 			},
 		],
-		artifacts: [],
+		artifacts: artifactRefs(),
 		metadata: {
 			provider: 'fake-runtime',
 		},
 	});
+}
+
+function artifactRefs() {
+	return [
+		{
+			schema: 'homeboy/agent-task-artifact/v1',
+			id: 'fake-runtime-outcome',
+			kind: 'fake-runtime-outcome',
+			name: 'Fake runtime outcome',
+			path: '.homeboy/fake-runtime/outcome.json',
+			mime: 'application/json',
+		},
+		{
+			schema: 'homeboy/agent-task-artifact/v1',
+			id: 'fake-runtime-transcript',
+			kind: 'fake-runtime-transcript',
+			name: 'Fake runtime transcript',
+			path: '.homeboy/fake-runtime/transcript.log',
+			mime: 'text/plain',
+		},
+	];
 }
 
 let request;
@@ -59,14 +101,8 @@ emit({
 			message: 'Provider command contract fixture executed successfully.',
 		},
 	],
-	artifacts: [
-		{
-			kind: 'fake-runtime-diagnostic',
-			path: '.homeboy/fake-runtime/outcome.json',
-		},
-	],
+	artifacts: artifactRefs(),
 	metadata: {
 		provider: 'fake-runtime',
-		secret_env_names: process.env.FAKE_RUNTIME_TOKEN ? ['FAKE_RUNTIME_TOKEN'] : [],
 	},
 });
