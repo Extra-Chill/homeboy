@@ -63,6 +63,7 @@ fn lint_args(root: &Path) -> LintArgs {
         force: false,
         setting_args: SettingArgs::default(),
         baseline_args: BaselineArgs::default(),
+        precomputed_changed_files: None,
         json_summary: false,
     }
 }
