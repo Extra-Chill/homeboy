@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```sh
-homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--check] [--dry-run] [--json '<spec>']
+homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--check] [--dry-run] [--apply] [--json '<spec>']
 # If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
 
 # Multi-project deployment
@@ -33,6 +33,7 @@ Options:
   - Shows all components for the project with version comparison status.
   - Combines with `--outdated` or component IDs to filter results.
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
+- `--apply`: confirm real deploys that use dangerous modes such as `--head` or `--force`
 - `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
 - `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. Each project deployment builds independently.
@@ -43,6 +44,8 @@ Options:
 - `--no-pull`: skip the automatic pull before deploy.
 - `--head`: deploy the current branch `HEAD` instead of the latest tag.
 - `--tagged`: force tag-based deploy and ignore reusable build artifacts.
+
+Real deploys with `--head` or `--force` require `--apply`. Preview and status commands (`--dry-run` or `--check`) do not require `--apply`.
 
 Bulk JSON input uses `component_ids` (snake_case):
 
