@@ -88,8 +88,7 @@ jobs:
 ### Migrating Old Wrapper Callers
 
 Removed domain-specific wrappers should migrate to `runtime-agent-full-run.yml`
-directly and provide their runtime stack as explicit generic inputs. Data Machine
-examples live in [`docs/integrations/datamachine.md`](../../docs/integrations/datamachine.md).
+directly and provide their runtime stack as explicit generic inputs.
 
 Use this mapping when updating old wrapper workflow bodies:
 
@@ -130,6 +129,54 @@ The workflow keeps two GitHub authentication modes:
 The run summary includes the selected auth mode, target repository, token scope,
 and whether the caller required a Homeboy App token. Tokens are never printed.
 
+## Runtime Bundle Example
+
+Workflows that need a runtime-backed bundle can pass the runtime profile,
+dependencies, WordPress sandbox configuration, pre-run bootstrap work, and extra
+ability assertions through generic full-run inputs.
+
+```yaml
+jobs:
+  run-example-agent:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    with:
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: example-agent-ci
+      runtime_profiles: >-
+        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-agent-bundle","runtime_bundle_ability":"example/run-agent-bundle","ability_requirements":["example/run-agent-bundle"]}}
+      runtime_dependencies: '["Example/runtime-plugin@main"]'
+      workload_id: example-agent-flow
+      workload_label: Run example agent
+      target_repo: Example/project
+      prompt: ${{ inputs.prompt }}
+      runtime_execution: '{"kind":"bundle","source":"bundles/example-agent"}'
+      validation_dependencies: Example/project@main
+      runtime_wordpress_version: beta
+      max_turns: 16
+      step_budget: 20
+      time_budget_ms: 900000
+      extra_wp_config_defines: |
+        {
+          "EXAMPLE_RUNTIME_MODE": "primary"
+        }
+      runtime_mounts: |
+        [
+          "${{ github.workspace }}/.ci/example-runtime-plugin:/wordpress/wp-content/plugins/example-runtime-plugin:readonly"
+        ]
+      workload_run_before: |
+        [
+          { "type": "php", "file": "world-creator-bootstrap.php" }
+        ]
+      runtime_config: '{"daily_memory_enabled":true}'
+      required_abilities: |
+        ["example/create-artifact", "example/publish-result"]
+      success_requires_pr: true
+      runtime_output_projections: '{"example_pr_url":"metadata.engine_data.example.pr_url"}'
+      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
+    secrets: inherit
+```
+
 ## Inputs worth calling out
 
 - Agent CI runs through the selected `runtime_provider`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
@@ -166,10 +213,47 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ## External Bundle And Tool Recording
 
-Consumers can keep an agent bundle in one repository while running it against
-another repository. The reusable workflow handles bundle checkout and passes tool
-recorder config to the runtime. Use `evidence_projections` when a consumer needs
-selected provider operation results copied into stable runner outputs.
+Consumers such as `docs-agent` can keep the agent bundle in one repository while
+running it against another repository. The reusable workflow handles the bundle
+checkout and passes tool recorder config to the WordPress runner.
+
+```yaml
+jobs:
+  run-docs-agent:
+    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    with:
+      runtime_provider: wp-codebox
+      runtime_ref: main
+      runtime_profile: example-agent-ci
+      runtime_profiles: >-
+        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-agent-bundle","runtime_bundle_ability":"example/run-agent-bundle","ability_requirements":["example/run-agent-bundle"]}}
+      runtime_dependencies: '["Example/runtime-plugin@main"]'
+      runtime_execution: '{"kind":"bundle","source":".ci/docs-agent/bundles/docs-agent"}'
+      workload_id: docs-agent-flow
+      workload_label: Run docs-agent runtime bundle
+      target_repo: Automattic/agents-api
+      validation_dependencies: Automattic/docs-agent@main
+      app_token_repos: Automattic/agents-api,Automattic/docs-agent
+      require_homeboy_app_token: true
+      allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
+      tool_results_key: github_tool_results
+      evidence_projections: |
+        [
+          {
+            "operation": "create_or_update_github_file",
+            "outputs": {
+              "path": "parameters.path",
+              "commit_sha": "result.commit.sha"
+            }
+          }
+        ]
+      success_requires_pr: false
+      transcript_artifact_name: docs-agent-transcript-${{ github.run_id }}
+    secrets: inherit
+```
+
+Use `evidence_projections` when a consumer needs selected provider operation
+results copied into stable runner outputs.
 
 ## Provider plugin examples
 
@@ -193,8 +277,8 @@ jobs:
 ```
 
 Non-OpenAI providers supply the plugin checkout and credential mapping
-explicitly. Map each runtime option to one of the generic provider secret env
-names, then pass that secret in the reusable workflow call:
+explicitly. Map each provider option to one of the generic provider
+secret env names, then pass that secret in the reusable workflow call:
 
 ```yaml
 jobs:

@@ -14,7 +14,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const {
   DEFAULT_RUNTIME_ID,
   resolveRuntimeProvider,
-} = require('../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+} = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;

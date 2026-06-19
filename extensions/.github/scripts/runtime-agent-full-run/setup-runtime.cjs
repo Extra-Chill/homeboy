@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { normalizeProviderPlugin, run } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 try {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();

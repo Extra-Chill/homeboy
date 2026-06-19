@@ -22,8 +22,8 @@ helper contract.
 Generic fanout/reconcile JSON planning is documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
-Integration-specific examples, including Data Machine Code promotion and Data
-Machine runtime-agent callers, live under [`docs/integrations/`](docs/integrations/).
+Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
+when a reusable integration needs documentation outside its owning project.
 
 ## Available Extensions
 
@@ -128,8 +128,10 @@ ability execution. Mount downloaded GitHub Actions artifacts with
 `runtime_output_projections`.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. See [`.github/workflows/README.md`](.github/workflows/README.md) for
-workflow inputs and integration examples.
+agent runs. Former domain-specific reusable workflow wrappers have been removed
+after active default-branch consumers migrated to the generic workflow.
+See [`.github/workflows/README.md`](.github/workflows/README.md) for workflow
+inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
@@ -142,8 +144,8 @@ generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
 Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
 and derives `component_contracts` / `extra_plugins` only as adapter
 compatibility for Codebox agent-task entry points that still consume component
-contracts directly. Data Machine ability selection, tool policy, hook/tool
-registration, and Homeboy schemas stay in Homeboy Extensions.
+contracts directly. Ability selection, tool policy, hook/tool registration, and
+runtime-owned schemas stay in the caller or selected runtime.
 
 Homeboy Extensions declares the temporary `homeboy_parent_tool_bridge`
 compatibility field in the runtime profile only when the profile does not already

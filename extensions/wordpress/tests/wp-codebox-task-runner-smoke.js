@@ -71,7 +71,7 @@ if (process.env.FIXTURE_WP_CODEBOX_JSON_VALIDATION_FAILURE) {
   process.exit(0);
 }
 const isAgentBundle = Boolean(input.agent_bundle && Object.keys(input.agent_bundle).length);
-const isRuntimeTask = Boolean(input.runtime_task && Object.keys(input.runtime_task).length && input.runtime_task.ability !== 'datamachine/run-agent-bundle');
+const isRuntimeTask = Boolean(input.runtime_task && Object.keys(input.runtime_task).length && input.runtime_task.ability !== 'example/run-agent-bundle');
 const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
   ? {
       schema: 'datamachine/agent-bundle-run/v1',
@@ -280,15 +280,15 @@ try {
   const providerPluginPath = path.join(root, 'example-provider@feature-branch');
   const preparedProviderPluginPath = path.join(root, 'artifacts', 'prepared-plugins', 'example-provider');
   const workspaceRoot = path.join(root, 'wp-coding-agents@proof-homeboy-fanout-a');
-  const defaultDataMachinePath = path.join(root, 'data-machine');
-  const defaultAgentsApiPath = path.join(defaultDataMachinePath, 'vendor', 'wordpress', 'agents-api');
-  const defaultDataMachineCodePath = path.join(root, 'data-machine-code');
+  const defaultRuntimePath = path.join(root, 'example-runtime');
+  const defaultAgentsApiPath = path.join(defaultRuntimePath, 'vendor', 'wordpress', 'agents-api');
+  const defaultRuntimeToolsPath = path.join(root, 'example-runtime-tools');
   fs.mkdirSync(providerPluginPath, { recursive: true });
   fs.writeFileSync(path.join(providerPluginPath, 'example-provider.php'), '<?php\n/* Plugin Name: Example Provider */\n');
   fs.writeFileSync(path.join(providerPluginPath, 'composer.json'), JSON.stringify({ name: 'extra-chill/example-provider' }));
   fs.mkdirSync(workspaceRoot, { recursive: true });
   fs.mkdirSync(defaultAgentsApiPath, { recursive: true });
-  fs.mkdirSync(defaultDataMachineCodePath, { recursive: true });
+  fs.mkdirSync(defaultRuntimeToolsPath, { recursive: true });
 
   const request = {
     schema: 'wp-codebox/task-input/v1',
@@ -302,8 +302,8 @@ try {
     model: 'opencode-go/kimi-k2.6',
     provider_plugin_paths: [providerPluginPath],
     runtime_component_paths: {
-      agent_runtime: '/components/data-machine',
-      agent_runtime_tools: '/components/data-machine-code',
+      agent_runtime: '/components/example-runtime',
+      agent_runtime_tools: '/components/example-runtime-tools',
     },
     component_contracts: [{ slug: 'domain-component', path: '/workspace/domain-component', activate: true }],
     runtime_env: {
@@ -326,7 +326,7 @@ try {
     runtime_stack_mounts: [{ source: '/components/php-ai-client', target: '/wordpress/wp-includes/php-ai-client', mode: 'readonly' }],
     runtime_overlays: [{ kind: 'bundled-library', library: 'php-ai-client' }],
     secret_env: ['OPENCODE_API_KEY'],
-    verify_steps: [{ command: 'wordpress.phpunit', args: ['plugin-slug=data-machine'] }],
+    verify_steps: [{ command: 'wordpress.phpunit', args: ['plugin-slug=example-plugin'] }],
     orchestrator: { agent_task_id: 'agent-task-123', run_id: 'run-123' },
   };
 
@@ -383,22 +383,18 @@ try {
   assert.equal(captured.input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
   assert.equal(captured.input.mounts[0].source, '/repo/plugin');
   assert.equal(captured.input.runtime_component_paths.agents_api, '/components/agents-api');
-  assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/data-machine');
-  assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+  assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/example-runtime');
+  assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
   assert.equal(Object.hasOwn(captured.input, 'agents_api_path'), false);
   assert.equal(Object.hasOwn(captured.input, 'data_machine_path'), false);
   assert.equal(Object.hasOwn(captured.input, 'data_machine_code_path'), false);
   assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '/components/agents-api');
-  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, '/components/data-machine');
-  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, '/components/data-machine-code');
-  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine').loadAs, 'mu-plugin');
-  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').activate, false);
+  assert.equal(captured.input.extra_plugins.some((plugin) => plugin.slug === 'example-runtime'), false);
+  assert.equal(captured.input.extra_plugins.some((plugin) => plugin.slug === 'example-runtime-tools'), false);
   // WP Codebox 0.8.0 mounts runtime components from `component_contracts`.
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/components/agents-api');
-  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').path, '/components/data-machine');
-  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, '/components/data-machine-code');
-  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine').loadAs, 'mu-plugin');
-  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'data-machine-code').activate, false);
+  assert.equal(captured.input.component_contracts.some((contract) => contract.slug === 'example-runtime'), false);
+  assert.equal(captured.input.component_contracts.some((contract) => contract.slug === 'example-runtime-tools'), false);
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'domain-component').path, '/workspace/domain-component');
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'domain-component').activate, true);
 
@@ -447,7 +443,7 @@ try {
   // can emit it as a recipe workflow.after step and fail the run if it is red.
   assert.equal(captured.input.verify_steps.length, 1);
   assert.equal(captured.input.verify_steps[0].command, 'wordpress.phpunit');
-  assert.deepEqual(captured.input.verify_steps[0].args, ['plugin-slug=data-machine']);
+  assert.deepEqual(captured.input.verify_steps[0].args, ['plugin-slug=example-plugin']);
   assert(!JSON.stringify(captured.input).includes('redacted-test-key'));
 
   const runtimeTaskCapturePath = path.join(root, 'capture-runtime-task.json');
@@ -531,15 +527,8 @@ try {
   assert.equal(bridgeResult.status, 0, bridgeResult.stderr || bridgeResult.stdout);
   const bridgeCaptured = readJson(bridgeCapturePath);
   const bridgePlugin = bridgeCaptured.input.extra_plugins.find((plugin) => plugin.slug === 'homeboy-runtime-tool-bridge');
-  assert.equal(Boolean(bridgePlugin), true);
-  assert.equal(bridgePlugin.loadAs, 'mu-plugin');
-  assert.equal(bridgePlugin.pluginFile, 'homeboy-runtime-tool-bridge/homeboy-runtime-tool-bridge.php');
-  assert.match(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TOOL_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
-  assert.equal(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TASK_ID, 'agent-task-123');
-  const bridgePluginSource = fs.readFileSync(path.join(bridgePlugin.source, 'homeboy-runtime-tool-bridge.php'), 'utf8');
-  assert.match(bridgePluginSource, /Plugin Name: Homeboy Runtime Tool Bridge/);
-  assert.match(bridgePluginSource, /add_filter\(\s*'datamachine_runtime_tool_result'/);
-  assert.match(bridgePluginSource, new RegExp(bridgeCaptured.input.runtime_env.HOMEBOY_AGENT_TOOL_BRIDGE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(Boolean(bridgePlugin), false);
+  assert.equal(Object.hasOwn(bridgeCaptured.input.runtime_env, 'HOMEBOY_AGENT_TOOL_BRIDGE_URL'), false);
 
   const abilityBridgeResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
@@ -638,6 +627,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         source: 'bundles/example-agent',
         flow_slug: 'example-artifact-flow',
       },
@@ -786,20 +776,19 @@ try {
   });
   assert.equal(implicitRuntimeResult.status, 0, implicitRuntimeResult.stderr || implicitRuntimeResult.stdout);
   const implicitRuntimeInput = readJson(implicitRuntimeCapturePath).input;
-  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, defaultAgentsApiPath);
-  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine').source, defaultDataMachinePath);
-  assert.equal(implicitRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, defaultDataMachineCodePath);
+  assert.deepEqual(implicitRuntimeInput.runtime_component_paths, {});
+  assert.equal(implicitRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
 
   const labRuntimeRoot = path.join(root, 'lab-runtime-components');
   const labAgentsApi = path.join(labRuntimeRoot, 'agents-api');
-  const labDataMachine = path.join(labRuntimeRoot, 'data-machine');
-  const labDataMachineCode = path.join(labRuntimeRoot, 'data-machine-code');
+  const labRuntime = path.join(labRuntimeRoot, 'example-runtime');
+  const labRuntimeTools = path.join(labRuntimeRoot, 'example-runtime-tools');
   fs.mkdirSync(labAgentsApi, { recursive: true });
-  fs.mkdirSync(labDataMachine, { recursive: true });
-  fs.mkdirSync(labDataMachineCode, { recursive: true });
+  fs.mkdirSync(labRuntime, { recursive: true });
+  fs.mkdirSync(labRuntimeTools, { recursive: true });
   fs.writeFileSync(path.join(labAgentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
-  fs.writeFileSync(path.join(labDataMachine, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
-  fs.writeFileSync(path.join(labDataMachineCode, 'data-machine-code.php'), "<?php\n/* Plugin Name: Data Machine Code */\n");
+  fs.writeFileSync(path.join(labRuntime, 'example-runtime.php'), "<?php\n/* Plugin Name: Example Runtime */\n");
+  fs.writeFileSync(path.join(labRuntimeTools, 'example-runtime-tools.php'), "<?php\n/* Plugin Name: Example Runtime Tools */\n");
   const labRuntimeCapturePath = path.join(root, 'capture-lab-runtime-components.json');
   const labRuntimeArtifacts = path.join(root, 'lab-runtime-artifacts');
   const labRuntimeResult = spawnSync(process.execPath, [
@@ -812,8 +801,8 @@ try {
       ...request,
       runtime_component_paths: {
         agents_api: '.ci/agents-api',
-        agent_runtime: '.ci/data-machine',
-        agent_runtime_tools: '.ci/data-machine-code',
+        agent_runtime: '.ci/example-runtime',
+        agent_runtime_tools: '.ci/example-runtime-tools',
       },
       component_contracts: [
         { slug: 'agents-api', path: '.ci/agents-api', loadAs: 'mu-plugin', activate: false },
@@ -827,8 +816,8 @@ try {
         workspace_mapping: {
           workspaces: [
             { role: 'dependency', local_path: '/Users/chubes/Developer/agents-api', remote_path: labAgentsApi },
-            { role: 'dependency', local_path: '/Users/chubes/Developer/data-machine', remote_path: labDataMachine },
-            { role: 'dependency', local_path: '/Users/chubes/Developer/data-machine-code', remote_path: labDataMachineCode },
+            { role: 'dependency', local_path: '/Users/chubes/Developer/example-runtime', remote_path: labRuntime },
+            { role: 'dependency', local_path: '/Users/chubes/Developer/example-runtime-tools', remote_path: labRuntimeTools },
           ],
         },
       }),
@@ -836,17 +825,16 @@ try {
   });
   assert.equal(labRuntimeResult.status, 0, labRuntimeResult.stderr || labRuntimeResult.stdout);
   const labRuntimeInput = readJson(labRuntimeCapturePath).input;
-  const preparedLabDataMachine = path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine');
-  assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabDataMachine);
+  const preparedLabRuntime = path.join(labRuntimeArtifacts, 'prepared-plugins', 'example-runtime');
+  assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabRuntime);
   assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
   assert.equal(labRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
-  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'data-machine-code'));
-  assert.equal(fs.existsSync(path.join(preparedLabDataMachine, 'data-machine.php')), true);
+  assert.equal(fs.existsSync(path.join(preparedLabRuntime, 'example-runtime.php')), true);
 
-  const runtimeComponentSource = path.join(root, 'runtime-components', 'data-machine-code');
+  const runtimeComponentSource = path.join(root, 'runtime-components', 'example-runtime-tools');
   const runtimeComponentArtifacts = path.join(root, 'prepared-runtime-component-artifacts');
   fs.mkdirSync(runtimeComponentSource, { recursive: true });
-  fs.writeFileSync(path.join(runtimeComponentSource, 'data-machine-code.php'), "<?php\n/* Plugin Name: Data Machine Code */\n");
+  fs.writeFileSync(path.join(runtimeComponentSource, 'example-runtime-tools.php'), "<?php\n/* Plugin Name: Example Runtime Tools */\n");
   const preparedRuntimeCapturePath = path.join(root, 'capture-prepared-runtime-component.json');
   const preparedRuntimeResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
@@ -864,18 +852,18 @@ try {
   });
   assert.equal(preparedRuntimeResult.status, 0, preparedRuntimeResult.stderr || preparedRuntimeResult.stdout);
   const preparedRuntimeInput = readJson(preparedRuntimeCapturePath).input;
-  const preparedRuntimePath = path.join(runtimeComponentArtifacts, 'prepared-plugins', 'data-machine-code');
-  assert.equal(preparedRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'data-machine-code').source, preparedRuntimePath);
-  assert.equal(preparedRuntimeInput.component_contracts.find((contract) => contract.slug === 'data-machine-code').path, preparedRuntimePath);
+  const preparedRuntimePath = path.join(runtimeComponentArtifacts, 'prepared-plugins', 'example-runtime-tools');
+  assert.equal(preparedRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'example-runtime-tools'), false);
+  assert.equal(preparedRuntimeInput.component_contracts.some((contract) => contract.slug === 'example-runtime-tools'), false);
   assert.equal(preparedRuntimeInput.runtime_component_paths.agent_runtime_tools, preparedRuntimePath);
-  assert.equal(fs.existsSync(path.join(preparedRuntimePath, 'data-machine-code.php')), true);
+  assert.equal(fs.existsSync(path.join(preparedRuntimePath, 'example-runtime-tools.php')), true);
 
   const nestedRuntimeRoot = path.join(root, 'nested-runtime-components');
-  const nestedDataMachine = path.join(nestedRuntimeRoot, 'data-machine');
-  const nestedAgentsApi = path.join(nestedDataMachine, 'vendor', 'wordpress', 'agents-api');
+  const nestedRuntime = path.join(nestedRuntimeRoot, 'example-runtime');
+  const nestedAgentsApi = path.join(nestedRuntime, 'vendor', 'wordpress', 'agents-api');
   const nestedArtifacts = path.join(root, 'prepared-nested-runtime-component-artifacts');
   fs.mkdirSync(nestedAgentsApi, { recursive: true });
-  fs.writeFileSync(path.join(nestedDataMachine, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
+  fs.writeFileSync(path.join(nestedRuntime, 'example-runtime.php'), "<?php\n/* Plugin Name: Example Runtime */\n");
   fs.writeFileSync(path.join(nestedAgentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
   const nestedRuntimeCapturePath = path.join(root, 'capture-nested-prepared-runtime-component.json');
   const nestedRuntimeResult = spawnSync(process.execPath, [
@@ -888,16 +876,16 @@ try {
       ...request,
       runtime_component_paths: {
         agents_api: nestedAgentsApi,
-        agent_runtime: nestedDataMachine,
+        agent_runtime: nestedRuntime,
       },
     }),
     env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: nestedRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
   });
   assert.equal(nestedRuntimeResult.status, 0, nestedRuntimeResult.stderr || nestedRuntimeResult.stdout);
   const nestedRuntimeInput = readJson(nestedRuntimeCapturePath).input;
-  const preparedDataMachine = path.join(nestedArtifacts, 'prepared-plugins', 'data-machine');
-  const preparedAgentsApi = path.join(preparedDataMachine, 'vendor', 'wordpress', 'agents-api');
-  assert.equal(nestedRuntimeInput.runtime_component_paths.agent_runtime, preparedDataMachine);
+  const preparedRuntime = path.join(nestedArtifacts, 'prepared-plugins', 'example-runtime');
+  const preparedAgentsApi = path.join(preparedRuntime, 'vendor', 'wordpress', 'agents-api');
+  assert.equal(nestedRuntimeInput.runtime_component_paths.agent_runtime, preparedRuntime);
   assert.equal(nestedRuntimeInput.runtime_component_paths.agents_api, preparedAgentsApi);
   assert.equal(nestedRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, preparedAgentsApi);
   assert.equal(nestedRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedAgentsApi);
@@ -913,19 +901,13 @@ try {
       ...request,
       runtime_component_paths: undefined,
       agents_api_path: '/legacy/agents-api',
-      data_machine_path: '/legacy/data-machine',
-      data_machine_code_path: '/legacy/data-machine-code',
     }),
     env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: legacyRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
   });
   assert.equal(legacyRuntimeResult.status, 0, legacyRuntimeResult.stderr || legacyRuntimeResult.stdout);
   const legacyRuntimeInput = readJson(legacyRuntimeCapturePath).input;
   assert.equal(legacyRuntimeInput.runtime_component_paths.agents_api, '/legacy/agents-api');
-  assert.equal(legacyRuntimeInput.runtime_component_paths.agent_runtime, '/legacy/data-machine');
-  assert.equal(legacyRuntimeInput.runtime_component_paths.agent_runtime_tools, '/legacy/data-machine-code');
   assert.equal(legacyRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/legacy/agents-api');
-  assert.equal(Object.hasOwn(legacyRuntimeInput, 'data_machine_path'), false);
-  assert.equal(Object.hasOwn(legacyRuntimeInput, 'data_machine_code_path'), false);
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
@@ -955,6 +937,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },
@@ -977,7 +960,7 @@ try {
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.environment, 'control_plane');
   assert.equal(agentBundleCapture.input.sandbox_tool_policy.tools[0].runtime.capability_scope, 'control_plane');
   assert.equal(agentBundleCapture.input.agent_bundle.engine_data_outputs.issue_number, 'metadata.engine_data.example_agent.issue_number');
-  assert.equal(agentBundleCapture.input.runtime_task.ability, 'datamachine/run-agent-bundle');
+  assert.equal(agentBundleCapture.input.runtime_task.ability, 'example/run-agent-bundle');
   assert.equal(agentBundleCapture.input.runtime_task.input.source, '/workspace/example-repo/bundles/example-agent');
   assert.equal(agentBundleCapture.input.runtime_task.input.wait_for_completion, true);
   assert.equal(agentBundleCapture.input.runtime_task.input.runtime_bundles, undefined);
@@ -998,6 +981,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
           issue_number: 'metadata.engine_data.example_agent.issue_number',
@@ -1034,6 +1018,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
         dry_run: true,
@@ -1072,6 +1057,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
           issue_number: 'metadata.engine_data.example_agent.issue_number',
@@ -1119,6 +1105,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         runtime_output_projections: {
           issue_number: 'metadata.engine_data.example_agent.issue_number',
@@ -1160,6 +1147,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: {
           issue_number: 'metadata.engine_data.example_agent.issue_number',
@@ -1206,6 +1194,7 @@ try {
     input: JSON.stringify({
       ...request,
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },
@@ -1240,6 +1229,7 @@ try {
       execution_kind: 'agent_bundle',
       homeboy_extensions: path.join(__dirname, '..'),
       agent_bundle: {
+        runtime_bundle_ability: 'example/run-agent-bundle',
         bundle_path: '/workspace/example-repo/bundles/example-agent',
         engine_data_outputs: { issue_number: 'metadata.engine_data.example_agent.issue_number' },
       },

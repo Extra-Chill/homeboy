@@ -177,7 +177,7 @@ test and loaded during the `load_deps` bootstrap stage:
   "extensions": {
     "wordpress": {
       "settings": {
-        "validation_dependencies": "data-machine, other-plugin"
+        "validation_dependencies": "example-dependency, other-plugin"
       }
     }
   }
@@ -640,7 +640,7 @@ compatibility callers, or keep `request_kind: "wp-codebox"` for existing callers
 that already use that flag. Both produce `wp-codebox/task-input/v1` task requests.
 
 The generic provider boundary is documented in
-[`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md#agent-task-executor-provider).
+[`../docs/agent-runtime-package-contract.md`](../docs/agent-runtime-package-contract.md).
 Discovery exposes the required request fields, outcome status vocabulary,
 failure classifications, capability list, and metadata redaction keys so Lab
 offload and runner transport consumers can select providers without importing
@@ -826,6 +826,5 @@ at the root to grandfather pre-existing findings (see PHPStan above).
 ## Further reading
 
 - [`docs/TESTING.md`](docs/TESTING.md) — canonical test/lint/bench reference, debug markers, sanctioned suppressions, browser-target schema, known gaps
-- [`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md) — running Data Machine agents on the WP Codebox WordPress execution substrate
 - [`docs/PLAYGROUND_DROPIN.md`](docs/PLAYGROUND_DROPIN.md) — `db.php` coexistence with Playground SQLite
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — release history

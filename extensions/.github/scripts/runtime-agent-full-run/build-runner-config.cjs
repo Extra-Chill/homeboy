@@ -13,7 +13,7 @@ const {
   splitCsv,
   writeGithubOutput,
 } = require('./lib/common.cjs');
-const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
   runtimeAgentCiFirstNonEmptyArray,
   runtimeAgentCiFirstNonEmptyObject,

@@ -25,7 +25,7 @@ jq -n \
 	--arg replayFile "$REPLAY_FILE" \
 	--arg resultsFile "$RESULTS_FILE" \
 	'{
-		component_id: "datamachine-agent-ci-driver",
+		component_id: "runtime-agent-driver",
 		scenarios: [
 			{
 				id: "agent-flow",
@@ -46,13 +46,13 @@ jq -n \
 					grade: { score: 1, max_score: 1 },
 					transcript_artifacts: { json: $transcriptFile },
 					evidence_references: {
-						schema: "homeboy/datamachine-agent-evidence-references/v1",
+						schema: "homeboy/runtime-agent-evidence-references/v1",
 						references: {
 							homeboy_result_json: { kind: "json", path: $resultsFile, label: "Homeboy result JSON", source: "homeboy", available: true },
 							artifact_verifier_result: { kind: "json", value: { status: "passed" }, label: "Artifact verifier result", source: "runner", available: true },
-							workspace_policy_result: { kind: "json", value: { status: "passed" }, label: "Workspace policy result", source: "data-machine-code", available: true },
+							workspace_policy_result: { kind: "json", value: { status: "passed" }, label: "Workspace policy result", source: "runtime-tools", available: true },
 							runtime_episode_trace: { kind: "jsonl", path: $episodeFile, label: "Runtime episode trace", source: "homeboy", available: true },
-							transcript_artifact: { kind: "json", path: $transcriptFile, label: "Transcript artifact", source: "data-machine", available: true },
+							transcript_artifact: { kind: "json", path: $transcriptFile, label: "Transcript artifact", source: "runtime", available: true },
 							replay_bundle_artifact: { kind: "json", path: $replayFile, label: "Replay bundle artifact", source: "homeboy", available: true },
 							pull_request: { kind: "url", value: "https://github.com/Extra-Chill/example/pull/1", label: "Pull request URL", source: "github", available: true },
 							workflow_run: { kind: "url", path: "https://github.com/Extra-Chill/example/actions/runs/1", label: "Workflow run", source: "github", available: true }
