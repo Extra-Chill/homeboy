@@ -86,6 +86,7 @@ pub mod output;
 pub(crate) mod ownership;
 pub mod plan;
 pub mod preview_client;
+pub mod preview_consumer;
 pub mod preview_ingress;
 #[cfg(test)]
 mod preview_ingress_tests;
@@ -110,6 +111,7 @@ pub mod source_snapshot;
 pub mod stack;
 pub mod structured_sidecar;
 pub mod top_n;
+pub mod trace_experiment;
 pub mod trace_secrets;
 pub mod triage;
 pub mod tunnel;
