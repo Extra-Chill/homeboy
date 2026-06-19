@@ -8,6 +8,7 @@ module.exports = {
 	...require('./lib/request-profiler'),
 	...require('./lib/rest-db-query-profiler'),
 	...require('./lib/db-inventory'),
+	...require('./lib/browser-request-coverage'),
 	...require('./lib/external-http-guardrail'),
 	...require('./lib/page-profiler'),
 	...require('./lib/rest-route-matrix'),
