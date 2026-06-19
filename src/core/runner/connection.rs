@@ -257,9 +257,12 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
+    // Active-job enrichment is best-effort: a status read must not hard-fail
+    // when the runner daemon or reverse broker is momentarily unreachable.
+    // Degrade to an empty job list so callers still receive session state.
     let active_jobs = if connected {
         match session.as_ref() {
-            Some(session) => active_runner_jobs(runner_id, session)?,
+            Some(session) => active_runner_jobs(runner_id, session).unwrap_or_default(),
             None => Vec::new(),
         }
     } else {
