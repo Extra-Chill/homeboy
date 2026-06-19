@@ -733,8 +733,14 @@ mod tests {
         let args = review_args_fixture();
         let global = GlobalArgs {};
         let step = PlanStep::ready("review.unknown", "review.unknown").build();
+        let review_context = ReviewExecutionContext {
+            scope: "full".to_string(),
+            changed_file_count: None,
+            precomputed_changed_files: None,
+        };
 
-        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture", None) {
+        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture", &review_context)
+        {
             Ok(_) => panic!("unsupported executable review step should fail"),
             Err(err) => err,
         };
