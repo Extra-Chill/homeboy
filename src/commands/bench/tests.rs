@@ -753,6 +753,61 @@ fn single_rig_selector_filters_extra_workloads_before_execution() {
 }
 
 #[test]
+fn rig_bench_component_expands_extension_settings() {
+    let monorepo = tempfile::TempDir::new().expect("monorepo dir");
+    let plugin_path = monorepo.path().join("plugins").join("woocommerce");
+    fs::create_dir_all(&plugin_path).expect("create plugin path");
+
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "example-performance",
+        "components": {
+            "example": {
+                "path": plugin_path.to_string_lossy(),
+                "extensions": {
+                    "example-extension": {
+                        "source_root": "${components.example.path}/../..",
+                        "source_subpath": "plugins/example",
+                        "file_mounts": [
+                            { "source": "${components.example.path}/example.php" }
+                        ]
+                    }
+                }
+            }
+        }
+    }))
+    .expect("parse rig spec");
+
+    let component =
+        matrix::rig_component_for_bench(&spec, "example").expect("resolve rig bench component");
+    let extension = component
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("example-extension"))
+        .expect("example extension settings");
+
+    assert_eq!(
+        extension.settings.get("source_root"),
+        Some(&serde_json::Value::String(
+            plugin_path.join("../..").to_string_lossy().into_owned()
+        ))
+    );
+    let expected_mount_source = plugin_path
+        .join("example.php")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        extension
+            .settings
+            .get("file_mounts")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("source"))
+            .and_then(|value| value.as_str()),
+        Some(expected_mount_source.as_str())
+    );
+}
+
+#[test]
 fn run_profile_selects_rig_profile_scenarios() {
     with_isolated_home(|home| {
         write_bench_extension(home);
