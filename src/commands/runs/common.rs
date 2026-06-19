@@ -40,7 +40,8 @@ pub fn run_summaries_with_artifact_indexes(
 ) -> homeboy::core::Result<Vec<RunSummary>> {
     let rig_run_ids = run_records
         .iter()
-        .filter_map(|run| (run.kind == "rig" && run.rig_id.is_some()).then(|| run.id.clone()))
+        .filter(|run| run.kind == "rig" && run.rig_id.is_some())
+        .map(|run| run.id.clone())
         .collect::<Vec<_>>();
     let mut artifacts_by_run = store.list_artifacts_for_runs(&rig_run_ids)?;
     Ok(run_records
@@ -201,80 +202,69 @@ pub fn load_artifact_rows(
     filter: RunListFilter,
     since: Option<&str>,
 ) -> homeboy::core::Result<ArtifactJsonLoadResult> {
-    let runs = if let Some(raw) = since {
-        let threshold = since_threshold(raw)?;
-        store
-            .list_runs_started_since(&threshold)?
-            .into_iter()
-            .filter(|run| run_matches_filter(run, &filter))
-            .collect::<Vec<_>>()
-    } else {
-        store.list_runs(filter)?
-    };
+    let threshold = since.map(since_threshold).transpose()?;
+    let run_artifacts = store.list_run_artifacts(filter, threshold.as_deref())?;
 
     let mut rows = Vec::new();
     let mut skipped = Vec::new();
-    let run_ids = runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
-    let mut artifacts_by_run = store.list_artifacts_for_runs(&run_ids)?;
-    for run in runs {
-        let artifacts = artifacts_by_run.remove(&run.id).unwrap_or_default();
-        for artifact in artifacts {
-            if artifact.artifact_type != "file" {
-                if artifact.artifact_type == "metadata-only" {
-                    skipped.push(skipped_artifact(
-                        &run,
-                        &artifact,
-                        "artifact bytes are not available in this imported metadata-only bundle",
-                    ));
-                }
-                continue;
-            }
-            if !is_reportable_artifact_evidence_path(&artifact.path) {
+    for run_artifact in run_artifacts {
+        let run = run_artifact.run;
+        let artifact = run_artifact.artifact;
+        if artifact.artifact_type != "file" {
+            if artifact.artifact_type == "metadata-only" {
                 skipped.push(skipped_artifact(
                     &run,
                     &artifact,
-                    "artifact path is not locally accessible or retrievable",
+                    "artifact bytes are not available in this imported metadata-only bundle",
+                ));
+            }
+            continue;
+        }
+        if !is_reportable_artifact_evidence_path(&artifact.path) {
+            skipped.push(skipped_artifact(
+                &run,
+                &artifact,
+                "artifact path is not locally accessible or retrievable",
+            ));
+            continue;
+        }
+        let path = Path::new(&artifact.path);
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(_) => {
+                skipped.push(skipped_artifact(
+                    &run,
+                    &artifact,
+                    "artifact file is missing or unreadable",
                 ));
                 continue;
             }
-            let path = Path::new(&artifact.path);
-            let file = match File::open(path) {
-                Ok(file) => file,
-                Err(_) => {
-                    skipped.push(skipped_artifact(
-                        &run,
-                        &artifact,
-                        "artifact file is missing or unreadable",
-                    ));
-                    continue;
-                }
-            };
-            let json = match serde_json::from_reader::<_, Value>(file) {
-                Ok(json) => json,
-                Err(err) if err.is_io() => {
-                    skipped.push(skipped_artifact(
-                        &run,
-                        &artifact,
-                        "artifact file is missing or unreadable",
-                    ));
-                    continue;
-                }
-                Err(_) => {
-                    skipped.push(skipped_artifact(
-                        &run,
-                        &artifact,
-                        "artifact file is not valid JSON",
-                    ));
-                    continue;
-                }
-            };
-            rows.push(ArtifactJsonRow {
-                run: run.clone(),
-                artifact_kind: artifact.kind,
-                artifact_path: artifact.path,
-                json,
-            });
-        }
+        };
+        let json = match serde_json::from_reader::<_, Value>(file) {
+            Ok(json) => json,
+            Err(err) if err.is_io() => {
+                skipped.push(skipped_artifact(
+                    &run,
+                    &artifact,
+                    "artifact file is missing or unreadable",
+                ));
+                continue;
+            }
+            Err(_) => {
+                skipped.push(skipped_artifact(
+                    &run,
+                    &artifact,
+                    "artifact file is not valid JSON",
+                ));
+                continue;
+            }
+        };
+        rows.push(ArtifactJsonRow {
+            run,
+            artifact_kind: artifact.kind,
+            artifact_path: artifact.path,
+            json,
+        });
     }
     Ok(ArtifactJsonLoadResult { rows, skipped })
 }
@@ -292,33 +282,6 @@ fn skipped_artifact(
         path: artifact.path.clone(),
         reason: reason.into(),
     }
-}
-
-/// Apply the same filters `list_runs` applies, but client-side. Used to
-/// re-filter rows fetched via `list_runs_started_since` (which doesn't take
-/// a kind/component filter).
-fn run_matches_filter(run: &RunRecord, filter: &RunListFilter) -> bool {
-    if let Some(kind) = &filter.kind {
-        if &run.kind != kind {
-            return false;
-        }
-    }
-    if let Some(component) = &filter.component_id {
-        if run.component_id.as_deref() != Some(component.as_str()) {
-            return false;
-        }
-    }
-    if let Some(status) = &filter.status {
-        if &run.status != status {
-            return false;
-        }
-    }
-    if let Some(rig) = &filter.rig_id {
-        if run.rig_id.as_deref() != Some(rig.as_str()) {
-            return false;
-        }
-    }
-    true
 }
 
 /// Tally the share of each scalar value of `metric_path` across `rows`.
