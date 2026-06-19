@@ -13,10 +13,6 @@
 //! See: https://github.com/Extra-Chill/homeboy/issues/1500
 
 use clap::Args;
-use serde::Serialize;
-use serde_json::Value;
-use std::path::Path;
-
 use homeboy::core::ci_profile::{self, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
@@ -29,9 +25,12 @@ use homeboy::core::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,
     ReviewStage, ReviewStages,
 };
+use serde::Serialize;
+use serde_json::Value;
 
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
+use super::utils::output::{write_output_file_atomically, OutputWriteOptions};
 use super::{audit, lint, test, CmdResult, GlobalArgs};
 
 mod observation;
@@ -408,20 +407,7 @@ pub fn write_artifact_to_file(
         }
     };
 
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "Warning: failed to create --output directory '{}': {}",
-                    parent.display(),
-                    e
-                );
-                return true;
-            }
-        }
-    }
-
-    if let Err(e) = std::fs::write(path, json) {
+    if let Err(e) = write_output_file_atomically(path, json, OutputWriteOptions::artifact()) {
         eprintln!("Warning: failed to write --output file '{}': {}", path, e);
     }
     true
