@@ -65,6 +65,23 @@ aliases select the WP Codebox provider unless a caller passes `runtimeProvider`.
 The provider owns the `wp-codebox/workspace-recipe/v1` recipe shape, recipe file
 name, runtime output file name, dispatch function, and artifact normalization.
 
+## Audit Fanout Runtime Boundary
+
+Audit fanout extraction is split from runtime execution. Generic fanout planning
+and reconcile code groups audit findings, templates opaque task requests, and
+matches provider records back to groups. The exported
+`audit-fanout-runtime-provider` interface defines dispatch/apply operations
+without naming runtime package names, provider credentials, sandbox recipes, or
+provider task schemas.
+
+WP Codebox is the current runtime provider implementation for audit fanout. The
+quarantined `audit-wp-codebox-fanout` module and CLI map grouped audit findings
+to `wp-codebox/task-input/v1`, execute those requests through Codebox-owned task
+runner contracts, and normalize Codebox artifacts/outcomes back into fanout
+records. Keep new executor-neutral extraction behavior in
+`generic-fanout-reconcile-workflow`; keep Codebox request/session/artifact
+details inside the Codebox audit fanout lane.
+
 ## Test failure sidecar
 
 When Homeboy sets `HOMEBOY_TEST_FAILURES_FILE`, the WordPress PHPUnit runners write a JSON sidecar with parsed failure details. Existing Homeboy analysis fields are preserved, and each failure also includes normalized sidecar fields for cross-runner consumers:

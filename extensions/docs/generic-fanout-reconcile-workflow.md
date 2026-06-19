@@ -1,8 +1,8 @@
 # Generic Fanout/Reconcile Workflow
 
-`wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs` exposes the shared fanout/reconcile runner through JSON files. It is executor-neutral: callers provide item artifacts, grouping rules, task request templates, and opaque execution descriptors, then run those task requests with their own implementation.
+`wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs` exposes the shared fanout/reconcile runner through JSON files. It is executor-neutral: callers provide item artifacts, grouping rules, task request templates, and opaque execution descriptors, then run those task requests with their own runtime provider implementation.
 
-This helper is not a generic runtime provider surface. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and Codebox-specific task schemas stay in caller-owned adapters such as the quarantined WP Codebox audit fanout lane.
+This helper is the planner/reconciler side of the audit fanout boundary, not a runtime provider. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and provider task schemas stay behind the `audit-fanout-runtime-provider` interface. The current audit fanout implementation is the quarantined WP Codebox lane, which maps grouped audit findings to `wp-codebox/task-input/v1` requests and executes them through Codebox-owned task runner contracts.
 
 ## Plan
 
@@ -50,4 +50,4 @@ node wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs \
 
 Records are matched by `id`, `task_id`, `sandbox_session_id`, or `group_key`. Successful statuses default to `completed`, `success`, and `passed`; override with `success_statuses` in config. Outcomes default to the record `outcome` field; override with `outcome_path`.
 
-Execution descriptors are caller-owned and opaque to this helper. Keep provider names, credentials, WordPress setup, sandbox recipes, repository-specific instructions, and `wp-codebox/task-input/v1` request details in caller config or implementation-specific workflow examples, not in this generic reconcile helper.
+Execution descriptors are caller-owned and opaque to this helper. Keep provider names, credentials, WordPress setup, sandbox recipes, repository-specific instructions, and provider-specific request details such as `wp-codebox/task-input/v1` in caller config or implementation-specific workflow examples, not in this generic reconcile helper.

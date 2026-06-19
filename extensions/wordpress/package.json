@@ -38,6 +38,7 @@
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./static-site-fanout-adapter": "./lib/static-site-fanout-adapter.js",
+    "./audit-fanout-runtime-provider": "./lib/audit-fanout-runtime-provider.js",
     "./audit-wp-codebox-fanout": "./lib/audit-wp-codebox-fanout.js",
     "./wordpress-runtime-task-planner": "./lib/wordpress-runtime-task-planner.js"
   },
@@ -74,6 +75,7 @@
     "test:fanout-reconcile-runner": "node tests/fanout-reconcile-runner-smoke.js",
     "test:generic-fanout-reconcile-workflow": "node tests/generic-fanout-reconcile-workflow-smoke.js",
     "test:static-site-fanout-adapter": "node tests/static-site-fanout-adapter-smoke.js",
+    "test:audit-fanout-runtime-provider": "node tests/audit-fanout-runtime-provider-smoke.js",
     "test:wordpress-bench-state-sampling": "php tests/wordpress-bench-state-sampling-helper-smoke.php",
     "test:wordpress-bench-artifacts": "php tests/wordpress-bench-artifact-helper-smoke.php",
     "test:wordpress-bench-woocommerce-fixtures": "php tests/wordpress-bench-woocommerce-fixtures-smoke.php",

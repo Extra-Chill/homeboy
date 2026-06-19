@@ -556,6 +556,15 @@ homeboy refactor <component> \
   --setting secret_env=PROVIDER_API_KEY
 ```
 
+Audit fanout has two boundaries. Generic extraction and reconcile mechanics live
+in `lib/generic-fanout-reconcile-workflow.js` and the
+`scripts/agent/homeboy-generic-fanout-reconcile.cjs` JSON CLI. The generic
+runtime provider interface lives in `lib/audit-fanout-runtime-provider.js` and is
+exported from the WordPress package. Runtime providers own execution: they map
+generic grouped work into their provider task contract, run the task, and
+normalize records back for reconcile.
+
+The current provider implementation is WP Codebox.
 `scripts/agent/homeboy-audit-wp-codebox-fanout.cjs` turns a structured audit
 report into one `wp-codebox/task-input/v1` request per fix batch. With
 `--execute`, it streams each request to a WP Codebox task runner command such as
@@ -563,11 +572,12 @@ report into one `wp-codebox/task-input/v1` request per fix batch. With
 stable `wp-codebox agent-task-run` parent contract.
 
 This audit fanout lane is intentionally quarantined as a WP Codebox-specific
-implementation. Its direct module/CLI entrypoints remain available for existing
-callers, but it is not exported from `wordpress/index.js` and is not part of the
-generic fanout/reconcile or runtime provider surfaces. Executor-neutral fanout
+runtime provider implementation. Its direct module/CLI entrypoints remain
+available for existing callers, but it is not exported from `wordpress/index.js`
+and generic orchestration code must not import it inline. Executor-neutral fanout
 planning belongs in `lib/generic-fanout-reconcile-workflow.js`; Codebox request
-schemas, sandbox session IDs, and recipe details stay in this lane.
+schemas, sandbox session IDs, artifact lookup, partial-run discovery, and recipe
+details stay in this lane.
 
 ### WP Codebox agent-task executor
 

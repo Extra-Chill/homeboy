@@ -16,6 +16,9 @@ const {
   taskOutcome,
   taskOutcomeSucceeded,
 } = require('../lib/audit-wp-codebox-fanout');
+const {
+  auditFanoutRuntimeInvocation,
+} = require('../lib/audit-fanout-runtime-adapter');
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -296,13 +299,27 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-audit-wp-codebox-fan
 
 async function main() {
 try {
-  assert.equal(IMPLEMENTATION_SCOPE.quarantine, 'wp-codebox-implementation');
+  assert.equal(IMPLEMENTATION_SCOPE.quarantine, 'wp-codebox-compatibility-entrypoint');
   assert.equal(IMPLEMENTATION_SCOPE.generic_surface, false);
+  assert.equal(IMPLEMENTATION_SCOPE.runtime_adapter, 'wordpress/lib/audit-fanout-runtime-adapter.js');
   assert.ok(IMPLEMENTATION_SCOPE.public_entrypoints.includes('wordpress/lib/audit-wp-codebox-fanout.js'));
+
+  const defaultRuntimeInvocation = auditFanoutRuntimeInvocation();
+  assert.equal(defaultRuntimeInvocation.runtime.id, 'wp-codebox');
+  assert.equal(defaultRuntimeInvocation.command, 'wp-codebox');
+  const explicitRuntimeInvocation = auditFanoutRuntimeInvocation({
+    wp_codebox_command: process.execPath,
+    wp_codebox_args: ['fixture-command.cjs'],
+  });
+  assert.equal(explicitRuntimeInvocation.runtime.id, 'wp-codebox');
+  assert.equal(explicitRuntimeInvocation.command, process.execPath);
+  assert.deepEqual(explicitRuntimeInvocation.args, ['fixture-command.cjs']);
 
   const wordpressPackageExports = require('..');
   assert.equal(Object.hasOwn(wordpressPackageExports, 'createAuditWpCodeboxFanoutPlan'), false);
   assert.equal(Object.hasOwn(wordpressPackageExports, 'executeAuditWpCodeboxFanout'), false);
+  assert.equal(Object.hasOwn(wordpressPackageExports.wpCodebox || {}, 'createAuditWpCodeboxFanoutPlan'), false);
+  assert.equal(Object.hasOwn(wordpressPackageExports.wpCodebox || {}, 'executeAuditWpCodeboxFanout'), false);
 
   const initialPlan = createAuditWpCodeboxFanoutPlan({
     report,
