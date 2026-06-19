@@ -759,16 +759,16 @@ fn rig_bench_component_expands_extension_settings() {
     fs::create_dir_all(&plugin_path).expect("create plugin path");
 
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "woocommerce-performance",
+        "id": "example-performance",
         "components": {
-            "woocommerce": {
+            "example": {
                 "path": plugin_path.to_string_lossy(),
                 "extensions": {
-                    "wordpress": {
-                        "wp_codebox_source_root": "${components.woocommerce.path}/../..",
-                        "wp_codebox_source_subpath": "plugins/woocommerce",
-                        "wp_codebox_file_mounts": [
-                            { "source": "${components.woocommerce.path}/woocommerce.php" }
+                    "example-extension": {
+                        "source_root": "${components.example.path}/../..",
+                        "source_subpath": "plugins/example",
+                        "file_mounts": [
+                            { "source": "${components.example.path}/example.php" }
                         ]
                     }
                 }
@@ -778,27 +778,27 @@ fn rig_bench_component_expands_extension_settings() {
     .expect("parse rig spec");
 
     let component =
-        matrix::rig_component_for_bench(&spec, "woocommerce").expect("resolve rig bench component");
-    let wordpress = component
+        matrix::rig_component_for_bench(&spec, "example").expect("resolve rig bench component");
+    let extension = component
         .extensions
         .as_ref()
-        .and_then(|extensions| extensions.get("wordpress"))
-        .expect("wordpress extension settings");
+        .and_then(|extensions| extensions.get("example-extension"))
+        .expect("example extension settings");
 
     assert_eq!(
-        wordpress.settings.get("wp_codebox_source_root"),
+        extension.settings.get("source_root"),
         Some(&serde_json::Value::String(
-            monorepo.path().to_string_lossy().into_owned()
+            plugin_path.join("../..").to_string_lossy().into_owned()
         ))
     );
     let expected_mount_source = plugin_path
-        .join("woocommerce.php")
+        .join("example.php")
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        wordpress
+        extension
             .settings
-            .get("wp_codebox_file_mounts")
+            .get("file_mounts")
             .and_then(|value| value.as_array())
             .and_then(|items| items.first())
             .and_then(|item| item.get("source"))

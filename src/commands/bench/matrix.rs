@@ -215,33 +215,25 @@ fn expand_rig_extension_settings(
     extensions: &mut HashMap<String, ScopedExtensionConfig>,
 ) {
     for extension in extensions.values_mut() {
-        for (key, value) in extension.settings.iter_mut() {
-            expand_rig_setting_value(spec, Some(key.as_str()), value);
+        for value in extension.settings.values_mut() {
+            expand_rig_setting_value(spec, value);
         }
     }
 }
 
-fn expand_rig_setting_value(spec: &RigSpec, key: Option<&str>, value: &mut serde_json::Value) {
+fn expand_rig_setting_value(spec: &RigSpec, value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(raw) => {
-            let expanded = rig::expand::expand_vars(spec, raw);
-            *raw = if key == Some("wp_codebox_source_root") {
-                std::fs::canonicalize(&expanded)
-                    .ok()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or(expanded)
-            } else {
-                expanded
-            };
+            *raw = rig::expand::expand_vars(spec, raw);
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                expand_rig_setting_value(spec, None, value);
+                expand_rig_setting_value(spec, value);
             }
         }
         serde_json::Value::Object(values) => {
-            for (key, value) in values {
-                expand_rig_setting_value(spec, Some(key.as_str()), value);
+            for value in values.values_mut() {
+                expand_rig_setting_value(spec, value);
             }
         }
         _ => {}
