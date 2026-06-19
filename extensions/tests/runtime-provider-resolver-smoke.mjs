@@ -16,6 +16,7 @@ const {
 const registry = runtimeRegistry({ repoRoot: rootDir });
 assert.equal(DEFAULT_RUNTIME_ID, 'wp-codebox');
 assert.ok(registry['wp-codebox'], 'wp-codebox is registered as the default runtime provider');
+assert.ok(registry.opencode, 'opencode is registered as a selectable runtime provider');
 
 const runtime = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,
@@ -34,6 +35,17 @@ assert.equal(runtime.paths.runtime_bin, path.join(workspace, '.ci/wp-codebox/pac
 assert.equal(runtime.paths.runtime_component, path.join(workspace, '.ci/wp-codebox/packages/wordpress-plugin'));
 assert.equal(runtime.executor.backend, 'codebox');
 assert.equal(runtime.executor.path, path.join(rootDir, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
+
+const opencodeRuntime = resolveRuntimeProvider('opencode', {
+	repoRoot: rootDir,
+	workspace,
+});
+assert.equal(opencodeRuntime.id, 'opencode');
+assert.equal(opencodeRuntime.checkout.repo, '');
+assert.equal(opencodeRuntime.executor.backend, 'opencode');
+assert.equal(opencodeRuntime.executor.path, path.join(rootDir, 'agent-runtimes/opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs'));
+assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'experimental');
+assert.equal(opencodeRuntime.manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
 
 assert.throws(
 	() => resolveRuntimeProvider('missing-runtime', { repoRoot: rootDir, workspace }),

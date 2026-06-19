@@ -31,6 +31,7 @@ const OPENCODE_CAPABILITIES = [
 	'provider_owned_auth',
 	'provider_owned_session',
 	'provider_owned_cancellation',
+	'nested_orchestrator',
 ];
 
 function providerContract(options = {}) {

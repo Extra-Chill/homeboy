@@ -39,28 +39,32 @@ assert.equal(provider.capabilities.includes('repo_workspace'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('browser_runtime'), false);
 
-const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
-const runtime = manifest.agent_runtimes.find((candidate) => candidate.id === 'opencode');
-assert(runtime, 'WordPress manifest declares the OpenCode agent runtime');
-assert.equal(runtime.label, 'OpenCode');
-assert.equal(runtime.agent_task_executors.length, 1);
-assert.deepEqual(runtime.agent_task_executors[0], providerContract({
-	command: 'node {{extension_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs',
-}));
+const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'agent-runtimes', 'opencode', 'opencode.json'), 'utf8'));
+assert.equal(manifest.id, 'opencode');
+assert.equal(manifest.name, 'OpenCode');
+assert.equal(manifest.agent_task_executors.length, 1);
+assert.equal(manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
+assert.deepEqual(manifest.agent_task_executors[0], providerContract());
+
+const runtime = {
+  agent_task_executors: [providerContract({
+    command: 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs',
+  })],
+};
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-provider-contract-'));
 try {
-	const extensionsRoot = path.join(root, 'extensions');
-	const extensionPath = path.join(extensionsRoot, 'wordpress');
-	fs.mkdirSync(extensionsRoot, { recursive: true });
-	fs.symlinkSync(path.join(__dirname, '..'), extensionPath, 'dir');
+	const runtimesRoot = path.join(root, 'agent-runtimes');
+	const runtimePath = path.join(runtimesRoot, 'opencode');
+	fs.mkdirSync(runtimesRoot, { recursive: true });
+	fs.symlinkSync(path.join(__dirname, '..', '..', 'agent-runtimes', 'opencode'), runtimePath, 'dir');
 
-	const command = runtime.agent_task_executors[0].command.replaceAll('{{extension_path}}', extensionPath);
+	const command = runtime.agent_task_executors[0].command.replaceAll('{{runtime_path}}', runtimePath);
 	const [, scriptPath] = command.match(/^node\s+(.+)$/) || [];
 	assert(scriptPath, 'provider command should be a node script command');
 	assert.equal(
 		path.normalize(scriptPath),
-		path.join(extensionPath, 'scripts', 'agent', 'homeboy-opencode-agent-task-executor.cjs')
+		path.join(runtimePath, 'scripts', 'agent', 'homeboy-opencode-agent-task-executor.cjs')
 	);
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
