@@ -215,22 +215,11 @@ impl RunnerCapabilitySnapshot {
         required_commands: &[String],
     ) -> Result<Self> {
         let client = Self::ssh_client_for_runner(runner)?;
-        let mut tools = BTreeSet::new();
-        for tool in RunnerToolRegistry::required_tools().iter().copied() {
-            if Self::tool_available(runner, &client, tool) {
-                tools.insert(tool);
-            }
-        }
-        let mut commands = BTreeSet::new();
-        for command in normalized_command_names(required_commands) {
-            if Self::command_available(&client, &command) {
-                commands.insert(command);
-            }
-        }
+        let probe = Self::batch_tool_and_command_probe(runner, &client, required_commands);
 
         Ok(Self {
-            tools,
-            commands,
+            tools: probe.tools,
+            commands: probe.commands,
             components: configured_runner_components(runner),
         })
     }
@@ -243,43 +232,37 @@ impl RunnerCapabilitySnapshot {
         self.commands.contains(command.trim())
     }
 
-    fn command_available(client: &SshClient, command: &str) -> bool {
-        client
-            .execute(&format!(
-                "command -v {} >/dev/null 2>&1",
-                shell::quote_arg(command)
-            ))
-            .success
+    fn batch_tool_and_command_probe(
+        runner: &Runner,
+        client: &SshClient,
+        required_commands: &[String],
+    ) -> RunnerCapabilityProbeResult {
+        let tool_commands = RunnerToolRegistry::required_tools()
+            .iter()
+            .copied()
+            .map(|tool| {
+                let command = if tool == RunnerRequiredTool::Homeboy {
+                    runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+                } else {
+                    RunnerToolRegistry::spec_for_required_tool(tool)
+                        .map(|spec| spec.command)
+                        .unwrap_or_else(|| tool.id())
+                };
+                (tool, command.to_string())
+            })
+            .collect::<Vec<_>>();
+        let command_names = normalized_command_names(required_commands);
+        let output = client.execute(&batch_probe_script(&tool_commands, &command_names));
+        parse_batch_probe_output(&output.stdout, &tool_commands, &command_names)
     }
 
-    fn tool_available(runner: &Runner, client: &SshClient, tool: RunnerRequiredTool) -> bool {
-        if tool == RunnerRequiredTool::Playwright {
-            return Self::playwright_ready(client);
-        }
-        let command = if tool == RunnerRequiredTool::Homeboy {
-            runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
-        } else {
-            RunnerToolRegistry::spec_for_required_tool(tool)
-                .map(|spec| spec.command)
-                .unwrap_or_else(|| tool.id())
-        };
-        client
-            .execute(&format!(
-                "command -v {} >/dev/null 2>&1",
-                shell::quote_arg(command)
-            ))
-            .success
-    }
-
-    fn playwright_ready(client: &SshClient) -> bool {
-        let playwright = client
-            .execute("command -v playwright >/dev/null 2>&1")
-            .success;
-        if !playwright {
-            return false;
-        }
-        let browser_cache = "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do [ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; done; exit 1";
-        client.execute(browser_cache).success
+    fn playwright_condition() -> &'static str {
+        concat!(
+            "command -v playwright >/dev/null 2>&1 && (",
+            "for d in \"${PLAYWRIGHT_BROWSERS_PATH:-}\" \"$HOME/Library/Caches/ms-playwright\" \"$HOME/.cache/ms-playwright\"; do ",
+            "[ -n \"$d\" ] && [ -d \"$d\" ] && find \"$d\" -mindepth 1 -maxdepth 1 2>/dev/null | grep -q . && exit 0; ",
+            "done; exit 1)"
+        )
     }
 
     fn ssh_client_for_runner(runner: &Runner) -> Result<SshClient> {
@@ -296,6 +279,72 @@ impl RunnerCapabilitySnapshot {
         client.env.extend(runner.env.clone());
         Ok(client)
     }
+}
+
+#[derive(Debug, Default)]
+struct RunnerCapabilityProbeResult {
+    tools: BTreeSet<RunnerRequiredTool>,
+    commands: BTreeSet<String>,
+}
+
+fn batch_probe_script(
+    tool_commands: &[(RunnerRequiredTool, String)],
+    command_names: &[String],
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("set +e".to_string());
+    for (index, (tool, command)) in tool_commands.iter().enumerate() {
+        let condition = if *tool == RunnerRequiredTool::Playwright {
+            RunnerCapabilitySnapshot::playwright_condition().to_string()
+        } else {
+            format!("command -v {} >/dev/null 2>&1", shell::quote_arg(command))
+        };
+        lines.push(format!(
+            "if {condition}; then printf 'T\\t{index}\\t1\\n'; else printf 'T\\t{index}\\t0\\n'; fi"
+        ));
+    }
+    for (index, command) in command_names.iter().enumerate() {
+        lines.push(format!(
+            "if command -v {} >/dev/null 2>&1; then printf 'C\\t{index}\\t1\\n'; else printf 'C\\t{index}\\t0\\n'; fi",
+            shell::quote_arg(command)
+        ));
+    }
+    lines.push("exit 0".to_string());
+    lines.join("\n")
+}
+
+fn parse_batch_probe_output(
+    stdout: &str,
+    tool_commands: &[(RunnerRequiredTool, String)],
+    command_names: &[String],
+) -> RunnerCapabilityProbeResult {
+    let mut result = RunnerCapabilityProbeResult::default();
+    for line in stdout.lines() {
+        let mut fields = line.split('\t');
+        let Some(kind) = fields.next() else {
+            continue;
+        };
+        let Some(index) = fields.next().and_then(|value| value.parse::<usize>().ok()) else {
+            continue;
+        };
+        if fields.next() != Some("1") {
+            continue;
+        }
+        match kind {
+            "T" => {
+                if let Some((tool, _)) = tool_commands.get(index) {
+                    result.tools.insert(*tool);
+                }
+            }
+            "C" => {
+                if let Some(command) = command_names.get(index) {
+                    result.commands.insert(command.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 fn evaluate_lab_runner_capabilities(
