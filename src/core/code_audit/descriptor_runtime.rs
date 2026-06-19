@@ -24,9 +24,13 @@ fn run_fingerprint_descriptor(
         FingerprintDetectorRunner::FacadePassthrough => {
             facade_passthrough::run(context.all_fingerprints)
         }
-        FingerprintDetectorRunner::LiteralShapes => {
-            repeated_literal_shape::run(context.all_fingerprints)
-        }
+        FingerprintDetectorRunner::LiteralShapes => repeated_literal_shape::run(
+            context.all_fingerprints,
+            &context
+                .audit_config
+                .detector_profile
+                .repeated_literal_shape_extensions,
+        ),
         FingerprintDetectorRunner::SharedScaffolding => {
             shared_scaffolding::run(context.all_fingerprints)
         }

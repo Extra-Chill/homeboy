@@ -53,7 +53,7 @@ enum ComponentCommand {
         /// Path to changelog file relative to localPath
         #[arg(long)]
         changelog_target: Option<String>,
-        /// Extension(s) this component uses (e.g., "wordpress"). Repeatable.
+        /// Extension(s) this component uses (e.g., a runtime/framework extension id). Repeatable.
         #[arg(long = "extension", value_name = "EXTENSION")]
         extensions: Vec<String>,
         /// Attach component to a project after creation
@@ -97,7 +97,7 @@ enum ComponentCommand {
         #[arg(long = "version-target", value_name = "TARGET")]
         version_targets: Vec<String>,
 
-        /// Extension(s) this component uses (e.g., "wordpress"). Repeatable.
+        /// Extension(s) this component uses (e.g., a runtime/framework extension id). Repeatable.
         #[arg(long = "extension", value_name = "EXTENSION")]
         extensions: Vec<String>,
     },
