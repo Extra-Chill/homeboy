@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.51] - 2026-06-19
+
+### Changed
+- Add WordPress full-surface coverage reports
+
 ## [3.7.50] - 2026-06-19
 
 ### Changed
