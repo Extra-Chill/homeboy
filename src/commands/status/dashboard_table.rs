@@ -59,6 +59,8 @@ pub(super) fn log_dashboard_table(rows: &[ProjectStatusRow]) {
             ProjectComponentDashboardStatus::DocsOnly => "📝 docs only",
             ProjectComponentDashboardStatus::Uncommitted => "🔴 uncommitted",
             ProjectComponentDashboardStatus::BehindUpstream => "⬇️  behind upstream",
+            ProjectComponentDashboardStatus::Bundled => "📦 bundled",
+            ProjectComponentDashboardStatus::Retired => "🗄️  retired",
             ProjectComponentDashboardStatus::Unknown => "❓ unknown",
         };
 
