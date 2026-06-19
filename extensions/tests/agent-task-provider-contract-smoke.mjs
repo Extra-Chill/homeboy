@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,19 @@ const fields = agentTaskProviderContractFields();
 assert.equal(fields.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(fields.outcome_schema, 'homeboy/agent-task-outcome/v1');
 assert.deepEqual(fields.redacted_metadata_keys, AGENT_TASK_REDACTED_METADATA_KEYS);
+
+const coreContract = JSON.parse(fs.readFileSync(
+	path.join(rootDir, 'agent-runtimes', 'fixtures', 'homeboy-agent-task-core-contract.json'),
+	'utf8'
+));
+assert.deepEqual(fields, {
+	request_schema: coreContract.provider_capability.request_schema,
+	outcome_schema: coreContract.provider_capability.outcome_schema,
+	request_required_fields: coreContract.provider_capability.request_required_fields,
+	outcome_statuses: coreContract.provider_capability.outcome_statuses,
+	failure_classifications: coreContract.provider_capability.failure_classifications,
+	redacted_metadata_keys: coreContract.provider_capability.redacted_metadata_keys,
+});
 
 const extendedRedactionKeys = extendRedactedMetadataKeys('secrets', ['provider_auth', 'codex_auth']);
 assert.deepEqual(extendedRedactionKeys, ['secret_env_values', 'secretEnvValues', 'secrets', 'provider_auth', 'codex_auth']);
@@ -106,6 +120,7 @@ assert.throws(
 
 const runnerSpec = agentTaskRunnerSpec({
 	backend: 'codebox',
+	runtime: 'wp-codebox',
 	config: { provider: 'codex' },
 	secretEnv: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
 	taskTimeoutSeconds: 900,
@@ -119,6 +134,7 @@ assert.throws(
 assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec }), {
 	executor: {
 		backend: 'codebox',
+		runtime: 'wp-codebox',
 		secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
 		config: { provider: 'codex' },
 	},

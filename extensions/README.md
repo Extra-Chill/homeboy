@@ -22,6 +22,9 @@ helper contract.
 Generic fanout/reconcile JSON planning is documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
+Integration-specific examples, including Data Machine Code promotion and Data
+Machine runtime-agent callers, live under [`docs/integrations/`](docs/integrations/).
+
 ## Available Extensions
 
 | Extension | Description |
@@ -115,62 +118,18 @@ homeboy test
 homeboy release
 ```
 
-### Data Machine Code promotion provider
-
-Homeboy core can promote agent-task patch artifacts through an external
-workspace provider command. This repo provides a Data Machine Code-backed
-provider script for environments that use managed DMC worktrees:
-
-```bash
-homeboy agent-task promote aggregate.json \
-  --to-worktree repo@branch-slug \
-  --provider-command ./scripts/datamachine-code-promotion-provider.sh
-```
-
-The provider reads `homeboy/agent-task-promotion-apply-request/v1` JSON on
-stdin and writes `homeboy/agent-task-promotion-apply-response/v1` JSON on
-stdout. It keeps the DMC-specific `studio wp datamachine-code ...` shellouts in
-Homeboy Extensions instead of Homeboy core.
-
 ### Runtime agent full-run tasks
 
 The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is the
-recommended entrypoint for full runtime-backed agent and ability runs. It can
-run a generic WordPress ability directly through WP Codebox without importing an
-agent bundle. Use `runtime_task` or the `ability_request`/`ability_input`
-shorthand. Downloaded GitHub Actions artifacts can be mounted into the sandbox
-with `runtime_mounts`, and typed outputs can be enforced with
-`artifact_declarations` plus `runtime_output_projections`:
-
-```yaml
-jobs:
-  process-artifact:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@main
-    with:
-      homeboy_extensions_ref: main
-      runtime_provider: wp-codebox
-      runtime_ref: main
-      runtime_profile: artifact-processor
-      runtime_profiles: >-
-        {"artifact-processor":{"id":"artifact-processor","runtime_task_ability":"example/process-artifact","ability_requirements":["example/process-artifact"]}}
-      target_repo: Example/project
-      workload_id: artifact-flow
-      actions_artifact_downloads: >-
-        [{"repo":"Example/project","run_id":"123456789","name":"source-packet","dir":".ci/actions-artifacts/source-packet"}]
-      runtime_mounts: >-
-        [{"source":".ci/actions-artifacts/source-packet","target":"/workspace/input","mode":"readonly"}]
-      ability_request: >-
-        {"ability":"example/process-artifact","input":{"source_artifact":"/workspace/input/source.json"}}
-      runtime_output_projections: >-
-        {"processed_packet":"result.processed_packet"}
-      artifact_declarations: >-
-        [{"name":"processed_packet","type":"example-packet","schema":"example/processed-packet/v1","required":true}]
-      expected_artifacts: '["processed_packet"]'
-```
+recommended entrypoint for full runtime-backed agent and ability runs. Use
+`runtime_task` or the `ability_request`/`ability_input` shorthand for direct
+ability execution. Mount downloaded GitHub Actions artifacts with
+`runtime_mounts`, and enforce typed outputs with `artifact_declarations` plus
+`runtime_output_projections`.
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. The former Data Machine-specific reusable workflow wrapper has been
-removed after active default-branch consumers migrated to the generic workflow.
+agent runs. See [`.github/workflows/README.md`](.github/workflows/README.md) for
+workflow inputs and integration examples.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
