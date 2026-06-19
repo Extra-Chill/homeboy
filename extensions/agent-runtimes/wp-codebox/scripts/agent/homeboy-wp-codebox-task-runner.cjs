@@ -96,7 +96,7 @@ function runtimeComponentSlug(contract) {
   if (!contract || typeof contract !== 'object') {
     return '';
   }
-  return ['agents-api', 'data-machine', 'data-machine-code'].includes(contract.slug) ? contract.slug : '';
+  return typeof contract.slug === 'string' ? contract.slug : '';
 }
 
 function remapRuntimeComponentContract(contract) {
@@ -582,99 +582,6 @@ function homeboyPolicyHasParentTools(taskInput) {
   ));
 }
 
-function homeboyRuntimeToolBridgePluginSource(endpoint = '') {
-  return `<?php
-/**
- * Homeboy parent runtime-tool bridge for Data Machine client tools.
- *
- * Plugin Name: Homeboy Runtime Tool Bridge
- * Description: Bridges Data Machine client runtime tools back to the Homeboy control plane.
- *
- * @package HomeboyCodeboxRuntime
- */
-
-add_filter(
-	'datamachine_runtime_tool_result',
-	static function ( $result, array $request, array $payload ) {
-		if ( null !== $result ) {
-			return $result;
-		}
-
-		$configured_endpoint = ${JSON.stringify(endpoint)};
-		$endpoint            = '' !== $configured_endpoint ? $configured_endpoint : getenv( 'HOMEBOY_AGENT_TOOL_BRIDGE_URL' );
-		if ( ! is_string( $endpoint ) || '' === $endpoint ) {
-			return null;
-		}
-
-		$tool_name = isset( $request['tool_name'] ) && is_scalar( $request['tool_name'] ) ? (string) $request['tool_name'] : '';
-		$call_id   = isset( $request['call_id'] ) && is_scalar( $request['call_id'] ) ? (string) $request['call_id'] : '';
-		$body      = array(
-			'schema'     => getenv( 'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA' ) ?: 'homeboy/agent-tool-request/v1',
-			'request_id' => '' !== $call_id ? $call_id : uniqid( 'runtime-tool-', true ),
-			'task_id'    => getenv( 'HOMEBOY_AGENT_TASK_ID' ) ?: ( is_scalar( $request['job_id'] ?? null ) ? (string) $request['job_id'] : '' ),
-			'tool'       => $tool_name,
-			'input'      => is_array( $request['parameters'] ?? null ) ? $request['parameters'] : array(),
-			'metadata'   => array(
-				'source'        => 'wp-codebox-datamachine-runtime-tool-bridge',
-				'session_id'    => $request['session_id'] ?? null,
-				'turn_count'    => $request['turn_count'] ?? null,
-				'mode'          => $request['mode'] ?? null,
-				'agent_id'      => $request['agent_id'] ?? null,
-				'tool_def'      => is_array( $request['tool_def'] ?? null ) ? $request['tool_def'] : array(),
-				'payload_scope' => array(
-					'job_id'     => $payload['job_id'] ?? null,
-					'session_id' => $payload['session_id'] ?? null,
-				),
-			),
-		);
-
-		$response = wp_remote_post(
-			$endpoint,
-			array(
-				'timeout' => 120,
-				'headers' => array( 'content-type' => 'application/json' ),
-				'body'    => wp_json_encode( $body ),
-			)
-		);
-
-		if ( is_wp_error( $response ) ) {
-			return $response;
-		}
-
-		$decoded = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( ! is_array( $decoded ) ) {
-			return new WP_Error( 'homeboy_agent_tool_bridge_invalid_response', 'Homeboy agent tool bridge returned an invalid JSON response.' );
-		}
-
-		$status      = isset( $decoded['status'] ) && is_scalar( $decoded['status'] ) ? (string) $decoded['status'] : 'failed';
-		$diagnostics = is_array( $decoded['diagnostics'] ?? null ) ? $decoded['diagnostics'] : array();
-		$error       = '';
-		if ( ! empty( $diagnostics[0]['message'] ) && is_scalar( $diagnostics[0]['message'] ) ) {
-			$error = (string) $diagnostics[0]['message'];
-		}
-
-		return array(
-			'success'   => 'succeeded' === $status,
-			'tool_name' => isset( $decoded['tool'] ) && is_scalar( $decoded['tool'] ) ? (string) $decoded['tool'] : $tool_name,
-			'executor'  => 'client',
-			'result'    => $decoded['output'] ?? null,
-			'error'     => '' !== $error ? $error : 'Homeboy agent tool bridge returned a failed result.',
-			'code'      => 'succeeded' === $status ? '' : 'homeboy_agent_tool_bridge_failed',
-			'metadata'  => array(
-				'homeboy_agent_tool_result' => $decoded,
-			),
-		);
-	},
-	10,
-	3
-);
-`;
-}
-
-function writeHomeboyRuntimeToolBridgePlugin(pluginDir, endpoint = '') {
-  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-tool-bridge.php'), homeboyRuntimeToolBridgePluginSource(endpoint));
-}
-
 function homeboyCallbackDataPluginSource() {
   return `<?php
 /**
@@ -879,39 +786,7 @@ server.listen(0, '127.0.0.1', () => {
 }
 
 function injectHomeboyRuntimeToolBridge(taskInput, artifacts) {
-  if (!homeboyPolicyHasParentTools(taskInput)) {
-    return { input: taskInput, bridge: null };
-  }
-
-  const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-tool-bridge-'));
-  const pluginDir = path.join(pluginRoot, 'homeboy-runtime-tool-bridge');
-  fs.mkdirSync(pluginDir, { recursive: true });
-  writeHomeboyRuntimeToolBridgePlugin(pluginDir);
-
-  return {
-    input: {
-      ...taskInput,
-      extra_plugins: [
-        ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins : []),
-        {
-          source: pluginDir,
-          slug: 'homeboy-runtime-tool-bridge',
-          pluginFile: 'homeboy-runtime-tool-bridge/homeboy-runtime-tool-bridge.php',
-          loadAs: 'mu-plugin',
-          activate: false,
-          metadata: { source: 'homeboy-runtime-tool-bridge' },
-        },
-      ],
-      runtime_env: {
-        ...(plainObject(taskInput.runtime_env) ? taskInput.runtime_env : {}),
-        HOMEBOY_AGENT_TASK_ID: taskInput.orchestrator?.agent_task_id || taskInput.parent_request?.task_id || '',
-      },
-    },
-    bridge: {
-      plugin_dir: pluginDir,
-      server_script: writeTextFile('homeboy-runtime-tool-bridge-server-', 'server.js', homeboyRuntimeToolBridgeServerSource()),
-    },
-  };
+  return { input: taskInput, bridge: null };
 }
 
 function callbackDataConfig(taskInput) {
@@ -1257,17 +1132,12 @@ function requestRuntimeComponents(request, mounts = []) {
     ? request.runtime_component_paths
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(request.component_contracts || []);
-  const workspaceRoot = workspaceRootFromMounts(mounts);
-  const agentRuntimePath = remapLabWorkspacePath(
-    explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine')),
-    'data-machine'
-  );
   return Object.fromEntries(Object.entries({
     ...contractPaths,
     ...explicit,
-    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(agentRuntimePath), 'agents-api'),
-    agent_runtime: agentRuntimePath,
-    agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')), 'data-machine-code'),
+    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api, 'agents-api'),
+    agent_runtime: remapLabWorkspacePath(explicit.agent_runtime || contractPaths.agent_runtime),
+    agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools),
   }).filter(([, value]) => value !== '' && value !== undefined));
 }
 
@@ -1277,8 +1147,6 @@ function runtimeComponentPathsFromContracts(contracts) {
   }
   const slugToKey = new Map([
     ['agents-api', 'agents_api'],
-    ['data-machine', 'agent_runtime'],
-    ['data-machine-code', 'agent_runtime_tools'],
   ]);
   return Object.fromEntries(contracts
     .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
@@ -1347,8 +1215,6 @@ function runtimeComponentExtraPlugins(input) {
   const components = input.runtime_component_paths || {};
   return [
     { key: 'agents_api', slug: 'agents-api' },
-    { key: 'agent_runtime', slug: 'data-machine' },
-    { key: 'agent_runtime_tools', slug: 'data-machine-code' },
   ].flatMap(({ key, slug }) => {
     const source = components[key];
     return source ? [{ source, slug, loadAs: 'mu-plugin', activate: false }] : [];
@@ -1403,8 +1269,7 @@ function componentContracts(input) {
 
 function verifySteps(input) {
   // Verification gates can come from the request directly or from the parent
-  // request/task. Each entry is a WP Codebox recipe step (e.g.
-  // `{ command: 'wordpress.phpunit', args: ['plugin-slug=data-machine'] }`)
+  // request/task. Each entry is a WP Codebox recipe step.
   // that runs after the agent finishes; a non-zero exit fails the run.
   const candidates = [
     input.verify_steps,
@@ -1660,7 +1525,7 @@ function sandboxToolPolicy(input, allowedTools) {
           const id = tool.trim();
           return {
             id,
-            runtime_tool_id: id.replace(/^datamachine\//, '').replace(/[^A-Za-z0-9_]+/g, '_'),
+            runtime_tool_id: id.replace(/^[^/]+\//, '').replace(/[^A-Za-z0-9_]+/g, '_'),
             execution_location: 'sandbox',
             transport_visibility: 'sandbox',
             allowed: true,
@@ -1720,8 +1585,12 @@ function agentBundleRuntimeTask(input, bundleConfig = {}) {
   const config = agentBundleConfig(input, bundleConfig);
   const source = config.source || config.bundle_path || config.bundle_host_path || '';
   const runtimeBundles = Array.isArray(config.runtime_bundles) ? config.runtime_bundles : [];
+  const ability = config.runtime_task_ability || config.runtime_bundle_ability || input.runtime_task_ability || input.runtime_bundle_ability;
+  if (!ability) {
+    throw new Error('agent_bundle requires runtime_task_ability or runtime_bundle_ability.');
+  }
   return {
-    ability: 'datamachine/run-agent-bundle',
+    ability,
     input: Object.fromEntries(Object.entries({
       ...config,
       source,
@@ -2344,7 +2213,6 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
   const bridgedInput = injectHomeboyRuntimeToolBridge(callbackInput.input, artifacts);
   const bridgeServer = startHomeboyRuntimeToolBridge(bridgedInput.bridge);
   if (bridgeServer && bridgedInput.bridge?.plugin_dir) {
-    writeHomeboyRuntimeToolBridgePlugin(bridgedInput.bridge.plugin_dir, bridgeServer.url);
   }
   const preparedInput = prepareStableTaskInput({
     ...bridgedInput.input,

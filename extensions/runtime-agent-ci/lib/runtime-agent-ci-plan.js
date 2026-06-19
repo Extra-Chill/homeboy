@@ -5,7 +5,7 @@ const {
   agentTaskRequestFromRunnerSpec,
   agentTaskRunnerSpec,
   validateAgentTaskRunnerSpec,
-} = require('../../agent-runtimes/lib/agent-task-runner-contract');
+} = require('./agent-task-runner-contract');
 
 const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';

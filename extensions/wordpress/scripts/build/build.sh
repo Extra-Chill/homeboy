@@ -469,7 +469,7 @@ build_frontend_assets() {
     fi
 }
 
-# Build nested frontend assets (Data Machine pattern - multiple package.json in subdirectories)
+# Build nested frontend assets for projects with multiple package.json files.
 build_nested_packages() {
     print_status "Checking for nested package.json files..."
 

@@ -90,7 +90,7 @@ function makeRunFiles(tmp, config) {
     provider: 'openai',
     model: 'gpt-5.5',
     workload_id: 'developer-docs',
-    ignored_workspace_paths: ['datamachine-agent-artifacts'],
+    ignored_workspace_paths: ['runtime-agent-artifacts'],
     runner_workspace: { branch: 'agent-artifacts/docs-agent-host-lifecycle', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist generated docs',
@@ -100,7 +100,7 @@ function makeRunFiles(tmp, config) {
     ...config,
   });
   writeJson(resultsPath, {
-    component_id: 'datamachine-agent-ci-driver',
+    component_id: 'runtime-agent-driver',
     scenarios: [{ id: 'developer-docs', metrics: {}, metadata: { engine_data: {}, ...(config.initial_metadata || {}) } }],
   });
   return { configPath, resultsPath };
@@ -226,9 +226,9 @@ function makeRunFiles(tmp, config) {
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
   fs.mkdirSync(path.join(repo, 'plugins', 'amp'), { recursive: true });
-  fs.mkdirSync(path.join(repo, 'datamachine-agent-artifacts', 'technical-docs-agent'), { recursive: true });
+  fs.mkdirSync(path.join(repo, 'runtime-agent-artifacts', 'technical-docs-agent'), { recursive: true });
   fs.writeFileSync(path.join(repo, 'plugins', 'amp', 'AGENTS.md'), 'invalid docs lane output\n');
-  fs.writeFileSync(path.join(repo, 'datamachine-agent-artifacts', 'technical-docs-agent', 'transcript.json'), '{}\n');
+  fs.writeFileSync(path.join(repo, 'runtime-agent-artifacts', 'technical-docs-agent', 'transcript.json'), '{}\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     writable_paths: ['README.md', 'docs/**', 'plugins/**/README.md'],
     verification_commands: [{ command: 'test -f plugins/amp/AGENTS.md', description: 'Out-of-policy file exists' }],
@@ -457,4 +457,4 @@ function makeRunFiles(tmp, config) {
   assert.equal(fs.existsSync(gh.log), false);
 }
 
-console.log('Data Machine agent host lifecycle smoke passed');
+console.log('Runtime agent host lifecycle smoke passed');

@@ -13,7 +13,7 @@ const {
   splitCsv,
   writeGithubOutput,
 } = require('./lib/common.cjs');
-const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
 const {
   runtimeAgentCiFirstNonEmptyArray,

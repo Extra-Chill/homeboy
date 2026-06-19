@@ -88,7 +88,7 @@ Configure dependencies in the component's WordPress extension settings:
   "extensions": {
     "wordpress": {
       "settings": {
-        "validation_dependencies": "data-machine"
+        "validation_dependencies": "example-dependency"
       }
     }
   }
@@ -97,10 +97,10 @@ Configure dependencies in the component's WordPress extension settings:
 
 Supported value shapes:
 
-- single component ID: `data-machine`
-- comma-separated list: `data-machine, other-plugin`
+- single component ID: `example-dependency`
+- comma-separated list: `example-dependency, other-plugin`
 - newline-separated list
-- JSON-array string: `["data-machine", "other-plugin"]`
+- JSON-array string: `["example-dependency", "other-plugin"]`
 
 Each dependency entry may be either:
 
@@ -708,10 +708,9 @@ Set `HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR` to write these derived artifacts
 to a specific directory. Otherwise they are written beside
 `HOMEBOY_BENCH_RESULTS_FILE`.
 
-The same workload contract powers Data Machine agent CI on the WP Codebox
-WordPress substrate. See
-[`../../wordpress/docs/AGENT_CI_WP_CODEBOX.md`](../../wordpress/docs/AGENT_CI_WP_CODEBOX.md)
-for the dedicated agent sandbox guide.
+The same workload contract powers runtime-backed agent tasks on the WP Codebox
+WordPress substrate. See `.github/workflows/runtime-agent-full-run.yml` for the
+reusable runtime agent workflow contract.
 
 ## WP Codebox Validation Profile
 
@@ -833,7 +832,7 @@ Supported fields:
 - `tags`, `metadata`, and `limits`: copied into the BenchResults scenario
   envelope for reports, filtering, and downstream eval tooling.
 
-Data Machine agent workloads also evaluate known general rules against available
+Runtime agent workloads also evaluate known general rules against available
 runner evidence and expose the results under
 `metadata.eval_artifact.general_rule_results`. Initial executable general rules
 cover editable block failures, raw HTML/shortcode failures, speculative plugin
@@ -854,7 +853,7 @@ Example: drive a plugin's pipeline through an Abilities API entry point.
       "settings": {
         "wp_codebox_blueprint": {
           "steps": [
-            { "step": "installPlugin", "pluginData": { "resource": "wordpress.org/plugins", "slug": "data-machine" } }
+            { "step": "installPlugin", "pluginData": { "resource": "wordpress.org/plugins", "slug": "example-plugin" } }
           ]
         },
         "wp_codebox_workloads": [

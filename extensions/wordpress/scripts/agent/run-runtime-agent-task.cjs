@@ -14,7 +14,7 @@ const { spawnSync } = require('node:child_process');
  * Internal dependencies
  */
 const { runtimeAgentCiTaskExecutorConfig } = require('../../../runtime-agent-ci');
-const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const SCRIPT_DIR = __dirname;
 const EXTENSION_PATH = path.resolve(SCRIPT_DIR, '..', '..');

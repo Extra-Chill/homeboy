@@ -21,7 +21,7 @@ const {
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
   providerDefaultsContract,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,
@@ -133,6 +133,8 @@ const AGENT_BUNDLE_CONFIG_FIELDS = [
   'ability_tools',
   'engine_data_outputs',
   'runtime_output_projections',
+  'runtime_task_ability',
+  'runtime_bundle_ability',
   'engine_key',
   'tool_results_key',
   'artifact_export_config',

@@ -95,14 +95,14 @@ result without parsing backend-native logs.
 ## Homeboy Contract Adapter
 
 Extension runtime packages should consume generic Homeboy contract constants
-through `agent-runtimes/lib/agent-task-provider-contract.js`. That adapter is the
+through `runtime-agent-ci/lib/agent-task-provider-contract.js`. That adapter is the
 local compatibility seam while the matching Homeboy core contracts are released.
 It owns schema identifiers, the default provider fields, secret-env requirement
 selectors, redacted metadata keys, and artifact/evidence reference projection
 helpers.
 
 Reusable CI callers that need to describe a runner without embedding workflow
-glue should consume `agent-runtimes/lib/agent-task-runner-contract.js`. That
+glue should consume `runtime-agent-ci/lib/agent-task-runner-contract.js`. That
 adapter owns `homeboy/agent-task-runner-spec/v1` validation and projection into
 the generic request fields consumed by executor providers. Extension-specific
 exports, such as the WordPress `agent-task-runner-spec` module, should re-export
@@ -111,7 +111,7 @@ that adapter instead of copying schema and lifecycle validation logic.
 Runtime packages may add backend-specific capabilities, secret names, role
 aliases, and metadata keys, but should extend the adapter output instead of
 copying schema strings or selector paths into each backend. Domain policy, such
-as WordPress or Data Machine defaults, belongs in the caller/runtime package and
+as WordPress or project-specific defaults, belongs in the caller/runtime package and
 not in the generic adapter.
 
 ## Secret Requirements
@@ -168,9 +168,9 @@ The provider must not infer workspace shape from WP Codebox, WordPress, or any
 other current runtime unless that shape is declared here.
 
 Caller-owned wrappers should pass domain-specific runtime requirements explicitly.
-For example, Data Machine Agent CI supplies its Agents API, Data Machine, Data
-Machine Code, workspace-tool, and ability-policy defaults before invoking the
-generic WP Codebox provider.
+For example, a caller can supply its ability provider, runtime components,
+workspace-tool, and ability-policy defaults before invoking the generic WP
+Codebox provider.
 
 ## Outcome And Diagnostic Contracts
 

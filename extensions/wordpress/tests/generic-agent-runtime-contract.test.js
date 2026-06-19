@@ -8,10 +8,10 @@ const path = require('node:path');
 const {
 	resolveRuntimeProvider,
 	runtimeRegistry,
-} = require('../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+} = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
 	agentTaskRunnerSpec,
-} = require('../../agent-runtimes/lib/agent-task-runner-contract');
+} = require('../../runtime-agent-ci/lib/agent-task-runner-contract');
 const {
 	runtimeAgentCiRunnerSpec,
 } = require('../../runtime-agent-ci');

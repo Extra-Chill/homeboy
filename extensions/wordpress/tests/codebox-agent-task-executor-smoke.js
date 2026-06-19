@@ -17,13 +17,10 @@ const {
   providerSecretEnv,
 } = require('../../agent-runtimes/wp-codebox');
 const {
-  datamachineAgentCiCodeboxExecutorConfig,
-} = require('../lib/datamachine-agent-ci-codebox-adapter');
-const {
   AGENT_TASK_FAILURE_CLASSIFICATIONS,
   AGENT_TASK_OUTCOME_STATUSES,
   AGENT_TASK_REDACTED_METADATA_KEYS,
-} = require('../../agent-runtimes/lib/agent-task-provider-contract');
+} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
 
 const fixtureCodeboxCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-agent-task-normalizer.mjs');
 const wpCodeboxRuntimeRoot = path.join(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
@@ -42,11 +39,28 @@ const claudeCodeSecretEnv = [
 ];
 const claudeCodeRefreshTokenEnv = 'AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN';
 const repoLoopCapabilities = [
-  'tool:datamachine/run-agent-bundle',
+  'tool:example/run-agent-bundle',
   'tool:github_pull_request_publish',
-  'ability:datamachine/run-agent-bundle',
+  'ability:example/run-agent-bundle',
   'ability:github_pull_request_publish',
 ];
+
+function exampleAgentCiCodeboxExecutorConfig(config = {}) {
+  const profileId = 'example-agent-ci';
+  return {
+    ...config,
+    runtime_profile: config.runtime_profile || profileId,
+    runtime_profiles: {
+      ...(config.runtime_profiles || {}),
+      [profileId]: {
+        id: profileId,
+        runtime_task_ability: 'example/run-agent-bundle',
+        runtime_bundle_ability: 'example/run-agent-bundle',
+        ability_requirements: ['example/run-agent-bundle'],
+      },
+    },
+  };
+}
 
 function secretEnvRequirementForProvider(contract, provider) {
   return contract.secret_env_requirements.find((requirement) => (
@@ -882,7 +896,7 @@ const codexAgentRequest = {
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: datamachineAgentCiCodeboxExecutorConfig({
+    config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       provider_plugin_paths: ['/components/ai-provider-for-openai'],
       secret_env: [
@@ -892,9 +906,11 @@ const codexAgentRequest = {
         'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
         'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
       ],
-      agents_api: '/components/agents-api',
-      agent_runtime: '/components/data-machine',
-      agent_runtime_tools: '/components/data-machine-code',
+      runtime_component_paths: {
+        agents_api: '/components/agents-api',
+        agent_runtime: '/components/example-runtime',
+        agent_runtime_tools: '/components/example-runtime-tools',
+      },
       homeboy: '/components/homeboy',
       homeboy_extensions: '/components/homeboy-extensions',
       wp_codebox_bin: '/bin/wp-codebox',
@@ -909,8 +925,8 @@ assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
 assert.equal(codexRequest.runtime_component_paths.agents_api, '/components/agents-api');
-assert.equal(codexRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
-assert.equal(codexRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+assert.equal(codexRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
+assert.equal(codexRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
 assert.equal(Object.hasOwn(codexRequest, 'agents_api_path'), false);
 assert.equal(Object.hasOwn(codexRequest, 'data_machine_path'), false);
 assert.equal(Object.hasOwn(codexRequest, 'data_machine_code_path'), false);
@@ -933,7 +949,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: datamachineAgentCiCodeboxExecutorConfig({
+    config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       runtime_bin: '/bin/wp-codebox-runtime',
       wordpress_runtime_version: 'beta',
@@ -943,11 +959,11 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
         target: '/wordpress/wp-content/plugins/driver/driver.php',
         mode: 'readonly',
       }],
-      runtime_components: {
+      runtime_component_paths: {
         runtime: '/components/wp-codebox/packages/wordpress-plugin',
         agents_api: '/components/agents-api',
-        data_machine: '/components/data-machine',
-        data_machine_code: '/components/data-machine-code',
+        agent_runtime: '/components/example-runtime',
+        agent_runtime_tools: '/components/example-runtime-tools',
       },
     }),
   },
@@ -962,8 +978,8 @@ assert.deepEqual(workflowStyleConfigRequest.mounts, [{
 }]);
 assert.equal(workflowStyleConfigRequest.runtime_component_paths.runtime, '/components/wp-codebox/packages/wordpress-plugin');
 assert.equal(workflowStyleConfigRequest.runtime_component_paths.agents_api, '/components/agents-api');
-assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
-assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
 assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine'), false);
 assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine_code'), false);
 
@@ -972,7 +988,7 @@ const deprecatedWordPressRuntimeVersionRequest = codeboxTaskRequestFromAgentTask
   task_id: 'runtime-contract-task-deprecated-wordpress-version',
   executor: {
     backend: 'codebox',
-    config: datamachineAgentCiCodeboxExecutorConfig({
+    config: exampleAgentCiCodeboxExecutorConfig({
       provider: 'codex',
       wp_codebox_wordpress_version: '6.9',
     }),
@@ -983,14 +999,14 @@ assert.equal(deprecatedWordPressRuntimeVersionRequest.wp, '6.9');
 const defaultsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-defaults-'));
 try {
   const workspaceRoot = path.join(defaultsRoot, 'target-repo@issue-1161');
-  const dataMachinePath = path.join(defaultsRoot, 'data-machine');
-  const bundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'wordpress', 'agents-api');
-  const alternateBundledAgentsApiPath = path.join(dataMachinePath, 'vendor', 'automattic', 'agents-api');
-  const dataMachineCodePath = path.join(defaultsRoot, 'data-machine-code');
+  const runtimePath = path.join(defaultsRoot, 'example-runtime');
+  const bundledAgentsApiPath = path.join(runtimePath, 'vendor', 'wordpress', 'agents-api');
+  const alternateBundledAgentsApiPath = path.join(runtimePath, 'vendor', 'automattic', 'agents-api');
+  const runtimeToolsPath = path.join(defaultsRoot, 'example-runtime-tools');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
   const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, dataMachineCodePath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, runtimeToolsPath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -999,7 +1015,7 @@ try {
     task_id: 'default-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
+      config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1007,9 +1023,7 @@ try {
   }, {
     settings: {},
   });
-  assert.equal(defaultedRequest.runtime_component_paths.agents_api, bundledAgentsApiPath);
-  assert.equal(defaultedRequest.runtime_component_paths.agent_runtime, dataMachinePath);
-  assert.equal(defaultedRequest.runtime_component_paths.agent_runtime_tools, dataMachineCodePath);
+  assert.deepEqual(defaultedRequest.runtime_component_paths, {});
   assert.deepEqual(defaultedRequest.provider_plugin_paths, []);
   assert.deepEqual(defaultedRequest.runtime_overlay_profiles, []);
   assert.deepEqual(defaultedRequest.runtime_overlays, []);
@@ -1185,7 +1199,7 @@ try {
     task_id: 'alternate-default-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
+      config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
     },
     inputs: {
       target: { root: workspaceRoot },
@@ -1193,7 +1207,7 @@ try {
   }, {
     settings: {},
   });
-  assert.equal(alternateDefaultedRequest.runtime_component_paths.agents_api, alternateBundledAgentsApiPath);
+  assert.deepEqual(alternateDefaultedRequest.runtime_component_paths, {});
 
   const explicitProviderPath = path.join(defaultsRoot, 'provider-plugin');
   fs.mkdirSync(explicitProviderPath, { recursive: true });
@@ -1270,7 +1284,7 @@ try {
       task_id: 'lab-no-target-default-runtime-stack-task-123',
       executor: {
         backend: 'codebox',
-        config: datamachineAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
+        config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
       },
       inputs: {},
     }, {
@@ -1287,12 +1301,12 @@ try {
     task_id: 'explicit-runtime-stack-task-123',
     executor: {
       backend: 'codebox',
-      config: datamachineAgentCiCodeboxExecutorConfig({
+      config: exampleAgentCiCodeboxExecutorConfig({
         provider: 'codex',
-        agents_api: staleStandaloneAgentsApiPath,
         runtime_component_paths: {
-          agent_runtime: '/explicit/data-machine',
-          agent_runtime_tools: '/explicit/data-machine-code',
+          agents_api: staleStandaloneAgentsApiPath,
+          agent_runtime: '/explicit/example-runtime',
+          agent_runtime_tools: '/explicit/example-runtime-tools',
         },
         provider_plugin_paths: ['/explicit/provider'],
         runtime_overlay_profiles: ['explicit-profile'],
@@ -1307,8 +1321,8 @@ try {
     },
   });
   assert.equal(explicitOverrideRequest.runtime_component_paths.agents_api, staleStandaloneAgentsApiPath);
-  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime, '/explicit/data-machine');
-  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/data-machine-code');
+  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime, '/explicit/example-runtime');
+  assert.equal(explicitOverrideRequest.runtime_component_paths.agent_runtime_tools, '/explicit/example-runtime-tools');
   assert.deepEqual(explicitOverrideRequest.provider_plugin_paths, ['/explicit/provider']);
   assert.deepEqual(explicitOverrideRequest.runtime_overlay_profiles, ['explicit-profile']);
   assert.deepEqual(explicitOverrideRequest.runtime_overlays, [{ kind: 'bundled-library', library: 'php-ai-client', source: '/explicit/php-ai-client' }]);
@@ -1316,27 +1330,6 @@ try {
   assert.deepEqual(explicitOverrideRequest.mounts, [{ source: '/explicit/worktree', target: '/workspace', mode: 'readonly' }]);
   assert.deepEqual(explicitOverrideRequest.workspaces, [{ target: '/explicit-workspace', mode: 'readonly' }]);
 
-  const legacyAliasRequest = codeboxTaskRequestFromAgentTaskRequest({
-    ...request,
-    task_id: 'legacy-runtime-alias-task-123',
-    executor: {
-      backend: 'codebox',
-      config: datamachineAgentCiCodeboxExecutorConfig({
-        provider: 'codex',
-        agents_api_path: staleStandaloneAgentsApiPath,
-        data_machine_path: '/legacy/data-machine',
-        data_machine_code_path: '/legacy/data-machine-code',
-      }),
-    },
-    inputs: {
-      target: { root: workspaceRoot },
-    },
-  });
-  assert.equal(legacyAliasRequest.runtime_component_paths.agents_api, staleStandaloneAgentsApiPath);
-  assert.equal(legacyAliasRequest.runtime_component_paths.agent_runtime, '/legacy/data-machine');
-  assert.equal(legacyAliasRequest.runtime_component_paths.agent_runtime_tools, '/legacy/data-machine-code');
-  assert.equal(Object.hasOwn(legacyAliasRequest, 'data_machine_path'), false);
-  assert.equal(Object.hasOwn(legacyAliasRequest, 'data_machine_code_path'), false);
 } finally {
   fs.rmSync(defaultsRoot, { recursive: true, force: true });
 }
@@ -1365,14 +1358,14 @@ const agentBundleRequest = codeboxTaskRequestFromAgentTaskRequest({
   executor: {
     backend: 'codebox',
     model: 'gpt-5.5',
-    config: datamachineAgentCiCodeboxExecutorConfig({
+    config: exampleAgentCiCodeboxExecutorConfig({
       execution_kind: 'agent_bundle',
       provider: 'openai',
       provider_plugin_paths: ['/components/ai-provider-for-openai'],
-      agents_api: '/components/agents-api',
       runtime_component_paths: {
-        agent_runtime: '/components/data-machine',
-        agent_runtime_tools: '/components/data-machine-code',
+        agents_api: '/components/agents-api',
+        agent_runtime: '/components/example-runtime',
+        agent_runtime_tools: '/components/example-runtime-tools',
       },
       homeboy_extensions: '/components/homeboy-extensions/wordpress',
       bundle_path: '/bundles/example-agent',
@@ -1401,8 +1394,8 @@ assert.deepEqual(agentBundleRequest.agent_bundle.evidence_projections, [{ operat
 assert.deepEqual(agentBundleRequest.agent_bundle.runtime_output_projections, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
 assert.equal(Object.hasOwn(agentBundleRequest.agent_bundle, 'tool_recorders'), false);
 assert.equal(Object.hasOwn(agentBundleRequest.agent_bundle, 'engine_data_outputs'), false);
-assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime, '/components/data-machine');
-assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
+assert.equal(agentBundleRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
 assert.equal(agentBundleRequest.homeboy_extensions_path, '/components/homeboy-extensions/wordpress');
 assert.deepEqual(agentBundleRequest.mounts, [{
   source: '/home/runner/work/example-repo/example-repo/bundles/example-agent',
@@ -2035,7 +2028,7 @@ const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxRes
       result: {
         success: false,
         error_reason: 'empty_data_packet_returned',
-        error_message: 'Data Machine bundle returned an empty data packet.',
+        error_message: 'Runtime bundle returned an empty data packet.',
         terminal_status: 'failed - empty_data_packet_returned',
         outputs: {
           typed_artifacts: {
@@ -2467,8 +2460,8 @@ try {
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
   assert.equal(capturedCodex.request.runtime_component_paths.agents_api, '/components/agents-api');
-  assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/data-machine');
-  assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/data-machine-code');
+  assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/example-runtime');
+  assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
   assert.equal(Object.hasOwn(capturedCodex.request, 'agents_api_path'), false);
   assert.equal(Object.hasOwn(capturedCodex.request, 'data_machine_path'), false);
   assert.equal(Object.hasOwn(capturedCodex.request, 'data_machine_code_path'), false);
@@ -2654,11 +2647,12 @@ try {
       config: {
         provider: 'openai',
         provider_plugin_paths: ['/components/ai-provider-for-openai'],
-        agents_api: '/components/agents-api',
         runtime_component_paths: {
-          agent_runtime: '/components/data-machine',
-          agent_runtime_tools: '/components/data-machine-code',
+          agents_api: '/components/agents-api',
+          agent_runtime: '/components/example-runtime',
+          agent_runtime_tools: '/components/example-runtime-tools',
         },
+        runtime_bundle_ability: 'example/run-agent-bundle',
         runtime_env: fullRunnerRuntimeEnv,
         runtime_state_mounts: fullRunnerRuntimeStateMounts,
         runtime_config_mounts: fullRunnerRuntimeConfigMounts,

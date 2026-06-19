@@ -15,7 +15,7 @@ const {
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
   agentTaskProviderContractFields,
-} = require('../../agent-runtimes/lib/agent-task-provider-contract');
+} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
 const { providerContract } = require('../../agent-runtimes/wp-codebox');
 
 const contract = JSON.parse(fs.readFileSync(path.join(

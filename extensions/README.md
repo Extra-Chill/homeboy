@@ -112,23 +112,6 @@ homeboy test
 homeboy release
 ```
 
-### Data Machine Code promotion provider
-
-Homeboy core can promote agent-task patch artifacts through an external
-workspace provider command. This repo provides a Data Machine Code-backed
-provider script for environments that use managed DMC worktrees:
-
-```bash
-homeboy agent-task promote aggregate.json \
-  --to-worktree repo@branch-slug \
-  --provider-command ./scripts/datamachine-code-promotion-provider.sh
-```
-
-The provider reads `homeboy/agent-task-promotion-apply-request/v1` JSON on
-stdin and writes `homeboy/agent-task-promotion-apply-response/v1` JSON on
-stdout. It keeps the DMC-specific `studio wp datamachine-code ...` shellouts in
-Homeboy Extensions instead of Homeboy core.
-
 ### Runtime agent full-run tasks
 
 The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is the
@@ -166,8 +149,8 @@ jobs:
 ```
 
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. The former Data Machine-specific reusable workflow wrapper has been
-removed after active default-branch consumers migrated to the generic workflow.
+agent runs. Former domain-specific reusable workflow wrappers have been removed
+after active default-branch consumers migrated to the generic workflow.
 
 Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact

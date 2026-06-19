@@ -11,7 +11,7 @@ const {
 	DEFAULT_RUNTIME_ID,
 	resolveRuntimeProvider,
 	runtimeRegistry,
-} = require('../agent-runtimes/lib/runtime-provider-resolver.cjs');
+} = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const registry = runtimeRegistry({ repoRoot: rootDir });
 assert.equal(DEFAULT_RUNTIME_ID, 'wp-codebox');
