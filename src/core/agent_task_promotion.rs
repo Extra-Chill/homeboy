@@ -287,11 +287,11 @@ fn promote_with_provider(
                 None,
             )
         })?;
-        // Materialize dependencies (composer install / npm install / component
-        // deps script) in the freshly created worktree before running the
-        // verify gates. Without this, a fresh worktree has no vendor/ or
-        // node_modules/ and PHP/JS gates fatal on missing autoloaded deps,
-        // masking the real pass/fail signal (#3771).
+        // Materialize dependencies via the component's resolved dependency
+        // providers (install + build steps) in the freshly created worktree
+        // before running the verify gates. Without this, a fresh worktree has
+        // no installed dependency artifacts and gates fatal on missing
+        // dependencies, masking the real pass/fail signal (#3771).
         dependencies_materialized =
             crate::core::hygiene::materialize_worktree_dependencies(Path::new(worktree_path))?;
         for (index, command) in options.gates.verify.iter().enumerate() {

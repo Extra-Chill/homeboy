@@ -2,7 +2,6 @@
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::Value;
 
@@ -19,6 +18,7 @@ use homeboy::core::agent_tasks::controller_service::{
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
+use homeboy::core::git;
 use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
@@ -265,17 +265,7 @@ fn git_root_for_spec(spec_path: &Path) -> Option<PathBuf> {
 }
 
 fn git_root_for_path(path: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let root = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!root.is_empty()).then(|| PathBuf::from(root))
+    git::repo_root(path)
 }
 
 /// Bridge controller spawn-task `"dispatch"` requests into the CLI dispatch path.

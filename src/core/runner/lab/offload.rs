@@ -1765,7 +1765,7 @@ fn agent_task_provider_selection_from_args(
 ) -> Result<Option<AgentTaskProviderSelection>> {
     let action_index = super::args_util::subcommand_index(args, "agent-task").and_then(|index| {
         args.get(index + 1)
-            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
+            .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook" | "loop"))
             .map(|_| index + 1)
     });
     let Some(action_index) = action_index else {
@@ -2901,6 +2901,31 @@ mod tests {
             "primary".to_string(),
             "--selector=variant-a".to_string(),
             "--prompt".to_string(),
+            "fix it".to_string(),
+        ];
+
+        let selection = agent_task_provider_selection_from_args(&args)
+            .expect("selection resolves")
+            .expect("selection");
+
+        assert_eq!(selection.backend, "primary");
+        assert_eq!(selection.selector.as_deref(), Some("variant-a"));
+    }
+
+    #[test]
+    fn agent_task_provider_selection_reads_loop_backend_and_selector() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "loop".to_string(),
+            "--backend=primary".to_string(),
+            "--selector".to_string(),
+            "variant-a".to_string(),
+            "--to-worktree".to_string(),
+            "homeboy@candidate".to_string(),
+            "--verify".to_string(),
+            "homeboy test".to_string(),
+            "--goal".to_string(),
             "fix it".to_string(),
         ];
 
