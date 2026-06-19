@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  artifactResultEnvelopeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
@@ -82,6 +83,20 @@ assert.deepEqual(typedArtifactsFromCodeboxResult({
     },
   },
 }).review.payload, { ok: true });
+const artifactResultEnvelope = artifactResultEnvelopeFromCodeboxResult({
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    artifact_bundle_refs: [{ kind: 'artifact-bundle', path: 'artifacts/run-1' }],
+    artifact_refs: [{ kind: 'codebox-review', path: 'files/review.json' }],
+    evidence_refs: [{ kind: 'codebox-agent-terminal-result', uri: 'artifacts/run-1', label: 'Terminal result' }],
+    transcript_refs: [{ kind: 'codebox-transcript', path: 'files/transcript.json' }],
+    typed_artifacts: [{ name: 'review', artifact_schema: 'example/review/v1', payload: { ok: true } }],
+  },
+});
+assert.equal(artifactResultEnvelope.artifactRefs.length, 2);
+assert.equal(artifactResultEnvelope.evidenceRefs.length, 2);
+assert.equal(artifactResultEnvelope.evidenceRefs[0].uri, 'artifacts/run-1');
+assert.deepEqual(typedArtifactsFromCodeboxResult({ artifact_result: artifactResultEnvelope }).review.payload, { ok: true });
 assert.equal(normalizeCodeboxArtifactOutcome({ id: 'patch.diff', kind: 'codebox-patch' }, {}, {
   roleAliases: provider.role_aliases,
 }).role, 'patch');

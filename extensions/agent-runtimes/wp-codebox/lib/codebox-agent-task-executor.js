@@ -2673,8 +2673,15 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
     for (const artifact of artifactResult?.artifactRefs || []) {
       appendUniqueEvidenceRef(refs, {
         kind: artifact.kind,
-        uri: artifact.path || artifact.url,
+        uri: artifact.uri || artifact.path || artifact.url,
         label: artifact.name || artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
+      });
+    }
+    for (const evidenceRef of artifactResult?.evidenceRefs || []) {
+      appendUniqueEvidenceRef(refs, {
+        kind: evidenceRef.kind,
+        uri: evidenceRef.uri || evidenceRef.path || evidenceRef.url,
+        label: evidenceRef.name || evidenceRef.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
       });
     }
     if (!artifactResult) {
@@ -2734,8 +2741,13 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
   const evidenceRefs = [
     ...(artifactResult?.artifactRefs || []).map((artifact) => ({
       kind: artifact.kind,
-      uri: artifact.path || artifact.url,
+      uri: artifact.uri || artifact.path || artifact.url,
       label: artifact.name || artifact.kind,
+    })),
+    ...(artifactResult?.evidenceRefs || []).map((ref) => ({
+      kind: ref.kind,
+      uri: ref.uri || ref.path || ref.url,
+      label: ref.name || ref.kind,
     })),
     ...(result?.evidence_refs || result?.evidence || []),
   ];
