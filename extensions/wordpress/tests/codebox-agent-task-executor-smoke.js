@@ -487,17 +487,15 @@ assert.deepEqual(codeboxRequest.runtime_requirements, {
   schema: 'wp-codebox/runtime-profile/v1',
   runtime_overlays: codeboxRequest.runtime_overlays,
   provider_plugins: [{ path: '/providers/openai' }],
-  homeboy_parent_tool_bridge: {
-    schema: 'wp-codebox/parent-tool-bridge/v1',
-    status: 'declared-compatibility-bridge',
-    env: [
-      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-    ],
-    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
-  },
+  upstream_primitive_requirements: [{
+    schema: 'wp-codebox/upstream-primitive-requirement/v1',
+    id: 'parent-tool-bridge',
+    owner: 'wp-codebox',
+    primitive_schema: 'wp-codebox/parent-tool-bridge/v1',
+    status: 'required-upstream-primitive',
+    adapter_behavior: 'declare_requirement_only',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
+  }],
 });
 const legacyOverlayNameRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
@@ -796,17 +794,15 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
   provider_plugins: [{ path: '/providers/fixture-provider' }],
   runtime_state_mounts: genericRuntimeStateMounts,
   runtime_config_mounts: genericRuntimeConfigMounts,
-  homeboy_parent_tool_bridge: {
-    schema: 'wp-codebox/parent-tool-bridge/v1',
-    status: 'declared-compatibility-bridge',
-    env: [
-      'HOMEBOY_AGENT_TOOL_POLICY_JSON',
-      'HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_RESULT_SCHEMA',
-      'HOMEBOY_AGENT_TOOL_POLICY_SCHEMA',
-    ],
-    upstream_expected: 'Codebox runtime profiles should expose a parent-tool bridge component that maps parent-owned tools into sandbox-visible tool descriptors without Homeboy injecting bridge env directly.',
-  },
+  upstream_primitive_requirements: [{
+    schema: 'wp-codebox/upstream-primitive-requirement/v1',
+    id: 'parent-tool-bridge',
+    owner: 'wp-codebox',
+    primitive_schema: 'wp-codebox/parent-tool-bridge/v1',
+    status: 'required-upstream-primitive',
+    adapter_behavior: 'declare_requirement_only',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
+  }],
 });
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
 assert.deepEqual(genericProviderRuntimeRequest.secret_env, ['FIXTURE_PROVIDER_SECRET']);
@@ -2991,7 +2987,7 @@ try {
       ...request.executor,
       config: {
         provider: 'openai',
-        task_kind: 'repo-cooking',
+        workspace_required: true,
         repo: 'a8c-intelligence',
       },
     },
@@ -3013,7 +3009,7 @@ try {
   assert.equal(missingWorkspaceOutcome.failure_classification, 'execution_failed');
   assert.equal(missingWorkspaceOutcome.diagnostics[0].class, 'codebox.preflight.missing_workspace');
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.repo, 'a8c-intelligence');
-  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.task_kind, 'repo-cooking');
+  assert.equal(missingWorkspaceOutcome.diagnostics[0].data.workspace_required, true);
   assert.equal(missingWorkspaceOutcome.diagnostics[0].data.mounts_count, 0);
   assert.equal(missingWorkspaceOutcome.metadata.codebox.missing_workspace, true);
 
