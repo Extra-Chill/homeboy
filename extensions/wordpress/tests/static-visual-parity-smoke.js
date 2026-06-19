@@ -6,8 +6,12 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   buildStaticVisualParityRecipe,
+  buildWpCodeboxStaticVisualParityRecipe,
+  createWpCodeboxStaticVisualParityRuntimeProvider,
   normalizeStaticVisualParityArtifacts,
+  normalizeWpCodeboxStaticVisualParityArtifacts,
   runStaticVisualParity,
+  runWpCodeboxStaticVisualParity,
 } = require('../lib/static-visual-parity');
 
 function withTempDirectory(callback) {
@@ -76,7 +80,21 @@ assert.deepEqual(buildStaticVisualParityRecipe({
   'include-aa=true',
 ]);
 
-withTempDirectory(async (root) => {
+const codeboxRecipe = buildWpCodeboxStaticVisualParityRecipe({
+  sourceUrl: 'http://127.0.0.1:4173/index.html',
+  candidateUrl: '/',
+  artifactsDirectory: '/tmp/artifacts',
+});
+assert.equal(codeboxRecipe.schema, 'wp-codebox/workspace-recipe/v1');
+assert.equal(codeboxRecipe.workflow.steps[0].command, 'wordpress.visual-compare');
+
+const codeboxProvider = createWpCodeboxStaticVisualParityRuntimeProvider();
+assert.equal(codeboxProvider.id, 'wp-codebox');
+assert.equal(codeboxProvider.recipeFileName, 'wp-codebox-static-visual-parity-recipe.json');
+assert.equal(codeboxProvider.buildRecipe, buildWpCodeboxStaticVisualParityRecipe);
+
+async function main() {
+await withTempDirectory(async (root) => {
   const artifactsDirectory = path.join(root, 'artifacts');
   const outputDirectory = path.join(root, 'output');
   const visualDir = path.join(artifactsDirectory, 'custom-browser-artifacts');
@@ -102,7 +120,7 @@ withTempDirectory(async (root) => {
   }));
   fs.mkdirSync(outputDirectory, { recursive: true });
 
-  const visualDiff = await normalizeStaticVisualParityArtifacts({
+  const visualDiff = await normalizeWpCodeboxStaticVisualParityArtifacts({
     codeboxResult: {
       success: true,
       artifacts: { directory: artifactsDirectory },
@@ -114,9 +132,22 @@ withTempDirectory(async (root) => {
   assert.equal(visualDiff.pass, true);
   assert.equal(visualDiff.regions[0].mismatchRatio, 3 / 25);
   assert.equal(fs.existsSync(path.join(outputDirectory, 'imported.png')), true);
+
+  const aliasOutputDirectory = path.join(root, 'alias-output');
+  fs.mkdirSync(aliasOutputDirectory, { recursive: true });
+  const aliasVisualDiff = await normalizeStaticVisualParityArtifacts({
+    codeboxResult: {
+      success: true,
+      artifacts: { directory: artifactsDirectory },
+      files: { visualDiff: 'custom-browser-artifacts/visual-diff.json' },
+    },
+    outputDirectory: aliasOutputDirectory,
+    maxMismatchRatio: 0.02,
+  });
+  assert.equal(aliasVisualDiff.pass, true);
 });
 
-withTempDirectory(async (root) => {
+await withTempDirectory(async (root) => {
   const sourceDirectory = path.join(root, 'source');
   const outputDirectory = path.join(root, 'output');
   const readinessFile = path.join(outputDirectory, 'ready.json');
@@ -131,7 +162,7 @@ withTempDirectory(async (root) => {
   const previous = process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE;
   process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE = recipeCapture;
   try {
-    const result = await runStaticVisualParity({
+    const result = await runWpCodeboxStaticVisualParity({
       sourceDirectory,
       outputDirectory,
       artifactsDirectory: path.join(root, 'artifacts'),
@@ -156,4 +187,40 @@ withTempDirectory(async (root) => {
   }
 });
 
+await withTempDirectory(async (root) => {
+  const sourceDirectory = path.join(root, 'source');
+  const outputDirectory = path.join(root, 'output');
+  const fakeWpCodebox = path.join(root, 'wp-codebox.js');
+  const recipeCapture = path.join(root, 'recipe-capture.json');
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sourceDirectory, 'index.html'), '<!doctype html><title>Alias</title>');
+  writeFakeWpCodebox(fakeWpCodebox);
+
+  const previous = process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE;
+  process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE = recipeCapture;
+  try {
+    const result = await runStaticVisualParity({
+      sourceDirectory,
+      outputDirectory,
+      artifactsDirectory: path.join(root, 'artifacts'),
+      sourcePort: 4200,
+      wpCodeboxBin: fakeWpCodebox,
+    });
+    assert.equal(result.recipe.schema, 'wp-codebox/workspace-recipe/v1');
+    assert.equal(result.visualDiff.pass, true);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE;
+    } else {
+      process.env.FAKE_WP_CODEBOX_RECIPE_CAPTURE = previous;
+    }
+  }
+});
+
 console.log('✓ static visual parity smoke test PASSED');
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

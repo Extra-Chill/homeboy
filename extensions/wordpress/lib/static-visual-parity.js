@@ -14,7 +14,7 @@ const path = require('node:path');
 const { runWpCodeboxRecipe } = require('./wp-codebox-recipe-helper');
 const { resolveWpCodeboxArtifactPath } = require('./wp-codebox-artifacts');
 
-function buildStaticVisualParityRecipe(options = {}) {
+function buildWpCodeboxStaticVisualParityRecipe(options = {}) {
   const sourceUrl = requiredString(options.sourceUrl, 'sourceUrl');
   const candidateUrl = requiredString(options.candidateUrl, 'candidateUrl');
   const artifactsDirectory = requiredString(options.artifactsDirectory, 'artifactsDirectory');
@@ -57,6 +57,40 @@ function buildStaticVisualParityRecipe(options = {}) {
   };
 }
 
+function buildStaticVisualParityRecipe(options = {}) {
+  return resolveStaticVisualParityRuntimeProvider(options).buildRecipe(options);
+}
+
+function createWpCodeboxStaticVisualParityRuntimeProvider() {
+  return {
+    id: 'wp-codebox',
+    label: 'WP Codebox',
+    recipeFileName: 'wp-codebox-static-visual-parity-recipe.json',
+    outputFileName: 'wp-codebox-output.json',
+    buildRecipe: buildWpCodeboxStaticVisualParityRecipe,
+    runRecipe: runWpCodeboxStaticVisualParityRecipe,
+    normalizeArtifacts: normalizeWpCodeboxStaticVisualParityArtifacts,
+    writeSummary: writeStaticVisualParitySummary,
+  };
+}
+
+function resolveStaticVisualParityRuntimeProvider(options = {}) {
+  return options.runtimeProvider || createWpCodeboxStaticVisualParityRuntimeProvider();
+}
+
+async function runWpCodeboxStaticVisualParityRecipe({ recipeFile, artifactsDirectory, outputFile, options = {} } = {}) {
+  return runWpCodeboxRecipe({
+    recipeFile,
+    artifactsDir: artifactsDirectory,
+    outputFile,
+    wpCodeboxBin: options.wpCodeboxBin,
+    bin: options.bin,
+    env: options.env,
+    cwd: options.cwd,
+    recipeRunArgs: arrayOption(options.recipeRunArgs),
+  });
+}
+
 async function runStaticVisualParity(options = {}) {
   const outputDirectory = requiredString(options.outputDirectory, 'outputDirectory');
   const artifactsDirectory = options.artifactsDirectory || outputDirectory;
@@ -75,30 +109,27 @@ async function runStaticVisualParity(options = {}) {
     await listen(sourceServer, sourcePort);
   }
 
-  const recipe = buildStaticVisualParityRecipe({
+  const runtimeProvider = resolveStaticVisualParityRuntimeProvider(options);
+  const recipe = runtimeProvider.buildRecipe({
     ...options,
     sourceUrl,
     candidateUrl,
     artifactsDirectory,
   });
-  const recipeFile = options.recipeFile || path.join(outputDirectory, 'wp-codebox-static-visual-parity-recipe.json');
-  const codeboxOutputFile = options.codeboxOutputFile || path.join(outputDirectory, 'wp-codebox-output.json');
+  const recipeFile = options.recipeFile || path.join(outputDirectory, runtimeProvider.recipeFileName || 'static-visual-parity-runtime-recipe.json');
+  const runtimeOutputFile = options.runtimeOutputFile || options.codeboxOutputFile || path.join(outputDirectory, runtimeProvider.outputFileName || 'static-visual-parity-runtime-output.json');
   await fs.writeFile(recipeFile, `${JSON.stringify(recipe, null, 2)}\n`);
 
   try {
-    const codeboxRun = await runWpCodeboxRecipe({
+    const runtimeRun = await runtimeProvider.runRecipe({
       recipeFile,
-      artifactsDir: artifactsDirectory,
-      outputFile: codeboxOutputFile,
-      wpCodeboxBin: options.wpCodeboxBin,
-      bin: options.bin,
-      env: options.env,
-      cwd: options.cwd,
-      recipeRunArgs: arrayOption(options.recipeRunArgs),
+      artifactsDirectory,
+      outputFile: runtimeOutputFile,
+      options,
     });
-    const codeboxResult = codeboxRun.json;
+    const codeboxResult = runtimeRun.json;
     if (codeboxResult?.success !== true) {
-      throw new Error(`WP Codebox visual compare failed: ${codeboxResult?.error?.message || JSON.stringify(codeboxResult)}`);
+      throw new Error(`${runtimeProvider.label || runtimeProvider.id || 'Runtime'} visual compare failed: ${codeboxResult?.error?.message || JSON.stringify(codeboxResult)}`);
     }
 
     const readiness = await readReadiness(options.readinessFile);
@@ -106,13 +137,13 @@ async function runStaticVisualParity(options = {}) {
       await options.validateReadiness(readiness);
     }
 
-    const visualDiff = await normalizeStaticVisualParityArtifacts({
+    const visualDiff = await runtimeProvider.normalizeArtifacts({
       codeboxResult,
       artifactsDirectory,
       outputDirectory,
       maxMismatchRatio: options.maxMismatchRatio,
     });
-    const summary = await writeStaticVisualParitySummary({
+    const summary = await runtimeProvider.writeSummary({
       outputDirectory,
       sourceUrl,
       candidateUrl,
@@ -135,9 +166,16 @@ async function runStaticVisualParity(options = {}) {
   }
 }
 
-async function normalizeStaticVisualParityArtifacts({ codeboxResult, artifactsDirectory, outputDirectory, maxMismatchRatio } = {}) {
+async function runWpCodeboxStaticVisualParity(options = {}) {
+  return runStaticVisualParity({
+    ...options,
+    runtimeProvider: createWpCodeboxStaticVisualParityRuntimeProvider(),
+  });
+}
+
+async function normalizeWpCodeboxStaticVisualParityArtifacts({ codeboxResult, artifactsDirectory, outputDirectory, maxMismatchRatio } = {}) {
   if (!outputDirectory) {
-    throw new Error('normalizeStaticVisualParityArtifacts requires outputDirectory.');
+    throw new Error('normalizeWpCodeboxStaticVisualParityArtifacts requires outputDirectory.');
   }
   const sourcePath = path.join(outputDirectory, 'source.png');
   const candidatePath = path.join(outputDirectory, 'candidate.png');
@@ -221,6 +259,10 @@ async function normalizeStaticVisualParityArtifacts({ codeboxResult, artifactsDi
   return result;
 }
 
+async function normalizeStaticVisualParityArtifacts(options = {}) {
+  return normalizeWpCodeboxStaticVisualParityArtifacts(options);
+}
+
 async function writeStaticVisualParitySummary({ outputDirectory, sourceUrl, candidateUrl, readiness, visualDiff, codeboxResult, viewport, metadata = {} } = {}) {
   const comparisonHtml = `<!doctype html>
 <html lang="en">
@@ -271,6 +313,10 @@ code { color: #d1d5db; }
   };
   await fs.writeFile(path.join(outputDirectory, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
   return summary;
+}
+
+async function writeWpCodeboxStaticVisualParitySummary(options = {}) {
+  return writeStaticVisualParitySummary(options);
 }
 
 async function readReadiness(readinessFile) {
@@ -375,8 +421,13 @@ function escapeHtml(value) {
 
 module.exports = {
   buildStaticVisualParityRecipe,
+  buildWpCodeboxStaticVisualParityRecipe,
+  createWpCodeboxStaticVisualParityRuntimeProvider,
   createStaticServer,
   normalizeStaticVisualParityArtifacts,
+  normalizeWpCodeboxStaticVisualParityArtifacts,
   runStaticVisualParity,
+  runWpCodeboxStaticVisualParity,
   writeStaticVisualParitySummary,
+  writeWpCodeboxStaticVisualParitySummary,
 };

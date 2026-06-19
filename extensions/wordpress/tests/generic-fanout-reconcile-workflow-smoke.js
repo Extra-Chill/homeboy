@@ -39,7 +39,7 @@ async function main() {
       },
     },
     runtime_execution: {
-      backend: 'caller-provided-runtime',
+      backend: 'caller-provided-executor',
       task: {
         name: 'process-generic-group',
         group: '{{group.key}}',
@@ -58,7 +58,9 @@ async function main() {
   assert.deepEqual(plan.task_requests.map((request) => request.id), ['task-alpha', 'task-beta']);
   assert.deepEqual(plan.task_requests[0].item_ids, ['a1', 'a2']);
   assert.equal(plan.task_requests[0].item_count, 2);
-  assert.equal(plan.task_requests[0].runtime_execution.backend, 'caller-provided-runtime');
+  assert.equal(plan.task_requests[0].runtime_execution.backend, 'caller-provided-executor');
+  assert.equal(Object.hasOwn(plan.task_requests[0], 'sandbox_session_id'), false);
+  assert.equal(Object.hasOwn(plan.task_requests[0], 'wp_codebox_command'), false);
   assert.equal(plan.reconciliation.record_count, 0);
 
   const result = await createGenericFanoutReconcileResult({

@@ -1,5 +1,7 @@
 'use strict';
 
+const staticVisualParity = require('./lib/static-visual-parity');
+
 module.exports = {
 	...require('./lib/admin-page-scenarios'),
 	...require('./lib/wordpress-bootstrap-timeline'),
@@ -14,18 +16,29 @@ module.exports = {
 	...require('./lib/helper-manifest'),
 	...require('./lib/wordpress-helper-consumer'),
 	...require('./lib/fixture-setup'),
-	...require('./lib/codebox-memory-report'),
 	...require('./lib/webperf-evidence-summary'),
 	...require('./lib/benchmark-matrix-report'),
 	...require('./lib/static-site-fanout-adapter'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
-	...require('./lib/datamachine-agent-ci-codebox-adapter'),
 	...require('./lib/datamachine-agent-ci-plan'),
-	...require('./lib/wp-codebox-apply-adapter'),
-	...require('./lib/wp-codebox-recipe-helper'),
-	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wordpress-workload-profile'),
-	...require('./lib/static-visual-parity'),
+	buildStaticVisualParityRecipe: staticVisualParity.buildStaticVisualParityRecipe,
+	createStaticServer: staticVisualParity.createStaticServer,
+	normalizeStaticVisualParityArtifacts: staticVisualParity.normalizeStaticVisualParityArtifacts,
+	runStaticVisualParity: staticVisualParity.runStaticVisualParity,
+	writeStaticVisualParitySummary: staticVisualParity.writeStaticVisualParitySummary,
 	...require('./lib/wordpress-runtime-task-planner'),
+	wpCodebox: {
+		...require('./lib/codebox-memory-report'),
+		...require('./lib/datamachine-agent-ci-codebox-adapter'),
+		...require('./lib/wp-codebox-apply-adapter'),
+		...require('./lib/wp-codebox-recipe-helper'),
+		...require('./lib/wp-codebox-artifacts'),
+		buildWpCodeboxStaticVisualParityRecipe: staticVisualParity.buildWpCodeboxStaticVisualParityRecipe,
+		createWpCodeboxStaticVisualParityRuntimeProvider: staticVisualParity.createWpCodeboxStaticVisualParityRuntimeProvider,
+		normalizeWpCodeboxStaticVisualParityArtifacts: staticVisualParity.normalizeWpCodeboxStaticVisualParityArtifacts,
+		runWpCodeboxStaticVisualParity: staticVisualParity.runWpCodeboxStaticVisualParity,
+		writeWpCodeboxStaticVisualParitySummary: staticVisualParity.writeWpCodeboxStaticVisualParitySummary,
+	},
 };

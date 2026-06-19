@@ -324,37 +324,36 @@ Callers that need a provider stack supply WP Codebox's generic fields directly:
 `secret_env`. HBEX forwards those fields without expanding provider-specific
 runtime stacks; WP Codebox owns sandbox recipe expansion, runtime mounting, and
 artifact capture. The same generic fields can live in Homeboy/global settings as
-`wp_codebox_provider_plugin_paths`, `wp_codebox_runtime_overlays`,
-`wp_codebox_runtime_overlay_profiles`, `wp_codebox_runtime_env`,
-`wp_codebox_runtime_state_mounts`, `wp_codebox_runtime_config_mounts`, and
-`wp_codebox_secret_env`.
+`provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`,
+`runtime_env`, `runtime_state_mounts`, `runtime_config_mounts`, and `secret_env`.
+The corresponding `wp_codebox_*` names remain legacy compatibility aliases.
 
 Example global settings payload:
 
 ```json
 {
-  "wp_codebox_provider": "provider-slug",
-  "wp_codebox_model": "provider/model",
-  "wp_codebox_provider_plugin_paths": ["/components/ai-provider-example"],
-  "wp_codebox_runtime_env": {
+  "provider": "provider-slug",
+  "model": "provider/model",
+  "provider_plugin_paths": ["/components/ai-provider-example"],
+  "runtime_env": {
     "PROVIDER_CONFIG": "/runtime/provider/config.json",
     "XDG_DATA_HOME": "/runtime/provider/data"
   },
-  "wp_codebox_runtime_state_mounts": [
+  "runtime_state_mounts": [
     {
       "source": "/host/provider/state.json",
       "target": "/runtime/provider/state.json",
       "mode": "readonly"
     }
   ],
-  "wp_codebox_runtime_config_mounts": [
+  "runtime_config_mounts": [
     {
       "source": "/host/provider/config.json",
       "target": "/runtime/provider/config.json",
       "mode": "readonly"
     }
   ],
-  "wp_codebox_secret_env": ["PROVIDER_API_KEY"]
+  "secret_env": ["PROVIDER_API_KEY"]
 }
 ```
 
@@ -445,7 +444,7 @@ same spec without inheriting GitHub Actions glue.
             "agent_runtime_tools": "/components/data-machine-code"
           },
           "homeboy_extensions": "/components/homeboy-extensions/wordpress",
-          "wp_codebox_bin": "/components/wp-codebox/packages/wp-codebox/dist/cli.js",
+          "runtime_bin": "/components/wp-codebox/packages/wp-codebox/dist/cli.js",
           "bundle_path": "bundles/example-agent",
           "agent_slug": "example-agent",
           "pipeline_slug": "example-pipeline",

@@ -31,6 +31,7 @@
     "./wordpress-workload-profile": "./lib/wordpress-workload-profile.js",
     "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
     "./wp-codebox-visual-compare": "./lib/wp-codebox-visual-compare.js",
+    "./wordpress-codebox-visual-parity-workload": "./lib/wordpress-codebox-visual-parity-workload.mjs",
     "./static-visual-parity": "./lib/static-visual-parity.js",
     "./webperf-evidence-summary": "./lib/webperf-evidence-summary.js",
     "./benchmark-matrix-report": "./lib/benchmark-matrix-report.js",
@@ -66,6 +67,7 @@
     "test:wordpress-workload-profile": "node tests/wordpress-workload-profile-smoke.js",
     "test:wp-codebox-browser-metrics": "node tests/wp-codebox-browser-metrics-smoke.js",
     "test:wp-codebox-visual-compare": "node tests/wp-codebox-visual-compare-smoke.js",
+    "test:wordpress-codebox-visual-parity-workload": "node tests/wordpress-codebox-visual-parity-workload-smoke.mjs",
     "test:static-visual-parity": "node tests/static-visual-parity-smoke.js",
     "test:webperf-evidence-summary": "node tests/webperf-evidence-summary-smoke.js",
     "test:benchmark-matrix-report": "node tests/benchmark-matrix-report-smoke.js",
@@ -95,6 +97,7 @@
     "test:wordpress-runtime-task-planner": "node tests/wordpress-runtime-task-planner-smoke.js",
     "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:datamachine-agent-host-lifecycle": "node tests/datamachine-agent-host-lifecycle-smoke.js",
+    "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"
   },
   "devDependencies": {

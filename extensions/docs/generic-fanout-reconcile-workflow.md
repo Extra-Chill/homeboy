@@ -1,6 +1,8 @@
 # Generic Fanout/Reconcile Workflow
 
-`wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs` exposes the shared fanout/reconcile runner through JSON files. It is domain-neutral: callers provide item artifacts, grouping rules, task request templates, and runtime execution descriptors.
+`wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs` exposes the shared fanout/reconcile runner through JSON files. It is executor-neutral: callers provide item artifacts, grouping rules, task request templates, and opaque execution descriptors, then run those task requests with their own implementation.
+
+This helper is not a generic runtime provider surface. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and Codebox-specific task schemas stay in caller-owned adapters such as the quarantined WP Codebox audit fanout lane.
 
 ## Plan
 
@@ -26,7 +28,7 @@ Minimal config:
     "inputs": { "items": "{{group.items}}" }
   },
   "runtime_execution": {
-    "backend": "caller-provided-runtime",
+    "backend": "caller-provided-executor",
     "task": { "name": "process-generic-group", "group": "{{group.key}}" }
   }
 }
@@ -48,4 +50,4 @@ node wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs \
 
 Records are matched by `id`, `task_id`, `sandbox_session_id`, or `group_key`. Successful statuses default to `completed`, `success`, and `passed`; override with `success_statuses` in config. Outcomes default to the record `outcome` field; override with `outcome_path`.
 
-Runtime-specific descriptors are caller-owned. Keep provider names, credentials, WordPress setup, sandbox recipes, and repository-specific instructions in caller config or workflow examples, not in this generic helper.
+Execution descriptors are caller-owned and opaque to this helper. Keep provider names, credentials, WordPress setup, sandbox recipes, repository-specific instructions, and `wp-codebox/task-input/v1` request details in caller config or implementation-specific workflow examples, not in this generic reconcile helper.

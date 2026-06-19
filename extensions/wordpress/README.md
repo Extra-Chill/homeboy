@@ -300,13 +300,14 @@ runtime, component mount, command execution, and artifacts, and emits the same
 `BenchResults` envelope Homeboy core parses.
 
 Each file under `tests/bench/*.php` returns a callable. The callable may return
-numeric metrics directly or `{metrics, metadata, artifacts}`. Components may
-also declare configured workloads via `wp_codebox_workloads`; the WordPress
-runner maps those declarations into a temporary WP Codebox recipe alongside
-`validation_dependencies`, `wp_codebox_file_mounts`, `wp_config_defines`,
-`bench_env`, shared-state mounts, and browser handoff descriptors.
+numeric metrics directly or `{metrics, metadata, artifacts}`. Components may also
+declare configured workloads via the legacy `wp_codebox_workloads` setting; the
+WordPress runner maps those declarations into a temporary WP Codebox recipe
+alongside `validation_dependencies`, legacy `wp_codebox_file_mounts`,
+`wp_config_defines`, `bench_env`, shared-state mounts, and browser handoff
+descriptors.
 
-The generated recipe is the single WP Codebox entry point for benchmarks:
+The generated recipe is the single runtime entry point for benchmarks: legacy
 `wp_codebox_blueprint` becomes `runtime.blueprint`, dependencies become recipe
 plugin inputs, and scenario manifests compile into configured workloads.
 
@@ -549,10 +550,10 @@ extension handles the audit source with:
 homeboy refactor <component> \
   --from audit \
   --setting refactor.audit.extension=wordpress \
-  --setting wp_codebox_provider=provider-slug \
-  --setting wp_codebox_model=provider/model \
-  --setting wp_codebox_provider_plugin_paths=/components/ai-provider-example \
-  --setting wp_codebox_secret_env=PROVIDER_API_KEY
+  --setting provider=provider-slug \
+  --setting model=provider/model \
+  --setting provider_plugin_paths=/components/ai-provider-example \
+  --setting secret_env=PROVIDER_API_KEY
 ```
 
 `scripts/agent/homeboy-audit-wp-codebox-fanout.cjs` turns a structured audit
@@ -560,6 +561,13 @@ report into one `wp-codebox/task-input/v1` request per fix batch. With
 `--execute`, it streams each request to a WP Codebox task runner command such as
 `scripts/agent/homeboy-wp-codebox-task-runner.cjs`, which calls WP Codebox's
 stable `wp-codebox agent-task-run` parent contract.
+
+This audit fanout lane is intentionally quarantined as a WP Codebox-specific
+implementation. Its direct module/CLI entrypoints remain available for existing
+callers, but it is not exported from `wordpress/index.js` and is not part of the
+generic fanout/reconcile or runtime provider surfaces. Executor-neutral fanout
+planning belongs in `lib/generic-fanout-reconcile-workflow.js`; Codebox request
+schemas, sandbox session IDs, and recipe details stay in this lane.
 
 ### WP Codebox agent-task executor
 
@@ -605,12 +613,12 @@ extension and WP Codebox.
 
 Provider stacks stay generic at the Homeboy boundary. Executor config, options,
 or `HOMEBOY_SETTINGS_JSON` may provide `runtime_env`, `runtime_state_mounts`,
-and `runtime_config_mounts` (or the settings names `wp_codebox_runtime_env`,
-`wp_codebox_runtime_state_mounts`, and `wp_codebox_runtime_config_mounts`). The
-executor forwards those values unchanged to the WP Codebox task input alongside
-`provider_plugin_paths`, `runtime_overlays`, `runtime_overlay_profiles`, and
-`secret_env`; provider plugins own any model/auth/config discovery inside the
-sandbox.
+and `runtime_config_mounts`. The executor forwards those values unchanged to the
+WP Codebox task input alongside `provider_plugin_paths`, `runtime_overlays`,
+`runtime_overlay_profiles`, and `secret_env`; provider plugins own any
+model/auth/config discovery inside the sandbox. The legacy
+`wp_codebox_runtime_env`, `wp_codebox_runtime_state_mounts`, and
+`wp_codebox_runtime_config_mounts` settings are still accepted for compatibility.
 
 The outcome preserves the Homeboy decision evidence needed for Codebox worker
 canaries: why the Codebox executor was selected, which capabilities were used,
@@ -640,11 +648,11 @@ Configure per-component in the component's homeboy/component config under
 | `user` | string | `""` | WP-CLI user (email/login/ID); appended as `--user` when set |
 | `wp_config_defines` | object | `{}` | `CONSTANT_NAME => value` map appended to the runtime `wp-tests-config.php`; PHP type preserved via `var_export` |
 | `bench_env` | object | `{}` | `NAME => value` env vars forwarded into the runtime (workloads/fixtures read via `getenv()`) |
-| `wp_codebox_core_module` | string | `""` | Host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
-| `wp_codebox_blueprint` | object | `{}` | Runtime blueprint merged into the generated WP Codebox bench recipe |
-| `wp_codebox_extra_plugins` | array | `[]` | Additional WP Codebox extra plugin entries for runtime prerequisites that are not Homeboy validation dependencies |
-| `wp_codebox_workloads` | array | `[]` | Declared bench workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
-| `wp_codebox_file_mounts` | array | `[]` | Files from the component or validation dependencies mounted into explicit WordPress runtime paths |
+| `wp_codebox_core_module` | string | `""` | Legacy compatibility setting for the host-side ESM module path or package specifier that exports WP Codebox recipe builders for bench recipe generation |
+| `wp_codebox_blueprint` | object | `{}` | Legacy WP Codebox bench setting for the runtime blueprint merged into the generated recipe |
+| `wp_codebox_extra_plugins` | array | `[]` | Legacy WP Codebox bench setting for additional plugin entries that are not Homeboy validation dependencies |
+| `wp_codebox_workloads` | array | `[]` | Legacy WP Codebox bench setting for declared workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
+| `wp_codebox_file_mounts` | array | `[]` | Legacy WP Codebox bench setting for files from the component or validation dependencies mounted into explicit WordPress runtime paths |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
 
 ## Blueprint Validation
@@ -659,8 +667,8 @@ wordpress/scripts/validation/validate-playground-blueprint.sh \
 
 The script runs `wp-codebox validate-blueprint` and prints captured stdout/stderr
 on failure, including step-level Blueprint errors and PHP fatals surfaced by the
-WP Codebox Playground runtime. Set `HOMEBOY_WP_CODEBOX_BIN` to validate with a
-specific wp-codebox binary.
+WP Codebox Playground runtime. Set the legacy script-specific
+`HOMEBOY_WP_CODEBOX_BIN` override to validate with a specific wp-codebox binary.
 
 ## WP Codebox Doctor
 
@@ -672,8 +680,9 @@ wordpress/scripts/doctor/wp-codebox-doctor.sh doctor
 wordpress/scripts/doctor/wp-codebox-doctor.sh cleanup --stale-after-seconds 3600
 ```
 
-The script resolves `HOMEBOY_WP_CODEBOX_BIN` or `wp_codebox_bin` from Homeboy
-settings, then delegates to upstream `wp-codebox doctor` or `wp-codebox cleanup`.
+The script resolves `runtime_bin` first, then legacy `HOMEBOY_WP_CODEBOX_BIN` or
+`wp_codebox_bin` from Homeboy settings, before delegating to upstream
+`wp-codebox doctor` or `wp-codebox cleanup`.
 WP Codebox owns the health output, including JSON mode, binary/source checks,
 stale `recipe-run` process checks, and archive cache cleanup behavior.
 

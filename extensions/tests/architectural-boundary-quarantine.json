@@ -4,6 +4,7 @@
   "datamachine-agent-ci/lib/datamachine-agent-ci-plan.js": "Data Machine Agent CI adapter constants and option mapping around generic runtime-agent-ci primitives.",
   "wordpress/lib/datamachine-agent-ci-codebox-adapter.js": "WordPress Codebox adapter shim that injects the Data Machine Agent CI runtime profile.",
   "wordpress/lib/datamachine-agent-ci-plan.js": "WordPress package compatibility wrapper around the quarantined Data Machine Agent CI adapter.",
+  "wordpress/lib/datamachine-agent-ci-runtime-adapter.js": "WordPress package compatibility adapter that maps legacy Data Machine Agent CI runtime profile fields into generic runtime provider resolution.",
   "wordpress/scripts/agent/build-replay-bundle.js": "Replay bundle projection keeps Data Machine provenance fields for legacy agent-ci evidence bundles.",
   "wordpress/scripts/agent/project-wpgym-eval-row.js": "WP Gym eval row projection keeps Data Machine provenance fields from legacy agent-ci evidence bundles.",
   "wordpress/scripts/agent/run-datamachine-agent-task.cjs": "WordPress runner entrypoint for the quarantined Data Machine Agent CI workflow."

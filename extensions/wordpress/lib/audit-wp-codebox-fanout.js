@@ -28,6 +28,16 @@ const { loadWpCodeboxCoreFunction } = require('./wp-codebox-core-loader');
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const TASK_SCHEMA = 'wp-codebox/task-input/v1';
 const RUN_SCHEMA = 'homeboy/audit-wp-codebox-run/v1';
+const IMPLEMENTATION_SCOPE = Object.freeze({
+  id: 'wordpress.audit-wp-codebox-fanout',
+  quarantine: 'wp-codebox-implementation',
+  generic_surface: false,
+  public_entrypoints: [
+    'wordpress/lib/audit-wp-codebox-fanout.js',
+    'wordpress/scripts/agent/homeboy-audit-wp-codebox-fanout.cjs',
+  ],
+  rationale: 'Audit fanout plans and executes wp-codebox/task-input/v1 requests; callers that need executor-neutral fanout should use generic-fanout-reconcile-workflow instead.',
+});
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_TASK_TIMEOUT_SECONDS = 45 * 60;
 const WP_CODEBOX_STRUCTURED_OUTCOME_KINDS = new Set([
@@ -1202,6 +1212,7 @@ function taskOrder(plan, record) {
 }
 
 module.exports = {
+  IMPLEMENTATION_SCOPE,
   PLAN_SCHEMA,
   RUN_SCHEMA,
   TASK_SCHEMA,

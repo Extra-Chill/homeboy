@@ -22,8 +22,8 @@ instead of embedding the provider contract.
 
 Configure the Codex pair with task config, global settings, or environment variables:
 
-- `provider_plugin_paths` / `wp_codebox_provider_plugin_paths` / `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`.
-- `runtime_overlays` / `wp_codebox_runtime_overlays`, or `wp_codebox_php_ai_client_path` / `HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH`: a prepared `php-ai-client` checkout mounted to `/wordpress/wp-includes/php-ai-client`. Explicit runtime overlay entries must use the canonical `kind` field, for example `{ "kind": "bundled-library", "library": "php-ai-client", "source": "/abs/path/to/php-ai-client" }`; legacy `type` entries are rejected before WP Codebox dispatch.
+- `provider_plugin_paths`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`. Legacy compatibility aliases: `wp_codebox_provider_plugin_paths`, `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`.
+- `runtime_overlays`, or `php_ai_client_path`: a prepared `php-ai-client` checkout mounted to `/wordpress/wp-includes/php-ai-client`. Legacy compatibility aliases: `wp_codebox_runtime_overlays`, `wp_codebox_php_ai_client_path`, `HOMEBOY_WP_CODEBOX_PHP_AI_CLIENT_PATH`. Explicit runtime overlay entries must use the canonical `kind` field, for example `{ "kind": "bundled-library", "library": "php-ai-client", "source": "/abs/path/to/php-ai-client" }`; legacy `type` entries are rejected before WP Codebox dispatch.
 
 The `php-ai-client` checkout must include bearer-token auth support (`RequestAuthenticationMethod::bearerToken`) and Composer vendor dependencies (`vendor/autoload.php`). If the stack is incomplete, the executor emits diagnostics for the missing Codex provider plugin, missing bearer-token auth, or missing Composer vendor preparation.
 
@@ -42,6 +42,28 @@ directory aliases including `artifacts.directory`, `artifacts.path`,
 This keeps extension helpers product-neutral: workloads and probes can name the
 artifact they need, while runtime-specific bundle layouts remain behind one
 lookup boundary.
+
+The generic `homeboy-extension-wordpress` root export does not flatten
+WP Codebox helpers into the public WordPress API. Compatibility consumers that
+need Codebox-owned helpers from the root export should access them through the
+explicit `wpCodebox` namespace; new imports should prefer the dedicated
+`homeboy-extension-wordpress/wp-codebox-*` subpath exports.
+
+## Static Visual Parity Runtime Boundary
+
+`wordpress/lib/static-visual-parity.js` keeps the static visual parity
+orchestration API stable while routing runtime-specific work through a provider
+object. The default provider is WP Codebox and is exposed explicitly through
+`createWpCodeboxStaticVisualParityRuntimeProvider()`,
+`buildWpCodeboxStaticVisualParityRecipe()`,
+`runWpCodeboxStaticVisualParity()`, and
+`normalizeWpCodeboxStaticVisualParityArtifacts()`.
+
+Existing callers can continue using `buildStaticVisualParityRecipe()`,
+`runStaticVisualParity()`, and `normalizeStaticVisualParityArtifacts()`; those
+aliases select the WP Codebox provider unless a caller passes `runtimeProvider`.
+The provider owns the `wp-codebox/workspace-recipe/v1` recipe shape, recipe file
+name, runtime output file name, dispatch function, and artifact normalization.
 
 ## Test failure sidecar
 
@@ -109,11 +131,12 @@ Each dependency entry may be either:
 
 ## Configurable WP Codebox Bench Workloads
 
-WordPress bench runs can declare WP Codebox workloads in extension settings when
+WordPress bench runs can declare runtime workloads in extension settings when
 the workload should be configured by the repo instead of living under
-`tests/bench/*.php`. Configured workloads run after the existing WP Codebox
-bootstrap, `wp_codebox_blueprint`, dependency mounts, and component load through
-a generated WP Codebox recipe.
+`tests/bench/*.php`. Configured workloads run after the runtime bootstrap,
+blueprint, dependency mounts, and component load through a generated WP Codebox
+recipe. The current bench runner still consumes the legacy `wp_codebox_*`
+settings for recipe-specific fields.
 
 ### Portable workload profile helper
 
@@ -127,7 +150,8 @@ onto the reusable workflow inputs Homeboy Extensions already owns:
 - `wp_config_defines` becomes `extra_wp_config_defines` JSON.
 - `mounts` becomes `runtime_mounts` JSON.
 - `run_before` and `run_after` become workload lifecycle hook arrays.
-- `workloads` becomes `wp_codebox_workloads` JSON.
+- `workloads` becomes legacy `wp_codebox_workloads` JSON for the current WP
+  Codebox bench recipe generator.
 - `visual_comparisons` append generic `visual-compare` verifier steps to
   `workload_run_after`.
 
@@ -601,6 +625,32 @@ match counts, visible counts, nonzero bounding-box counts, first-match text, and
 group/totals summaries. Product-specific visual parity gates should stay in the
 rig or workload that owns those expectations.
 
+## WordPress/Codebox Visual Parity Workloads
+
+WordPress benchmark workloads can import
+`runWordPressCodeboxVisualParityWorkload()` from the WordPress extension when
+they need to run a Codebox `wordpress.visual-compare` recipe and emit a
+normalized `homeboy/VisualParityArtifact/v1` artifact.
+
+```js
+const { runWordPressCodeboxVisualParityWorkload } = await import('homeboy-extension-wordpress/wordpress-codebox-visual-parity-workload');
+
+export default async function () {
+  return runWordPressCodeboxVisualParityWorkload({
+    id: 'homepage-parity',
+    backend: { codeboxCli: process.env.CODEBOX_CLI },
+    source: { path: './dist/site', label: 'static-source', port: 4173 },
+    candidate: {
+      url: '/',
+      label: 'wordpress-candidate',
+      recipe: { runtime: { wp: 'latest' }, inputs: { mounts: [] } },
+    },
+    viewport: { width: 1280, height: 1600 },
+    threshold: 0.015,
+  });
+}
+```
+
 ## Block Theme Quality Probe
 
 Playground scenario graders can call a generic PHP-first WordPress quality probe
@@ -748,10 +798,11 @@ Evidence expectations:
 
 ### Nested Plugin Source Roots
 
-WP Codebox bench runs normally treat the selected Homeboy component path as the
+Runtime bench runs normally treat the selected Homeboy component path as the
 plugin source. Monorepos can keep that component path scoped to the nested
 plugin while asking the runner to materialize a broader checkout for host-side
-prep and Composer path repositories:
+prep and Composer path repositories. These source-root settings are legacy
+WP Codebox bench aliases until the bench recipe generator grows generic names:
 
 ```json
 {
@@ -766,9 +817,10 @@ prep and Composer path repositories:
 }
 ```
 
-For Lab offload, pass `wp_codebox_source_root` as a path-valued `--setting` when
-the root must be synced separately from the selected component snapshot. Homeboy
-remaps that setting to the runner path before the WordPress bench runner starts.
+For Lab offload, pass legacy `wp_codebox_source_root` as a path-valued
+`--setting` when the root must be synced separately from the selected component
+snapshot. Homeboy remaps that setting to the runner path before the WordPress
+bench runner starts.
 The bench runner keeps `HOMEBOY_COMPONENT_PATH` and the plugin slug scoped to the
 selected component, but uses the configured source root/subpath for prepare step
 cwd resolution, workload discovery, file mounts, and the WP Codebox plugin input.
@@ -776,8 +828,9 @@ cwd resolution, workload discovery, file mounts, and the WP Codebox plugin input
 ## WP Codebox Scenario Manifests
 
 Repos can declare first-class scenario manifests and let the WordPress runner
-compile them into `wp_codebox_workloads`. This keeps eval/RL-style scenarios on
-the WP Codebox recipe execution path instead of adding a second runner.
+compile them into legacy `wp_codebox_workloads`. This keeps eval/RL-style
+scenarios on the WP Codebox recipe execution path instead of adding a second
+runner.
 
 ```json
 {
@@ -823,8 +876,9 @@ Supported fields:
   references resolve relative to the manifest file.
 - `blueprint` or `blueprint_file`: inline object or JSON file passed to
   WP Codebox as part of the generated recipe runtime blueprint.
-- `run`: existing `wp_codebox_workloads` steps for the model or agent action
-  loop. The supported step types are still `php`, `ability`, and `wp-cli`.
+- `run`: existing legacy `wp_codebox_workloads` steps for the model or agent
+  action loop. The supported step types are still `php`, `ability`, and
+  `wp-cli`.
 - `grader` or `grader_file`: PHP file appended after `run`, so grading happens
   after the action loop.
 - `rules`, `general_rules`, `task_rules`, and `probes`: copied into scenario
