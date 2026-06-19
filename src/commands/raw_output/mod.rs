@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn interactive_passthrough_has_no_raw_text_result() {
         let result = run(
-            Commands::List,
+            Commands::List { json: false },
             &GlobalArgs {},
             CommandRawOutputMode::InteractivePassthrough,
         );
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn unsupported_plain_text_command_returns_output_mode_error() {
         let result = run(
-            Commands::List,
+            Commands::List { json: false },
             &GlobalArgs {},
             CommandRawOutputMode::PlainText,
         )

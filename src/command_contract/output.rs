@@ -286,7 +286,7 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::List => CommandOutputDescriptor {
+            Commands::List { .. } => CommandOutputDescriptor {
                 response_mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
                 output_file_mode,
                 json_family: CommandJsonFamily::RawOnly,
@@ -453,7 +453,7 @@ mod tests {
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
         assert_eq!(
-            Commands::List.response_mode(false),
+            (Commands::List { json: false }).response_mode(false),
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
     }
@@ -498,7 +498,7 @@ mod tests {
             CommandOutputContractKind::JsonEnvelope
         );
 
-        let list_descriptor = Commands::List.descriptor(false);
+        let list_descriptor = (Commands::List { json: false }).descriptor(false);
         assert_eq!(
             list_descriptor.output.json_family,
             CommandJsonFamily::RawOnly
