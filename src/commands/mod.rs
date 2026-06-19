@@ -239,6 +239,7 @@ pub mod source_command;
 pub mod ssh;
 pub mod stack;
 pub mod status;
+pub(crate) mod summary_json;
 pub mod test;
 pub mod trace;
 pub mod triage;
