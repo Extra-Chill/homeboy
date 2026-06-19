@@ -11,7 +11,7 @@ use crate::commands::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 2;
+const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 
 #[derive(Parser)]
 #[command(name = "homeboy")]
@@ -197,6 +197,7 @@ impl CommandSurface {
 pub struct CommandSurfaceEntry {
     pub name: String,
     pub visible_aliases: Vec<String>,
+    pub hidden: bool,
     pub subcommands: Vec<CommandSurfaceEntry>,
 }
 
@@ -221,6 +222,8 @@ impl CommandSafetyManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSafetyEntry {
     pub name: String,
+    pub aliases: Vec<String>,
+    pub hidden: bool,
     pub path: Vec<String>,
     pub mutates: bool,
     pub operator: bool,
@@ -380,6 +383,8 @@ fn command_safety_entry(entry: &CommandSurfaceEntry, parent_path: &[String]) -> 
 
     CommandSafetyEntry {
         name: entry.name.clone(),
+        aliases: entry.visible_aliases.clone(),
+        hidden: entry.hidden,
         path: path.clone(),
         mutates: safety.mutates,
         operator: safety.operator,
@@ -509,13 +514,13 @@ fn docs_path(path: &[String]) -> Option<String> {
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
     command
         .get_subcommands()
-        .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| CommandSurfaceEntry {
             name: subcommand.get_name().to_string(),
             visible_aliases: subcommand
                 .get_visible_aliases()
                 .map(str::to_string)
                 .collect(),
+            hidden: subcommand.is_hide_set(),
             subcommands: if remaining_depth == 0 {
                 Vec::new()
             } else {
@@ -593,6 +598,7 @@ mod tests {
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
+        assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -604,6 +610,7 @@ mod tests {
         assert!(surface.contains_path(&["self", "status"]));
         assert!(surface.contains_path(&["doctor", "resources"]));
         assert!(surface.contains_path(&["ci", "list"]));
+        assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
         assert!(surface.contains_path(&["observe"]));
     }
 
@@ -623,6 +630,21 @@ mod tests {
         assert!(manifest.find_path(&["db", "delete-row"]).is_some());
         assert!(manifest.find_path(&["file", "write"]).is_some());
         assert!(manifest.find_path(&["api", "post"]).is_some());
+        assert!(manifest
+            .find_path(&["agent-task", "controller", "run-next"])
+            .is_some());
+    }
+
+    #[test]
+    fn command_safety_manifest_records_clap_visibility_metadata() {
+        let manifest = current_command_safety_manifest();
+
+        let hidden_list = manifest.find_path(&["list"]).unwrap();
+        assert!(hidden_list.hidden);
+
+        let visible_status = manifest.find_path(&["status"]).unwrap();
+        assert!(!visible_status.hidden);
+        assert!(visible_status.aliases.is_empty());
     }
 
     #[test]
