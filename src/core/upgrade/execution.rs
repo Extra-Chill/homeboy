@@ -325,12 +325,16 @@ fn command_output_with_timeout(
     let start = Instant::now();
 
     loop {
-        if child.try_wait().map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some("verify active binary version".to_string()),
-            )
-        })?.is_some() {
+        if child
+            .try_wait()
+            .map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some("verify active binary version".to_string()),
+                )
+            })?
+            .is_some()
+        {
             return child.wait_with_output().map_err(|e| {
                 Error::internal_io(
                     e.to_string(),
