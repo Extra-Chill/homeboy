@@ -9,10 +9,9 @@
 use std::collections::HashMap;
 
 use crate::core::agent_tasks::provider::{
-    provider_runner_secret_env_for_plan, provider_runner_secret_env_for_plan_with_providers,
-    provider_secret_sources_for_plan, provider_secret_sources_for_plan_with_providers,
-    provider_secret_sources_for_providers, AgentTaskExecutorProvider,
-    ExtensionProviderAgentTaskExecutor,
+    provider_runner_secret_env_for_plan_with_providers,
+    provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
+    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use crate::core::agent_tasks::scheduler::AgentTaskPlan;
 use crate::core::agent_tasks::secrets as agent_task_secrets;
@@ -32,8 +31,18 @@ pub(super) fn hydrate_agent_task_secret_env(
     args: &[String],
     env: &mut HashMap<String, String>,
 ) -> Result<serde_json::Value> {
-    let names = declared_agent_task_controller_secret_env(args);
-    let mut runner_deferred_names = declared_agent_task_run_plan_secret_env(args);
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    hydrate_agent_task_secret_env_with_providers(args, env, executor.providers())
+}
+
+fn hydrate_agent_task_secret_env_with_providers(
+    args: &[String],
+    env: &mut HashMap<String, String>,
+    providers: &[AgentTaskExecutorProvider],
+) -> Result<serde_json::Value> {
+    let mut names = declared_agent_task_controller_secret_env_with_providers(args, providers);
+    let mut runner_deferred_names =
+        declared_agent_task_run_plan_secret_env_with_providers(args, providers);
     runner_deferred_names.sort();
     runner_deferred_names.dedup();
     if names.is_empty() && runner_deferred_names.is_empty() {
@@ -44,7 +53,26 @@ pub(super) fn hydrate_agent_task_secret_env(
         }));
     }
 
-    let fallback_sources = declared_agent_task_controller_secret_sources(args);
+    let fallback_sources = subcommand_index(args, "agent-task")
+        .map(|agent_task_index| {
+            declared_agent_task_controller_secret_sources_with_providers(
+                args,
+                agent_task_index,
+                providers,
+            )
+        })
+        .unwrap_or_default();
+    let controller_source_run_plan_names = runner_deferred_names
+        .iter()
+        .filter(|name| fallback_sources.contains_key(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !controller_source_run_plan_names.is_empty() {
+        names.extend(controller_source_run_plan_names.iter().cloned());
+        names.sort();
+        names.dedup();
+        runner_deferred_names.retain(|name| !controller_source_run_plan_names.contains(name));
+    }
     if !names.is_empty() {
         let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(&names, &fallback_sources).map_err(|error| {
             Error::validation_invalid_argument(
@@ -231,27 +259,16 @@ fn declared_agent_task_controller_secret_env_with_providers(
     names
 }
 
-fn declared_agent_task_controller_secret_sources(
-    args: &[String],
-) -> HashMap<String, crate::core::defaults::AgentTaskSecretSource> {
-    let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
-        return HashMap::new();
-    };
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    declared_agent_task_controller_secret_sources_with_providers(
-        args,
-        agent_task_index,
-        executor.providers(),
-    )
-}
-
 fn declared_agent_task_controller_secret_sources_with_providers(
     args: &[String],
     agent_task_index: usize,
     providers: &[AgentTaskExecutorProvider],
 ) -> HashMap<String, crate::core::defaults::AgentTaskSecretSource> {
     if args.get(agent_task_index + 1).map(String::as_str) != Some("providers") {
-        return agent_task_dispatch_provider_plan_from_args(args)
+        if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args) {
+            return provider_secret_sources_for_plan_with_providers(&plan, providers);
+        }
+        return agent_task_run_plan_from_args(args)
             .map(|plan| provider_secret_sources_for_plan_with_providers(&plan, providers))
             .unwrap_or_default();
     }
@@ -474,7 +491,15 @@ fn declared_provider_config_secret_env(spec: &str) -> Vec<String> {
 }
 
 fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
-    declared_agent_task_run_plan_secret_env_by_task(args)
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    declared_agent_task_run_plan_secret_env_with_providers(args, executor.providers())
+}
+
+fn declared_agent_task_run_plan_secret_env_with_providers(
+    args: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    declared_agent_task_run_plan_secret_env_by_task_with_providers(args, providers)
         .into_iter()
         .flat_map(|task| task.secret_env)
         .collect()
@@ -490,26 +515,24 @@ struct PlanTaskSecretEnv {
 }
 
 fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanTaskSecretEnv> {
-    let Some(plan_spec) = agent_task_run_plan_plan_spec(args) else {
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    declared_agent_task_run_plan_secret_env_by_task_with_providers(args, executor.providers())
+}
+
+fn declared_agent_task_run_plan_secret_env_by_task_with_providers(
+    args: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<PlanTaskSecretEnv> {
+    let Some(plan) = agent_task_run_plan_from_args(args) else {
         return Vec::new();
-    };
-    if plan_spec == "-" {
-        return Vec::new();
-    }
-    let raw = match config::read_json_spec_to_string(&plan_spec) {
-        Ok(raw) => raw,
-        Err(_) => return Vec::new(),
-    };
-    let plan: AgentTaskPlan = match serde_json::from_str(&raw) {
-        Ok(plan) => plan,
-        Err(_) => return Vec::new(),
     };
 
     let mut tasks = Vec::new();
-    let provider_names = provider_runner_secret_env_for_plan(&plan);
-    let provider_secret_sources: Vec<String> = provider_secret_sources_for_plan(&plan)
-        .into_keys()
-        .collect();
+    let provider_names = provider_runner_secret_env_for_plan_with_providers(&plan, providers);
+    let provider_secret_sources: Vec<String> =
+        provider_secret_sources_for_plan_with_providers(&plan, providers)
+            .into_keys()
+            .collect();
     if !provider_names.is_empty() {
         tasks.push(PlanTaskSecretEnv {
             task_id: PLAN_PROVIDER_PROVENANCE.to_string(),
@@ -538,6 +561,15 @@ fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanT
         });
     }
     tasks
+}
+
+fn agent_task_run_plan_from_args(args: &[String]) -> Option<AgentTaskPlan> {
+    let plan_spec = agent_task_run_plan_plan_spec(args)?;
+    if plan_spec == "-" {
+        return None;
+    }
+    let raw = config::read_json_spec_to_string(&plan_spec).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
@@ -1025,6 +1057,75 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_agent_task_secret_env_resolves_provider_default_run_plan_secrets_on_controller() {
+        let _access_token_env = RemovedEnvVar::new("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN");
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let auth_path = temp.path().join("codex-auth.json");
+            std::fs::write(
+                &auth_path,
+                serde_json::json!({
+                    "tokens": {
+                        "access_token": "controller-access-token"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("write auth json");
+            let plan_path = temp.path().join("plan.json");
+            std::fs::write(
+                &plan_path,
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-plan/v1",
+                    "plan_id": "provider-default-controller-secret-plan",
+                    "tasks": [
+                        {
+                            "schema": "homeboy/agent-task-request/v1",
+                            "task_id": "codex-task",
+                            "executor": {
+                                "backend": "sample-runtime",
+                                "config": {
+                                    "provider": "codex"
+                                }
+                            },
+                            "instructions": "Use Codex credentials."
+                        }
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("write plan");
+            let provider =
+                fixture_provider_with_codex_defaults_at(&auth_path.display().to_string());
+            let mut env = HashMap::new();
+
+            let diagnostics = hydrate_agent_task_secret_env_with_providers(
+                &run_plan_args(&plan_path),
+                &mut env,
+                std::slice::from_ref(&provider),
+            )
+            .expect("provider default source should resolve on controller");
+
+            assert!(matches!(
+                env.get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN").map(String::as_str),
+                Some("controller-access-token")
+            ));
+            assert_eq!(diagnostics["runner_deferred_secret_env"], serde_json::json!([]));
+            assert_eq!(
+                diagnostics["secret_env"],
+                serde_json::json!([
+                    {
+                        "name": "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+                        "configured": true,
+                        "source": "json-file"
+                    }
+                ])
+            );
+            assert!(!diagnostics.to_string().contains("controller-access-token"));
+        });
+    }
+
+    #[test]
     fn preflight_agent_task_runner_secret_env_fails_missing_runner_ref() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan_path = temp.path().join("plan.json");
@@ -1271,7 +1372,34 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
         }
     }
 
+    struct RemovedEnvVar {
+        name: &'static str,
+        value: Option<String>,
+    }
+
+    impl RemovedEnvVar {
+        fn new(name: &'static str) -> Self {
+            let value = std::env::var(name).ok();
+            std::env::remove_var(name);
+            Self { name, value }
+        }
+    }
+
+    impl Drop for RemovedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.value {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
     fn fixture_provider_with_codex_defaults() -> AgentTaskExecutorProvider {
+        fixture_provider_with_codex_defaults_at("~/.codex/auth.json")
+    }
+
+    fn fixture_provider_with_codex_defaults_at(path: &str) -> AgentTaskExecutorProvider {
         let mut provider_defaults = std::collections::BTreeMap::new();
         provider_defaults.insert(
             "codex".to_string(),
@@ -1280,7 +1408,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
                 "secret_env_sources": {
                     "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
                         "source": "json-file",
-                        "path": "~/.codex/auth.json",
+                        "path": path,
                         "field": "tokens.access_token"
                     }
                 }
