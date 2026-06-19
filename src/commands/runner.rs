@@ -1109,22 +1109,89 @@ fn exec(
     )
 }
 
+/// Maximum number of bytes retained when reading a runner exec script into
+/// memory. The script is executed verbatim, so an oversized script is rejected
+/// rather than silently truncated; the cap bounds the retained bytes and the
+/// truncation metadata records when the source exceeded the limit (#5238).
+const RUNNER_EXEC_SCRIPT_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// Truncation metadata describing how much of a captured script was retained.
+/// Mirrors the bounded-capture pattern used elsewhere in the codebase (the
+/// `CaptureMetadata`/`BoundedCapture` shape) so the retained bytes cannot grow
+/// without an explicit limit and the overflow is observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScriptCaptureMetadata {
+    limit_bytes: usize,
+    seen_bytes: usize,
+    retained_bytes: usize,
+    truncated: bool,
+}
+
+/// Read a stream into memory with an explicit retained-byte bound, returning the
+/// retained bytes plus truncation metadata. Reads one byte past the limit so an
+/// overflow is detectable without retaining the entire (potentially unbounded)
+/// source.
+fn read_bounded(
+    mut reader: impl Read,
+    limit_bytes: usize,
+) -> io::Result<(Vec<u8>, ScriptCaptureMetadata)> {
+    let mut retained = Vec::new();
+    let read = reader
+        .by_ref()
+        .take((limit_bytes as u64).saturating_add(1))
+        .read_to_end(&mut retained)?;
+    let truncated = read > limit_bytes;
+    if truncated {
+        retained.truncate(limit_bytes);
+    }
+    let metadata = ScriptCaptureMetadata {
+        limit_bytes,
+        seen_bytes: read,
+        retained_bytes: retained.len(),
+        truncated,
+    };
+    Ok((retained, metadata))
+}
+
 fn read_runner_exec_script(path: &str) -> homeboy::core::Result<String> {
-    if path == "-" {
-        let mut script = String::new();
-        io::stdin().read_to_string(&mut script).map_err(|err| {
+    let (bytes, capture) = if path == "-" {
+        read_bounded(io::stdin().lock(), RUNNER_EXEC_SCRIPT_LIMIT_BYTES).map_err(|err| {
             homeboy::core::Error::internal_io(
                 err.to_string(),
                 Some("read runner exec script from stdin".to_string()),
             )
+        })?
+    } else {
+        let file = fs::File::open(path).map_err(|err| {
+            homeboy::core::Error::internal_io(
+                err.to_string(),
+                Some(format!("read runner exec script {path}")),
+            )
         })?;
-        return Ok(script);
+        read_bounded(file, RUNNER_EXEC_SCRIPT_LIMIT_BYTES).map_err(|err| {
+            homeboy::core::Error::internal_io(
+                err.to_string(),
+                Some(format!("read runner exec script {path}")),
+            )
+        })?
+    };
+
+    if capture.truncated {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "script_file",
+            format!(
+                "runner exec script exceeds the {} byte limit (retained {} of {}+ bytes); refusing to execute a truncated script",
+                capture.limit_bytes, capture.retained_bytes, capture.seen_bytes
+            ),
+            Some(path.to_string()),
+            None,
+        ));
     }
 
-    fs::read_to_string(path).map_err(|err| {
+    String::from_utf8(bytes).map_err(|err| {
         homeboy::core::Error::internal_io(
             err.to_string(),
-            Some(format!("read runner exec script {path}")),
+            Some(format!("decode runner exec script {path}")),
         )
     })
 }
@@ -1493,6 +1560,42 @@ mod tests {
         assert_eq!(value["stdout"], "hello\n");
         assert_eq!(value["stderr"], "warn\n");
         assert_eq!(value["job_id"], "job-123");
+    }
+
+    #[test]
+    fn read_bounded_retains_full_source_within_limit() {
+        let (bytes, capture) = read_bounded(&b"echo hi"[..], 1024).expect("read bounded");
+
+        assert_eq!(bytes, b"echo hi");
+        assert_eq!(capture.limit_bytes, 1024);
+        assert_eq!(capture.seen_bytes, 7);
+        assert_eq!(capture.retained_bytes, 7);
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn read_bounded_marks_truncated_when_source_exceeds_limit() {
+        let source = vec![b'x'; 16];
+        let (bytes, capture) = read_bounded(&source[..], 4).expect("read bounded");
+
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(capture.limit_bytes, 4);
+        assert_eq!(capture.retained_bytes, 4);
+        assert!(capture.seen_bytes > capture.retained_bytes);
+        assert!(capture.truncated);
+    }
+
+    #[test]
+    fn read_runner_exec_script_rejects_oversized_script() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().expect("temp script");
+        let oversized = vec![b'a'; RUNNER_EXEC_SCRIPT_LIMIT_BYTES + 1];
+        file.write_all(&oversized).expect("write script");
+        let path = file.path().to_string_lossy().to_string();
+
+        let err = read_runner_exec_script(&path).expect_err("oversized script rejected");
+        assert!(err.to_string().contains("byte limit"));
     }
 
     #[test]
