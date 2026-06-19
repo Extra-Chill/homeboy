@@ -2343,6 +2343,38 @@ assert(missingProviderPluginDiagnostic);
 assert.equal(missingProviderPluginDiagnostic.data.missing_provider_plugin_path, true);
 assert.deepEqual(missingProviderPluginDiagnostic.data.provider_plugin_paths, []);
 
+const installedLayoutRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-runtime-install-'));
+try {
+  const installedRuntime = path.join(installedLayoutRoot, 'agent-runtimes', 'wp-codebox');
+  fs.mkdirSync(path.join(installedRuntime, 'scripts', 'agent'), { recursive: true });
+  fs.mkdirSync(path.join(installedRuntime, 'lib'), { recursive: true });
+  fs.mkdirSync(path.join(installedLayoutRoot, 'extensions', 'wordpress', 'lib'), { recursive: true });
+  fs.copyFileSync(wpCodeboxRuntimeExecutor, path.join(installedRuntime, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs'));
+  fs.writeFileSync(path.join(installedRuntime, 'lib', 'codebox-agent-task-executor.js'), `module.exports = {
+  agentTaskOutcomeFromCodeboxResult() { return {}; },
+  codeboxTaskRequestFromAgentTaskRequest() { return {}; },
+  providerContract() { return {}; },
+};\n`);
+  fs.writeFileSync(path.join(installedRuntime, 'lib', 'provider-preflight-manifest.js'), `module.exports = {
+  normalizeStringArray(value) { return Array.isArray(value) ? value : []; },
+  providerAuthEnvSources() { return {}; },
+  providerDiagnosticClass() { return 'fixture'; },
+  providerLabel() { return 'fixture'; },
+  providerPluginValidation() { return null; },
+  providerSecretEnv() { return []; },
+};\n`);
+  fs.writeFileSync(path.join(installedLayoutRoot, 'extensions', 'wordpress', 'lib', 'wp-codebox-core-loader.js'), `module.exports = { async loadWpCodeboxCore() { return {}; } };\n`);
+  const installedLayoutResult = spawnSync(process.execPath, [path.join(installedRuntime, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')], {
+    encoding: 'utf8',
+    env: fixtureEnv(),
+  });
+  assert.equal(installedLayoutResult.status, 1);
+  assert.match(installedLayoutResult.stderr, /AgentTaskRequest JSON is required/);
+  assert.doesNotMatch(installedLayoutResult.stderr, /wp-codebox-core-loader|MODULE_NOT_FOUND/);
+} finally {
+  fs.rmSync(installedLayoutRoot, { recursive: true, force: true });
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-agent-task-executor-'));
 try {
   const { fixture, capture } = writeFixtureTaskRunner(root);

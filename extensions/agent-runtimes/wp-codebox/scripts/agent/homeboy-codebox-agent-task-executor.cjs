@@ -28,7 +28,26 @@ const {
 } = require('../../lib/provider-preflight-manifest');
 const {
   loadWpCodeboxCore,
-} = require('../../../../wordpress/lib/wp-codebox-core-loader');
+} = requireWpCodeboxCoreLoader();
+
+function requireWpCodeboxCoreLoader() {
+  const candidates = [
+    path.resolve(__dirname, '../../../../wordpress/lib/wp-codebox-core-loader'),
+    path.resolve(__dirname, '../../../../extensions/wordpress/lib/wp-codebox-core-loader'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      return require(candidate);
+    } catch (error) {
+      if (!error || error.code !== 'MODULE_NOT_FOUND') {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(`Unable to resolve wp-codebox-core-loader from ${candidates.join(', ')}`);
+}
 
 const DEFAULT_TASK_RUNNER = path.resolve(__dirname, 'homeboy-wp-codebox-task-runner.cjs');
 function argValue(name) {
