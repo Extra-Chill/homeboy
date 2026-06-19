@@ -5,8 +5,8 @@
 use homeboy::core::error::Hint;
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::Serialize;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+
+use super::output::{write_output_file_atomically, OutputWriteOptions};
 
 #[derive(Debug, Serialize)]
 pub struct CliResponse<T: Serialize> {
@@ -201,37 +201,9 @@ pub fn write_json_to_file(result: &Result<serde_json::Value>, path: &str, exit_c
         }
     };
 
-    if let Err(e) = write_json_to_file_atomically(path, &json) {
+    if let Err(e) = write_output_file_atomically(path, json, OutputWriteOptions::json_output()) {
         eprintln!("Warning: failed to write --output file '{}': {}", path, e);
     }
-}
-
-fn write_json_to_file_atomically(path: &str, json: &str) -> std::io::Result<()> {
-    let target = Path::new(path);
-    let temp = atomic_output_temp_path(target);
-    let mut file = std::fs::File::create(&temp)?;
-
-    file.write_all(json.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    drop(file);
-
-    match std::fs::rename(&temp, target) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(err)
-        }
-    }
-}
-
-fn atomic_output_temp_path(target: &Path) -> PathBuf {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("output.json");
-    let temp_name = format!(".{file_name}.{}.tmp", std::process::id());
-    target.with_file_name(temp_name)
 }
 
 #[cfg(test)]

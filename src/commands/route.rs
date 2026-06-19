@@ -5,6 +5,8 @@ use homeboy::core::lab_routing::{
 use homeboy::core::runners::{self, RunnerExecOptions};
 use std::collections::HashMap;
 
+use crate::commands::utils::output::write_output_file;
+
 pub fn route_after_parse(
     cli: &Cli,
     normalized_args: &[String],
@@ -234,9 +236,7 @@ fn is_lab_command_local_runner_option(command: &Commands) -> bool {
 }
 
 fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()> {
-    std::fs::write(path, stdout).map_err(|err| {
-        homeboy::core::Error::internal_io(err.to_string(), Some(format!("write {path}")))
-    })
+    write_output_file(path, stdout)
 }
 
 fn lab_offload_command(
