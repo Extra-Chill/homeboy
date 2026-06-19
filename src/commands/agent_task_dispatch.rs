@@ -1,10 +1,52 @@
 use clap::Args;
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchCommand};
+use homeboy::core::agent_tasks::dispatch_service::{
+    self, AgentTaskDispatchCommand, DispatchCoreInputs,
+};
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 
 use super::{CmdResult, GlobalArgs};
+
+/// CLI surface for the dispatch inputs shared across dispatch carriers. Flattened
+/// into [`DispatchArgs`] so the `--tasks/--provider-config/--client-context/
+/// --attempts/--queue-only` flags stay identical while the field group is
+/// declared once (#5187). The `#[arg]` attributes reproduce the original flag
+/// names, value names, and defaults exactly.
+#[derive(Args, Debug, Clone)]
+pub struct DispatchCoreArgs {
+    /// JSON array/object of task prompts for waves. Supports @file and - for stdin.
+    #[arg(long = "tasks", value_name = "JSON")]
+    pub tasks_json: Option<String>,
+
+    /// Provider config JSON object, @file, or - for stdin. Merged with workspace metadata.
+    #[arg(long = "provider-config", value_name = "JSON")]
+    pub provider_config: Option<String>,
+
+    /// Opaque client context JSON object, @file, or - for stdin.
+    #[arg(long = "client-context", value_name = "JSON")]
+    pub client_context: Option<String>,
+
+    /// Attempts per task, including the first attempt.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub attempts: u32,
+
+    /// Persist the run for a daemon/runner but do not execute immediately.
+    #[arg(long)]
+    pub queue_only: bool,
+}
+
+impl From<DispatchCoreArgs> for DispatchCoreInputs {
+    fn from(args: DispatchCoreArgs) -> Self {
+        DispatchCoreInputs {
+            tasks_json: args.tasks_json,
+            provider_config: args.provider_config,
+            client_context: args.client_context,
+            attempts: args.attempts,
+            queue_only: args.queue_only,
+        }
+    }
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
@@ -15,10 +57,6 @@ pub struct DispatchArgs {
     /// Additional task prompt, @file, or - for stdin. Each --task creates one minion cell.
     #[arg(long = "task", value_name = "PROMPT")]
     pub tasks: Vec<String>,
-
-    /// JSON array/object of task prompts for waves. Supports @file and - for stdin.
-    #[arg(long = "tasks", value_name = "JSON")]
-    pub tasks_json: Option<String>,
 
     /// Existing local repo checkout or worktree path to cook in.
     #[arg(long, value_name = "PATH")]
@@ -56,29 +94,16 @@ pub struct DispatchArgs {
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
 
-    /// Provider config JSON object, @file, or - for stdin. Merged with workspace metadata.
-    #[arg(long = "provider-config", value_name = "JSON")]
-    pub provider_config: Option<String>,
-
-    /// Opaque client context JSON object, @file, or - for stdin.
-    #[arg(long = "client-context", value_name = "JSON")]
-    pub client_context: Option<String>,
-
     /// Maximum number of task cells to run at once.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub concurrency: usize,
-
-    /// Attempts per task, including the first attempt.
-    #[arg(long, default_value_t = 1, value_name = "N")]
-    pub attempts: u32,
 
     /// Optional durable run id. Generated when omitted.
     #[arg(long, value_name = "ID")]
     pub run_id: Option<String>,
 
-    /// Persist the run for a daemon/runner but do not execute immediately.
-    #[arg(long)]
-    pub queue_only: bool,
+    #[command(flatten)]
+    pub core: DispatchCoreArgs,
 }
 
 impl From<DispatchArgs> for AgentTaskDispatchCommand {
@@ -86,7 +111,6 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
         AgentTaskDispatchCommand {
             prompt: args.prompt,
             tasks: args.tasks,
-            tasks_json: args.tasks_json,
             cwd: args.cwd,
             workspace: args.workspace,
             repo: args.repo,
@@ -96,12 +120,9 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
             model: args.model,
             required_capabilities: args.required_capabilities,
             secret_env: args.secret_env,
-            provider_config: args.provider_config,
-            client_context: args.client_context,
             concurrency: args.concurrency,
-            attempts: args.attempts,
             run_id: args.run_id,
-            queue_only: args.queue_only,
+            core: args.core.into(),
         }
     }
 }
@@ -139,8 +160,11 @@ mod tests {
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Queue this minion.".to_string()),
                     cwd: Some(workspace.path().display().to_string()),
-                    queue_only: true,
                     run_id: Some("dispatch-queued".to_string()),
+                    core: DispatchCoreInputs {
+                        queue_only: true,
+                        ..DispatchCoreInputs::default()
+                    },
                     ..DispatchArgOverrides::default()
                 })
                 .into(),
@@ -215,8 +239,11 @@ mod tests {
             let (value, exit_code) = dispatch_service::run_cook_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Queue this cook.".to_string()),
-                    queue_only: true,
                     run_id: Some("cook-queued".to_string()),
+                    core: DispatchCoreInputs {
+                        queue_only: true,
+                        ..DispatchCoreInputs::default()
+                    },
                     ..DispatchArgOverrides::default()
                 })
                 .into(),
@@ -243,7 +270,6 @@ mod tests {
             DispatchArgs {
                 prompt: Some("run with default".to_string()),
                 tasks: Vec::new(),
-                tasks_json: None,
                 cwd: None,
                 workspace: None,
                 repo: None,
@@ -253,12 +279,15 @@ mod tests {
                 model: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
-                provider_config: None,
-                client_context: None,
                 concurrency: 1,
-                attempts: 1,
                 run_id: None,
-                queue_only: false,
+                core: DispatchCoreArgs {
+                    tasks_json: None,
+                    provider_config: None,
+                    client_context: None,
+                    attempts: 1,
+                    queue_only: false,
+                },
             }
             .into(),
             |_| Ok(Some("fake-default".to_string())),
@@ -274,7 +303,6 @@ mod tests {
             DispatchArgs {
                 prompt: Some("run without default".to_string()),
                 tasks: Vec::new(),
-                tasks_json: None,
                 cwd: None,
                 workspace: None,
                 repo: None,
@@ -284,12 +312,15 @@ mod tests {
                 model: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
-                provider_config: None,
-                client_context: None,
                 concurrency: 1,
-                attempts: 1,
                 run_id: None,
-                queue_only: false,
+                core: DispatchCoreArgs {
+                    tasks_json: None,
+                    provider_config: None,
+                    client_context: None,
+                    attempts: 1,
+                    queue_only: false,
+                },
             }
             .into(),
             |_| Ok(None),
@@ -369,26 +400,21 @@ mod tests {
     #[derive(Default)]
     struct DispatchArgOverrides {
         prompt: Option<String>,
-        tasks_json: Option<String>,
         cwd: Option<String>,
         workspace: Option<String>,
         repo: Option<String>,
         task_url: Option<String>,
         secret_env: Vec<String>,
-        provider_config: Option<String>,
-        client_context: Option<String>,
         concurrency: usize,
-        attempts: u32,
-        queue_only: bool,
         run_id: Option<String>,
         backend: Option<String>,
+        core: DispatchCoreInputs,
     }
 
     fn dispatch_args(overrides: DispatchArgOverrides) -> DispatchArgs {
         DispatchArgs {
             prompt: overrides.prompt,
             tasks: Vec::new(),
-            tasks_json: overrides.tasks_json,
             cwd: overrides.cwd,
             workspace: overrides.workspace,
             repo: overrides.repo,
@@ -398,20 +424,23 @@ mod tests {
             model: None,
             required_capabilities: Vec::new(),
             secret_env: overrides.secret_env,
-            provider_config: overrides.provider_config,
-            client_context: overrides.client_context,
             concurrency: if overrides.concurrency == 0 {
                 1
             } else {
                 overrides.concurrency
             },
-            attempts: if overrides.attempts == 0 {
-                1
-            } else {
-                overrides.attempts
-            },
             run_id: overrides.run_id,
-            queue_only: overrides.queue_only,
+            core: DispatchCoreArgs {
+                tasks_json: overrides.core.tasks_json,
+                provider_config: overrides.core.provider_config,
+                client_context: overrides.core.client_context,
+                attempts: if overrides.core.attempts == 0 {
+                    1
+                } else {
+                    overrides.core.attempts
+                },
+                queue_only: overrides.core.queue_only,
+            },
         }
     }
 }

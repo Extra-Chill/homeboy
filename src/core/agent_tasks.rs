@@ -165,12 +165,14 @@ pub mod cook_loop {
 
 /// Durable dispatch request, plan construction, and execution service.
 pub mod dispatch_service {
+    pub use super::super::agent_task_dispatch_plan::{
+        build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
+    };
     pub use super::super::agent_task_dispatch_service::{
-        build_dispatch_plan, build_dispatch_plan_with_provider_requirements, dispatch,
-        dispatch_with_provider_requirements, resolve_dispatch_request,
+        dispatch, dispatch_with_provider_requirements, resolve_dispatch_request,
         resolve_dispatch_request_with_default, run_cook_command, run_dispatch_command,
         AgentTaskDispatchCommand, AgentTaskDispatchReport, AgentTaskDispatchRequest,
-        DISPATCH_RESULT_SCHEMA,
+        DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
 }
 
