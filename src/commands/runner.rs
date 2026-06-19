@@ -10,7 +10,7 @@ use serde_json::Value;
 use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{
-    self as runner, runner_job_cancel, runner_job_log_snapshot, ReverseRunnerConnectOptions,
+    self as runner, runner_job_log_snapshot, ReverseRunnerConnectOptions,
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerConnectReport,
     RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerStatusReport,
 };
@@ -1353,7 +1353,7 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
-    let (job, events) = runner_job_cancel(runner_id, job_id)?;
+    let (job, events) = homeboy::core::runner::runner_job_cancel(runner_id, job_id)?;
 
     Ok((
         RunnerJobOutput {
