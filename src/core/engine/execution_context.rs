@@ -966,8 +966,7 @@ mod tests {
     fn unknown_setting_overrides_flags_undeclared_keys() {
         let ctx = ctx_with_accepted_keys(&["workflow_bench_env", "iterations"]);
 
-        let unknown =
-            ctx.unknown_setting_overrides(["bench_env"].into_iter(), ["iterations"].into_iter());
+        let unknown = ctx.unknown_setting_overrides(["bench_env"], ["iterations"]);
 
         assert_eq!(unknown, vec!["bench_env".to_string()]);
     }
@@ -991,10 +990,7 @@ mod tests {
         // No declared settings → cannot validate → treat all as valid.
         let ctx = ctx_with_accepted_keys(&[]);
 
-        let unknown = ctx.unknown_setting_overrides(
-            ["anything", "at_all"].into_iter(),
-            ["json_key"].into_iter(),
-        );
+        let unknown = ctx.unknown_setting_overrides(["anything", "at_all"], ["json_key"]);
 
         assert!(unknown.is_empty());
     }
