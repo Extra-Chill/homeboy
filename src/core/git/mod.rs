@@ -57,9 +57,10 @@ pub use pr_policy::{
 };
 pub use primitives::{
     clone_repo, clone_repo_at_ref, current_branch, get_component_path_prefix, get_git_root,
-    head_sha, head_sha_short, is_workdir_clean_or_not_git, output_optional, output_optional_bytes,
-    pull_repo, remote_origin_url, remote_url, run_git, run_git_output, short_head_revision,
-    status_porcelain, status_porcelain_bytes, toplevel, update_to_remote_default_branch,
+    git_probe_path, head_sha, head_sha_short, is_workdir_clean_or_not_git, output_optional,
+    output_optional_bytes, pull_repo, remote_origin_url, remote_url, run_git, run_git_output,
+    short_head_revision, status_porcelain, status_porcelain_bytes, toplevel,
+    update_to_remote_default_branch,
 };
 pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
 
