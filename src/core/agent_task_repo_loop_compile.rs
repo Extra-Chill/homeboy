@@ -401,31 +401,8 @@ fn repo_loop_required_capabilities(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Vec<String> {
-    let mut capabilities = Vec::new();
-    if let Some(agent_id) = &workflow.agent_id {
-        if let Some(agent) = spec.agents.iter().find(|agent| &agent.agent_id == agent_id) {
-            for tool_id in &agent.tools {
-                push_capability(&mut capabilities, "tool", tool_id);
-            }
-            for ability_id in &agent.abilities {
-                push_capability(&mut capabilities, "ability", ability_id);
-            }
-        }
-    }
-    for tool_id in &workflow.tools {
-        push_capability(&mut capabilities, "tool", tool_id);
-    }
-    for ability_id in &workflow.abilities {
-        push_capability(&mut capabilities, "ability", ability_id);
-    }
-    capabilities
-}
-
-fn push_capability(capabilities: &mut Vec<String>, kind: &str, id: &str) {
-    let capability = format!("{kind}:{id}");
-    if !capabilities.contains(&capability) {
-        capabilities.push(capability);
-    }
+    let _ = (spec, workflow);
+    Vec::new()
 }
 
 fn repo_loop_workflow_artifact_declarations(

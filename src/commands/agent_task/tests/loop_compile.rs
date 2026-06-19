@@ -99,7 +99,7 @@ fn compile_loop_command_emits_plan_from_repo_loop_spec() {
     assert_eq!(value["tasks"][0]["executor"]["backend"], "fixture");
     assert_eq!(
         value["tasks"][0]["executor"]["required_capabilities"],
-        json!(["tool:write-file", "ability:render-blocks"])
+        json!(null)
     );
     assert_eq!(
         value["tasks"][0]["workspace"]["slug"],
