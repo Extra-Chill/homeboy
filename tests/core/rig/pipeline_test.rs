@@ -173,8 +173,8 @@ fn test_command_step_exposes_pipeline_settings_env() {
     .expect("parse rig");
 
     let settings = vec![(
-        "wp_sample-runtime_source_root".to_string(),
-        "/tmp/woocommerce".to_string(),
+        "sample_runtime_source_root".to_string(),
+        "/tmp/sample-runtime".to_string(),
     )];
     let out =
         run_pipeline_with_settings(&rig, "bench_prepare", true, &settings).expect("pipeline runs");
@@ -182,7 +182,7 @@ fn test_command_step_exposes_pipeline_settings_env() {
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
     assert_eq!(
         std::fs::read_to_string(marker).expect("marker"),
-        "/tmp/woocommerce"
+        "/tmp/sample-runtime"
     );
 }
 
