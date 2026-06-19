@@ -274,8 +274,8 @@ fn run_once_output(
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
     // starting execution, so a missing tool fails before remote dispatch instead
-    // of mid-run (#5093). `exec` runs `preflight_runner_capability_plan` against
-    // this preflight before handing the command to the runtime.
+    // of mid-run (#5093). `exec_worker_local` runs this preflight before handing
+    // the claimed job directly to the local worker runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -583,7 +583,12 @@ mod tests {
                     metadata: None,
                 })
                 .expect("submit job");
-            let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+            let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (broker_url, handle) = spawn_mock_broker_with_paths(
+                store.clone(),
+                3,
+                Some(seen_paths.clone()),
+            );
             write_reverse_controller_session(&broker_url);
 
             let (output, exit_code) =
@@ -613,6 +618,11 @@ mod tests {
                 .and_then(|event| event.data.as_ref())
                 .expect("result event data");
             assert!(result["metrics"]["duration_ms"].as_u64().is_some());
+            let seen_paths = seen_paths.lock().expect("seen paths");
+            assert!(
+                !seen_paths.iter().any(|path| path == "/runner/jobs"),
+                "claimed worker job must execute locally instead of submitting another reverse broker job"
+            );
             if cfg!(target_os = "linux") {
                 assert_eq!(
                     result["metrics"]["source"],
@@ -780,12 +790,26 @@ mod tests {
         store: JobStore,
         expected_requests: usize,
     ) -> (String, std::thread::JoinHandle<()>) {
+        spawn_mock_broker_with_paths(store, expected_requests, None)
+    }
+
+    fn spawn_mock_broker_with_paths(
+        store: JobStore,
+        expected_requests: usize,
+        seen_paths: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("addr");
         let handle = std::thread::spawn(move || {
             for _ in 0..expected_requests {
                 let (mut stream, _) = listener.accept().expect("accept request");
                 let request = read_request(&mut stream);
+                if let Some(seen_paths) = &seen_paths {
+                    seen_paths
+                        .lock()
+                        .expect("record request path")
+                        .push(request.path.clone());
+                }
                 let response = handle_request(&store, &request);
                 write_response(&mut stream, response);
             }
