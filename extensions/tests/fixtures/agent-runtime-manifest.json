@@ -1,16 +1,16 @@
 {
   "schema": "homeboy/agent-runtime-manifest/v1",
-  "id": "fake-runtime",
-  "name": "Fake Agent Runtime",
+  "id": "fixture-runtime",
+  "name": "Fixture Agent Runtime",
   "version": "1.0.0",
-  "description": "Minimal generic agent runtime fixture for Homeboy contract tests.",
+  "description": "Static manifest fixture for Homeboy contract tests.",
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
-      "id": "fake-runtime.agent-task-executor",
-      "label": "Fake agent task executor",
-      "backend": "fake-runtime",
-      "command": "node {{runtime_path}}/scripts/agent/fake-agent-task-executor.cjs",
+      "id": "fixture-runtime.agent-task-executor",
+      "label": "Fixture agent task executor",
+      "backend": "fixture-runtime",
+      "command": "node {{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs",
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [
@@ -43,6 +43,12 @@
         "structured_outcome",
         "diagnostic_artifacts"
       ],
+      "runner_readiness": [],
+      "role_aliases": {
+        "artifact_kinds": {
+          "patch": ["fixture-runtime-patch"]
+        }
+      },
       "tool_presets": [
         "runner_workspace",
         "publication"
@@ -72,13 +78,13 @@
         "requires_git": true,
         "write_scope": "artifacts",
         "artifact_paths": [
-          ".homeboy/fake-runtime"
+          ".homeboy/fixture-runtime"
         ]
       },
       "secret_requirements": [],
       "secret_env_requirements": [],
       "provider_defaults": {
-        "fake-runtime": {
+        "fixture-runtime": {
           "secret_env": []
         }
       },
@@ -89,8 +95,8 @@
           "metadata"
         ],
         "artifact_kinds": [
-          "fake-runtime-outcome",
-          "fake-runtime-transcript"
+          "fixture-runtime-outcome",
+          "fixture-runtime-transcript"
         ]
       },
       "status": "experimental",

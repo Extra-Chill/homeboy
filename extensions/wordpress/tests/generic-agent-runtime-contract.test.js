@@ -26,14 +26,15 @@ const repoRoot = path.join(__dirname, '..', '..');
 const registry = runtimeRegistry({ repoRoot });
 
 assert.equal(registry['wp-codebox'].id, 'wp-codebox');
-assert.equal(registry['fake-runtime'].id, 'fake-runtime');
+assert.equal(registry['fake-runtime'], undefined);
+assert.equal(registry['local-shell'], undefined);
 assert.equal(registry['package'], undefined);
 assert.equal(registry['homeboy-agent-task-core-contract'], undefined);
 
-const fakeRuntime = resolveRuntimeProvider('fake-runtime', { repoRoot, registry });
-assert.equal(fakeRuntime.id, 'fake-runtime');
-assert.equal(fakeRuntime.executor.backend, 'fake-runtime');
-assert.equal(fakeRuntime.executor.path, path.join(repoRoot, 'agent-runtimes/fake-runtime/scripts/agent/fake-agent-task-executor.cjs'));
+const wpCodeboxRuntime = resolveRuntimeProvider('wp-codebox', { repoRoot, registry });
+assert.equal(wpCodeboxRuntime.id, 'wp-codebox');
+assert.equal(wpCodeboxRuntime.executor.backend, 'codebox');
+assert.equal(wpCodeboxRuntime.executor.path, path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-registry-'));
 try {
@@ -77,28 +78,28 @@ try {
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
 
-assert.deepEqual(dependencyEntries({ RUNTIME_PROVIDER: 'fake-runtime', PROVIDER: 'fake-runtime' }), []);
+assert.deepEqual(dependencyEntries({ RUNTIME_PROVIDER: 'opencode', PROVIDER: 'opencode' }), []);
 
 const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-config-'));
 try {
 	const config = buildConfig({
 		GITHUB_WORKSPACE: configRoot,
 		RUNNER_TEMP: path.join(configRoot, 'runner-temp'),
-		WORKLOAD_ID: 'fake-runtime-smoke',
+		WORKLOAD_ID: 'opencode-smoke',
 		TARGET_REPO: 'Extra-Chill/example-target',
-		RUNTIME_PROVIDER: 'fake-runtime',
-		RUNTIME_PROFILE: 'fake-runtime-ci',
+		RUNTIME_PROVIDER: 'opencode',
+		RUNTIME_PROFILE: 'opencode-ci',
 		RUNTIME_PROFILES: JSON.stringify({
-			'fake-runtime-ci': {
-				id: 'fake-runtime-ci',
-				runtime_task_ability: 'fake-runtime/run-task',
+			'opencode-ci': {
+				id: 'opencode-ci',
+				runtime_task_ability: 'opencode/run-task',
 			},
 		}),
-		PROVIDER: 'fake-runtime',
+		PROVIDER: 'opencode',
 	});
-	assert.equal(config.runtime_id, 'fake-runtime');
-	assert.equal(config.runtime_profile, 'fake-runtime-ci');
-	assert.equal(config.runtime_requirements.runtime_task_ability, 'fake-runtime/run-task');
+	assert.equal(config.runtime_id, 'opencode');
+	assert.equal(config.runtime_profile, 'opencode-ci');
+	assert.equal(config.runtime_requirements.runtime_task_ability, 'opencode/run-task');
 	assert.equal(config.runtime_bin, undefined);
 } finally {
 	fs.rmSync(configRoot, { recursive: true, force: true });
@@ -109,12 +110,12 @@ assert.throws(
 	/backend is required/
 );
 assert.equal(
-	agentTaskRunnerSpec({ backend: 'fake-runtime', runtime: 'fake-runtime', config: {} }).executor.backend,
-	'fake-runtime'
+	agentTaskRunnerSpec({ backend: 'opencode', runtime: 'opencode', config: {} }).executor.backend,
+	'opencode'
 );
 assert.equal(
-	agentTaskRunnerSpec({ backend: 'fake-runtime', runtime: 'fake-runtime', config: {} }).executor.runtime,
-	'fake-runtime'
+	agentTaskRunnerSpec({ backend: 'opencode', runtime: 'opencode', config: {} }).executor.runtime,
+	'opencode'
 );
 
 const runtimeProfile = {
@@ -123,7 +124,7 @@ const runtimeProfile = {
 };
 assert.throws(
 	() => runtimeAgentCiRunnerSpec({
-		backend: 'fake-runtime',
+		backend: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
 		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
@@ -132,23 +133,23 @@ assert.throws(
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		backend: 'fake-runtime',
-		runtime: 'fake-runtime',
+		backend: 'opencode',
+		runtime: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
 		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.backend,
-	'fake-runtime'
+	'opencode'
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		backend: 'fake-runtime',
-		runtime: 'fake-runtime',
+		backend: 'opencode',
+		runtime: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
 		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
-	'fake-runtime'
+	'opencode'
 );
 
 process.stdout.write('Generic agent runtime contract passed\n');

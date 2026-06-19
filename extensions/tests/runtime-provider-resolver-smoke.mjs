@@ -44,7 +44,7 @@ assert.equal(opencodeRuntime.id, 'opencode');
 assert.equal(opencodeRuntime.checkout.repo, '');
 assert.equal(opencodeRuntime.executor.backend, 'opencode');
 assert.equal(opencodeRuntime.executor.path, path.join(rootDir, 'agent-runtimes/opencode/scripts/agent/homeboy-opencode-agent-task-executor.cjs'));
-assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'available');
+assert.equal(opencodeRuntime.manifest.agent_task_executors[0].status, 'active');
 assert.equal(opencodeRuntime.manifest.agent_task_executors[0].capabilities.includes('nested_orchestrator'), true);
 
 assert.throws(

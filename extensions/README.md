@@ -10,8 +10,8 @@ depend on runtime capabilities without embedding the provider contract.
 
 Generic runtime package requirements are documented in
 [`docs/agent-runtime-package-contract.md`](docs/agent-runtime-package-contract.md).
-Use the `agent-runtimes/fake-runtime` fixture as the minimal contract example;
-WP Codebox is a concrete backend, not the generic template.
+Use `tests/fixtures/agent-runtime-manifest.json` for static contract assertions;
+`agent-runtimes/` contains only shipped runtime packages.
 
 Generic project-root, package-manager, and named-script execution helpers live in
 [`scripts/lib/project-scripts.sh`](scripts/lib/project-scripts.sh) and are
