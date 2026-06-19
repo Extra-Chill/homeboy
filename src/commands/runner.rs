@@ -999,9 +999,7 @@ fn connect(
 
 fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     if let Some(id) = id {
-        let mut report = runner::status(id)?;
-        report.active_jobs = active_runner_jobs(id);
-        report.active_job_count = report.active_jobs.len();
+        let report = runner::status(id)?;
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
@@ -1020,36 +1018,13 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         RunnerOutput {
             command: "runner.status".to_string(),
             extra: RunnerExtra {
-                sessions: runner::statuses()?
-                    .into_iter()
-                    .map(|mut report| {
-                        report.active_jobs = active_runner_jobs(&report.runner_id);
-                        report.active_job_count = report.active_jobs.len();
-                        report
-                    })
-                    .collect(),
+                sessions: runner::statuses()?,
                 ..Default::default()
             },
             ..Default::default()
         },
         0,
     ))
-}
-
-fn active_runner_jobs(runner_id: &str) -> Vec<homeboy::core::api_jobs::ActiveRunnerJobSummary> {
-    runner::daemon_api_get(runner_id, "/jobs")
-        .ok()
-        .and_then(|data| data.get("body").cloned())
-        .and_then(|body| body.get("active_runner_jobs").cloned())
-        .and_then(|jobs| serde_json::from_value(jobs).ok())
-        .map(
-            |jobs: Vec<homeboy::core::api_jobs::ActiveRunnerJobSummary>| {
-                jobs.into_iter()
-                    .filter(|job| job.runner_id == runner_id)
-                    .collect()
-            },
-        )
-        .unwrap_or_default()
 }
 
 fn disconnect(id: &str) -> CmdResult<RunnerOutput> {

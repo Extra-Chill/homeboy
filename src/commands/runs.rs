@@ -482,22 +482,13 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
         .unwrap_or_default()
         .into_iter()
         .filter(|report| report.connected)
-        .flat_map(|report| active_runner_jobs(&report.runner_id))
+        .flat_map(|report| report.active_jobs)
         .filter(|job| match status {
             Some(status) => status == job.status.run_status_label(),
             None => true,
         })
         .map(active_runner_job_run_summary)
         .collect()
-}
-
-fn active_runner_jobs(runner_id: &str) -> Vec<ActiveRunnerJobSummary> {
-    runner::daemon_api_get(runner_id, "/jobs")
-        .ok()
-        .and_then(|data| data.get("body").cloned())
-        .and_then(|body| body.get("active_runner_jobs").cloned())
-        .and_then(|jobs| serde_json::from_value(jobs).ok())
-        .unwrap_or_default()
 }
 
 fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
