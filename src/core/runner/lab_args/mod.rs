@@ -12,6 +12,7 @@
 //! the surface the rest of the `runner` module consumes.
 
 mod agent_task_specs;
+mod envelope;
 mod offload;
 mod path_remap;
 mod provider_config;
