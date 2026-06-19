@@ -1039,23 +1039,50 @@ fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
-    let Some(local_url) = session.local_url.as_deref() else {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "runner session does not expose a local daemon URL yet",
-            Some(runner.id),
-            Some(vec![
-                "Reverse tunnel daemon routing is tracked in #2946 and #2948.".to_string(),
-            ]),
-        ));
-    };
-    match method {
-        "GET" => daemon_get(&client, local_url, path),
-        "POST" => daemon_post(&client, local_url, path),
-        _ => Err(Error::internal_unexpected(format!(
-            "unsupported daemon API method {method}"
-        ))),
+    if let Some(local_url) = session.local_url.as_deref() {
+        return match method {
+            "GET" => daemon_get(&client, local_url, path),
+            "POST" => daemon_post(&client, local_url, path),
+            _ => Err(Error::internal_unexpected(format!(
+                "unsupported daemon API method {method}"
+            ))),
+        };
     }
+    if session.mode == RunnerTunnelMode::Reverse {
+        let Some(broker_url) = session.broker_url.as_deref() else {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "reverse runner session does not expose a broker URL",
+                Some(runner.id),
+                Some(vec![
+                    "Reconnect the reverse runner with `homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>`.".to_string(),
+                ]),
+            ));
+        };
+        return match method {
+            "GET" => {
+                broker_http::get_json(&client, broker_url, path, "query reverse runner broker")
+            }
+            "POST" => broker_http::post_json(
+                &client,
+                broker_url,
+                path,
+                json!({}),
+                "query reverse runner broker",
+            ),
+            _ => Err(Error::internal_unexpected(format!(
+                "unsupported daemon API method {method}"
+            ))),
+        };
+    }
+    Err(Error::validation_invalid_argument(
+        "runner",
+        "runner session does not expose a local daemon URL or reverse broker URL",
+        Some(runner.id),
+        Some(vec![
+            "Use a direct daemon connection or a reverse runner session registered with a broker before querying runner jobs.".to_string(),
+        ]),
+    ))
 }
 
 fn daemon_post(client: &Client, local_url: &str, path: &str) -> Result<Value> {
