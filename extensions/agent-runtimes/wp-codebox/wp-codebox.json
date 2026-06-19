@@ -359,6 +359,36 @@
           "provider_run_result": ["codebox_run_result"]
         }
       },
+      "upstream_primitive_requirements": [
+        {
+          "id": "runtime-profile",
+          "schema": "wp-codebox/runtime-profile/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "forward_profile_payload",
+          "requirement": "Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals."
+        },
+        {
+          "id": "parent-tool-bridge",
+          "schema": "wp-codebox/parent-tool-bridge/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "declare_requirement_when_missing",
+          "requirement": "Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details."
+        },
+        {
+          "id": "provider-runtime-invocation",
+          "schema": "wp-codebox/provider-runtime-invocation-contract/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "declare_task_and_ability_names",
+          "requirement": "Provide runner workspace, transcript recording, and artifact handoff operations behind stable task/ability names."
+        },
+        {
+          "id": "artifact-result-envelope",
+          "schema": "wp-codebox/evidence-artifact-envelope/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "normalize_declared_artifacts",
+          "requirement": "Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts."
+        }
+      ],
       "status": "active",
       "integration_contract": "homeboy-wordpress-agent-task/v1",
       "runtime_gap_trackers": []

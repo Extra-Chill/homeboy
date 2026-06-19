@@ -9,6 +9,9 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const { codeboxTaskRequestFromAgentTaskRequest } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js')
 );
+const { codeboxRuntimeProfilePayload } = require(
+	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-runtime-profile.js')
+);
 
 const previousPolicy = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 
@@ -102,6 +105,37 @@ try {
 	assert.equal(genericProfileTaskInput.runtime_requirements.homeboy_parent_tool_bridge, undefined);
 	assert.deepEqual(genericProfileTaskInput.runtime_requirements.provider_plugins, [{ path: '/runtime/provider-plugin' }]);
 	assert.equal(genericProfileTaskInput.runtime_requirements.env.EXAMPLE_RUNTIME, '1');
+
+	const mergedProfile = codeboxRuntimeProfilePayload({
+		profile: {
+			id: 'shared-profile-helper',
+			runtime_overlays: [{ kind: 'library', library: 'php-ai-client', source: '/runtime/php-ai-client' }],
+			env: { PROFILE_ENV: '1', SHARED_ENV: 'profile' },
+			provider_plugins: ['/runtime/provider-from-profile'],
+		},
+		runtimeRequirements: {
+			runtime_overlays: [{ kind: 'plugin', slug: 'agents-api', source: '/runtime/agents-api' }],
+			env: { REQUIREMENT_ENV: '1', SHARED_ENV: 'requirement' },
+		},
+		runtimeOverlays: [{ kind: 'mu-plugin', slug: 'runtime-tools', source: '/runtime/runtime-tools' }],
+		runtimeEnv: { REQUEST_ENV: '1', SHARED_ENV: 'request' },
+		providerPluginPaths: ['/runtime/provider-from-request'],
+	});
+	assert.deepEqual(mergedProfile.runtime_overlays.map((overlay) => overlay.source), [
+		'/runtime/php-ai-client',
+		'/runtime/agents-api',
+		'/runtime/runtime-tools',
+	]);
+	assert.deepEqual(mergedProfile.env, {
+		PROFILE_ENV: '1',
+		SHARED_ENV: 'request',
+		REQUIREMENT_ENV: '1',
+		REQUEST_ENV: '1',
+	});
+	assert.deepEqual(mergedProfile.provider_plugins, [
+		{ path: '/runtime/provider-from-profile' },
+		{ path: '/runtime/provider-from-request' },
+	]);
 
 	console.log('wp-codebox runtime profile defaults smoke passed');
 } finally {

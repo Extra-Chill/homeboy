@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
+  artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
   normalizeTypedArtifactEntry,
@@ -17,6 +18,8 @@ const {
 assert.equal(artifactPath('/tmp/artifacts/', '/files/transcript.json'), '/tmp/artifacts/files/transcript.json');
 assert.equal(artifactPath('', 'files/transcript.json'), '');
 assert.equal(artifactNameFromDeclaration({ id: 'transcript' }), 'transcript');
+assert.equal(artifactRoleFromCodeboxArtifact({ kind: 'codebox-patch' }, { artifact_roles: { patch: ['codebox-patch'] } }), 'patch');
+assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }), 'changed_files');
 
 assert.deepEqual(typedArtifactFileRefs({ fileRefs: [{ path: 'artifact.json' }] }), [{ path: 'artifact.json' }]);
 

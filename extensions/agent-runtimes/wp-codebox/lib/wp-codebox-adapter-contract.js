@@ -105,6 +105,37 @@ const WP_CODEBOX_ROLE_ALIASES = {
   },
 };
 
+const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
+  {
+    id: 'runtime-profile',
+    schema: 'wp-codebox/runtime-profile/v1',
+    owner: 'wp-codebox',
+    adapter_behavior: 'forward_profile_payload',
+    requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals.',
+  },
+  {
+    id: 'parent-tool-bridge',
+    schema: 'wp-codebox/parent-tool-bridge/v1',
+    owner: 'wp-codebox',
+    adapter_behavior: 'declare_requirement_when_missing',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details.',
+  },
+  {
+    id: 'provider-runtime-invocation',
+    schema: WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
+    owner: 'wp-codebox',
+    adapter_behavior: 'declare_task_and_ability_names',
+    requirement: 'Provide runner workspace, transcript recording, and artifact handoff operations behind stable task/ability names.',
+  },
+  {
+    id: 'artifact-result-envelope',
+    schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.evidence_artifact_envelope,
+    owner: 'wp-codebox',
+    adapter_behavior: 'normalize_declared_artifacts',
+    requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts.',
+  },
+];
+
 function wpCodeboxProviderRuntimeInvocationContract() {
   return {
     schema: WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
@@ -162,6 +193,7 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
   WP_CODEBOX_ROLE_ALIASES,
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
+  WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,

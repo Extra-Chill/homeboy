@@ -26,6 +26,18 @@ function codeboxRuntimeProfilePayload({
   const normalizedProfile = plainObject(profile);
   const normalizedRuntimeRequirements = plainObject(runtimeRequirements);
   const runtimeProfileDependencies = runtimeProfileDependencyFields(normalizedProfile, normalizedRuntimeRequirements);
+  const normalizedRuntimeOverlays = uniqueObjectsByRuntimeIdentity([
+    ...normalizeArray(normalizedProfile.runtime_overlays),
+    ...normalizeArray(normalizedRuntimeRequirements.runtime_overlays),
+    ...normalizeArray(runtimeOverlays),
+  ]);
+  const normalizedRuntimeEnv = {
+    ...plainObject(normalizedProfile.env),
+    ...plainObject(normalizedProfile.runtime_env),
+    ...plainObject(normalizedRuntimeRequirements.env),
+    ...plainObject(normalizedRuntimeRequirements.runtime_env),
+    ...plainObject(runtimeEnv),
+  };
   const normalizedComponentContracts = uniqueObjectsByRuntimeIdentity([
     ...normalizeArray(normalizedProfile.component_contracts),
     ...normalizeArray(normalizedRuntimeRequirements.component_contracts),
@@ -33,8 +45,8 @@ function codeboxRuntimeProfilePayload({
     ...normalizeArray(componentContracts),
   ]);
   const normalizedProviderPlugins = uniqueObjectsByRuntimeIdentity([
-    ...normalizeArray(normalizedProfile.provider_plugins),
-    ...normalizeArray(normalizedRuntimeRequirements.provider_plugins),
+    ...providerPluginEntries(normalizedProfile.provider_plugins),
+    ...providerPluginEntries(normalizedRuntimeRequirements.provider_plugins),
     ...providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
   ]);
   return withoutEmptyObjectValues({
@@ -46,12 +58,21 @@ function codeboxRuntimeProfilePayload({
     ...runtimeProfileDependencies,
     component_contracts: normalizedComponentContracts,
     extra_plugins: normalizedComponentContracts,
-    runtime_overlays: runtimeOverlays,
-    env: runtimeEnv,
+    runtime_overlays: normalizedRuntimeOverlays,
+    env: normalizedRuntimeEnv,
     provider_plugins: normalizedProviderPlugins,
     runtime_state_mounts: runtimeStateMounts,
     runtime_config_mounts: runtimeConfigMounts,
     ...parentToolBridgeProfileFields(normalizedProfile, normalizedRuntimeRequirements, runtimeProfileDependencies, normalizedComponentContracts),
+  });
+}
+
+function providerPluginEntries(value) {
+  return normalizeArray(value).flatMap((entry) => {
+    if (typeof entry === 'string') {
+      return [{ path: entry }];
+    }
+    return entry;
   });
 }
 
