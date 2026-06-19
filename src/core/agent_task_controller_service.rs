@@ -1482,31 +1482,8 @@ fn workflow_required_capabilities(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Vec<String> {
-    let mut capabilities = Vec::new();
-    if let Some(agent_id) = &workflow.agent_id {
-        if let Some(agent) = spec.agents.iter().find(|agent| &agent.agent_id == agent_id) {
-            for tool_id in &agent.tools {
-                push_capability(&mut capabilities, "tool", tool_id);
-            }
-            for ability_id in &agent.abilities {
-                push_capability(&mut capabilities, "ability", ability_id);
-            }
-        }
-    }
-    for tool_id in &workflow.tools {
-        push_capability(&mut capabilities, "tool", tool_id);
-    }
-    for ability_id in &workflow.abilities {
-        push_capability(&mut capabilities, "ability", ability_id);
-    }
-    capabilities
-}
-
-fn push_capability(capabilities: &mut Vec<String>, kind: &str, id: &str) {
-    let capability = format!("{kind}:{id}");
-    if !capabilities.contains(&capability) {
-        capabilities.push(capability);
-    }
+    let _ = (spec, workflow);
+    Vec::new()
 }
 
 fn select_by_id<'a, T, F>(items: &'a [T], ids: &[String], id: F) -> Vec<&'a T>
@@ -4149,10 +4126,9 @@ mod tests {
                     assert!(request_template["dispatch"]
                         .get("provider_config")
                         .is_none());
-                    assert_eq!(
-                        request_template["dispatch"]["required_capabilities"],
-                        json!(["tool:repo-inspector", "ability:apply_patch"])
-                    );
+                    assert!(request_template["dispatch"]
+                        .get("required_capabilities")
+                        .is_none());
                     let context: Value = serde_json::from_str(
                         request_template["dispatch"]["client_context"]
                             .as_str()
@@ -4164,10 +4140,11 @@ mod tests {
                         context["plan"]["inputs"]["schema"],
                         "homeboy/repo-loop-workflow-plan/v1"
                     );
-                    assert_eq!(
-                        context["plan"]["policy"]["required_capabilities"],
-                        json!(["tool:repo-inspector", "ability:apply_patch"])
-                    );
+                    assert!(context["plan"]["policy"]
+                        .get("required_capabilities")
+                        .is_none());
+                    assert_eq!(context["agent"]["tools"], json!(["repo-inspector"]));
+                    assert_eq!(context["agent"]["abilities"], json!(["apply_patch"]));
                     assert_eq!(context["plan"]["steps"][0]["kind"], "agent_task_dispatch");
                     assert_eq!(
                         context["plan"]["steps"][0]["needs"],
@@ -4353,7 +4330,7 @@ mod tests {
     }
 
     #[test]
-    fn init_from_spec_reconciles_changed_required_capabilities() {
+    fn init_from_spec_reconciles_changed_workflow_abilities() {
         with_isolated_home(|_| {
             let report = reapply_base_then_mutated("repo-loop-reconcile-capabilities", |spec| {
                 spec.workflows
@@ -4376,15 +4353,12 @@ mod tests {
                 } => request_template,
                 other => panic!("expected workflow dispatch action, got {other:?}"),
             };
-            assert_eq!(
-                request["dispatch"]["required_capabilities"],
-                json!(["ability:static_publication"])
-            );
+            assert!(request["dispatch"].get("required_capabilities").is_none());
             let context = workflow_action_context(&report, "generation");
-            assert_eq!(
-                context["plan"]["policy"]["required_capabilities"],
-                json!(["ability:static_publication"])
-            );
+            assert!(context["plan"]["policy"]
+                .get("required_capabilities")
+                .is_none());
+            assert_eq!(context["abilities"][0]["ability_id"], "static_publication");
         });
     }
 
