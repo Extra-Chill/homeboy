@@ -1,9 +1,6 @@
 use serde_json::Value;
 
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
-    CommandResponseMode,
-};
+use crate::command_contract::{CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode};
 
 use crate::cli_surface::Commands;
 
@@ -79,17 +76,11 @@ impl<Args> TypedCommandAdapter<Args> {
     pub fn json_only(
         json_family: CommandJsonFamily,
         output_file_mode: CommandOutputFileMode,
-        output_contract: CommandOutputContractKind,
         execute_json: JsonCommandExecutor<Args>,
     ) -> Self {
         Self {
             contract: CommandAdapterContract {
-                output: CommandOutputDescriptor {
-                    response_mode: CommandResponseMode::Json,
-                    output_file_mode,
-                    json_family,
-                    output_contract,
-                },
+                output: CommandOutputDescriptor::json_envelope(json_family, output_file_mode),
                 lab_runner: CommandLabRunnerPolicy::LOCAL,
             },
             execute_json: Some(execute_json),
@@ -131,6 +122,7 @@ pub(crate) fn command_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command_contract::{CommandOutputContractKind, CommandResponseMode};
     use clap::Parser;
 
     fn parsed_command(args: &[&str]) -> Commands {
@@ -144,7 +136,6 @@ mod tests {
         let adapter = TypedCommandAdapter::<()>::json_only(
             CommandJsonFamily::Workspace,
             CommandOutputFileMode::GenericEnvelope,
-            CommandOutputContractKind::JsonEnvelope,
             |_, _| (Ok(Value::Null), 0),
         );
 
@@ -156,6 +147,10 @@ mod tests {
             CommandOutputFileMode::GenericEnvelope
         );
         assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
+        assert_eq!(
+            descriptor.output_contract,
+            CommandOutputContractKind::JsonEnvelope
+        );
         assert!(adapter.execute_json.is_some());
     }
     #[test]

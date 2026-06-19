@@ -5,9 +5,7 @@ use homeboy::core::component;
 use homeboy::core::release::version::{read_component_version, read_version, VersionTargetInfo};
 
 use super::{adapter, CmdResult};
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
-};
+use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode};
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -62,7 +60,6 @@ pub(crate) fn adapter(
     adapter::TypedCommandAdapter::json_only(
         CommandJsonFamily::Workspace,
         output_file_mode,
-        CommandOutputContractKind::JsonEnvelope,
         run_json,
     )
 }

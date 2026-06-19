@@ -23,8 +23,7 @@ use super::utils::args::{
 use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
-    CommandResponseMode, LabCommandContract,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
 };
 
 const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
@@ -101,12 +100,7 @@ impl LintArgs {
         &self,
         output_file_mode: CommandOutputFileMode,
     ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor {
-            response_mode: CommandResponseMode::Json,
-            output_file_mode,
-            json_family: CommandJsonFamily::Quality,
-            output_contract: CommandOutputContractKind::JsonEnvelope,
-        }
+        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
