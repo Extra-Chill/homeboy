@@ -13,7 +13,7 @@ const {
 	AGENT_TASK_OUTCOME_SCHEMA,
 	AGENT_TASK_REQUEST_SCHEMA,
 	agentTaskProviderContractFields,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
 const PI_PROVIDER_LABEL = 'Pi agent task executor';
@@ -29,7 +29,6 @@ function providerContract(options = {}) {
 		runtime: PI_BACKEND,
 		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs',
 		...agentTaskProviderContractFields(),
-		request_required_fields: ['schema', 'task_id', 'executor.backend', 'executor.runtime', 'instructions'],
 		secret_env_requirements: [],
 		capabilities: [
 			'cli_runtime',
@@ -110,7 +109,7 @@ function executePiAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const timeoutSeconds = Number(request.limits?.task_timeout_seconds || config.timeout_seconds || DEFAULT_TIMEOUT_SECONDS);
+	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds || DEFAULT_TIMEOUT_SECONDS);
 	const cwd = resolveCwd(request, config);
 	const requestJson = JSON.stringify(request);
 	const spawnResult = spawnSync(commandSpec.command, commandSpec.args, {
@@ -186,13 +185,20 @@ function validateRequest(request) {
 	if (request.executor?.backend !== PI_BACKEND) {
 		return `Request executor.backend must be ${PI_BACKEND}.`;
 	}
-	if (request.executor?.runtime !== PI_BACKEND) {
+	if (request.executor?.runtime !== undefined && request.executor.runtime !== PI_BACKEND) {
 		return `Request executor.runtime must be ${PI_BACKEND}.`;
 	}
 	if (!request.instructions || typeof request.instructions !== 'string') {
 		return 'Request instructions are required.';
 	}
 	return null;
+}
+
+function timeoutSecondsFromLimits(limits = {}, fallbackSeconds = 0) {
+	if (limits.timeout_ms || limits.max_runtime_ms) {
+		return Math.ceil(Number(limits.timeout_ms || limits.max_runtime_ms) / 1000);
+	}
+	return Number(limits.task_timeout_seconds || limits.taskTimeoutSeconds || fallbackSeconds || 0);
 }
 
 function resolveCommandSpec(config = {}, options = {}) {

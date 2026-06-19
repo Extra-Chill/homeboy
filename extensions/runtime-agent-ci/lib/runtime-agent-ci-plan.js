@@ -53,6 +53,7 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
       ...(options.title ? { title: options.title } : {}),
     },
     limits: runnerRequest.limits,
+    artifact_declarations: runnerRequest.artifact_declarations,
     expected_artifacts: runnerRequest.expected_artifacts,
   });
 }
@@ -66,6 +67,7 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
     config,
     secret_env: normalizeArray(config.secret_env),
     task_timeout_seconds: config.task_timeout_seconds || options.taskTimeoutSeconds || options.task_timeout_seconds || 900,
+    artifact_declarations: options.artifactDeclarations || options.artifact_declarations,
     limits: options.limits,
     expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
   });

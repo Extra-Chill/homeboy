@@ -15,7 +15,7 @@ const {
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 
 const CLAUDE_CODE_PROVIDER_ID = 'claude-code.agent-task-executor';
 const CLAUDE_CODE_PROVIDER_LABEL = 'Claude Code agent task executor';
@@ -146,7 +146,7 @@ function executeClaudeCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 
-	const timeoutSeconds = Number(request.limits?.task_timeout_seconds || config.timeout_seconds || 0);
+	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const spawnResult = spawnSync(commandSpec.command, commandSpec.args, {
 		cwd: resolveCwd(request, config),
 		env: process.env,
@@ -212,7 +212,7 @@ function validateRequest(request) {
 	if (request.executor?.backend !== 'claude-code') {
 		return 'Request executor.backend must be claude-code.';
 	}
-	if (request.executor?.runtime !== 'claude-code') {
+	if (request.executor?.runtime !== undefined && request.executor.runtime !== 'claude-code') {
 		return 'Request executor.runtime must be claude-code.';
 	}
 	if (!request.executor.config || typeof request.executor.config !== 'object' || Array.isArray(request.executor.config)) {
@@ -222,6 +222,13 @@ function validateRequest(request) {
 		return 'Request instructions are required.';
 	}
 	return null;
+}
+
+function timeoutSecondsFromLimits(limits = {}, fallbackSeconds = 0) {
+	if (limits.timeout_ms || limits.max_runtime_ms) {
+		return Math.ceil(Number(limits.timeout_ms || limits.max_runtime_ms) / 1000);
+	}
+	return Number(limits.task_timeout_seconds || limits.taskTimeoutSeconds || fallbackSeconds || 0);
 }
 
 function resolveCommandSpec(config = {}, options = {}) {

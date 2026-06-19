@@ -22,7 +22,7 @@ const {
 const {
 	resolveRuntimeProvider,
 	runtimeRegistry,
-} = require('../../lib/runtime-provider-resolver.cjs');
+} = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const runtimeRoot = path.join(__dirname, '..');
 const repoRoot = path.join(__dirname, '..', '..', '..');
@@ -128,7 +128,7 @@ process.exit(0);
 	assert.deepEqual(JSON.parse(runResult.stdout), executeCodexAgentTask(request));
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
 	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
-	assert.equal(executeCodexAgentTask({ ...request, executor: { backend: 'codex', config: {} } }).failure_code, 'agent_task.invalid_codex_request');
+	assert.equal(executeCodexAgentTask({ ...request, executor: { backend: 'codex', runtime: 'wrong', config: {} } }).failure_code, 'agent_task.invalid_codex_request');
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

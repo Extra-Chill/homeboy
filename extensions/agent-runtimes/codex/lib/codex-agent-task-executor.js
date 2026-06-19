@@ -15,7 +15,7 @@ const {
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
-} = require('../../lib/agent-task-provider-contract');
+} = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
 
 const CODEX_RUNTIME_ID = 'codex';
 const CODEX_PROVIDER_ID = 'codex.agent-task-executor';
@@ -132,7 +132,7 @@ function executeCodexAgentTask(request = {}, options = {}) {
 		...(config.model ? ['--model', config.model] : []),
 		request.instructions,
 	];
-	const timeoutSeconds = Number(request.limits?.task_timeout_seconds || config.timeout_seconds || 0);
+	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const spawnResult = spawnSync(commandSpec.command, args, {
 		cwd: resolveCwd(request, config),
 		env: process.env,
@@ -197,7 +197,7 @@ function validateRequest(request) {
 	if (request.executor?.backend !== CODEX_RUNTIME_ID) {
 		return 'Request executor.backend must be codex.';
 	}
-	if (request.executor?.runtime !== CODEX_RUNTIME_ID) {
+	if (request.executor?.runtime !== undefined && request.executor.runtime !== CODEX_RUNTIME_ID) {
 		return 'Request executor.runtime must be codex.';
 	}
 	if (!request.executor.config || typeof request.executor.config !== 'object' || Array.isArray(request.executor.config)) {
@@ -207,6 +207,13 @@ function validateRequest(request) {
 		return 'Request instructions are required.';
 	}
 	return null;
+}
+
+function timeoutSecondsFromLimits(limits = {}, fallbackSeconds = 0) {
+	if (limits.timeout_ms || limits.max_runtime_ms) {
+		return Math.ceil(Number(limits.timeout_ms || limits.max_runtime_ms) / 1000);
+	}
+	return Number(limits.task_timeout_seconds || limits.taskTimeoutSeconds || fallbackSeconds || 0);
 }
 
 function resolveCommandSpec(config = {}, options = {}) {

@@ -246,7 +246,7 @@ function executeOpenCodeAgentTask(request = {}, options = {}) {
 		...(config.title ? ['--title', config.title] : []),
 		request.instructions,
 	];
-	const timeoutSeconds = Number(request.limits?.task_timeout_seconds || config.timeout_seconds || 0);
+	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
 	const spawnResult = spawnSync(commandSpec.command, args, {
 		cwd: resolveCwd(request, config),
 		env: process.env,
@@ -318,6 +318,13 @@ function validateRequest(request) {
 		return 'Request instructions are required.';
 	}
 	return null;
+}
+
+function timeoutSecondsFromLimits(limits = {}, fallbackSeconds = 0) {
+	if (limits.timeout_ms || limits.max_runtime_ms) {
+		return Math.ceil(Number(limits.timeout_ms || limits.max_runtime_ms) / 1000);
+	}
+	return Number(limits.task_timeout_seconds || limits.taskTimeoutSeconds || fallbackSeconds || 0);
 }
 
 function resolveCommandSpec(config = {}, options = {}) {

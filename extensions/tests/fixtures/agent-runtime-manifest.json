@@ -17,7 +17,6 @@
         "schema",
         "task_id",
         "executor.backend",
-        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [
@@ -30,6 +29,7 @@
       "failure_classifications": [
         "request_validation",
         "provider",
+        "transient",
         "timeout",
         "execution_failed"
       ],

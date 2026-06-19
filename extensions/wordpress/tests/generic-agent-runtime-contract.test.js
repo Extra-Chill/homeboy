@@ -122,14 +122,14 @@ const runtimeProfile = {
 	id: 'example-runtime-ci',
 	runtime_task_ability: 'example/run-task',
 };
-assert.throws(
-	() => runtimeAgentCiRunnerSpec({
+assert.equal(
+	runtimeAgentCiRunnerSpec({
 		backend: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
 		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
-	}),
-	/runtime is required/
+	}).executor.runtime,
+	undefined
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
