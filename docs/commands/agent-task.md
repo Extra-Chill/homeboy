@@ -93,6 +93,33 @@ declared emitted artifacts become `artifact_outputs`. Controller-only sections
 such as transition policies, phases, arbitrary actions, initial events, and
 entity fan-out are rejected with explicit diagnostics instead of being ignored.
 
+Repo-style specs may also declare an `artifact_graph` edge list. The narrow
+compiler support is deliberately limited to direct one-producer, one-consumer
+artifact flow:
+
+```json
+{
+  "artifact_graph": {
+    "edges": [
+      {
+        "artifact_id": "site_plan",
+        "from_workflow_id": "plan-site",
+        "to_workflow_id": "build-site",
+        "required": true
+      }
+    ]
+  }
+}
+```
+
+`compile-loop` validates graph edges against declared artifacts and workflow
+`emits`/`consumes`, then materializes supported edges as `output_dependencies`
+and `artifact_outputs`. The controller path exposes the same edge records in
+workflow `client_context.artifact_graph_edges` and includes graph producers in
+`artifact_dependencies.producer_workflow_ids`. Fan-out graph edges, joins, gates,
+and retry policy remain controller-only follow-ups and produce deterministic
+diagnostics instead of partial compilation.
+
 ## Dispatch
 
 `agent-task dispatch` builds a durable task plan from common repo-cooking inputs

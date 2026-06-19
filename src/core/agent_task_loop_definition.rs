@@ -9,7 +9,8 @@ use crate::core::agent_task::{
     AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_controller_service::{
-    AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecArtifact, AgentTaskRepoLoopSpecWorkflow,
+    AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecArtifact, AgentTaskRepoLoopSpecArtifactGraphEdge,
+    AgentTaskRepoLoopSpecWorkflow,
 };
 use crate::core::agent_task_schedule::{
     AgentTaskArtifactOutputDeclaration, AgentTaskOutputBinding, AgentTaskOutputDependencies,
@@ -208,6 +209,7 @@ fn compile_repo_loop_spec(spec: AgentTaskRepoLoopSpec) -> Result<AgentTaskPlan> 
 
 fn validate_repo_loop_spec_for_agent_task_plan(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
     validate_repo_loop_artifact_references(spec)?;
+    validate_repo_loop_artifact_graph(spec)?;
 
     if spec.loop_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -596,10 +598,22 @@ fn repo_loop_workflow_artifact_outputs(
     spec: &AgentTaskRepoLoopSpec,
     workflow: &AgentTaskRepoLoopSpecWorkflow,
 ) -> Vec<AgentTaskArtifactOutputDeclaration> {
-    workflow
+    let mut ids = workflow
         .artifacts
         .iter()
         .chain(workflow.emits.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    for edge in spec
+        .artifact_graph
+        .iter()
+        .filter(|edge| edge.from_workflow_id == workflow.workflow_id)
+    {
+        if !ids.contains(&edge.artifact_id) {
+            ids.push(edge.artifact_id.clone());
+        }
+    }
+    ids.iter()
         .filter_map(|artifact_id| repo_loop_artifact(spec, artifact_id))
         .map(|artifact| AgentTaskArtifactOutputDeclaration {
             name: artifact.artifact_id.clone(),
@@ -618,7 +632,18 @@ fn repo_loop_workflow_output_dependencies(
 ) -> AgentTaskOutputDependencies {
     let mut depends_on = Vec::new();
     let mut bindings = HashMap::new();
-    for artifact_id in workflow.consumes.iter().chain(workflow.dependencies.iter()) {
+    let mut artifact_ids = workflow
+        .consumes
+        .iter()
+        .chain(workflow.dependencies.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    for edge in artifact_graph_consumer_edges(spec, workflow) {
+        if !artifact_ids.contains(&edge.artifact_id) {
+            artifact_ids.push(edge.artifact_id.clone());
+        }
+    }
+    for artifact_id in &artifact_ids {
         for (_producer, producer_task_id) in repo_loop_artifact_producers(
             spec,
             workflow,
@@ -678,6 +703,11 @@ fn repo_loop_artifact_producers<'a>(
         .filter(|producer| {
             producer.artifacts.iter().any(|id| id == artifact_id)
                 || producer.emits.iter().any(|id| id == artifact_id)
+                || spec.artifact_graph.iter().any(|edge| {
+                    edge.artifact_id == artifact_id
+                        && edge.from_workflow_id == producer.workflow_id
+                        && edge.to_workflow_id == consumer.workflow_id
+                })
         })
         .flat_map(|producer| match scope {
             RepoLoopProducerScope::All if producer.entity_ids.is_empty() => {
@@ -700,6 +730,16 @@ fn repo_loop_artifact_producers<'a>(
                 .collect(),
             RepoLoopProducerScope::MatchingEntity(None) => Vec::new(),
         })
+        .collect()
+}
+
+fn artifact_graph_consumer_edges<'a>(
+    spec: &'a AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Vec<&'a AgentTaskRepoLoopSpecArtifactGraphEdge> {
+    spec.artifact_graph
+        .iter()
+        .filter(|edge| edge.to_workflow_id == workflow.workflow_id)
         .collect()
 }
 
@@ -904,6 +944,79 @@ fn validate_repo_loop_artifact_references(spec: &AgentTaskRepoLoopSpec) -> Resul
     ))
 }
 
+fn validate_repo_loop_artifact_graph(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    let mut diagnostics = Vec::new();
+    for (index, edge) in spec.artifact_graph.iter().enumerate() {
+        if repo_loop_artifact(spec, &edge.artifact_id).is_none() {
+            diagnostics.push(format!(
+                "artifact_graph[{index}].artifact_id references undeclared artifact '{}'",
+                edge.artifact_id
+            ));
+        }
+        let producer = spec
+            .workflows
+            .iter()
+            .find(|workflow| workflow.workflow_id == edge.from_workflow_id);
+        let consumer = spec
+            .workflows
+            .iter()
+            .find(|workflow| workflow.workflow_id == edge.to_workflow_id);
+        match producer {
+            Some(producer) => {
+                if !producer.entity_ids.is_empty() {
+                    diagnostics.push(format!(
+                        "artifact_graph[{index}] producer workflow '{}' uses fan-out; graph compilation only supports one task per graph edge",
+                        edge.from_workflow_id
+                    ));
+                }
+                if !producer.artifacts.contains(&edge.artifact_id)
+                    && !producer.emits.contains(&edge.artifact_id)
+                {
+                    diagnostics.push(format!(
+                        "artifact_graph[{index}] producer workflow '{}' does not emit artifact '{}'",
+                        edge.from_workflow_id, edge.artifact_id
+                    ));
+                }
+            }
+            None => diagnostics.push(format!(
+                "artifact_graph[{index}].from_workflow_id references undeclared workflow '{}'",
+                edge.from_workflow_id
+            )),
+        }
+        match consumer {
+            Some(consumer) => {
+                if !consumer.entity_ids.is_empty() {
+                    diagnostics.push(format!(
+                        "artifact_graph[{index}] consumer workflow '{}' uses fan-out; graph compilation only supports one task per graph edge",
+                        edge.to_workflow_id
+                    ));
+                }
+                if !consumer.consumes.contains(&edge.artifact_id)
+                    && !consumer.dependencies.contains(&edge.artifact_id)
+                {
+                    diagnostics.push(format!(
+                        "artifact_graph[{index}] consumer workflow '{}' does not consume artifact '{}'",
+                        edge.to_workflow_id, edge.artifact_id
+                    ));
+                }
+            }
+            None => diagnostics.push(format!(
+                "artifact_graph[{index}].to_workflow_id references undeclared workflow '{}'",
+                edge.to_workflow_id
+            )),
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "artifact_graph",
+        "repo loop spec artifact_graph edges cannot be compiled into deterministic agent-task dependencies",
+        Some(spec.loop_id.clone()),
+        Some(diagnostics),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1009,6 +1122,128 @@ mod tests {
             plan.artifact_outputs["build-page__about"][0].name,
             "page_blocks"
         );
+    }
+
+    #[test]
+    fn compiles_repo_loop_artifact_graph_edges_into_output_dependencies() {
+        let plan = compile_loop_spec_value(json!({
+            "loop_id": "example/artifact-graph",
+            "artifacts": {
+                "site_plan": { "kind": "example/SitePlan/v1", "required": true }
+            },
+            "artifact_graph": {
+                "edges": [
+                    {
+                        "artifact_id": "site_plan",
+                        "from_workflow_id": "plan-site",
+                        "to_workflow_id": "build-site",
+                        "required": true
+                    }
+                ]
+            },
+            "workflows": [
+                {
+                    "workflow_id": "plan-site",
+                    "prompt": "Plan the site.",
+                    "emits": ["site_plan"]
+                },
+                {
+                    "workflow_id": "build-site",
+                    "prompt": "Build the site.",
+                    "consumes": ["site_plan"]
+                }
+            ]
+        }))
+        .expect("artifact graph spec compiles");
+
+        assert_eq!(plan.artifact_outputs["plan-site"][0].name, "site_plan");
+        assert_eq!(
+            plan.output_dependencies["build-site"].depends_on,
+            vec!["plan-site"]
+        );
+        let binding = &plan.output_dependencies["build-site"].bindings["site_plan"];
+        assert_eq!(binding.task_id, "plan-site");
+        assert_eq!(binding.path, "/typed_artifacts/site_plan");
+        assert_eq!(
+            binding
+                .artifact
+                .as_ref()
+                .and_then(|artifact| artifact.artifact_id.as_deref()),
+            Some("site_plan")
+        );
+    }
+
+    #[test]
+    fn rejects_repo_loop_artifact_graph_undeclared_artifacts() {
+        let error = compile_loop_spec_value(json!({
+            "loop_id": "example/artifact-graph-missing-artifact",
+            "artifact_graph": [
+                {
+                    "artifact_id": "missing_packet",
+                    "from_workflow_id": "produce",
+                    "to_workflow_id": "consume"
+                }
+            ],
+            "workflows": [
+                { "workflow_id": "produce", "prompt": "Produce.", "emits": ["missing_packet"] },
+                { "workflow_id": "consume", "prompt": "Consume.", "consumes": ["missing_packet"] }
+            ]
+        }))
+        .expect_err("undeclared artifact is rejected");
+
+        assert!(error.message.contains("artifact_graph edges"));
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("diagnostics are tried values")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tried.contains(
+            "artifact_graph[0].artifact_id references undeclared artifact 'missing_packet'"
+        ));
+    }
+
+    #[test]
+    fn rejects_repo_loop_artifact_graph_fanout_with_deterministic_diagnostic() {
+        let error = compile_loop_spec_value(json!({
+            "loop_id": "example/artifact-graph-fanout",
+            "artifacts": {
+                "page_plan": { "kind": "example/PagePlan/v1" }
+            },
+            "artifact_graph": [
+                {
+                    "artifact_id": "page_plan",
+                    "from_workflow_id": "plan-page",
+                    "to_workflow_id": "build-site"
+                }
+            ],
+            "workflows": [
+                {
+                    "workflow_id": "plan-page",
+                    "prompt": "Plan pages.",
+                    "entity_ids": ["home", "about"],
+                    "emits": ["page_plan"]
+                },
+                {
+                    "workflow_id": "build-site",
+                    "prompt": "Build the site.",
+                    "consumes": ["page_plan"]
+                }
+            ]
+        }))
+        .expect_err("artifact graph fanout requires later compiler support");
+
+        assert!(error.message.contains("artifact_graph edges"));
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("diagnostics are tried values")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tried.contains("producer workflow 'plan-page' uses fan-out"));
+        assert!(tried.contains("only supports one task per graph edge"));
     }
 
     #[test]

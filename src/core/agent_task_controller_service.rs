@@ -8,7 +8,7 @@
 //! Reports keep their existing JSON shapes via `serde` so the CLI continues to
 //! emit the same envelopes after the move.
 
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -115,6 +115,12 @@ pub struct AgentTaskRepoLoopSpec {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub artifacts: Vec<AgentTaskRepoLoopSpecArtifact>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_artifact_graph_edges",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub artifact_graph: Vec<AgentTaskRepoLoopSpecArtifactGraphEdge>,
     #[serde(
         default,
         deserialize_with = "deserialize_dependencies",
@@ -235,6 +241,18 @@ pub struct AgentTaskRepoLoopSpecArtifact {
     pub required: bool,
 }
 
+/// Directed artifact edge declared by a repo loop spec.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskRepoLoopSpecArtifactGraphEdge {
+    pub artifact_id: String,
+    #[serde(alias = "producer", alias = "producer_workflow_id")]
+    pub from_workflow_id: String,
+    #[serde(alias = "consumer", alias = "consumer_workflow_id")]
+    pub to_workflow_id: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
 /// Dependency declared by a repo loop spec.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRepoLoopSpecDependency {
@@ -342,6 +360,28 @@ where
     D: Deserializer<'de>,
 {
     deserialize_vec_or_keyed_map(deserializer, "artifact_id")
+}
+
+fn deserialize_artifact_graph_edges<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<AgentTaskRepoLoopSpecArtifactGraphEdge>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let edges = match value {
+        Value::Array(items) => Value::Array(items),
+        Value::Object(mut object) => object.remove("edges").ok_or_else(|| {
+            de::Error::custom("artifact_graph object must contain an edges array")
+        })?,
+        other => {
+            return Err(de::Error::custom(format!(
+                "expected array or object with edges for artifact_graph, got {}",
+                json_type_name(&other)
+            )))
+        }
+    };
+    serde_json::from_value(edges).map_err(de::Error::custom)
 }
 
 fn deserialize_dependencies<'de, D>(
@@ -1085,7 +1125,73 @@ fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
             |ability| &ability.ability_id,
         )?;
     }
+    validate_artifact_graph_edges(spec)?;
     Ok(())
+}
+
+fn validate_artifact_graph_edges(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+    let mut diagnostics = Vec::new();
+    for (index, edge) in spec.artifact_graph.iter().enumerate() {
+        if !spec
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id == edge.artifact_id)
+        {
+            diagnostics.push(format!(
+                "artifact_graph[{index}].artifact_id references undeclared artifact '{}'",
+                edge.artifact_id
+            ));
+        }
+        let producer = spec
+            .workflows
+            .iter()
+            .find(|workflow| workflow.workflow_id == edge.from_workflow_id);
+        let consumer = spec
+            .workflows
+            .iter()
+            .find(|workflow| workflow.workflow_id == edge.to_workflow_id);
+        if producer.is_none() {
+            diagnostics.push(format!(
+                "artifact_graph[{index}].from_workflow_id references undeclared workflow '{}'",
+                edge.from_workflow_id
+            ));
+        }
+        if consumer.is_none() {
+            diagnostics.push(format!(
+                "artifact_graph[{index}].to_workflow_id references undeclared workflow '{}'",
+                edge.to_workflow_id
+            ));
+        }
+        if let Some(producer) = producer {
+            if !producer.artifacts.contains(&edge.artifact_id)
+                && !producer.emits.contains(&edge.artifact_id)
+            {
+                diagnostics.push(format!(
+                    "artifact_graph[{index}] producer workflow '{}' does not emit artifact '{}'",
+                    edge.from_workflow_id, edge.artifact_id
+                ));
+            }
+        }
+        if let Some(consumer) = consumer {
+            if !consumer.consumes.contains(&edge.artifact_id)
+                && !consumer.dependencies.contains(&edge.artifact_id)
+            {
+                diagnostics.push(format!(
+                    "artifact_graph[{index}] consumer workflow '{}' does not consume artifact '{}'",
+                    edge.to_workflow_id, edge.artifact_id
+                ));
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "artifact_graph",
+        "repo loop spec artifact_graph edges must reference declared workflow artifact flow",
+        Some(spec.loop_id.clone()),
+        Some(diagnostics),
+    ))
 }
 
 fn validate_declared_ids<T, F>(
@@ -1266,6 +1372,7 @@ fn workflow_client_context(
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
         "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
+        "artifact_graph_edges": workflow_artifact_graph_edges(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -1363,6 +1470,7 @@ fn workflow_declaration_context(
         "abilities": select_by_id(&spec.abilities, &workflow.abilities, |ability| &ability.ability_id),
         "artifacts": select_by_id(&spec.artifacts, &workflow.artifacts, |artifact| &artifact.artifact_id),
         "artifact_dependencies": workflow_artifact_dependencies(spec, workflow),
+        "artifact_graph_edges": workflow_artifact_graph_edges(spec, workflow),
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
@@ -1428,6 +1536,15 @@ fn workflow_artifact_dependencies(
             ids.push(dependency.clone());
         }
     }
+    for edge in spec
+        .artifact_graph
+        .iter()
+        .filter(|edge| edge.to_workflow_id == workflow.workflow_id)
+    {
+        if !ids.contains(&edge.artifact_id) {
+            ids.push(edge.artifact_id.clone());
+        }
+    }
 
     ids.iter()
         .filter_map(|id| {
@@ -1442,7 +1559,13 @@ fn workflow_artifact_dependencies(
                     .iter()
                     .filter(|producer| producer.workflow_id != workflow.workflow_id)
                     .filter(|producer| {
-                        producer.artifacts.contains(id) || producer.emits.contains(id)
+                        producer.artifacts.contains(id)
+                            || producer.emits.contains(id)
+                            || spec.artifact_graph.iter().any(|edge| {
+                                edge.artifact_id == *id
+                                    && edge.from_workflow_id == producer.workflow_id
+                                    && edge.to_workflow_id == workflow.workflow_id
+                            })
                     })
                     .map(|producer| Value::String(producer.workflow_id.clone()))
                     .collect();
@@ -1455,6 +1578,20 @@ fn workflow_artifact_dependencies(
             }
             Some(value)
         })
+        .collect()
+}
+
+fn workflow_artifact_graph_edges(
+    spec: &AgentTaskRepoLoopSpec,
+    workflow: &AgentTaskRepoLoopSpecWorkflow,
+) -> Vec<Value> {
+    spec.artifact_graph
+        .iter()
+        .filter(|edge| {
+            edge.from_workflow_id == workflow.workflow_id
+                || edge.to_workflow_id == workflow.workflow_id
+        })
+        .filter_map(|edge| serde_json::to_value(edge).ok())
         .collect()
 }
 
@@ -3592,6 +3729,7 @@ mod tests {
                     required: true,
                 },
             ],
+            artifact_graph: Vec::new(),
             dependencies: Vec::new(),
             gates: Vec::new(),
             metrics: Vec::new(),
@@ -3847,6 +3985,7 @@ mod tests {
                         required: true,
                     },
                 ],
+                artifact_graph: Vec::new(),
                 dependencies: vec![AgentTaskRepoLoopSpecDependency {
                     dependency_id: "source-tree".to_string(),
                     kind: "repo".to_string(),
@@ -4010,6 +4149,47 @@ mod tests {
     }
 
     #[test]
+    fn init_from_spec_projects_artifact_graph_edges_to_controller_metadata() {
+        with_isolated_home(|_| {
+            let mut spec = repo_loop_reconcile_spec("repo-loop-artifact-graph");
+            spec.workflows
+                .iter_mut()
+                .find(|workflow| workflow.workflow_id == "generation")
+                .expect("generation workflow")
+                .emits = vec!["static_site_pull_request".to_string()];
+            spec.workflows
+                .iter_mut()
+                .find(|workflow| workflow.workflow_id == "static_validation")
+                .expect("static validation workflow")
+                .consumes = vec!["static_site_pull_request".to_string()];
+            spec.artifact_graph = vec![AgentTaskRepoLoopSpecArtifactGraphEdge {
+                artifact_id: "static_site_pull_request".to_string(),
+                from_workflow_id: "generation".to_string(),
+                to_workflow_id: "static_validation".to_string(),
+                required: true,
+            }];
+
+            let report =
+                init_from_spec(ControllerFromSpecRequest { spec }).expect("spec initializes");
+            let context = workflow_action_context(&report, "static_validation");
+
+            assert_eq!(
+                context["artifact_graph_edges"],
+                json!([{
+                    "artifact_id": "static_site_pull_request",
+                    "from_workflow_id": "generation",
+                    "to_workflow_id": "static_validation",
+                    "required": true
+                }])
+            );
+            assert_eq!(
+                context["artifact_dependencies"][0]["producer_workflow_ids"],
+                json!(["generation"])
+            );
+        });
+    }
+
+    #[test]
     fn init_from_spec_reconciles_changed_emitted_artifacts() {
         with_isolated_home(|_| {
             let report = reapply_base_then_mutated("repo-loop-reconcile-artifacts", |spec| {
@@ -4136,6 +4316,7 @@ mod tests {
                     inputs: Value::Null,
                 }],
                 artifacts: Vec::new(),
+                artifact_graph: Vec::new(),
                 dependencies: Vec::new(),
                 gates: Vec::new(),
                 metrics: Vec::new(),
@@ -4171,6 +4352,7 @@ mod tests {
                 abilities: Vec::new(),
                 workflows: Vec::new(),
                 artifacts: Vec::new(),
+                artifact_graph: Vec::new(),
                 dependencies: Vec::new(),
                 gates: Vec::new(),
                 metrics: Vec::new(),
@@ -4886,6 +5068,7 @@ mod tests {
                     description: Some("candidate patch".to_string()),
                     required: true,
                 }],
+                artifact_graph: Vec::new(),
                 dependencies: vec![AgentTaskRepoLoopSpecDependency {
                     dependency_id: "source-tree".to_string(),
                     kind: "repo".to_string(),
