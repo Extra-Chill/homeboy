@@ -99,6 +99,36 @@ Failure outcomes should include a normalized classification from
 `failure_classifications` plus enough diagnostic context for Homeboy to route the
 result without parsing backend-native logs.
 
+## Runtime Command Provider Boundary
+
+TODO: Add a generic runtime-command provider only after the selected runtime owns
+a stable command substrate that accepts and returns backend-neutral shapes. The
+provider manifest should advertise a separate capability such as
+`runtime_command_execution`; until then, agent-task providers must not imply they
+can run arbitrary runtime commands.
+
+The generic request shape needs these caller-owned inputs:
+
+- `runtime_package`: runtime package id/ref and optional version or checkout ref.
+- `recipe`: recipe pack/name/path/ref inputs to materialize the runtime.
+- `command_id`: stable command id selected by the caller.
+- `args`: JSON object or array passed to the command without shell expansion.
+- `env_names`: declared environment variable names the runtime may read; values
+  are resolved by Homeboy and never embedded in manifests or diagnostics.
+- `workspace`, `limits`, and `artifacts`: materialization, timeout, and expected
+  output declarations.
+
+The provider command should emit `homeboy/agent-task-outcome/v1` with normalized
+`status`, `failure_classification`, `summary`, `diagnostics`, `artifacts`,
+`evidence_refs`, `outputs`, and redacted `metadata`. Backend-native logs and
+recipe artifacts may be attached as artifacts, but Homeboy should not parse them
+to determine the terminal outcome.
+
+For WP Codebox specifically, Homeboy Extensions can forward runtime package,
+recipe, command, args, and env-name declarations, but Codebox must provide the
+stable command runner and result envelope. Keep WPCOM, Dolly, and product-specific
+semantics in callers or runtime packages, not in this generic provider boundary.
+
 ## Homeboy Contract Adapter
 
 Extension runtime packages should consume generic Homeboy contract constants
