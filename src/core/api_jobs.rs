@@ -1668,6 +1668,57 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_claim_heartbeat_extends_matching_unexpired_claim() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
+        let previous_expiry = claim.job.claim_expires_at_ms.expect("claim expiry");
+
+        let renewed = store
+            .renew_remote_runner_claim(job.id, "homeboy-lab", &claim_id, 60_000)
+            .expect("matching claim renews");
+
+        assert_eq!(renewed.id, job.id);
+        assert_eq!(renewed.claim_id.as_deref(), Some(claim_id.as_str()));
+        assert!(renewed.claim_expires_at_ms.expect("renewed expiry") > previous_expiry);
+    }
+
+    #[test]
+    fn remote_runner_claim_heartbeat_rejects_wrong_or_expired_claim() {
+        let store = JobStore::default();
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
+            .expect("remote runner job queues");
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        let claim_id = claim.job.claim_id.expect("claim id");
+
+        let wrong_claim = store.renew_remote_runner_claim(job.id, "homeboy-lab", "wrong", 30_000);
+        assert!(wrong_claim.is_err());
+
+        {
+            let mut inner = store.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .get_mut(&job.id)
+                .expect("job exists")
+                .job
+                .claim_expires_at_ms = Some(timestamp_ms().saturating_sub(1));
+        }
+
+        let expired = store.renew_remote_runner_claim(job.id, "homeboy-lab", &claim_id, 30_000);
+        assert!(expired.is_err());
+    }
+
+    #[test]
     fn cancelled_remote_runner_job_cannot_be_claimed() {
         let store = JobStore::default();
         let job = store

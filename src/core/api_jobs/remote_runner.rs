@@ -296,6 +296,28 @@ impl JobStore {
         )
     }
 
+    pub(crate) fn renew_remote_runner_claim(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        claim_id: &str,
+        lease_ms: u64,
+    ) -> Result<Job> {
+        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
+        let now = timestamp_ms();
+        {
+            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            stored.job.updated_at_ms = now;
+            stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
+        }
+        self.persist()?;
+        self.get(job_id)
+    }
+
     pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
         let expired_ids = {
             let inner = self.inner.lock().expect("job store mutex poisoned");

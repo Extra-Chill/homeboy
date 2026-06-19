@@ -40,6 +40,14 @@ struct FinishRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct HeartbeatRequest {
+    runner_id: String,
+    claim_id: String,
+    #[serde(default)]
+    lease_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct SessionRequest {
     runner_id: String,
     controller_id: String,
@@ -84,7 +92,7 @@ pub(super) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, or /runner/jobs/<job-id>/finish."
+                    "Use /runner/jobs, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, or /runner/jobs/<job-id>/heartbeat."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
@@ -187,7 +195,7 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
                 "unknown remote runner job path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs/<job-id>/events or /runner/jobs/<job-id>/finish.".to_string(),
+                    "Use /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, or /runner/jobs/<job-id>/heartbeat.".to_string(),
                 ]),
             ),
         );
@@ -202,15 +210,17 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
             Ok(body) => daemon_endpoint_response("runner.jobs.finish", body),
             Err(err) => error_response(400, err),
         },
+        "heartbeat" => match heartbeat(job_id, body, job_store) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.heartbeat", body),
+            Err(err) => error_response(400, err),
+        },
         _ => error_response(
             404,
             Error::validation_invalid_argument(
                 "path",
                 "unknown remote runner job operation",
                 Some(operation.to_string()),
-                Some(vec![
-                    "Supported operations are events and finish.".to_string()
-                ]),
+                Some(vec!["Supported operations are events, finish, and heartbeat.".to_string()]),
             ),
         ),
     }
@@ -251,6 +261,21 @@ fn finish(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Val
     )?;
     Ok(json!({
         "command": "api.runner.jobs.finish",
+        "job": job,
+    }))
+}
+
+fn heartbeat(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Value> {
+    let request: HeartbeatRequest = parse_body(body, "remote runner heartbeat request")?;
+    touch_reverse_session(&request.runner_id)?;
+    let job = job_store.renew_remote_runner_claim(
+        job_id,
+        &request.runner_id,
+        &request.claim_id,
+        request.lease_ms.unwrap_or(30_000),
+    )?;
+    Ok(json!({
+        "command": "api.runner.jobs.heartbeat",
         "job": job,
     }))
 }
