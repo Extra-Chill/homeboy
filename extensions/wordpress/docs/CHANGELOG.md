@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.37] - 2026-06-19
+
+### Changed
+- Resolve Codebox helpers from installed runtime
+
 ## [3.7.36] - 2026-06-19
 
 ### Changed
