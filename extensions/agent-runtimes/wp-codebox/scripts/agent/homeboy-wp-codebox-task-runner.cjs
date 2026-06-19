@@ -20,6 +20,13 @@ const {
   providerGuidance,
   providerPreflightManifest,
 } = require('../../lib/provider-preflight-manifest');
+const {
+  artifactNameFromDeclaration,
+  artifactPath,
+  normalizeTypedArtifactEntry,
+  normalizeTypedArtifacts,
+  typedArtifactFileRefs,
+} = require('../../lib/codebox-artifact-contract');
 
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -1500,45 +1507,8 @@ function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizeTypedArtifactEntry(name, artifact) {
-  if (!plainObject(artifact)) {
-    return null;
-  }
-  const artifactName = artifact.name || name;
-  if (!artifactName) {
-    return null;
-  }
-  const fileRefs = typedArtifactFileRefs(artifact);
-  return Object.fromEntries(Object.entries({
-    schema: 'homeboy/agent-task-typed-artifact/v1',
-    name: artifactName,
-    type: artifact.type || artifact.kind || artifact.artifact_type || artifact.artifactType,
-    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
-    payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
-    provenance: plainObject(artifact.provenance) ? artifact.provenance : {},
-    file_refs: fileRefs,
-    metadata: plainObject(artifact.metadata) ? artifact.metadata : {},
-  }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)));
-}
-
-function typedArtifactFileRefs(artifact) {
-  if (Array.isArray(artifact.file_refs)) {
-    return artifact.file_refs;
-  }
-  if (Array.isArray(artifact.fileRefs)) {
-    return artifact.fileRefs;
-  }
-  return [];
-}
-
 function artifactDeclarationName(declaration) {
-  if (typeof declaration === 'string') {
-    return declaration;
-  }
-  if (!plainObject(declaration)) {
-    return '';
-  }
-  return declaration.name || declaration.id || '';
+  return artifactNameFromDeclaration(declaration);
 }
 
 function requiredArtifactDeclarations(input, config = {}) {
@@ -1576,22 +1546,6 @@ function missingRequiredTypedArtifactDiagnostic(input, workload, config = {}) {
   };
 }
 
-function normalizeTypedArtifacts(value) {
-  if (Array.isArray(value)) {
-    return Object.fromEntries(value
-      .map((artifact, index) => normalizeTypedArtifactEntry(artifact?.name || artifact?.id || `artifact_${index + 1}`, artifact))
-      .filter(Boolean)
-      .map((artifact) => [artifact.name, artifact]));
-  }
-  if (!plainObject(value)) {
-    return {};
-  }
-  return Object.fromEntries(Object.entries(value)
-    .map(([name, artifact]) => normalizeTypedArtifactEntry(name, artifact))
-    .filter(Boolean)
-    .map((artifact) => [artifact.name, artifact]));
-}
-
 function mergeTypedArtifactOutputs(outputs, ...candidates) {
   const typedArtifacts = Object.assign({}, ...candidates.map(normalizeTypedArtifacts));
   if (Object.keys(typedArtifacts).length === 0) {
@@ -1611,13 +1565,6 @@ function isTranscriptArtifactDeclaration(declaration) {
   const type = declaration?.type || declaration?.kind || declaration?.artifact_type || declaration?.artifactType || '';
   const schema = declaration?.artifact_schema || declaration?.artifactSchema || declaration?.schema || '';
   return /transcript|conversation|messages/i.test(`${name} ${type} ${schema}`);
-}
-
-function artifactPath(root, relativePath) {
-  if (!root || !relativePath) {
-    return '';
-  }
-  return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
 }
 
 function transcriptTypedArtifactsFromAgentResult(input, agentResult, config = {}) {
