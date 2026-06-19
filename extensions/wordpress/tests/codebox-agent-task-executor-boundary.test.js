@@ -192,22 +192,58 @@ restoreEnv('HOMEBOY_AGENT_TOOL_POLICY_SCHEMA', originalToolPolicySchemaEnv);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('workspace_read'), true);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_issue_publish'), false);
 assert.equal(homeboyToolPolicyTaskInput.allowed_tools.includes('github_pull_request_publish'), false);
-assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, 'homeboy/agent-tool-request/v1');
-assert.deepEqual(
-  JSON.parse(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_POLICY_JSON),
-  JSON.parse(homeboyAgentToolPolicyJson)
-);
+assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA, undefined);
+assert.equal(homeboyToolPolicyTaskInput.runtime_env.HOMEBOY_AGENT_TOOL_POLICY_JSON, undefined);
 assert.equal(homeboyToolPolicyTaskInput.runtime_env.DATAMACHINE_HOST_TOOL_POLICY_JSON, undefined);
-const homeboySandboxTools = Object.fromEntries(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.map((tool) => [tool.id, tool]));
-assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy_agent_tool_policy');
-assert.equal(homeboySandboxTools.workspace_read.allowed, true);
-assert.equal(homeboySandboxTools.workspace_read.runtime.environment, 'runtime_local');
-assert.equal(homeboySandboxTools.github_issue_publish.allowed, false);
-assert.equal(homeboySandboxTools.github_issue_publish.execution_location, 'parent');
-assert.equal(homeboySandboxTools.github_issue_publish.transport_visibility, 'parent');
-assert.equal(homeboySandboxTools.github_issue_publish.runtime.environment, 'control_plane');
-assert.equal(homeboySandboxTools.github_issue_publish.metadata.timeout_ms, 30000);
-assert.equal(homeboySandboxTools.github_pull_request_publish.transport_visibility, 'hidden');
+assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.metadata.source, 'homeboy.codebox-agent-task.default-workspace-tools');
+assert.equal(homeboyToolPolicyTaskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'github_issue_publish'), false);
+
+const codeboxOwnedBridgeTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'codebox-owned-parent-tool-bridge-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      runtime_profile: {
+        schema: 'wp-codebox/runtime-profile/v1',
+        id: 'codebox-owned-bridge',
+        parent_tool_bridge: {
+          schema: 'wp-codebox/parent-tool-bridge/v1',
+        },
+      },
+    },
+  },
+  instructions: 'Run with a Codebox-owned parent tool bridge.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+  tools: ['workspace_read'],
+});
+assert.equal(codeboxOwnedBridgeTaskInput.runtime_requirements.parent_tool_bridge.schema, 'wp-codebox/parent-tool-bridge/v1');
+assert.equal(codeboxOwnedBridgeTaskInput.runtime_requirements.upstream_primitive_requirements, undefined);
+
+const runtimeProfileDependencyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'runtime-profile-dependencies-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      runtime_requirements: {
+        components: [{ slug: 'runtime-component', path: '/components/runtime-component' }],
+        plugins: [{ slug: 'runtime-plugin', path: '/plugins/runtime-plugin' }],
+      },
+    },
+  },
+  instructions: 'Forward Codebox-owned runtime profile dependencies.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+});
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.components, [{ slug: 'runtime-component', path: '/components/runtime-component' }]);
+assert.deepEqual(runtimeProfileDependencyTaskInput.runtime_requirements.plugins, [{ slug: 'runtime-plugin', path: '/plugins/runtime-plugin' }]);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.component_contracts, undefined);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.extra_plugins, undefined);
+assert.deepEqual(runtimeProfileDependencyTaskInput.component_contracts, []);
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].id, 'parent-tool-bridge');
+assert.equal(runtimeProfileDependencyTaskInput.runtime_requirements.upstream_primitive_requirements[0].adapter_behavior, 'declare_requirement_only');
 
 const customRuntimePolicyTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
