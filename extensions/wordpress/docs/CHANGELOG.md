@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.38] - 2026-06-19
+
+### Changed
+- Thin Codebox artifact adapter boundary
+
 ## [3.7.37] - 2026-06-19
 
 ### Changed
