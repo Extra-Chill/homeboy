@@ -24,7 +24,7 @@ function main() {
 }
 
 function dependencyEntries(env) {
-  const runtimeId = env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID;
+  const runtimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
   const runtime = resolveRuntimeProvider(runtimeId, { env });
   const entries = runtime.checkout.repo ? [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }] : [];
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);

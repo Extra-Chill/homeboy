@@ -170,7 +170,7 @@ function writeOutcome(outcome) {
 try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
-  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME_PROVIDER || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
+  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
   const request = buildAgentTaskRequest(config, configPath, runtime);
   const result = spawnSync(process.execPath, [runtime.executor.path], {
     encoding: 'utf8',

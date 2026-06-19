@@ -8,7 +8,7 @@ const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime
 
 try {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const runtime = resolveRuntimeProvider(process.env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID, { workspace });
+  const runtime = resolveRuntimeProvider(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { workspace });
   run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
   run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
   for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {

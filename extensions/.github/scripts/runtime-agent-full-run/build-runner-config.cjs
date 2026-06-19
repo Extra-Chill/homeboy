@@ -34,8 +34,8 @@ function buildConfig(env) {
   const targetRepo = required(env.TARGET_REPO, 'TARGET_REPO');
   const componentId = env.COMPONENT_ID || path.basename(workspace);
   const componentPath = env.COMPONENT_PATH || workspace;
-  const runtimeId = env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID;
-  const runtimeProfile = required(env.RUNTIME_PROFILE, 'RUNTIME_PROFILE');
+  const runtimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
+  const runtimeProfile = required(env.PROFILE || env.RUNTIME_PROFILE, 'PROFILE or RUNTIME_PROFILE');
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
   const runtimeBin = runtime.paths.runtime_bin;
@@ -112,7 +112,7 @@ function buildConfig(env) {
     workload_id: workloadId,
     workload_label: env.WORKLOAD_LABEL || `Run ${workloadId}`,
     validation_dependencies: validationDependencies.paths,
-    runtime_id: runtimeId,
+    runtime_id: runtime.id,
     runtime_profile: runtimeProfile,
     runtime_profiles: effectiveRuntimeProfiles,
     runtime_ref: env.RUNTIME_REF || 'main',

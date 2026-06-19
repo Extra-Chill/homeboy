@@ -63,9 +63,9 @@ jobs:
   run-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
-      runtime_provider: wp-codebox
+      runtime: wp-codebox
       runtime_ref: main
-      runtime_profile: example-agent
+      profile: example-agent
       runtime_profiles: |
         {
           "example-agent": {
@@ -94,7 +94,7 @@ Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| Runtime selection | `runtime_provider`, `runtime_ref`, `runtime_wordpress_version` |
+| Runtime selection | `runtime` (`runtime_provider` compatibility alias), `runtime_ref`, `runtime_wordpress_version` |
 | Flow identity | `workload_id`, `workload_label`, `callback_data` |
 | Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
 | Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
@@ -179,7 +179,8 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime_provider`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- Agent CI runs through the selected `runtime`. `runtime_provider` remains a compatibility alias, and `codebox` resolves to `wp-codebox` for older callers. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- `profile` is the preferred runtime profile selector. `runtime_profile` remains supported for existing callers.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.

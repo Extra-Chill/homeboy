@@ -12,9 +12,17 @@ name: Runtime Agent Full Run (reusable)
         type: boolean
         default: true
       runtime_provider:
-        description: Runtime provider backend identifier.
+        description: Runtime provider identifier. Prefer runtime for new callers.
         type: string
         default: wp-codebox
+      runtime:
+        description: Agent runtime id. Preferred alias for runtime_provider.
+        type: string
+        default: ''
+      backend:
+        description: Compatibility alias for runtime_provider; use runtime for new callers.
+        type: string
+        default: ''
       runtime_ref:
         description: Runtime provider ref.
         type: string
@@ -26,7 +34,11 @@ name: Runtime Agent Full Run (reusable)
       runtime_profile:
         description: Runtime profile id selected from runtime_profiles.
         type: string
-        required: true
+        default: ''
+      profile:
+        description: Preferred alias for runtime_profile.
+        type: string
+        default: ''
       runtime_profiles:
         description: JSON object keyed by runtime profile id.
         type: string
@@ -411,6 +423,8 @@ jobs:
           VALIDATION_DEPENDENCIES: ${{ inputs.validation_dependencies }}
           RUNTIME_DEPENDENCIES: ${{ inputs.runtime_dependencies }}
           RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          RUNTIME: ${{ inputs.runtime }}
+          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
@@ -452,6 +466,8 @@ jobs:
         if: ${{ inputs.run_agent }}
         env:
           RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          RUNTIME: ${{ inputs.runtime }}
+          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
@@ -474,9 +490,12 @@ jobs:
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
           RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          RUNTIME: ${{ inputs.runtime }}
+          BACKEND: ${{ inputs.backend }}
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           RUNTIME_REF: ${{ inputs.runtime_ref }}
           RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
+          PROFILE: ${{ inputs.profile }}
           RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
           RUNTIME_WORDPRESS_VERSION: ${{ inputs.runtime_wordpress_version }}
           EXECUTION_KIND: ${{ inputs.execution_kind }}
