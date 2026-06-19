@@ -127,6 +127,10 @@ ability execution. Mount downloaded GitHub Actions artifacts with
 `runtime_mounts`, and enforce typed outputs with `artifact_declarations` plus
 `runtime_output_projections`.
 
+New callers should select runtimes with `runtime` and `profile`. Existing
+`runtime_provider` / `runtime_profile` callers remain supported, and the legacy
+`codebox` runtime value resolves to `wp-codebox`.
+
 Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
 agent runs. Former domain-specific reusable workflow wrappers have been removed
 after active default-branch consumers migrated to the generic workflow.

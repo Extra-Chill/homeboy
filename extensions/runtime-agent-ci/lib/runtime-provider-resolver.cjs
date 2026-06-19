@@ -4,6 +4,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_RUNTIME_ID = 'wp-codebox';
+const RUNTIME_ID_ALIASES = {
+	codebox: 'wp-codebox',
+};
 
 function repoRootFromHere() {
 	return path.resolve(__dirname, '..', '..');
@@ -84,8 +87,13 @@ function isRuntimeManifest(manifest) {
 	);
 }
 
-function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
+function normalizeRuntimeId(runtimeId = DEFAULT_RUNTIME_ID) {
 	const id = runtimeId || DEFAULT_RUNTIME_ID;
+	return RUNTIME_ID_ALIASES[id] || id;
+}
+
+function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
+	const id = normalizeRuntimeId(runtimeId);
 	const registry = options.registry || runtimeRegistry(options);
 	const manifest = registry[id];
 	if (!manifest) {
@@ -165,6 +173,7 @@ function executorScriptArg(provider) {
 
 module.exports = {
 	DEFAULT_RUNTIME_ID,
+	normalizeRuntimeId,
 	resolveRuntimeProvider,
 	runtimeManifestPath,
 	runtimeRegistry,

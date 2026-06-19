@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+	normalizeRuntimeId,
 	resolveRuntimeProvider,
 	runtimeRegistry,
 } = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
@@ -30,6 +31,8 @@ assert.equal(registry['fake-runtime'], undefined);
 assert.equal(registry['local-shell'], undefined);
 assert.equal(registry['package'], undefined);
 assert.equal(registry['homeboy-agent-task-core-contract'], undefined);
+assert.equal(normalizeRuntimeId('codebox'), 'wp-codebox');
+assert.equal(resolveRuntimeProvider('codebox', { repoRoot, registry }).id, 'wp-codebox');
 
 const wpCodeboxRuntime = resolveRuntimeProvider('wp-codebox', { repoRoot, registry });
 assert.equal(wpCodeboxRuntime.id, 'wp-codebox');
@@ -87,8 +90,8 @@ try {
 		RUNNER_TEMP: path.join(configRoot, 'runner-temp'),
 		WORKLOAD_ID: 'opencode-smoke',
 		TARGET_REPO: 'Extra-Chill/example-target',
-		RUNTIME_PROVIDER: 'opencode',
-		RUNTIME_PROFILE: 'opencode-ci',
+		RUNTIME: 'opencode',
+		PROFILE: 'opencode-ci',
 		RUNTIME_PROFILES: JSON.stringify({
 			'opencode-ci': {
 				id: 'opencode-ci',
@@ -133,7 +136,6 @@ assert.throws(
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		backend: 'opencode',
 		runtime: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
@@ -143,13 +145,30 @@ assert.equal(
 );
 assert.equal(
 	runtimeAgentCiRunnerSpec({
-		backend: 'opencode',
 		runtime: 'opencode',
 		ability: 'example/run-task',
 		runtimeProfile: 'example-runtime-ci',
 		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
 	}).executor.runtime,
 	'opencode'
+);
+assert.equal(
+	runtimeAgentCiRunnerSpec({
+		runtimeProvider: 'codebox',
+		ability: 'example/run-task',
+		runtimeProfile: 'example-runtime-ci',
+		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+	}).executor.runtime,
+	'wp-codebox'
+);
+assert.equal(
+	runtimeAgentCiRunnerSpec({
+		runtimeProvider: 'codebox',
+		ability: 'example/run-task',
+		runtimeProfile: 'example-runtime-ci',
+		runtimeProfiles: { 'example-runtime-ci': runtimeProfile },
+	}).executor.backend,
+	'codebox'
 );
 
 process.stdout.write('Generic agent runtime contract passed\n');

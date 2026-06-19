@@ -3,11 +3,21 @@ name: Runtime Agent CI (reusable)
 on:
   workflow_call:
     inputs:
-      runtime_provider:
-        description: Runtime provider backend identifier.
+      runtime:
+        description: Agent runtime id. Preferred alias for runtime_provider.
         required: false
         type: string
-        default: codebox
+        default: ''
+      backend:
+        description: Compatibility alias for runtime_provider; use runtime for new callers.
+        required: false
+        type: string
+        default: ''
+      runtime_provider:
+        description: Runtime provider identifier. Prefer runtime for new callers.
+        required: false
+        type: string
+        default: wp-codebox
       provider:
         description: Model/provider identifier forwarded to the runtime.
         required: false
@@ -20,8 +30,14 @@ on:
         default: ''
       runtime_profile:
         description: Runtime profile id to select from runtime_profiles.
-        required: true
+        required: false
         type: string
+        default: ''
+      profile:
+        description: Preferred alias for runtime_profile.
+        required: false
+        type: string
+        default: ''
       runtime_profiles:
         description: JSON object keyed by runtime profile id.
         required: true
@@ -97,9 +113,12 @@ jobs:
         shell: bash
         env:
           RUNTIME_PROVIDER: ${{ inputs.runtime_provider }}
+          RUNTIME: ${{ inputs.runtime }}
+          BACKEND: ${{ inputs.backend }}
           PROVIDER: ${{ inputs.provider }}
           MODEL: ${{ inputs.model }}
           RUNTIME_PROFILE: ${{ inputs.runtime_profile }}
+          PROFILE: ${{ inputs.profile }}
           RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
           RUNTIME_COMPONENT_PATHS: ${{ inputs.runtime_component_paths }}
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
@@ -119,6 +138,7 @@ jobs:
           const {
             runtimeAgentCiTaskExecutorConfig,
           } = require('./runtime-agent-ci');
+          const { normalizeRuntimeId } = require('./runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
           function parseJson(name, fallback) {
             const value = process.env[name];
@@ -129,11 +149,16 @@ jobs:
           }
 
           const runtimeTask = parseJson('RUNTIME_TASK', {});
+          const runtimeProvider = normalizeRuntimeId(process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox');
+          const runtimeProfile = process.env.PROFILE || process.env.RUNTIME_PROFILE;
+          if (!runtimeProfile) {
+            throw new Error('profile or runtime_profile is required.');
+          }
           const config = runtimeAgentCiTaskExecutorConfig({
-            runtimeProvider: process.env.RUNTIME_PROVIDER,
+            runtimeProvider,
             provider: process.env.PROVIDER || undefined,
             model: process.env.MODEL || undefined,
-            runtimeProfile: process.env.RUNTIME_PROFILE,
+            runtimeProfile,
             runtimeProfiles: parseJson('RUNTIME_PROFILES', {}),
             runtimeComponentPaths: parseJson('RUNTIME_COMPONENT_PATHS', {}),
             ignoredWorkspacePaths: parseJson('IGNORED_WORKSPACE_PATHS', []),

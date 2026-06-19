@@ -6,6 +6,7 @@ const {
   agentTaskRunnerSpec,
   validateAgentTaskRunnerSpec,
 } = require('./agent-task-runner-contract');
+const { normalizeRuntimeId } = require('./runtime-provider-resolver.cjs');
 
 const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
@@ -60,9 +61,11 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
 function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   const taskExecutorConfig = context.taskExecutorConfig || runtimeAgentCiTaskExecutorConfig;
   const config = taskExecutorConfig(options);
+  const runtime = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
+  const normalizedRuntime = runtime ? normalizeRuntimeId(runtime) : runtime;
   return agentTaskRunnerSpec({
-    backend: options.backend || options.runtimeBackend || options.runtime_backend,
-    runtime: options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider,
+    backend: options.backend || options.runtimeBackend || options.runtime_backend || runtimeBackendForRuntime(normalizedRuntime),
+    runtime: normalizedRuntime,
     config,
     secret_env: normalizeArray(config.secret_env),
     task_timeout_seconds: config.task_timeout_seconds || options.taskTimeoutSeconds || options.task_timeout_seconds || 900,
@@ -71,8 +74,17 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   });
 }
 
+function runtimeBackendForRuntime(runtime) {
+  const normalizedRuntime = normalizeRuntimeId(runtime);
+  if (normalizedRuntime === 'wp-codebox') {
+    return 'codebox';
+  }
+  return normalizedRuntime;
+}
+
 function runtimeAgentCiTaskExecutorConfig(options = {}) {
   const runtimeProfile = resolveRuntimeAgentCiRuntimeProfile(options);
+  const runtimeProvider = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
   const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtimeExecution || options.runtime_execution, runtimeProfile);
   const runtimeTaskInput = runtimeExecution?.input || options.abilityInput || options.ability_input || {};
   const runtimeTask = stripUndefined({
@@ -83,7 +95,7 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     ...(options.config || {}),
     provider: options.provider,
     model: options.model,
-    runtime_provider: options.runtimeProvider || options.runtime_provider,
+    runtime_provider: runtimeProvider ? normalizeRuntimeId(runtimeProvider) : runtimeProvider,
     runtime_profile: runtimeProfile.id,
     runtime_profiles: runtimeProfilesForOptions(options, runtimeProfile),
     runtime_component_paths: options.runtimeComponentPaths || options.runtime_component_paths,
@@ -306,6 +318,7 @@ module.exports = {
   runtimeAgentCiRuntimeProfilesForOptions,
   runtimeAgentCiTaskFromRequest,
   runtimeAgentCiTaskExecutorConfig,
+  runtimeBackendForRuntime,
   normalizeRuntimeExecutionDescriptor,
   resolveRuntimeAgentCiRuntimeProfile,
   validateAgentTaskRunnerSpec,
