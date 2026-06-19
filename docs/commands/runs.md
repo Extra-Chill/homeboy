@@ -1,6 +1,6 @@
 # Runs Command
 
-Inspect persisted observation-store runs and artifacts.
+Inspect and maintain persisted observation-store runs and artifacts.
 
 ## Synopsis
 
@@ -12,7 +12,9 @@ homeboy runs show <run-id>
 homeboy runs resume-plan <run-id>
 homeboy runs artifacts <run-id>
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
+homeboy runs artifact get <run-id> <artifact-id> [--output <path>]
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
+homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
 homeboy runs export --run <run-id> --output <dir>
 homeboy runs export --since <duration> --output <dir>
 homeboy runs import <dir>
@@ -22,7 +24,7 @@ homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run
 
 ## Description
 
-`homeboy runs` is a read-only query surface over Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly.
+`homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, and run explicit cleanup or reconciliation tasks.
 
 `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
 
@@ -40,6 +42,10 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 `homeboy runs evidence <run-id>` emits reviewer-facing evidence using generic artifact addresses. Local operator files are represented as non-reviewer-visible `homeboy://run/<run-id>/artifact/<artifact-id>` handles with a fetch command instead of absolute machine paths. Remote runner artifacts use `runner-artifact://...` refs, validated public HTTP(S) URLs are emitted as public evidence links, and metadata-only evidence remains non-public. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
 
 `homeboy runs artifact cleanup-downloads` plans cleanup for local runner artifact downloads under Homeboy's artifact root (`<artifact-root>/runner`). By default it is a dry run; pass `--apply` to remove the planned cache subtree. Use `--runner` and `--run-id` to narrow cleanup to a specific runner or run cache.
+
+`homeboy runs artifact cleanup-persisted` plans cleanup for persisted local run artifacts and their database records. By default it is a dry run; pass `--apply` to delete planned artifact files/directories and remove their database rows.
+
+`homeboy runs reconcile` marks orphaned `running` observation records stale. Treat it as a mutating maintenance command, not a reader.
 
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
 
@@ -89,11 +95,26 @@ The v1 bundle is metadata-only: artifact records are exported, but artifact file
 
 `homeboy runs import` is idempotent. Existing identical records are accepted, while conflicting records with the same primary key fail clearly.
 
+`homeboy runs export` writes a directory bundle. `homeboy runs import` mutates the local observation store by inserting the bundle's records when they are new or identical.
+
 ## GitHub Actions Artifacts
 
 `homeboy runs import --from-gh-actions` imports JSON files from matching GitHub Actions artifacts into the local observation store. Use `--workflow` to scan recent workflow runs, or `--run-id` when triage starts from an exact GitHub Actions run URL or ID and the workflow filename is irrelevant.
 
 The structured output includes stable Homeboy run/artifact IDs and persisted local artifact paths under `artifacts[]`, so agents can read the copied JSON directly without searching temporary download directories.
+
+## Mutating Subcommands
+
+Most `homeboy runs` subcommands are readers. These subcommands write files,
+delete files, or update the local observation store:
+
+- `artifact get`: copies a recorded file artifact to a local destination.
+- `artifact cleanup-downloads --apply`: deletes locally cached runner artifact downloads.
+- `artifact cleanup-persisted --apply`: deletes persisted local artifact files/directories and their database records.
+- `export`: writes an observation bundle directory.
+- `import`: inserts observation bundle or GitHub Actions artifact records into the local observation store.
+- `loop-sync`: syncs continuous-loop archive directories into observation artifacts.
+- `reconcile`: marks orphaned running records stale.
 
 ```bash
 homeboy runs import --from-gh-actions \

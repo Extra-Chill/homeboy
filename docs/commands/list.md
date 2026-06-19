@@ -10,7 +10,9 @@ homeboy list
 
 `homeboy list` is a convenience command that prints the same help text as `homeboy --help`.
 
-This command exists as a convenience entrypoint (for example when you want a quick command list without remembering `--help`).
+This command is retained as a compatibility alias for existing operators and scripts. Prefer `homeboy --help` for new usage.
+
+`homeboy list` is intentionally raw help output rather than a structured command surface API.
 
 ## Output
 

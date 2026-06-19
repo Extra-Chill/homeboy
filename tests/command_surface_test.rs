@@ -202,6 +202,60 @@ fn runner_env_rejects_legacy_show_values_flag() {
 }
 
 #[test]
+fn docs_cover_focused_command_surface_cleanup_targets() {
+    let auth = include_str!("../docs/commands/auth.md");
+    assert!(auth.contains("`profile`"));
+    assert!(auth.contains("set-basic"));
+    assert!(auth.contains("set-bearer"));
+
+    let self_docs = include_str!("../docs/commands/self.md");
+    assert!(self_docs.contains("`identity`"));
+    assert!(self_docs.contains("`cleanup-runtime-tmp`"));
+    assert!(self_docs.contains("--older-than-days"));
+    assert!(self_docs.contains("--apply"));
+
+    let lab = include_str!("../docs/commands/lab.md");
+    assert!(lab.contains("routing helper, not a benchmark executor"));
+
+    let runs = include_str!("../docs/commands/runs.md");
+    assert!(runs.contains("## Mutating Subcommands"));
+    assert!(runs.contains("artifact cleanup-persisted"));
+    assert!(runs.contains("`reconcile`"));
+
+    let list = include_str!("../docs/commands/list.md");
+    assert!(list.contains("compatibility alias"));
+    assert!(list.contains("Prefer `homeboy --help`"));
+
+    for args in [
+        ["homeboy", "auth", "profile", "set-basic", "dev"].as_slice(),
+        ["homeboy", "auth", "profile", "set-bearer", "dev"].as_slice(),
+        ["homeboy", "self", "identity"].as_slice(),
+        [
+            "homeboy",
+            "self",
+            "cleanup-runtime-tmp",
+            "--older-than-days",
+            "14",
+        ]
+        .as_slice(),
+        ["homeboy", "runs", "artifact", "get", "run-1", "artifact-1"].as_slice(),
+        [
+            "homeboy",
+            "runs",
+            "artifact",
+            "cleanup-persisted",
+            "--older-than-days",
+            "30",
+        ]
+        .as_slice(),
+    ] {
+        Cli::try_parse_from(args).unwrap_or_else(|error| {
+            panic!("documented cleanup target failed to parse: {args:?}\n{error}")
+        });
+    }
+}
+
+#[test]
 fn agent_task_auth_status_accepts_global_runner_and_secret_env() {
     Cli::try_parse_from([
         "homeboy",
