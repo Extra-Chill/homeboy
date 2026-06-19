@@ -83,4 +83,45 @@ const projectedEnvelope = artifactResultEnvelopeFromCodeboxResult({
 });
 assert.equal(projectedEnvelope.operation, 'import-artifact-bundle');
 assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedEnvelope)), ['review']);
+assert.deepEqual(typedArtifactsFromCodeboxResult({
+  artifact_result: artifactResultEnvelope,
+  metadata: {
+    agent_runtime: {
+      result: {
+        outputs: {
+          typed_artifacts: {
+            legacy: { type: 'json', payload: { old: true } },
+          },
+        },
+      },
+    },
+  },
+}).review.artifact_schema, 'example/review/v1');
+assert.equal(Object.hasOwn(typedArtifactsFromCodeboxResult({
+  artifact_result: artifactResultEnvelope,
+  metadata: {
+    agent_runtime: {
+      result: {
+        outputs: {
+          typed_artifacts: {
+            legacy: { type: 'json', payload: { old: true } },
+          },
+        },
+      },
+    },
+  },
+}), 'legacy'), false);
+assert.equal(typedArtifactsFromCodeboxResult({
+  metadata: {
+    agent_runtime: {
+      result: {
+        outputs: {
+          typed_artifacts: {
+            legacy: { type: 'json', payload: { old: true } },
+          },
+        },
+      },
+    },
+  },
+}).legacy.payload.old, true);
 console.log('wp-codebox artifact contract smoke passed');

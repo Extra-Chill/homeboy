@@ -2629,18 +2629,20 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
     if (Array.isArray(result.artifacts)) {
       result.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
     }
-    for (const artifact of codeboxBundleArtifacts(result)) {
-      appendUniqueArtifact(artifacts, artifact);
-    }
-    for (const artifact of agentRuntimeBundleArtifacts(result)) {
-      appendUniqueArtifact(artifacts, artifact);
-    }
-    for (const artifact of typedBundleOutputArtifacts(result)) {
-      appendUniqueArtifact(artifacts, artifact);
-    }
-    if (!recipeSummary) {
-      for (const artifact of recipeRunArtifacts(result)) {
+    if (!artifactResult) {
+      for (const artifact of codeboxBundleArtifacts(result)) {
         appendUniqueArtifact(artifacts, artifact);
+      }
+      for (const artifact of agentRuntimeBundleArtifacts(result)) {
+        appendUniqueArtifact(artifacts, artifact);
+      }
+      for (const artifact of typedBundleOutputArtifacts(result)) {
+        appendUniqueArtifact(artifacts, artifact);
+      }
+      if (!recipeSummary) {
+        for (const artifact of recipeRunArtifacts(result)) {
+          appendUniqueArtifact(artifacts, artifact);
+        }
       }
     }
     return artifacts.map(artifactFromCodeboxArtifact);
@@ -2675,34 +2677,36 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
         label: artifact.name || artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
       });
     }
-    for (const artifact of codeboxBundleArtifacts(result)) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-      });
-    }
-    for (const artifact of agentRuntimeBundleArtifacts(result)) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
-      });
-    }
-    for (const artifact of typedBundleOutputArtifacts(result)) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.path || artifact.url,
-        label: `Typed bundle output ${artifact.name || ''}`.trim(),
-      });
-    }
-    if (!recipeSummary) {
-      for (const artifact of recipeRunArtifacts(result)) {
+    if (!artifactResult) {
+      for (const artifact of codeboxBundleArtifacts(result)) {
         appendUniqueEvidenceRef(refs, {
           kind: artifact.kind,
           uri: artifact.path || artifact.url,
-          label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
+          label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
         });
+      }
+      for (const artifact of agentRuntimeBundleArtifacts(result)) {
+        appendUniqueEvidenceRef(refs, {
+          kind: artifact.kind,
+          uri: artifact.path || artifact.url,
+          label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
+        });
+      }
+      for (const artifact of typedBundleOutputArtifacts(result)) {
+        appendUniqueEvidenceRef(refs, {
+          kind: artifact.kind,
+          uri: artifact.path || artifact.url,
+          label: `Typed bundle output ${artifact.name || ''}`.trim(),
+        });
+      }
+      if (!recipeSummary) {
+        for (const artifact of recipeRunArtifacts(result)) {
+          appendUniqueEvidenceRef(refs, {
+            kind: artifact.kind,
+            uri: artifact.path || artifact.url,
+            label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
+          });
+        }
       }
     }
     for (const artifact of runSummary?.artifacts || []) {

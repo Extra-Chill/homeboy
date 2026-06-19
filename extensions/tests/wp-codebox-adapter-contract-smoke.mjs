@@ -63,6 +63,11 @@ assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) =>
 	'parent-tool-bridge',
 	'provider-runtime-invocation',
 	'artifact-result-envelope',
+	'artifact-apply-execution',
 ]);
+assert.equal(
+	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
+	'consume_canonical_envelope_with_legacy_package_fallback'
+);
 
 console.log('wp-codebox adapter contract smoke passed');

@@ -1467,6 +1467,33 @@ assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
 assert.equal(upstreamRunnerOutcome.artifacts[0].path, '/tmp/wp-codebox-artifacts');
 
+const canonicalArtifactEnvelopeOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifactRefs: [{ kind: 'artifact-log', path: '/tmp/canonical/log.txt' }],
+    result: {
+      outputs: {
+        typed_artifacts: {
+          review: { type: 'json', payload: { canonical: true } },
+        },
+      },
+    },
+  },
+  run: {
+    agentResult: {
+      artifacts: { directory: '/tmp/legacy-artifacts' },
+      patch: { artifact: 'files/legacy.patch' },
+    },
+  },
+});
+assert.equal(canonicalArtifactEnvelopeOutcome.outputs.typed_artifacts.review.payload.canonical, true);
+assert.equal(canonicalArtifactEnvelopeOutcome.artifacts.some((artifact) => artifact.path === '/tmp/canonical/log.txt'), true);
+assert.equal(canonicalArtifactEnvelopeOutcome.artifacts.some((artifact) => artifact.path === '/tmp/legacy-artifacts/files/legacy.patch'), false);
+
 const failedUpstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'failed',

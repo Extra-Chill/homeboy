@@ -59,9 +59,29 @@ function normalizeTypedArtifacts(value, options = {}) {
 
 function typedArtifactsFromCodeboxResult(result, options = {}) {
   const workload = options.workload || agentRuntimeWorkload(result) || {};
-  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+  const envelopeArtifacts = typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
+  if (Object.keys(envelopeArtifacts).length > 0) {
+    return envelopeArtifacts;
+  }
+
+  return Object.assign({}, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, workload)
+    .map((candidate) => normalizeTypedArtifacts(candidate, options)));
+}
+
+function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) {
   const candidates = [
+    artifactResult?.result?.typed_artifacts,
+    artifactResult?.result?.typedArtifacts,
+    artifactResult?.result?.outputs?.typed_artifacts,
+    artifactResult?.result?.outputs?.typedArtifacts,
+  ];
+  return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
+}
+
+function legacyTypedArtifactCandidatesFromCodeboxResult(result, workload = {}) {
+  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  return [
     result?.outputs?.typed_artifacts,
     result?.outputs?.typedArtifacts,
     result?.run?.agentResult?.typed_artifacts,
@@ -78,10 +98,6 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
     result?.metadata?.agent_runtime?.result?.outputs?.typedArtifacts,
     result?.metadata?.agent_runtime?.result?.outputs?.outputs?.typed_artifacts,
     result?.metadata?.agent_runtime?.result?.outputs?.outputs?.typedArtifacts,
-    artifactResult?.result?.typed_artifacts,
-    artifactResult?.result?.typedArtifacts,
-    artifactResult?.result?.outputs?.typed_artifacts,
-    artifactResult?.result?.outputs?.typedArtifacts,
     workload.typed_artifacts,
     workload.typedArtifacts,
     workload.outputs?.typed_artifacts,
@@ -99,7 +115,6 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
     ...scenarios.map((scenario) => scenario?.metadata?.typed_artifacts),
     ...scenarios.map((scenario) => scenario?.metadata?.typedArtifacts),
   ];
-  return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
 }
 
 function artifactResultEnvelopeFromCodeboxResult(result) {
@@ -109,11 +124,13 @@ function artifactResultEnvelopeFromCodeboxResult(result) {
     result?.artifactResult,
     result?.metadata?.artifact_result,
     result?.metadata?.artifactResult,
-    result?.metadata?.agent_runtime?.result,
     ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
     ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
   ];
-  return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+  const legacyCandidates = [
+    result?.metadata?.agent_runtime?.result,
+  ];
+  return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
 }
 
 function normalizeArtifactResultEnvelope(envelope) {
