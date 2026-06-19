@@ -1973,9 +1973,14 @@ where
             executor,
             dispatch,
         ),
-        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. }
-        | AgentTaskLoopPolicyAction::Retry { .. }
-        | AgentTaskLoopPolicyAction::RequestChanges { .. } => {
+        AgentTaskLoopPolicyAction::Retry { target_run_id } => {
+            execute_retry_action(record, action, target_run_id)
+        }
+        AgentTaskLoopPolicyAction::RequestChanges {
+            target_run_id,
+            feedback_id,
+        } => execute_request_changes_action(record, action, target_run_id, feedback_id.as_deref()),
+        AgentTaskLoopPolicyAction::ValidateCandidatePatch { .. } => {
             Err(Error::validation_invalid_argument(
                 "action_id",
                 format!(
@@ -1987,6 +1992,103 @@ where
             ))
         }
     }
+}
+
+fn execute_retry_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    target_run_id: &str,
+) -> Result<(Value, i32)> {
+    let retry = agent_task_service::retry(target_run_id, None, false)?;
+    let retry_run_id = retry.record.run_id.clone();
+    if !record
+        .task_lineage
+        .iter()
+        .any(|lineage| lineage.run_id == retry_run_id)
+    {
+        record.task_lineage.push(AgentTaskLoopTaskLineage {
+            run_id: retry_run_id.clone(),
+            task_id: None,
+            parent_run_id: Some(target_run_id.to_string()),
+            parent_task_id: None,
+            entity_id: None,
+            dedupe_key: action.dedupe_key.clone(),
+            artifact_refs: Vec::new(),
+            inputs: serde_json::json!({ "target_run_id": target_run_id }),
+            outputs: Value::Null,
+        });
+    }
+    push_controller_history(
+        record,
+        "controller.action.retry_queued",
+        None,
+        serde_json::json!({
+            "action_id": action.action_id,
+            "target_run_id": target_run_id,
+            "retry_run_id": retry_run_id,
+        }),
+    );
+    Ok((
+        serde_json::json!({
+            "mode": "retry",
+            "target_run_id": target_run_id,
+            "retry_run_id": retry.record.run_id,
+            "record": retry.record,
+            "run": retry.run,
+        }),
+        0,
+    ))
+}
+
+fn execute_request_changes_action(
+    record: &mut AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    target_run_id: &str,
+    feedback_id: Option<&str>,
+) -> Result<(Value, i32)> {
+    let feedback_id = feedback_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("feedback-{}", record.feedback.len() + 1));
+    let feedback = controller::AgentTaskLoopFeedbackArtifact {
+        feedback_id: feedback_id.clone(),
+        review_run_id: None,
+        target_run_id: Some(target_run_id.to_string()),
+        target_task_id: None,
+        target_entity_id: None,
+        status: controller::AgentTaskLoopFeedbackStatus::ChangesRequested,
+        findings: Vec::new(),
+        payload: serde_json::json!({
+            "action_id": action.action_id,
+            "target_run_id": target_run_id,
+        }),
+    };
+    if let Some(existing) = record
+        .feedback
+        .iter_mut()
+        .find(|existing| existing.feedback_id == feedback.feedback_id)
+    {
+        *existing = feedback.clone();
+    } else {
+        record.feedback.push(feedback.clone());
+    }
+    push_controller_history(
+        record,
+        "controller.action.changes_requested",
+        None,
+        serde_json::json!({
+            "action_id": action.action_id,
+            "target_run_id": target_run_id,
+            "feedback_id": feedback_id,
+        }),
+    );
+    Ok((
+        serde_json::json!({
+            "mode": "request_changes",
+            "target_run_id": target_run_id,
+            "feedback": feedback,
+        }),
+        0,
+    ))
 }
 
 fn execute_spawn_task_action<E, D>(
@@ -4823,6 +4925,106 @@ mod tests {
                 loaded.next_actions[1].status,
                 AgentTaskLoopActionStatus::Completed
             );
+        });
+    }
+
+    #[test]
+    fn retry_action_queues_durable_retry_and_records_parent_lineage() {
+        with_isolated_home(|_| {
+            crate::core::agent_task_lifecycle::submit_plan(&test_plan(), Some("retry-source-run"))
+                .expect("source run submitted");
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-retry".to_string(),
+                phase: "repair".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.record_action(
+                AgentTaskLoopPolicyAction::Retry {
+                    target_run_id: "retry-source-run".to_string(),
+                },
+                "red gate requested retry",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-retry",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("retry action executed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status.as_deref(), Some("completed"));
+            let retry_run_id = result
+                .value
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.get("retry_run_id"))
+                .and_then(Value::as_str)
+                .expect("retry run id returned")
+                .to_string();
+            let retry_record = crate::core::agent_task_lifecycle::status(&retry_run_id)
+                .expect("retry record exists");
+            assert_eq!(retry_record.metadata["retry_of"], json!("retry-source-run"));
+
+            let loaded = controller::load_controller("loop-service-retry").expect("controller");
+            assert_eq!(loaded.task_lineage.len(), 1);
+            assert_eq!(loaded.task_lineage[0].run_id, retry_run_id);
+            assert_eq!(
+                loaded.task_lineage[0].parent_run_id.as_deref(),
+                Some("retry-source-run")
+            );
+            assert!(loaded
+                .history
+                .iter()
+                .any(|event| event.event_type == "controller.action.retry_queued"));
+        });
+    }
+
+    #[test]
+    fn request_changes_action_records_normalized_feedback() {
+        with_isolated_home(|_| {
+            let mut record = init(ControllerInitRequest {
+                loop_id: "loop-service-request-changes".to_string(),
+                phase: "review".to_string(),
+                config_version: "v1".to_string(),
+            })
+            .expect("controller initialized");
+            record.record_action(
+                AgentTaskLoopPolicyAction::RequestChanges {
+                    target_run_id: "candidate-run-1".to_string(),
+                    feedback_id: Some("review-feedback-1".to_string()),
+                },
+                "review requested changes",
+            );
+            controller::write_controller(&record).expect("controller written");
+
+            let result = run_next(
+                "loop-service-request-changes",
+                CapturingExecutor::default(),
+                &NoopDispatchHook,
+            )
+            .expect("request changes action executed");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.value.status.as_deref(), Some("completed"));
+            let loaded =
+                controller::load_controller("loop-service-request-changes").expect("controller");
+            assert_eq!(loaded.feedback.len(), 1);
+            assert_eq!(loaded.feedback[0].feedback_id, "review-feedback-1");
+            assert_eq!(
+                loaded.feedback[0].target_run_id.as_deref(),
+                Some("candidate-run-1")
+            );
+            assert_eq!(
+                loaded.feedback[0].status,
+                controller::AgentTaskLoopFeedbackStatus::ChangesRequested
+            );
+            assert!(loaded
+                .history
+                .iter()
+                .any(|event| event.event_type == "controller.action.changes_requested"));
         });
     }
 
