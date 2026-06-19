@@ -1,6 +1,7 @@
 //! Split from `agent_task_controller_service` god file (#5208). Structural move only.
 #![allow(unused_imports)]
 use super::*;
+use crate::core::plan::PlanStepDependencyKind;
 
 pub(super) const REPO_LOOP_SPEC_METADATA_KEY: &str = "repo_loop_spec";
 pub(super) const REPO_LOOP_SPEC_WORKFLOW_REASON: &str = "repo loop spec workflow";
