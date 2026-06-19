@@ -753,6 +753,61 @@ fn single_rig_selector_filters_extra_workloads_before_execution() {
 }
 
 #[test]
+fn rig_bench_component_expands_extension_settings() {
+    let monorepo = tempfile::TempDir::new().expect("monorepo dir");
+    let plugin_path = monorepo.path().join("plugins").join("woocommerce");
+    fs::create_dir_all(&plugin_path).expect("create plugin path");
+
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "woocommerce-performance",
+        "components": {
+            "woocommerce": {
+                "path": plugin_path.to_string_lossy(),
+                "extensions": {
+                    "wordpress": {
+                        "wp_codebox_source_root": "${components.woocommerce.path}/../..",
+                        "wp_codebox_source_subpath": "plugins/woocommerce",
+                        "wp_codebox_file_mounts": [
+                            { "source": "${components.woocommerce.path}/woocommerce.php" }
+                        ]
+                    }
+                }
+            }
+        }
+    }))
+    .expect("parse rig spec");
+
+    let component =
+        matrix::rig_component_for_bench(&spec, "woocommerce").expect("resolve rig bench component");
+    let wordpress = component
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("wordpress"))
+        .expect("wordpress extension settings");
+
+    assert_eq!(
+        wordpress.settings.get("wp_codebox_source_root"),
+        Some(&serde_json::Value::String(
+            monorepo.path().to_string_lossy().into_owned()
+        ))
+    );
+    let expected_mount_source = plugin_path
+        .join("woocommerce.php")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        wordpress
+            .settings
+            .get("wp_codebox_file_mounts")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("source"))
+            .and_then(|value| value.as_str()),
+        Some(expected_mount_source.as_str())
+    );
+}
+
+#[test]
 fn run_profile_selects_rig_profile_scenarios() {
     with_isolated_home(|home| {
         write_bench_extension(home);

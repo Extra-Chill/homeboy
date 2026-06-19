@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use homeboy::core::ci_profile::{self, CiResolvedJob};
-use homeboy::core::component::Component;
+use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
@@ -197,7 +197,8 @@ pub(super) fn rig_component_path(spec: &RigSpec, component_id: &str) -> Option<S
 
 pub(super) fn rig_component_for_bench(spec: &RigSpec, component_id: &str) -> Option<Component> {
     let rig_component = spec.components.get(component_id)?;
-    let extensions = rig_component.extensions.clone()?;
+    let mut extensions = rig_component.extensions.clone()?;
+    expand_rig_extension_settings(spec, &mut extensions);
     let mut component = Component {
         id: component_id.to_string(),
         local_path: rig::expand::expand_vars(spec, &rig_component.path),
@@ -207,6 +208,44 @@ pub(super) fn rig_component_for_bench(spec: &RigSpec, component_id: &str) -> Opt
     };
     component.resolve_remote_path();
     Some(component)
+}
+
+fn expand_rig_extension_settings(
+    spec: &RigSpec,
+    extensions: &mut HashMap<String, ScopedExtensionConfig>,
+) {
+    for extension in extensions.values_mut() {
+        for (key, value) in extension.settings.iter_mut() {
+            expand_rig_setting_value(spec, Some(key.as_str()), value);
+        }
+    }
+}
+
+fn expand_rig_setting_value(spec: &RigSpec, key: Option<&str>, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(raw) => {
+            let expanded = rig::expand::expand_vars(spec, raw);
+            *raw = if key == Some("wp_codebox_source_root") {
+                std::fs::canonicalize(&expanded)
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or(expanded)
+            } else {
+                expanded
+            };
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                expand_rig_setting_value(spec, None, value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                expand_rig_setting_value(spec, Some(key.as_str()), value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn component_shared_state(
