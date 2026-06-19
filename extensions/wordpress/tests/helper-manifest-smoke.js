@@ -25,6 +25,10 @@ assert.equal(
 	path.resolve(__dirname, '..', 'lib', 'request-profiler.js')
 );
 assert.equal(
+	manifest.helpers.restDbQueryProfiler,
+	path.resolve(__dirname, '..', 'lib', 'rest-db-query-profiler.js')
+);
+assert.equal(
 	manifest.helpers.externalHttpGuardrail,
 	path.resolve(__dirname, '..', 'lib', 'external-http-guardrail.js')
 );
