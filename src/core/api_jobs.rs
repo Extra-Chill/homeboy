@@ -1392,7 +1392,7 @@ mod tests {
             .expect("second runner job queues");
 
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
             .expect("claim succeeds")
             .expect("matching job is claimed");
 
@@ -1416,6 +1416,53 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_job_claim_respects_concurrency_limit() {
+        let store = JobStore::default();
+        let first = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("first runner job queues");
+        let second = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("events")))
+            .expect("second runner job queues");
+
+        let first_claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
+            .expect("claim succeeds")
+            .expect("first job is claimed");
+        assert_eq!(first_claim.job.id, first.id);
+
+        let saturated_claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
+            .expect("claim request succeeds");
+        assert!(saturated_claim.is_none());
+        assert_eq!(
+            store.get(second.id).expect("second job").status,
+            JobStatus::Queued
+        );
+
+        store
+            .finish_remote_runner_job(
+                first.id,
+                "homeboy-lab",
+                RemoteRunnerJobResult {
+                    exit_code: 0,
+                    stdout: None,
+                    stderr: None,
+                    data: None,
+                    artifacts: Vec::new(),
+                    metrics: None,
+                },
+            )
+            .expect("first job completes");
+
+        let second_claim = store
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
+            .expect("claim succeeds")
+            .expect("second job is claimed after capacity frees");
+        assert_eq!(second_claim.job.id, second.id);
+    }
+
+    #[test]
     fn remote_runner_job_claim_can_be_filtered_by_project() {
         let store = JobStore::default();
         let wire = store
@@ -1426,7 +1473,7 @@ mod tests {
             .expect("events job queues");
 
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", Some("events"), 30_000)
+            .claim_remote_runner_job("homeboy-lab", Some("events"), 30_000, None)
             .expect("claim succeeds")
             .expect("events job is claimed");
 
@@ -1444,7 +1491,7 @@ mod tests {
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
             .expect("remote runner job queues");
         store
-            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
         store
@@ -1505,7 +1552,7 @@ mod tests {
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
             .expect("remote runner job queues");
         store
-            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
 
@@ -1544,7 +1591,7 @@ mod tests {
         store.cancel(job.id, "user requested").expect("job cancels");
 
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
             .expect("claim request succeeds");
 
         assert!(claim.is_none());
@@ -1557,7 +1604,7 @@ mod tests {
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
             .expect("remote runner job queues");
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", None, 1)
+            .claim_remote_runner_job("homeboy-lab", None, 1, None)
             .expect("claim succeeds")
             .expect("job is claimed");
 
@@ -1587,7 +1634,7 @@ mod tests {
 
         let reopened = JobStore::open(&path).expect("durable store reopens");
         let claim = reopened
-            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000)
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
             .expect("claim succeeds")
             .expect("persisted job is claimed");
 

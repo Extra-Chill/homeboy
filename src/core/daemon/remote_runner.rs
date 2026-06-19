@@ -8,7 +8,7 @@ use crate::core::api_jobs::{
 };
 use crate::core::error::{Error, Result};
 use crate::core::paths;
-use crate::core::runner::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+use crate::core::runner::{self, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 #[derive(Debug, Clone, Deserialize)]
 struct ClaimRequest {
@@ -17,6 +17,8 @@ struct ClaimRequest {
     project_id: Option<String>,
     #[serde(default)]
     lease_ms: Option<u64>,
+    #[serde(default)]
+    concurrency_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,10 +159,16 @@ fn enqueue(body: Option<Value>, job_store: &JobStore) -> Result<Value> {
 fn claim(body: Option<Value>, job_store: &JobStore) -> Result<Value> {
     let request: ClaimRequest = parse_body(body, "remote runner claim request")?;
     touch_reverse_session(&request.runner_id)?;
+    let concurrency_limit = request.concurrency_limit.or_else(|| {
+        runner::load(&request.runner_id)
+            .ok()
+            .and_then(|runner| runner.settings.concurrency_limit)
+    });
     let claim = job_store.claim_remote_runner_job(
         &request.runner_id,
         request.project_id.as_deref(),
         request.lease_ms.unwrap_or(30_000),
+        concurrency_limit,
     )?;
     Ok(json!({
         "command": "api.runner.jobs.claim",
