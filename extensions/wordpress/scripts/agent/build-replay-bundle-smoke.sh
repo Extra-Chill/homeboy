@@ -133,7 +133,7 @@ if [ "$action_row" != "client/search_docs sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	cat "$EPISODE_PATH" >&2
 	exit 1
 fi
-if [[ "$missing_seams" != *"datamachine_provenance"* ]] || [[ "$missing_seams" != *"datamachine_code_policy_attestation"* ]]; then
+if [[ "$missing_seams" != *"runtime_provenance"* ]] || [[ "$missing_seams" != *"workspace_policy_attestation"* ]]; then
 	echo "ERROR: expected missing provenance/policy seams to remain explicit" >&2
 	cat "$BUNDLE_PATH" >&2
 	exit 1
