@@ -28,6 +28,7 @@ const {
 } = require('./provider-outcome-normalizer');
 const {
   codeboxRuntimeProfilePayload,
+  componentContractsFromRuntimeProfileDependencies,
 } = require('./codebox-runtime-profile');
 
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
@@ -704,6 +705,8 @@ function componentContractsFromAgentTaskRequest(request, config, options = {}) {
     ...normalizeArray(config.runtime_requirements?.extra_plugins),
     ...normalizeArray(options.runtimeProfile?.component_contracts),
     ...normalizeArray(options.runtimeProfile?.extra_plugins),
+    ...componentContractsFromRuntimeProfileDependencies(options.runtimeProfile),
+    ...componentContractsFromRuntimeProfileDependencies(config.runtime_requirements),
     ...normalizeArray(options.componentContracts),
   ]);
 }
