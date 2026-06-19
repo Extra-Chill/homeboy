@@ -100,12 +100,14 @@ pub struct ReleaseArgs {
 #[derive(Serialize)]
 #[serde(tag = "command", rename = "release")]
 pub struct ReleaseOutput {
+    pub variant: &'static str,
     pub result: ReleaseCommandResult,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "command", rename = "release.batch")]
 pub struct BatchReleaseOutput {
+    pub variant: &'static str,
     pub result: BatchReleaseResult,
 }
 
@@ -241,7 +243,10 @@ pub fn run(
         })?;
 
         return Ok((
-            ReleaseCommandOutput::Single(ReleaseOutput { result }),
+            ReleaseCommandOutput::Single(ReleaseOutput {
+                variant: "single",
+                result,
+            }),
             exit_code,
         ));
     }
@@ -315,6 +320,7 @@ pub fn run(
 
     Ok((
         ReleaseCommandOutput::Batch(BatchReleaseOutput {
+            variant: "batch",
             result: batch_result,
         }),
         exit_code,

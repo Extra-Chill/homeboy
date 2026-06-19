@@ -144,6 +144,7 @@ With `--dry-run`:
 ```json
 {
   "command": "release",
+  "variant": "single",
   "result": {
     "component_id": "<component_id>",
     "bump_type": "patch",
@@ -204,6 +205,7 @@ Without `--dry-run`:
 ```json
 {
   "command": "release",
+  "variant": "single",
   "result": {
     "component_id": "<component_id>",
     "bump_type": "patch",
