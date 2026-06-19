@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeDir = path.join(rootDir, 'agent-runtimes', 'fake-runtime');
 const manifestPath = path.join(runtimeDir, 'fake-runtime.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const { expandAgentTaskToolPresets } = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-provider-contract.js'));
 
 const requiredRootFields = ['schema', 'id', 'name', 'version', 'description', 'agent_task_executors'];
 for (const field of requiredRootFields) {
@@ -34,6 +37,9 @@ const requiredProviderFields = [
 	'failure_classifications',
 	'redacted_metadata_keys',
 	'capabilities',
+	'tool_presets',
+	'workspace_tools',
+	'publication_tools',
 	'workspace_materialization',
 	'secret_requirements',
 	'secret_env_requirements',
@@ -56,6 +62,10 @@ assert.ok(provider.outcome_statuses.includes('succeeded'));
 assert.ok(provider.failure_classifications.includes('request_validation'));
 assert.ok(provider.redacted_metadata_keys.includes('secrets'));
 assert.ok(provider.capabilities.includes('structured_outcome'));
+assert.deepEqual(provider.tool_presets, ['runner_workspace', 'publication']);
+const expandedToolPresets = expandAgentTaskToolPresets(provider.tool_presets);
+assert.deepEqual(provider.workspace_tools, expandedToolPresets.workspace_tools);
+assert.deepEqual(provider.publication_tools, expandedToolPresets.publication_tools);
 assert.equal(provider.workspace_materialization.cwd, 'git_checkout');
 assert.equal(provider.workspace_materialization.requires_git, true);
 assert.equal(provider.workspace_materialization.write_scope, 'artifacts');

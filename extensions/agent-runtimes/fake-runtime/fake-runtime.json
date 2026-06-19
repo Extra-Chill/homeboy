@@ -43,6 +43,30 @@
         "structured_outcome",
         "diagnostic_artifacts"
       ],
+      "tool_presets": [
+        "runner_workspace",
+        "publication"
+      ],
+      "workspace_tools": {
+        "readonly": [
+          "workspace_ls",
+          "workspace_read",
+          "workspace_git_status"
+        ],
+        "readwrite": [
+          "workspace_run",
+          "workspace_write",
+          "workspace_edit",
+          "workspace_apply_patch",
+          "workspace_delete",
+          "workspace_git_add"
+        ]
+      },
+      "publication_tools": [
+        "publication_prepare",
+        "publication_publish",
+        "publication_status"
+      ],
       "workspace_materialization": {
         "cwd": "git_checkout",
         "requires_git": true,

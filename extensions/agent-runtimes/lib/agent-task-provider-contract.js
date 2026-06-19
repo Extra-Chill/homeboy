@@ -43,6 +43,33 @@ const AGENT_TASK_SECRET_SELECTOR_PATHS = [
   'provider',
 ];
 
+const AGENT_TASK_TOOL_PRESETS = {
+  runner_workspace: {
+    workspace_tools: {
+      readonly: [
+        'workspace_ls',
+        'workspace_read',
+        'workspace_git_status',
+      ],
+      readwrite: [
+        'workspace_run',
+        'workspace_write',
+        'workspace_edit',
+        'workspace_apply_patch',
+        'workspace_delete',
+        'workspace_git_add',
+      ],
+    },
+  },
+  publication: {
+    publication_tools: [
+      'publication_prepare',
+      'publication_publish',
+      'publication_status',
+    ],
+  },
+};
+
 const AGENT_TASK_ARTIFACT_FIELDS = [
   'schema',
   'id',
@@ -119,6 +146,49 @@ function providerDefaultsContract(providerDefaults = {}) {
   }]));
 }
 
+function expandAgentTaskToolPresets(presets = [], overrides = {}) {
+  const expanded = {};
+  for (const preset of normalizeArray(presets)) {
+    const definition = AGENT_TASK_TOOL_PRESETS[preset];
+    if (!definition) {
+      throw new Error(`Unknown agent task tool preset: ${preset}`);
+    }
+    mergeToolPreset(expanded, definition);
+  }
+  mergeToolPreset(expanded, overrides);
+  return expanded;
+}
+
+function mergeToolPreset(target, source = {}) {
+  if (source.workspace_tools) {
+    target.workspace_tools = mergeWorkspaceTools(target.workspace_tools, source.workspace_tools);
+  }
+  if (source.publication_tools) {
+    target.publication_tools = uniqueStrings([
+      ...normalizeArray(target.publication_tools),
+      ...normalizeArray(source.publication_tools),
+    ]);
+  }
+  return target;
+}
+
+function mergeWorkspaceTools(current = {}, next = {}) {
+  return {
+    readonly: uniqueStrings([
+      ...normalizeArray(current.readonly),
+      ...normalizeArray(next.readonly),
+    ]),
+    readwrite: uniqueStrings([
+      ...normalizeArray(current.readwrite),
+      ...normalizeArray(next.readwrite),
+    ]),
+  };
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.trim() !== '')));
+}
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value.filter((entry) => entry !== undefined && entry !== null) : [];
 }
@@ -144,9 +214,11 @@ module.exports = {
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
   AGENT_TASK_SECRET_SELECTOR_PATHS,
+  AGENT_TASK_TOOL_PRESETS,
   agentTaskArtifactFromRef,
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
+  expandAgentTaskToolPresets,
   extendRedactedMetadataKeys,
   providerDefaultsContract,
   providerSecretEnvRequirement,

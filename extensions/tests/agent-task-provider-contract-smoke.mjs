@@ -14,9 +14,11 @@ const {
 	AGENT_TASK_EVIDENCE_REF_SCHEMA,
 	AGENT_TASK_REDACTED_METADATA_KEYS,
 	AGENT_TASK_SECRET_SELECTOR_PATHS,
+	AGENT_TASK_TOOL_PRESETS,
 	agentTaskArtifactFromRef,
 	agentTaskEvidenceRefFromRef,
 	agentTaskProviderContractFields,
+	expandAgentTaskToolPresets,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
 } = require(path.join(rootDir, 'agent-runtimes', 'lib', 'agent-task-provider-contract.js'));
@@ -78,6 +80,29 @@ assert.deepEqual(agentTaskEvidenceRefFromRef({ type: 'preview', path: 'artifacts
 	uri: 'artifacts/preview.html',
 	label: 'Preview',
 });
+
+assert.deepEqual(Object.keys(AGENT_TASK_TOOL_PRESETS), ['runner_workspace', 'publication']);
+assert.deepEqual(expandAgentTaskToolPresets(['runner_workspace', 'publication']), {
+	workspace_tools: {
+		readonly: ['workspace_ls', 'workspace_read', 'workspace_git_status'],
+		readwrite: ['workspace_run', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete', 'workspace_git_add'],
+	},
+	publication_tools: ['publication_prepare', 'publication_publish', 'publication_status'],
+});
+assert.deepEqual(expandAgentTaskToolPresets(['runner_workspace'], {
+	workspace_tools: { readonly: ['workspace_read', 'workspace_stat'] },
+	publication_tools: ['publication_status'],
+}), {
+	workspace_tools: {
+		readonly: ['workspace_ls', 'workspace_read', 'workspace_git_status', 'workspace_stat'],
+		readwrite: ['workspace_run', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete', 'workspace_git_add'],
+	},
+	publication_tools: ['publication_status'],
+});
+assert.throws(
+	() => expandAgentTaskToolPresets(['product_workspace']),
+	/Unknown agent task tool preset: product_workspace/,
+);
 
 const runnerSpec = agentTaskRunnerSpec({
 	backend: 'codebox',
