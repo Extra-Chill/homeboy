@@ -80,6 +80,20 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: Some("deploy_contract.json"),
     },
     PublicOutputVariantContract {
+        command: "release",
+        variant: "single",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("single"),
+        golden_fixture: Some("release_contract.json"),
+    },
+    PublicOutputVariantContract {
+        command: "release",
+        variant: "batch",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("batch"),
+        golden_fixture: Some("release_contract.json"),
+    },
+    PublicOutputVariantContract {
         command: "runs",
         variant: "list",
         discriminator_field: Some("variant"),

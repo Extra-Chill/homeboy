@@ -199,9 +199,11 @@ fn release_command_json_contract_matches_golden_fixture() {
         json!({
             "scenarios": [
                 scenario("release dry-run single", ReleaseCommandOutput::Single(ReleaseOutput {
+                    variant: "single",
                     result: release_result("homeboy", "minor", true, Some(release_plan())),
                 })),
                 scenario("release dry-run batch", ReleaseCommandOutput::Batch(BatchReleaseOutput {
+                    variant: "batch",
                     result: BatchReleaseResult {
                         results: vec![BatchReleaseComponentResult {
                             component_id: "homeboy".to_string(),
