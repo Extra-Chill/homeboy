@@ -316,16 +316,16 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
         return Ok(());
     };
 
-    for shared_dir in ["scripts", "agent-runtimes"] {
+    for shared_dir in ["scripts", "agent-runtimes", "runtime-agent-ci"] {
         let source = source_root.join(shared_dir);
         if !source.is_dir() {
             continue;
         }
 
-        let target = if shared_dir == "agent-runtimes" {
-            paths::agent_runtimes()?
-        } else {
-            extensions_dir.join(shared_dir)
+        let target = match shared_dir {
+            "agent-runtimes" => paths::agent_runtimes()?,
+            "runtime-agent-ci" => paths::homeboy()?.join(shared_dir),
+            _ => extensions_dir.join(shared_dir),
         };
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| {
@@ -975,6 +975,19 @@ mod tests {
         fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
             .expect("runtime script dir");
         fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
+
+        let runtime_agent_ci_helper = root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
+        fs::create_dir_all(
+            runtime_agent_ci_helper
+                .parent()
+                .expect("runtime agent ci helper parent"),
+        )
+        .expect("runtime agent ci helper dir");
+        fs::write(
+            &runtime_agent_ci_helper,
+            "module.exports = { schema: 'fixture' };\n",
+        )
+        .expect("runtime agent ci helper");
     }
 
     fn run_git(dir: &Path, args: &[&str]) -> bool {
@@ -1355,6 +1368,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
+            assert!(home
+                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .exists());
         });
     }
 
@@ -1384,6 +1400,9 @@ exec '{}' "$@"
 
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
                 .exists());
         });
     }
