@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.25] - 2026-06-19
+
+### Changed
+- Remove Data Machine-specific runtime coupling
+- Decouple agent runtime selection from Codebox
+
 ## [3.7.24] - 2026-06-19
 
 ### Changed
