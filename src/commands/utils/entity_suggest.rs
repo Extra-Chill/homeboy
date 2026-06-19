@@ -2,6 +2,7 @@
 
 use homeboy::core::engine::text::levenshtein;
 use homeboy::core::{component, extension, project, server};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityType {
@@ -29,45 +30,54 @@ pub struct EntityMatch {
     pub exact: bool,
 }
 
+#[derive(Debug, Clone)]
+struct EntityIdList {
+    entity_type: EntityType,
+    ids: Vec<String>,
+}
+
+static ENTITY_SUGGESTION_SNAPSHOT: OnceLock<Vec<EntityIdList>> = OnceLock::new();
+
+fn entity_suggestion_snapshot() -> &'static [EntityIdList] {
+    ENTITY_SUGGESTION_SNAPSHOT.get_or_init(|| {
+        vec![
+            EntityIdList {
+                entity_type: EntityType::Component,
+                ids: component::list_ids().unwrap_or_default(),
+            },
+            EntityIdList {
+                entity_type: EntityType::Project,
+                ids: project::list_ids().unwrap_or_default(),
+            },
+            EntityIdList {
+                entity_type: EntityType::Server,
+                ids: server::list()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|server| server.id)
+                    .collect(),
+            },
+            EntityIdList {
+                entity_type: EntityType::Extension,
+                ids: extension::available_extension_ids(),
+            },
+        ]
+    })
+}
+
 pub fn find_entity_match(input: &str) -> Option<EntityMatch> {
     let input_lower = input.to_lowercase();
 
-    if let Ok(ids) = component::list_ids() {
-        if let Some(m) = find_match_in_list(&input_lower, &ids) {
+    for entry in entity_suggestion_snapshot() {
+        if let Some(m) = find_match_in_list(&input_lower, &entry.ids) {
             return Some(EntityMatch {
-                entity_type: EntityType::Component,
+                entity_type: entry.entity_type,
                 entity_id: m.0,
                 exact: m.1,
             });
         }
     }
-    if let Ok(ids) = project::list_ids() {
-        if let Some(m) = find_match_in_list(&input_lower, &ids) {
-            return Some(EntityMatch {
-                entity_type: EntityType::Project,
-                entity_id: m.0,
-                exact: m.1,
-            });
-        }
-    }
-    if let Ok(servers) = server::list() {
-        let ids: Vec<String> = servers.into_iter().map(|s| s.id).collect();
-        if let Some(m) = find_match_in_list(&input_lower, &ids) {
-            return Some(EntityMatch {
-                entity_type: EntityType::Server,
-                entity_id: m.0,
-                exact: m.1,
-            });
-        }
-    }
-    let extension_ids = extension::available_extension_ids();
-    if let Some(m) = find_match_in_list(&input_lower, &extension_ids) {
-        return Some(EntityMatch {
-            entity_type: EntityType::Extension,
-            entity_id: m.0,
-            exact: m.1,
-        });
-    }
+
     None
 }
 
