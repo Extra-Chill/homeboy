@@ -88,6 +88,11 @@ pub struct AuditConfig {
     /// tracker, path, or version-guard catalogues.
     #[serde(default, skip_serializing_if = "DetectorProfileConfig::is_empty")]
     pub detector_profile: DetectorProfileConfig,
+    /// Component-owned thin-command-adapter policy. Flags command-layer modules
+    /// that accumulate orchestration/business logic instead of staying thin
+    /// adapters over core services.
+    #[serde(default, skip_serializing_if = "ThinCommandAdapterConfig::is_empty")]
+    pub thin_command_adapter: ThinCommandAdapterConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -559,6 +564,162 @@ impl ArtifactPortabilityConfig {
             &mut self.non_portable_path_contains,
             &other.non_portable_path_contains,
         );
+    }
+}
+
+/// One named group of orchestration markers contributing to a command module's
+/// orchestration weight. Core treats every marker as an opaque regex; the
+/// component owns all ecosystem/language semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThinCommandAdapterMarkerGroup {
+    /// Human-readable category surfaced in findings (e.g. "process execution").
+    pub label: String,
+    /// Regex patterns whose matches count as orchestration evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<String>,
+    /// Per-match weight for this group. Defaults to 1.
+    #[serde(
+        default = "default_thin_command_adapter_group_weight",
+        skip_serializing_if = "is_default_thin_command_adapter_group_weight"
+    )]
+    pub weight: u32,
+}
+
+fn default_thin_command_adapter_group_weight() -> u32 {
+    1
+}
+
+fn is_default_thin_command_adapter_group_weight(value: &u32) -> bool {
+    *value == default_thin_command_adapter_group_weight()
+}
+
+/// Configurable thin-command-adapter detector policy.
+///
+/// The detector scans files within `include_path_contains` (and matching
+/// `file_extensions`) and sums orchestration weight from configured marker
+/// groups. A module whose orchestration weight reaches `max_orchestration_weight`
+/// is flagged as too thick — its orchestration belongs in a core service.
+///
+/// Core stays ecosystem-agnostic: it never hardcodes language, framework, or
+/// project terms. All markers, scopes, and allowlists come from config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThinCommandAdapterConfig {
+    /// Report convention label for findings.
+    #[serde(
+        default = "default_thin_command_adapter_convention",
+        skip_serializing_if = "is_default_thin_command_adapter_convention"
+    )]
+    pub convention: String,
+    /// Path substrings that scope which files are command-layer adapters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_path_contains: Vec<String>,
+    /// Path substrings that exclude transitional modules until their extraction
+    /// issues land.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_path_contains: Vec<String>,
+    /// Skip recognized test files/paths. Test scaffolding is not a command
+    /// adapter, so it is excluded by default. Set false to scan test modules too.
+    #[serde(
+        default = "default_thin_command_adapter_skip_tests",
+        skip_serializing_if = "is_true"
+    )]
+    pub skip_test_paths: bool,
+    /// File extensions (without dot) the detector scans. Empty means all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_extensions: Vec<String>,
+    /// Line substrings that exempt a single line from contributing weight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_line_contains: Vec<String>,
+    /// Line prefixes ignored entirely (e.g. comment markers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_line_prefixes: Vec<String>,
+    /// When a line equals one of these (trimmed), the remainder of the file is
+    /// ignored (e.g. an inline test module marker).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_after_line_equals: Vec<String>,
+    /// Orchestration marker groups whose matches accumulate weight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orchestration_markers: Vec<ThinCommandAdapterMarkerGroup>,
+    /// Orchestration weight (inclusive) at which a module is flagged. Defaults
+    /// to 1, meaning any configured orchestration marker is a violation.
+    #[serde(
+        default = "default_thin_command_adapter_threshold",
+        skip_serializing_if = "is_default_thin_command_adapter_threshold"
+    )]
+    pub max_orchestration_weight: u32,
+}
+
+fn default_thin_command_adapter_convention() -> String {
+    "thin_command_adapter".to_string()
+}
+
+fn is_default_thin_command_adapter_convention(value: &String) -> bool {
+    value.as_str() == default_thin_command_adapter_convention()
+}
+
+fn default_thin_command_adapter_threshold() -> u32 {
+    1
+}
+
+fn default_thin_command_adapter_skip_tests() -> bool {
+    true
+}
+
+fn is_default_thin_command_adapter_threshold(value: &u32) -> bool {
+    *value == default_thin_command_adapter_threshold()
+}
+
+impl Default for ThinCommandAdapterConfig {
+    fn default() -> Self {
+        Self {
+            convention: default_thin_command_adapter_convention(),
+            include_path_contains: Vec::new(),
+            exclude_path_contains: Vec::new(),
+            skip_test_paths: default_thin_command_adapter_skip_tests(),
+            file_extensions: Vec::new(),
+            allow_line_contains: Vec::new(),
+            ignore_line_prefixes: Vec::new(),
+            ignore_after_line_equals: Vec::new(),
+            orchestration_markers: Vec::new(),
+            max_orchestration_weight: default_thin_command_adapter_threshold(),
+        }
+    }
+}
+
+impl ThinCommandAdapterConfig {
+    pub fn is_empty(&self) -> bool {
+        self.include_path_contains.is_empty() && self.orchestration_markers.is_empty()
+    }
+
+    fn merge(&mut self, other: &ThinCommandAdapterConfig) {
+        if other.convention != default_thin_command_adapter_convention() {
+            self.convention = other.convention.clone();
+        }
+        extend_unique(
+            &mut self.include_path_contains,
+            &other.include_path_contains,
+        );
+        extend_unique(
+            &mut self.exclude_path_contains,
+            &other.exclude_path_contains,
+        );
+        if !other.skip_test_paths {
+            self.skip_test_paths = false;
+        }
+        extend_unique(&mut self.file_extensions, &other.file_extensions);
+        extend_unique(&mut self.allow_line_contains, &other.allow_line_contains);
+        extend_unique(&mut self.ignore_line_prefixes, &other.ignore_line_prefixes);
+        extend_unique(
+            &mut self.ignore_after_line_equals,
+            &other.ignore_after_line_equals,
+        );
+        extend_unique(
+            &mut self.orchestration_markers,
+            &other.orchestration_markers,
+        );
+        if other.max_orchestration_weight != default_thin_command_adapter_threshold() {
+            self.max_orchestration_weight = other.max_orchestration_weight;
+        }
     }
 }
 
@@ -1313,6 +1474,7 @@ impl AuditConfig {
             && self.artifact_portability.is_empty()
             && self.test_wiring.is_empty()
             && self.detector_profile.is_empty()
+            && self.thin_command_adapter.is_empty()
     }
 
     pub fn merge(&mut self, other: &AuditConfig) {
@@ -1350,6 +1512,7 @@ impl AuditConfig {
             .merge(&other.remote_execution_safety);
         self.artifact_portability.merge(&other.artifact_portability);
         self.detector_profile.merge(&other.detector_profile);
+        self.thin_command_adapter.merge(&other.thin_command_adapter);
         for rule in &other.source_policies {
             if !self
                 .source_policies
@@ -1431,6 +1594,37 @@ mod tests {
         };
 
         assert!(!config.is_empty());
+    }
+
+    #[test]
+    fn thin_command_adapter_config_marks_audit_config_non_empty() {
+        let config = AuditConfig {
+            thin_command_adapter: ThinCommandAdapterConfig {
+                include_path_contains: vec!["src/commands/".to_string()],
+                orchestration_markers: vec![ThinCommandAdapterMarkerGroup {
+                    label: "process execution".to_string(),
+                    patterns: vec!["Command::new".to_string()],
+                    weight: 1,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!config.is_empty());
+    }
+
+    #[test]
+    fn thin_command_adapter_config_requires_scope_and_markers_to_be_non_empty() {
+        let convention_only = AuditConfig {
+            thin_command_adapter: ThinCommandAdapterConfig {
+                convention: "thin_command_adapter".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(convention_only.is_empty());
     }
 
     #[test]

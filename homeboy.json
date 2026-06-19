@@ -396,96 +396,61 @@
           }
         ],
         "type": "forbidden_terms"
-      },
-      {
-        "allow_line_contains": [
-          "homeboy-audit: allow-thin-command-adapter"
-        ],
-        "case_insensitive": false,
-        "convention": "thin_command_adapters",
-        "default_match": "regex",
-        "description": "Command adapter boundary violation: `{term}` appears at line {line} in {classification} context `{context}`",
-        "exclude_path_contains": [
-          "src/commands/agent_task.rs",
-          "src/commands/agent_task/",
-          "src/commands/agent_task_summary.rs",
-          "src/commands/api.rs",
-          "src/commands/auth.rs",
-          "src/commands/bench.rs",
-          "src/commands/build.rs",
-          "src/commands/changelog.rs",
-          "src/commands/daemon.rs",
-          "src/commands/db.rs",
-          "src/commands/deploy.rs",
-          "src/commands/deps.rs",
-          "src/commands/file.rs",
-          "src/commands/fleet.rs",
-          "src/commands/git.rs",
-          "src/commands/http.rs",
-          "src/commands/issues.rs",
-          "src/commands/lab.rs",
-          "src/commands/logs.rs",
-          "src/commands/observe.rs",
-          "src/commands/project.rs",
-          "src/commands/refactor.rs",
-          "src/commands/release.rs",
-          "src/commands/report.rs",
-          "src/commands/review/",
-          "src/commands/rig/",
-          "src/commands/runner/",
-          "src/commands/runs/",
-          "src/commands/self_cmd.rs",
-          "src/commands/server.rs",
-          "src/commands/ssh.rs",
-          "src/commands/stack.rs",
-          "src/commands/status.rs",
-          "src/commands/test.rs",
-          "src/commands/trace.rs",
-          "src/commands/triage.rs",
-          "src/commands/undo.rs",
-          "src/commands/version.rs",
-          "src/commands/worktree.rs"
-        ],
-        "id": "thin-command-adapters",
-        "ignore_after_line_equals": [
-          "#[cfg(test)]"
-        ],
-        "ignore_line_prefixes": [
-          "//",
-          "///",
-          "//!"
-        ],
-        "include_path_contains": [
-          "src/commands/"
-        ],
-        "kind": "source_policy_violation",
-        "severity": "warning",
-        "suggestion": "Keep command modules to clap args, typed request construction, and output adaptation; move orchestration, persistence, process execution, filesystem mutation, and artifact handling into src/core/ services.",
-        "terms": [
-          {
-            "label": "direct process execution",
-            "value": "\\bstd::process::Command\\b|\\bCommand::new\\s*\\("
-          },
-          {
-            "label": "direct filesystem mutation",
-            "value": "\\bstd::fs::(write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy)\\s*\\(|\\bfs::(write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy)\\s*\\("
-          },
-          {
-            "label": "direct file writer construction",
-            "value": "\\b(File::create|OpenOptions::new)\\s*\\("
-          },
-          {
-            "label": "run artifact persistence",
-            "value": "\\b(RunDir::create|write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
-          },
-          {
-            "label": "runner execution orchestration",
-            "value": "\\b(runner::exec|execute_[A-Za-z0-9_]+|dispatch_[A-Za-z0-9_]+)\\s*\\("
-          }
-        ],
-        "type": "forbidden_terms"
       }
     ],
+    "thin_command_adapter": {
+      "include_path_contains": [
+        "src/commands/"
+      ],
+      "file_extensions": [
+        "rs"
+      ],
+      "allow_line_contains": [
+        "homeboy-audit: allow-thin-command-adapter"
+      ],
+      "ignore_line_prefixes": [
+        "//",
+        "///",
+        "//!"
+      ],
+      "ignore_after_line_equals": [
+        "#[cfg(test)]"
+      ],
+      "max_orchestration_weight": 3,
+      "orchestration_markers": [
+        {
+          "label": "direct process execution",
+          "patterns": [
+            "\\bstd::process::Command\\b",
+            "\\bCommand::new\\s*\\("
+          ]
+        },
+        {
+          "label": "direct filesystem mutation",
+          "patterns": [
+            "\\b(std::fs|fs)::(write|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy)\\s*\\("
+          ]
+        },
+        {
+          "label": "direct file writer construction",
+          "patterns": [
+            "\\b(File::create|OpenOptions::new)\\s*\\("
+          ]
+        },
+        {
+          "label": "run artifact persistence",
+          "patterns": [
+            "\\b(RunDir::create|write_to_run_dir|ObservationBuilder|finish_run|persist_[A-Za-z0-9_]+)\\b"
+          ]
+        },
+        {
+          "label": "runner execution orchestration",
+          "patterns": [
+            "\\b(runner::exec|execute_[A-Za-z0-9_]+|dispatch_[A-Za-z0-9_]+)\\s*\\("
+          ]
+        }
+      ]
+    },
     "test_wiring": {
       "policies": [
         {
@@ -525,7 +490,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-06-19T16:45:00Z",
-      "item_count": 417,
+      "item_count": 409,
       "known_fingerprints": [
         "Commands::src/commands/agent_task_summary.rs::NamingMismatch",
         "Commands::src/commands/output_runtime.rs::NamingMismatch",
@@ -810,6 +775,31 @@
         "remote_execution_preflight::src/core/runner/execution/policy.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/lab_workspaces.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/rig_materialization.rs::RemoteExecutionPreflight",
+        "src/commands/adapter.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
+        "src/commands/agent_task/controller.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
+        "src/commands/agent_task/tool.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
+        "src/commands/bench/observation.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, run artifact persistence",
+        "src/commands/bench/settings_matrix.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
+        "src/commands/bench/tests.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
+        "src/commands/doctor/resources.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct process execution",
+        "src/commands/json_output/mod.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
+        "src/commands/observe.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution, run artifact persistence",
+        "src/commands/report/browser_evidence_compare.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution",
+        "src/commands/review/mod.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
+        "src/commands/runner/doctor.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct process execution",
+        "src/commands/runs/gh_actions.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution, run artifact persistence",
+        "src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
+        "src/commands/trace/bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
+        "src/commands/trace/compare_bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
+        "src/commands/trace/compare_targets.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, run artifact persistence, runner execution orchestration",
+        "src/commands/trace/compare_variant.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
+        "src/commands/trace/experiment.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution",
+        "src/commands/trace/matrix.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, runner execution orchestration",
+        "src/commands/trace/observation_lifecycle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
+        "src/commands/trace/test_fixture.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution",
+        "src/commands/tunnel.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, direct process execution",
+        "src/commands/utils/observed_workflow.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
+        "src/commands/utils/output.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct file writer construction, direct filesystem mutation",
         "structural::src/commands/agent_task_summary.rs::HighItemCount",
         "structural::src/commands/bench.rs::HighItemCount",
         "structural::src/commands/bench/observation.rs::GodFile",
@@ -910,40 +900,7 @@
         "structural::tests/core/rig/spec_test.rs::HighItemCount",
         "structural::tests/core_agnostic_test.rs::HighItemCount",
         "test_quality::src/commands/agent_task/tests/loop_compile.rs::VacuousTest",
-        "test_quality::src/commands/trace/rig_tests.rs::VacuousTest",
-        "thin_command_adapters::src/commands/adapter.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/audit.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/bench/matrix.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/bench/observation.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/bench/tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/component.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/report/bench_coverage.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/report/browser_evidence_compare.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/route.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/runner.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/bundle.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/compare_bundle.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/compare_targets.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/compare_variant.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/compare_variant_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/experiment.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/experiment_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/generic_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/guardrail_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/matrix.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/matrix_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/observation_lifecycle.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/output_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/profile_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/repeat.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/rig_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/run_phase_tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/run_service.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/test_fixture.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/trace/tests.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/tunnel.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/utils/observed_workflow.rs::SourcePolicyViolation",
-        "thin_command_adapters::src/commands/utils/output.rs::SourcePolicyViolation"
+        "test_quality::src/commands/trace/rig_tests.rs::VacuousTest"
       ],
       "metadata": {
         "alignment_score": 0.8817204236984253,

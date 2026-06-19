@@ -404,6 +404,15 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
         log_label: "Command status contracts",
         log_summary: "inconsistent no-op/dry-run status fields",
     },
+    DetectorDescriptor {
+        id: "thin_command_adapter",
+        findings: &[AuditFinding::ThinCommandAdapterViolation],
+        access: DetectorAccess::RootOnly,
+        runtime: DetectorRuntime::Manual,
+        timing_id: "detector.thin_command_adapter",
+        log_label: "Thin command adapters",
+        log_summary: "command modules accumulating orchestration logic",
+    },
 ];
 
 impl AuditExecutionPlan {
@@ -547,6 +556,10 @@ impl AuditExecutionPlan {
 
     pub(crate) fn run_command_status_contracts(&self) -> bool {
         self.detector_enabled("command_status_contracts")
+    }
+
+    pub(crate) fn run_thin_command_adapter(&self) -> bool {
+        self.detector_enabled("thin_command_adapter")
     }
 
     pub(crate) fn requires_discovery(&self) -> bool {

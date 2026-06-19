@@ -23,6 +23,7 @@ pub(super) mod test_coverage;
 pub(super) mod test_topology;
 pub(super) mod test_vacuity;
 pub(super) mod test_wiring;
+pub(super) mod thin_command_adapter;
 pub(super) mod unbounded_output_capture;
 pub(super) mod upstream_workaround;
 pub(super) mod wrapper_inference;

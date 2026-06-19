@@ -324,6 +324,12 @@ pub enum AuditFinding {
     UnboundedOutputCapture,
     /// Declared command scenario output differs from its expected status contract.
     CommandStatusContractViolation,
+    /// A command-layer module accumulates orchestration/business logic that
+    /// should live in a core service. Command modules are expected to stay thin
+    /// adapters (argument parsing, typed request construction, output
+    /// formatting); orchestration density beyond the configured threshold is a
+    /// boundary violation.
+    ThinCommandAdapterViolation,
 }
 
 pub(crate) fn unwired_test_file_finding() -> AuditFinding {
@@ -402,6 +408,7 @@ impl AuditFinding {
             "non_portable_artifact_path",
             "unbounded_output_capture",
             "command_status_contract_violation",
+            "thin_command_adapter_violation",
         ]
     }
 }
