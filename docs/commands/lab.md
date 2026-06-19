@@ -74,10 +74,10 @@ runner Homeboy command before remote execution starts. Legacy
 `lab.self_command_prefix` values in `homeboy.json` are ignored and are not
 preserved by portable config rewrites.
 
-`homeboy lab bench` delegates to the same benchmark path while making the Lab
-intent explicit at the command surface. Its output includes the same managed
-follow-up hints so the operator can keep a failed bench inside the Homeboy
-workflow.
+`homeboy lab bench` is a routing helper, not a benchmark executor. It prints the
+equivalent `homeboy bench ...` command plus the same managed follow-up hints so
+the operator can run the benchmark through the normal benchmark pipeline and keep
+failed follow-up work inside the Homeboy workflow.
 
 `homeboy lab extension-sync` updates a Lab runner's installed extension through
 the runner API. Use it to pin a runner-side runtime dependency, such as the
@@ -101,8 +101,8 @@ debugging.
 ## Commands
 
 - `status`: Show configured Lab runners and benchmark routing guidance.
-- `bench`: Run a benchmark through the standard benchmark pipeline with Lab
-  routing intent.
+- `bench`: Print the standard `homeboy bench ...` command for the provided
+  arguments with Lab routing guidance and managed follow-up commands.
 - `extension-sync`: Install or replace a Lab runner extension from a source and
   ref. Successful output returns the runner id, runner `homeboy_path`, install
   command, and remote execution output; failures surface the runner-side root
