@@ -79,6 +79,7 @@ pub struct DeployArgs {
 #[derive(Serialize)]
 pub struct DeployOutput {
     pub command: String,
+    pub variant: &'static str,
     pub project_id: String,
     pub all: bool,
     pub outdated: bool,
@@ -93,6 +94,7 @@ pub struct DeployOutput {
 #[derive(Serialize)]
 pub struct MultiProjectDeployOutput {
     pub command: String,
+    pub variant: &'static str,
     pub component_ids: Vec<String>,
     pub projects: Vec<ProjectDeployResult>,
     pub summary: MultiDeploySummary,
@@ -168,6 +170,7 @@ pub fn run(
     Ok((
         DeployCommandOutput::Single(DeployOutput {
             command: "deploy.run".to_string(),
+            variant: "single",
             project_id,
             all: args.all,
             outdated: args.outdated,
@@ -301,6 +304,7 @@ fn run_multi_output(
     Ok((
         DeployCommandOutput::Multi(MultiProjectDeployOutput {
             command: "deploy.run_multi".to_string(),
+            variant: "multi_project",
             component_ids: result.component_ids,
             projects: result.projects,
             summary: result.summary,
