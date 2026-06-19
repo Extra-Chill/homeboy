@@ -891,6 +891,36 @@ try {
   assert.equal(nestedRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedAgentsApi);
   assert.equal(fs.existsSync(path.join(preparedAgentsApi, 'agents-api.php')), true);
 
+  const implicitAgentsApiRuntime = path.join(root, 'data-machine');
+  const implicitAgentsApi = path.join(implicitAgentsApiRuntime, 'vendor', 'wordpress', 'agents-api');
+  const implicitAgentsApiArtifacts = path.join(root, 'implicit-agents-api-artifacts');
+  fs.mkdirSync(implicitAgentsApi, { recursive: true });
+  fs.writeFileSync(path.join(implicitAgentsApiRuntime, 'data-machine.php'), "<?php\n/* Plugin Name: Data Machine */\n");
+  fs.writeFileSync(path.join(implicitAgentsApi, 'agents-api.php'), "<?php\n/* Plugin Name: Agents API */\n");
+  const implicitAgentsApiCapturePath = path.join(root, 'capture-implicit-agents-api-runtime.json');
+  const implicitAgentsApiResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+    '--artifacts', implicitAgentsApiArtifacts,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_component_paths: {
+        agent_runtime: implicitAgentsApiRuntime,
+      },
+    }),
+    env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: implicitAgentsApiCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
+  });
+  assert.equal(implicitAgentsApiResult.status, 0, implicitAgentsApiResult.stderr || implicitAgentsApiResult.stdout);
+  const implicitAgentsApiInput = readJson(implicitAgentsApiCapturePath).input;
+  const preparedImplicitRuntime = path.join(implicitAgentsApiArtifacts, 'prepared-plugins', 'data-machine');
+  const preparedImplicitAgentsApi = path.join(preparedImplicitRuntime, 'vendor', 'wordpress', 'agents-api');
+  assert.equal(implicitAgentsApiInput.runtime_component_paths.agent_runtime, preparedImplicitRuntime);
+  assert.equal(implicitAgentsApiInput.runtime_component_paths.agents_api, preparedImplicitAgentsApi);
+  assert.equal(implicitAgentsApiInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, preparedImplicitAgentsApi);
+  assert.equal(implicitAgentsApiInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedImplicitAgentsApi);
+
   const legacyRuntimeCapturePath = path.join(root, 'capture-legacy-runtime-stack.json');
   const legacyRuntimeResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,

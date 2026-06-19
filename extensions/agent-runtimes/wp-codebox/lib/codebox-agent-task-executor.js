@@ -2735,13 +2735,16 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
   const outputs = normalizeOutputs(result, request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
+  const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   if (status === 'succeeded' && missingRequiredTypedArtifacts) {
+    status = 'failed';
+  }
+  if (status === 'succeeded' && runtimeFailureDiagnostic) {
     status = 'failed';
   }
   const recipeRun = recipeRunFromResult(result);
   const fallbackRecipeSummary = recipeRunFailureSummary(recipeRun);
   const recipeFailedPhase = recipeSummary?.failed_phase || recipeSummary?.metadata?.failure_phase || recipeRunFailedPhase(recipeRun);
-  const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   const providerDiagnostic = providerNotRegisteredDiagnostic(request, result);
   const outcome = normalizeAgentTaskOutcome(request, result, {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
