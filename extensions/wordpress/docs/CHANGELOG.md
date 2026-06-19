@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.29] - 2026-06-19
+
+### Changed
+- Consume canonical WordPress runtime settings
+
 ## [3.7.28] - 2026-06-19
 
 ### Changed
