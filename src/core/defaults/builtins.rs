@@ -132,12 +132,8 @@ mod tests {
     fn source_upgrade_installs_active_binary() {
         let config = default_source_config();
 
-        assert!(config
-            .upgrade_command
-            .contains("cargo build --release"));
-        assert!(config
-            .upgrade_command
-            .contains("target/release/homeboy"));
+        assert!(config.upgrade_command.contains("cargo build --release"));
+        assert!(config.upgrade_command.contains("target/release/homeboy"));
         assert!(config.upgrade_command.contains("--version"));
         assert!(!config.upgrade_command.contains("cargo install --path"));
     }
