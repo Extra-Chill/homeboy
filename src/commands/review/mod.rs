@@ -183,7 +183,7 @@ fn dispatch_review_plan_step(
     }
 }
 
-pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<(ReviewCommandOutput, i32)> {
+pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component = args.comp.load()?;
@@ -357,7 +357,10 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<(ReviewCommandOut
     Ok((output, overall_exit))
 }
 
-fn preflight_review_scope(args: &ReviewArgs, source_path: &str) -> CmdResult<ReviewScopePreflight> {
+fn preflight_review_scope(
+    args: &ReviewArgs,
+    source_path: &str,
+) -> homeboy::core::Result<ReviewScopePreflight> {
     let scope = if args.changed_since.is_some() {
         "changed-since"
     } else if args.changed_only {
