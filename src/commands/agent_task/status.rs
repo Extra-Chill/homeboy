@@ -103,8 +103,7 @@ const FAILURE_REASON_LIMIT: usize = 8;
 /// (#3806). The actual root cause of an agent-task failure (recipe validation
 /// issue, PHP fatal, provider registration error, missing path) is otherwise
 /// buried deep in nested outcome JSON — both in the typed
-/// `outcomes[].diagnostics[]` and in provider-specific nested structures such as
-/// `outputs.codebox.agent_runtime.workload.diagnostics[]`.
+/// `outcomes[].diagnostics[]` and in provider-specific nested structures.
 ///
 /// This collects diagnostics from BOTH the typed field and any nested
 /// `diagnostics[]` arrays found anywhere in each outcome's `outputs`/`metadata`,
@@ -224,9 +223,9 @@ fn class_priority(class: &str) -> u8 {
 }
 
 /// Recursively walk a provider-specific JSON value looking for `diagnostics`
-/// arrays of objects carrying a `message` (and optional `class`). This is how
-/// nested structures like `outputs.codebox.agent_runtime.workload.diagnostics[]`
-/// get surfaced without the renderer needing to know the exact provider path.
+/// arrays of objects carrying a `message` (and optional `class`). This surfaces
+/// nested diagnostics without the renderer needing to know the exact provider
+/// path.
 fn collect_nested_diagnostics(
     task_id: &str,
     value: &Value,

@@ -708,13 +708,13 @@ mod tests {
             let result = replace_with_revision(
                 &new_source.to_string_lossy(),
                 Some("wordpress"),
-                Some("fix/codebox-bundled-agents-api"),
+                Some("fix/runtime-contract-preservation"),
             )
             .expect("replace should preserve requested revision");
 
             assert_eq!(
                 result.source_revision.as_deref(),
-                Some("fix/codebox-bundled-agents-api")
+                Some("fix/runtime-contract-preservation")
             );
         });
     }
