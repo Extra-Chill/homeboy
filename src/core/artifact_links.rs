@@ -199,9 +199,7 @@ fn artifact_is_fetchable(artifact: &ArtifactRecord) -> bool {
 }
 
 fn probe_public_artifact_url(public_url: &str) -> Result<reqwest::StatusCode, reqwest::Error> {
-    reqwest::blocking::Client::builder()
-        .timeout(PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT)
-        .build()?
+    crate::core::http_probe::blocking_client(PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT)?
         .get(public_url)
         .header(reqwest::header::RANGE, "bytes=0-0")
         .send()
