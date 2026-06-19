@@ -15,7 +15,7 @@ use crate::core::error::{Error, Result};
 
 use super::broker_http;
 use super::capabilities::RunnerCapabilityPreflight;
-use super::execution::{exec, RunnerExecOptions};
+use super::execution::{exec_worker_local, RunnerExecOptions};
 
 #[derive(Debug, Clone)]
 pub struct ReverseRunnerWorkerOptions {
@@ -287,7 +287,7 @@ fn run_once_output(
             result,
         )
     };
-    let exec_result = exec(
+    let exec_result = exec_worker_local(
         &options.runner_id,
         RunnerExecOptions {
             cwd: claim.request.cwd.clone(),
@@ -566,6 +566,7 @@ mod tests {
                 })
                 .expect("submit job");
             let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+            write_reverse_controller_session(&broker_url);
 
             let (output, exit_code) =
                 run_reverse_worker(worker_options(broker_url.clone())).expect("run worker");
@@ -772,6 +773,34 @@ mod tests {
             }
         });
         (format!("http://{addr}"), handle)
+    }
+
+    fn write_reverse_controller_session(broker_url: &str) {
+        let path = crate::core::paths::runner_session_file("lab").expect("session path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create session dir");
+        }
+        let session = crate::core::runner::RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: crate::core::runner::RunnerTunnelMode::Reverse,
+            role: crate::core::runner::RunnerSessionRole::Controller,
+            server_id: None,
+            controller_id: Some("controller".to_string()),
+            broker_url: Some(broker_url.to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            remote_daemon_pid: None,
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: None,
+            connected_at: "2026-06-19T00:00:00Z".to_string(),
+        };
+        std::fs::write(
+            path,
+            serde_json::to_string(&session).expect("serialize session"),
+        )
+        .expect("write session");
     }
 
     struct MockRequest {
