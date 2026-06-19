@@ -1,9 +1,106 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::core::execution_contract::{decode_uri_component, encode_uri_component};
 use crate::core::observation::ArtifactRecord;
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
 pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";
+pub const RUNNER_ARTIFACT_REF_SCHEME: &str = "runner-artifact://";
+pub const METADATA_ONLY_REF_SCHEME: &str = "metadata-only:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactReference {
+    LocalPath(String),
+    RunnerArtifact {
+        value: String,
+        runner_id: String,
+        run_id: String,
+        artifact_id: String,
+    },
+    MetadataOnly(String),
+    PublishedUrl(String),
+}
+
+impl ArtifactReference {
+    pub fn parse(value: impl Into<String>) -> Self {
+        let value = value.into();
+        if let Some(rest) = value.strip_prefix(RUNNER_ARTIFACT_REF_SCHEME) {
+            let parts = rest.split('/').collect::<Vec<_>>();
+            if parts.len() == 3 {
+                return Self::RunnerArtifact {
+                    value,
+                    runner_id: decode_uri_component(parts[0]),
+                    run_id: decode_uri_component(parts[1]),
+                    artifact_id: decode_uri_component(parts[2]),
+                };
+            }
+        }
+
+        if value.starts_with(METADATA_ONLY_REF_SCHEME) {
+            return Self::MetadataOnly(value);
+        }
+
+        if is_published_url(&value) {
+            return Self::PublishedUrl(value);
+        }
+
+        Self::LocalPath(value)
+    }
+
+    pub fn runner_artifact(runner_id: &str, run_id: &str, artifact_id: &str) -> Self {
+        Self::parse(format!(
+            "{}{}/{}/{}",
+            RUNNER_ARTIFACT_REF_SCHEME,
+            encode_uri_component(runner_id),
+            encode_uri_component(run_id),
+            encode_uri_component(artifact_id)
+        ))
+    }
+
+    pub fn metadata_only(label: &str) -> Self {
+        Self::MetadataOnly(format!("{}{label}", METADATA_ONLY_REF_SCHEME))
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::LocalPath(value)
+            | Self::MetadataOnly(value)
+            | Self::PublishedUrl(value)
+            | Self::RunnerArtifact { value, .. } => value,
+        }
+    }
+}
+
+impl fmt::Display for ArtifactReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ArtifactReference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::parse(value))
+    }
+}
+
+fn is_published_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactRef {
@@ -84,6 +181,45 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn artifact_reference_parses_and_serializes_existing_string_refs() {
+        let runner = ArtifactReference::parse("runner-artifact://runner%2Fa/run%20b/artifact%3Ac");
+        assert_eq!(
+            runner.to_string(),
+            "runner-artifact://runner%2Fa/run%20b/artifact%3Ac"
+        );
+        assert_eq!(
+            serde_json::to_value(&runner).expect("json"),
+            json!("runner-artifact://runner%2Fa/run%20b/artifact%3Ac")
+        );
+        match runner {
+            ArtifactReference::RunnerArtifact {
+                runner_id,
+                run_id,
+                artifact_id,
+                ..
+            } => {
+                assert_eq!(runner_id, "runner/a");
+                assert_eq!(run_id, "run b");
+                assert_eq!(artifact_id, "artifact:c");
+            }
+            other => panic!("unexpected artifact reference: {other:?}"),
+        }
+
+        assert_eq!(
+            ArtifactReference::metadata_only("trace.zip").to_string(),
+            "metadata-only:trace.zip"
+        );
+        assert_eq!(
+            ArtifactReference::parse("https://example.test/trace.zip"),
+            ArtifactReference::PublishedUrl("https://example.test/trace.zip".to_string())
+        );
+        assert_eq!(
+            ArtifactReference::parse("/tmp/trace.zip"),
+            ArtifactReference::LocalPath("/tmp/trace.zip".to_string())
+        );
+    }
 
     #[test]
     fn artifact_ref_serializes_stable_schema_and_type_field() {
