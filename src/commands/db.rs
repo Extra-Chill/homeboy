@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use homeboy::core::db::{self, DbResult, DbTunnelResult};
 use homeboy::core::engine::text;
@@ -91,19 +91,48 @@ enum DbCommand {
 }
 
 #[derive(Serialize)]
-
 pub struct DbOutput {
     pub command: String,
     #[serde(flatten)]
     pub result: DbResultVariant,
 }
 
-#[derive(Serialize)]
-#[serde(untagged)]
 pub enum DbResultVariant {
     Status(ObservationDbStatus),
     Query(DbResult),
     Tunnel(DbTunnelResult),
+}
+
+#[derive(Serialize)]
+struct TaggedDbResult<'a, T: Serialize> {
+    variant: &'static str,
+    #[serde(flatten)]
+    result: &'a T,
+}
+
+impl Serialize for DbResultVariant {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            DbResultVariant::Status(result) => TaggedDbResult {
+                variant: "status",
+                result,
+            }
+            .serialize(serializer),
+            DbResultVariant::Query(result) => TaggedDbResult {
+                variant: "query",
+                result,
+            }
+            .serialize(serializer),
+            DbResultVariant::Tunnel(result) => TaggedDbResult {
+                variant: "tunnel",
+                result,
+            }
+            .serialize(serializer),
+        }
+    }
 }
 
 pub fn run(args: DbArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DbOutput> {
