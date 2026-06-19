@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -153,8 +153,9 @@ pub(super) fn plan_component_deploys(
             fetch_remote_versions_for_project(all_components, Some(project), base_path, client);
         steps.extend(plan_outdated_steps(all_components, &remote_versions));
     } else if config.behind_upstream {
+        let mut git_probe_cache = GitProbeCache::default();
         for component in all_components {
-            let behind_upstream = component_is_behind_upstream(component);
+            let behind_upstream = git_probe_cache.component_is_behind_upstream(component);
             let mut step = deploy_step(
                 &component.id,
                 if behind_upstream {
@@ -361,28 +362,110 @@ fn empty_selection_error(field: &str, message: &str) -> Error {
 
 #[cfg(test)]
 fn select_behind_upstream_components(all_components: &[Component]) -> Vec<Component> {
+    let mut git_probe_cache = GitProbeCache::default();
     all_components
         .iter()
-        .filter(|component| component_is_behind_upstream(component))
+        .filter(|component| git_probe_cache.component_is_behind_upstream(component))
         .cloned()
         .collect()
 }
 
-fn component_is_behind_upstream(component: &Component) -> bool {
-    if component.is_file_component() {
-        return false;
+#[derive(Default)]
+pub(super) struct GitProbeCache {
+    behind_upstream: HashMap<String, bool>,
+    default_remote_branch: HashMap<String, Option<String>>,
+    fetched_origin: HashSet<String>,
+}
+
+impl GitProbeCache {
+    fn component_is_behind_upstream(&mut self, component: &Component) -> bool {
+        if component.is_file_component() {
+            return false;
+        }
+
+        let Some(git_root) = component_git_root(component) else {
+            return false;
+        };
+
+        if let Some(behind_upstream) = self.behind_upstream.get(&git_root) {
+            return *behind_upstream;
+        }
+
+        let behind_upstream = matches!(git::fetch_and_get_behind_count(&git_root), Ok(Some(_)));
+        self.behind_upstream
+            .insert(git_root.clone(), behind_upstream);
+
+        behind_upstream
     }
 
-    matches!(
-        git::fetch_and_get_behind_count(&component.local_path),
-        Ok(Some(_))
-    )
+    fn component_is_behind_default_branch(&mut self, component: &Component) -> bool {
+        if component.is_file_component() {
+            return false;
+        }
+
+        let Some(git_root) = component_git_root(component) else {
+            return false;
+        };
+
+        let path = Path::new(&git_root);
+        if git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_some() {
+            return false;
+        }
+
+        let Some(default_branch) = self.default_remote_branch(&git_root) else {
+            return false;
+        };
+
+        git_output(
+            path,
+            &[
+                "rev-list",
+                "--left-only",
+                "--count",
+                &format!("{default_branch}...HEAD"),
+            ],
+        )
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|count| count > 0)
+    }
+
+    fn default_remote_branch(&mut self, git_root: &str) -> Option<String> {
+        if let Some(default_branch) = self.default_remote_branch.get(git_root) {
+            return default_branch.clone();
+        }
+
+        self.fetch_origin(git_root);
+        let default_branch = default_remote_branch(Path::new(git_root));
+        self.default_remote_branch
+            .insert(git_root.to_string(), default_branch.clone());
+
+        default_branch
+    }
+
+    fn fetch_origin(&mut self, git_root: &str) {
+        if self.fetched_origin.insert(git_root.to_string()) {
+            fetch_origin(Path::new(git_root));
+        }
+    }
+}
+
+fn component_git_root(component: &Component) -> Option<String> {
+    git::get_git_root(&component.local_path).ok()
 }
 
 /// Calculate component status based on local and remote versions.
 pub(super) fn calculate_component_status(
     component: &Component,
     remote_versions: &HashMap<String, String>,
+) -> ComponentStatus {
+    let mut git_probe_cache = GitProbeCache::default();
+    calculate_component_status_with_git_cache(component, remote_versions, &mut git_probe_cache)
+}
+
+pub(super) fn calculate_component_status_with_git_cache(
+    component: &Component,
+    remote_versions: &HashMap<String, String>,
+    git_probe_cache: &mut GitProbeCache,
 ) -> ComponentStatus {
     let local_version = version::get_component_version(component);
     let remote_version = remote_versions.get(&component.id);
@@ -404,43 +487,15 @@ pub(super) fn calculate_component_status(
         return version_status;
     }
 
-    if component_is_behind_upstream(component) {
+    if git_probe_cache.component_is_behind_upstream(component) {
         return ComponentStatus::BehindUpstream;
     }
 
-    if component_is_behind_default_branch(component) {
+    if git_probe_cache.component_is_behind_default_branch(component) {
         return ComponentStatus::SourceStale;
     }
 
     version_status
-}
-
-fn component_is_behind_default_branch(component: &Component) -> bool {
-    if component.is_file_component() {
-        return false;
-    }
-
-    let path = Path::new(&component.local_path);
-    if git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_some() {
-        return false;
-    }
-
-    fetch_origin(path);
-    let Some(default_branch) = default_remote_branch(path) else {
-        return false;
-    };
-
-    git_output(
-        path,
-        &[
-            "rev-list",
-            "--left-only",
-            "--count",
-            &format!("{default_branch}...HEAD"),
-        ],
-    )
-    .and_then(|value| value.parse::<u32>().ok())
-    .is_some_and(|count| count > 0)
 }
 
 fn fetch_origin(path: &Path) {

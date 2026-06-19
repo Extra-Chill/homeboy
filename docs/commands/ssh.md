@@ -22,9 +22,9 @@ homeboy ssh list
 
 ## Arguments and flags
 
-- `[ID]`: project ID or server ID (project wins when both exist). Optional when using `--project` or `--server`.
-- `--project <PROJECT>`: force project resolution
-- `--server <SERVER>`: force server resolution
+- `[ID]`: project ID or server ID (project wins when both exist).
+- `--as-server`: force interpretation as a server ID.
+- `--user <USER>`: override the SSH user instead of the server's configured user.
 - `[COMMAND...]` (optional): command to execute (omit for interactive shell).
   - Recommended form: `homeboy ssh <id> -- <command...>` (supports multiple args cleanly)
   - Put all Homeboy flags/options **before** `--` (everything after `--` is treated as part of the remote command)
