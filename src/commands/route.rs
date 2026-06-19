@@ -953,10 +953,10 @@ mod tests {
             "homeboy".to_string(),
             "lint".to_string(),
             "--fix".to_string(),
-            "data-machine-code".to_string(),
+            "sample-component".to_string(),
         ];
 
-        let rewritten = strip_component_target_args(&args, "data-machine-code", "/src/dmc");
+        let rewritten = strip_component_target_args(&args, "sample-component", "/src/sample");
 
         assert_eq!(
             rewritten,
@@ -965,7 +965,7 @@ mod tests {
                 "lint".to_string(),
                 "--fix".to_string(),
                 "--path".to_string(),
-                "/src/dmc".to_string(),
+                "/src/sample".to_string(),
             ]
         );
     }
@@ -979,10 +979,10 @@ mod tests {
             "lint".to_string(),
             "--write".to_string(),
             "--component".to_string(),
-            "data-machine-code".to_string(),
+            "sample-component".to_string(),
         ];
 
-        let rewritten = strip_component_target_args(&args, "data-machine-code", "/src/dmc");
+        let rewritten = strip_component_target_args(&args, "sample-component", "/src/sample");
 
         assert_eq!(
             rewritten,
@@ -993,7 +993,7 @@ mod tests {
                 "lint".to_string(),
                 "--write".to_string(),
                 "--path".to_string(),
-                "/src/dmc".to_string(),
+                "/src/sample".to_string(),
             ]
         );
     }
@@ -1060,7 +1060,7 @@ mod tests {
             "homeboy",
             "lint",
             "--fix",
-            "data-machine-code",
+            "sample-component",
             "--path",
             "/explicit/path",
         ]);
@@ -1068,7 +1068,7 @@ mod tests {
             "homeboy".to_string(),
             "lint".to_string(),
             "--fix".to_string(),
-            "data-machine-code".to_string(),
+            "sample-component".to_string(),
             "--path".to_string(),
             "/explicit/path".to_string(),
         ];
