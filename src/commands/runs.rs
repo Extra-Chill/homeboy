@@ -140,6 +140,9 @@ pub struct RunsListArgs {
     /// Maximum runs to return
     #[arg(long, default_value_t = DEFAULT_LIMIT)]
     pub limit: i64,
+    /// Include active runner jobs from connected runner daemons
+    #[arg(long)]
+    pub include_active_runner_jobs: bool,
 }
 
 #[derive(Serialize)]
@@ -467,7 +470,9 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     })?;
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
-    runs.extend(active_runner_job_summaries(status_filter.as_deref()));
+    if args.include_active_runner_jobs {
+        runs.extend(active_runner_job_summaries(status_filter.as_deref()));
+    }
 
     Ok((RunsOutput::List(RunsListOutput { command, runs }), 0))
 }
@@ -840,6 +845,7 @@ mod tests {
                     rig: Some("studio".to_string()),
                     status: Some("pass".to_string()),
                     limit: 20,
+                    include_active_runner_jobs: false,
                 },
                 "runs.list",
             )
@@ -870,6 +876,7 @@ mod tests {
                     rig: Some("studio".to_string()),
                     status: None,
                     limit: 20,
+                    include_active_runner_jobs: false,
                 },
                 "runs.list",
             )
