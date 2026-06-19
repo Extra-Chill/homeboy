@@ -97,7 +97,6 @@
     "test:codebox-agent-task-executor": "node tests/codebox-agent-task-executor-smoke.js",
     "test:codebox-agent-task-matrix": "node tests/codebox-agent-task-matrix-smoke.js",
     "test:wordpress-runtime-task-planner": "node tests/wordpress-runtime-task-planner-smoke.js",
-    "test:opencode-agent-task-executor-boundary": "node tests/opencode-agent-task-executor-boundary.test.js",
     "test:datamachine-agent-host-lifecycle": "node tests/datamachine-agent-host-lifecycle-smoke.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js"

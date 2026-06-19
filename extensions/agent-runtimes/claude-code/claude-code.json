@@ -1,0 +1,122 @@
+{
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "claude-code",
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "description": "Claude Code agent runtime contract for OAuth-backed provider execution.",
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "claude-code.agent-task-executor",
+      "label": "Claude Code agent task executor",
+      "backend": "claude-code",
+      "runtime": "claude-code",
+      "command": "node {{runtime_path}}/scripts/agent/homeboy-claude-code-agent-task-executor.cjs",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "executor.runtime",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "no_op",
+        "unable_to_remediate",
+        "provider_error",
+        "timeout",
+        "failed",
+        "follow_up_issue",
+        "cancelled"
+      ],
+      "failure_classifications": [
+        "provider",
+        "timeout",
+        "policy_denied",
+        "capability_missing",
+        "invalid_input",
+        "execution_failed",
+        "unknown"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets",
+        "claude_code_auth"
+      ],
+      "secret_env_requirements": [
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": [
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+          ],
+          "when": {
+            "any": [
+              { "path": "executor.config.provider", "equals": "claude-code" },
+              { "path": "executor.provider", "equals": "claude-code" },
+              { "path": "provider", "equals": "claude-code" }
+            ]
+          }
+        }
+      ],
+      "capabilities": [
+        "cli_runtime",
+        "repo_workspace",
+        "workspace_tools",
+        "patch_artifacts",
+        "report_artifacts",
+        "structured_outcome",
+        "provider_owned_auth",
+        "provider_owned_session",
+        "provider_owned_cancellation",
+        "nested_orchestrator"
+      ],
+      "workspace_materialization": {
+        "cwd": "git_checkout"
+      },
+      "provider_defaults": {
+        "claude-code": {
+          "secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+          ],
+          "required_secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+          ],
+          "optional_secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+          ]
+        }
+      },
+      "provider_preflight": {
+        "claude-code": {
+          "label": "Claude Code",
+          "diagnostic_class": "claude_code.preflight.oauth",
+          "required_secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
+          ],
+          "optional_secret_env": [
+            "AI_PROVIDER_CLAUDE_CODE_ACCESS_TOKEN",
+            "AI_PROVIDER_CLAUDE_CODE_EXPIRES_AT"
+          ]
+        }
+      },
+      "lifecycle": {
+        "completion": "synchronous_process",
+        "cancellation": "provider_signal",
+        "max_concurrency_default": 1
+      },
+      "artifact_contract": {
+        "patch": ["git-diff", "patch"],
+        "report": ["json", "markdown"]
+      },
+      "status": "available",
+      "integration_contract": "homeboy-claude-code-agent-task/v1"
+    }
+  ]
+}

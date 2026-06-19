@@ -1,0 +1,69 @@
+{
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "pi",
+  "name": "Pi",
+  "version": "1.0.0",
+  "description": "Conservative Pi agent runtime integration for generic Homeboy agent task requests.",
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "pi.agent-task-executor",
+      "label": "Pi agent task executor",
+      "backend": "pi",
+      "runtime": "pi",
+      "command": "node {{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs",
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "executor.runtime",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "no_op",
+        "unable_to_remediate",
+        "provider_error",
+        "timeout",
+        "failed",
+        "follow_up_issue",
+        "cancelled"
+      ],
+      "failure_classifications": [
+        "provider",
+        "timeout",
+        "policy_denied",
+        "capability_missing",
+        "invalid_input",
+        "execution_failed",
+        "unknown"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets"
+      ],
+      "secret_env_requirements": [],
+      "capabilities": [
+        "cli_runtime",
+        "workspace_materialization",
+        "structured_outcome"
+      ],
+      "workspace_materialization": {
+        "cwd": "request_workspace",
+        "requires_git": false,
+        "write_scope": "workspace"
+      },
+      "provider_defaults": {},
+      "lifecycle": {
+        "completion": "synchronous_process",
+        "cancellation": "process_signal",
+        "max_concurrency_default": 1
+      },
+      "status": "experimental",
+      "integration_contract": "homeboy-pi-agent-task/v1"
+    }
+  ]
+}

@@ -40,6 +40,100 @@ const OPENCODE_CAPABILITIES = [
 	'nested_orchestrator',
 ];
 
+const OPENCODE_COMMAND = 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs';
+
+const OPENCODE_INVOCATION = {
+	schema: 'homeboy/command-invocation/v1',
+	argv: [
+		'node',
+		'{{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs',
+	],
+	display: OPENCODE_COMMAND,
+};
+
+const OPENCODE_RUNNER_READINESS = [
+	{
+		id: 'opencode.executable',
+		label: 'OpenCode executable',
+		executable: {
+			env: ['HOMEBOY_OPENCODE_COMMAND'],
+			candidates: ['opencode'],
+			version_command: ['--version'],
+			install_hint: 'Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias.',
+		},
+		remediation: 'Install OpenCode or set the generic runtime_bin executor config; HOMEBOY_OPENCODE_COMMAND remains a legacy compatibility env alias.',
+	},
+];
+
+const OPENCODE_WORKSPACE_TOOLS = {
+	readonly: [
+		'workspace_ls',
+		'workspace_read',
+		'workspace_git_status',
+	],
+	readwrite: [
+		'workspace_run',
+		'workspace_write',
+		'workspace_edit',
+		'workspace_apply_patch',
+		'workspace_delete',
+		'workspace_git_add',
+	],
+};
+
+const OPENCODE_PROVIDER_DEFAULTS = {
+	codex: {
+		model: 'gpt-5.5',
+		secret_env: [...OPENCODE_SECRET_ENV],
+		secret_env_sources: {
+			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: {
+				source: 'json-file',
+				path: '~/.codex/auth.json',
+				field: 'tokens.access_token',
+			},
+			AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: {
+				source: 'json-file',
+				path: '~/.codex/auth.json',
+				field: 'tokens.refresh_token',
+			},
+			AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT: {
+				source: 'json-file-jwt-expiration',
+				path: '~/.codex/auth.json',
+				field: 'tokens.access_token',
+				fallback_fields: ['tokens.expires_at', 'tokens.expiresAt'],
+			},
+			AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID: {
+				source: 'json-file',
+				path: '~/.codex/auth.json',
+				field: 'tokens.account_id',
+			},
+			AI_PROVIDER_OPENAI_CODEX_FEDRAMP: {
+				source: 'json-file',
+				path: '~/.codex/auth.json',
+				field: 'tokens.fedramp',
+				value: 'false',
+			},
+		},
+	},
+};
+
+const OPENCODE_PROVIDER_PREFLIGHT = {
+	codex: {
+		label: 'Codex',
+		diagnostic_class: 'opencode.preflight.codex_auth',
+		required_secret_env: [
+			'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
+			'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
+			'AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT',
+			'AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID',
+		],
+		optional_secret_env: ['AI_PROVIDER_OPENAI_CODEX_FEDRAMP'],
+		refresh_hook: 'codex-oauth-refresh',
+		validation_hooks: ['codex-token-expiration'],
+		guidance: 'Refresh Codex OAuth credentials before launching OpenCode, for example by signing in with Codex locally so ~/.codex/auth.json contains current tokens, then pass the updated AI_PROVIDER_OPENAI_CODEX_* secret environment values to the OpenCode executor.',
+	},
+};
+
 function providerContract(options = {}) {
 	const contractFields = agentTaskProviderContractFields();
 	contractFields.redacted_metadata_keys = extendRedactedMetadataKeys('codex_auth', 'opencode_auth');
@@ -49,19 +143,19 @@ function providerContract(options = {}) {
 		id: options.id || OPENCODE_PROVIDER_ID,
 		label: options.label || OPENCODE_PROVIDER_LABEL,
 		backend: 'opencode',
-		command: options.command || 'node {{runtime_path}}/scripts/agent/homeboy-opencode-agent-task-executor.cjs',
+		runtime: 'opencode',
+		command: options.command || OPENCODE_COMMAND,
+		invocation: options.invocation || OPENCODE_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV)],
 		capabilities: OPENCODE_CAPABILITIES,
 		workspace_materialization: {
 			cwd: 'git_checkout',
 		},
-		provider_defaults: {
-			codex: {
-				model: 'gpt-5.5',
-				secret_env: [...OPENCODE_SECRET_ENV],
-			},
-		},
+		runner_readiness: OPENCODE_RUNNER_READINESS,
+		workspace_tools: OPENCODE_WORKSPACE_TOOLS,
+		provider_defaults: OPENCODE_PROVIDER_DEFAULTS,
+		provider_preflight: OPENCODE_PROVIDER_PREFLIGHT,
 		lifecycle: {
 			completion: 'synchronous_process',
 			cancellation: 'provider_signal',
@@ -85,8 +179,8 @@ function outcome(request = {}, values = {}) {
 		...(values.failure_code ? { failure_code: values.failure_code } : {}),
 		summary: values.summary || 'OpenCode agent task executor failed before producing a detailed outcome.',
 		diagnostics: values.diagnostics || [],
-		artifacts: [],
-		evidence_refs: [],
+		artifacts: values.artifacts || [],
+		evidence_refs: values.evidence_refs || [],
 		metadata: {
 			provider: OPENCODE_PROVIDER_ID,
 			...(values.metadata || {}),
@@ -206,7 +300,7 @@ function validateRequest(request) {
 }
 
 function resolveCommandSpec(config = {}, options = {}) {
-	const configuredCommand = options.command || config.command || process.env.HOMEBOY_OPENCODE_COMMAND || 'opencode';
+	const configuredCommand = options.command || config.runtime_bin || config.runtimeBin || config.command || process.env.HOMEBOY_OPENCODE_COMMAND || 'opencode';
 	const configuredArgs = options.commandArgs || config.command_args || parseEnvCommandArgs();
 	if (typeof configuredCommand !== 'string' || configuredCommand.trim() === '') {
 		return { error: 'executor.config.command must be a non-empty string when provided.' };
@@ -237,6 +331,12 @@ module.exports = {
 	OPENCODE_PROVIDER_ID,
 	OPENCODE_PROVIDER_LABEL,
 	OPENCODE_SECRET_ENV,
+	OPENCODE_COMMAND,
+	OPENCODE_INVOCATION,
+	OPENCODE_PROVIDER_DEFAULTS,
+	OPENCODE_PROVIDER_PREFLIGHT,
+	OPENCODE_RUNNER_READINESS,
+	OPENCODE_WORKSPACE_TOOLS,
 	executeOpenCodeAgentTask,
 	outcome,
 	providerContract,

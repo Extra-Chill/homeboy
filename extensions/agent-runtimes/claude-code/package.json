@@ -1,0 +1,19 @@
+{
+  "name": "homeboy-agent-runtime-claude-code",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./claude-code-agent-task-executor": "./lib/claude-code-agent-task-executor.js"
+  },
+  "bin": {
+    "homeboy-claude-code-agent-task-executor": "./scripts/agent/homeboy-claude-code-agent-task-executor.cjs"
+  },
+  "scripts": {
+    "test:claude-code-agent-task-executor-boundary": "node tests/claude-code-agent-task-executor-boundary.test.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}
