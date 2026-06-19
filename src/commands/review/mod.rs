@@ -125,6 +125,19 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
             (self.run)((self.build_args)(review_args, review_context), global)?;
         let finding_count = (self.finding_count)(&output);
 
+        let mut hint = format!(
+            "Deep dive: homeboy {} {}{}",
+            self.name,
+            component_label,
+            scope_flag_suffix(review_args, self.include_changed_only_scope),
+        );
+        if self.name == "audit"
+            && (review_args.changed_since.is_some()
+                || review_context.precomputed_changed_files().is_some())
+        {
+            hint.push_str(" --profile=pr");
+        }
+
         Ok((
             ReviewStage {
                 stage: self.name.to_string(),
@@ -132,12 +145,7 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
                 passed: exit_code == 0,
                 exit_code,
                 finding_count,
-                hint: format!(
-                    "Deep dive: homeboy {} {}{}",
-                    self.name,
-                    component_label,
-                    scope_flag_suffix(review_args, self.include_changed_only_scope),
-                ),
+                hint,
                 skipped_reason: None,
                 output: Some(output),
             },
@@ -470,6 +478,13 @@ fn build_audit_args(
         conventions: false,
         only: Vec::new(),
         exclude: Vec::new(),
+        profile: if args.changed_since.is_some()
+            || review_context.precomputed_changed_files().is_some()
+        {
+            "pr".to_string()
+        } else {
+            "full".to_string()
+        },
         baseline_args: args.baseline_args.clone(),
         changed_since: args.changed_since.clone(),
         precomputed_changed_files: review_context
@@ -905,6 +920,31 @@ mod tests {
         };
         assert_eq!(scope_flag_suffix(&args, true), "");
         assert_eq!(scope_flag_suffix(&args, false), "");
+    }
+
+    #[test]
+    fn changed_since_review_uses_pr_audit_profile() {
+        let mut args = review_args_fixture();
+        args.changed_since = Some("origin/main".to_string());
+        let review_context = ReviewExecutionContext {
+            scope: "changed since origin/main".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: None,
+        };
+
+        assert_eq!(build_audit_args(&args, &review_context).profile, "pr");
+    }
+
+    #[test]
+    fn full_review_uses_full_audit_profile() {
+        let args = review_args_fixture();
+        let review_context = ReviewExecutionContext {
+            scope: "full".to_string(),
+            changed_file_count: None,
+            precomputed_changed_files: None,
+        };
+
+        assert_eq!(build_audit_args(&args, &review_context).profile, "full");
     }
 
     fn review_args_fixture() -> ReviewArgs {

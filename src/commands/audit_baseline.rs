@@ -86,6 +86,7 @@ fn refresh(
         exclude_kinds: Vec::new(),
         only_labels: Vec::new(),
         exclude_labels: Vec::new(),
+        profile: homeboy::core::code_audit::AuditProfile::Full,
         extension_overrides: args.extension_override.extensions,
         baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
             baseline: true,
