@@ -96,7 +96,7 @@ servers, fleets, rigs, stacks, and extensions.
 | **Attention** | `deps`, `triage`, `issues` | Find dependency drift, failing work, and tracked findings. |
 | **Remote ops** | `deploy`, `ssh`, `file`, `db`, `logs`, `server`, `project`, `component`, `fleet` | Operate configured projects, servers, and fleets. |
 | **Platforms** | `extension`, `wp`, `cargo` | Route platform-specific behavior through extensions. |
-| **Meta** | `config`, `docs`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade`, `list` | Manage Homeboy itself and its API surfaces. |
+| **Meta** | `config`, `docs`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade` | Manage Homeboy itself and its API surfaces. |
 
 For exhaustive command docs, see
 [docs/commands/commands-index.md](docs/commands/commands-index.md) or run
