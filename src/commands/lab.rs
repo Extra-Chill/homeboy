@@ -478,7 +478,23 @@ fn parse_trailing_json(stdout: &str) -> Option<Value> {
 }
 
 fn revision_matches(requested: &str, installed: &str) -> bool {
-    requested == installed || requested.starts_with(installed) || installed.starts_with(requested)
+    if installed.trim().is_empty() {
+        return false;
+    }
+
+    if requested == installed
+        || requested.starts_with(installed)
+        || installed.starts_with(requested)
+    {
+        return true;
+    }
+
+    !looks_like_git_revision(requested)
+}
+
+fn looks_like_git_revision(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 7 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn extension_sync_revision_error(
@@ -785,6 +801,16 @@ Installing declared dependencies...
             "941bf8cff9f88758123db837ed12bb6f6de5d00f"
         ));
         assert!(!revision_matches("941bf8c", "f36543e"));
+    }
+
+    #[test]
+    fn lab_extension_sync_accepts_named_refs_resolved_by_install() {
+        assert!(revision_matches("main", "941bf8c"));
+        assert!(revision_matches(
+            "fix/codebox-bundled-agents-api",
+            "9d17a58a"
+        ));
+        assert!(!revision_matches("main", ""));
     }
 
     #[test]

@@ -1725,6 +1725,7 @@ mod tests {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
             };
             let (first, _) = sync_workspace("lab-local", options.clone()).expect("first sync");
             let remote_path = Path::new(&first.remote_path);
