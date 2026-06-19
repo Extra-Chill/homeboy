@@ -45,8 +45,11 @@ const AVG_LITERAL_LOC: usize = 4;
 /// Estimated helper size (function definition + body).
 const HELPER_LOC: usize = 6;
 
-pub(in crate::core::code_audit) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
-    detect_repeated_literal_shapes(fingerprints)
+pub(in crate::core::code_audit) fn run(
+    fingerprints: &[&FileFingerprint],
+    scan_extensions: &[String],
+) -> Vec<Finding> {
+    detect_repeated_literal_shapes(fingerprints, scan_extensions)
 }
 
 /// Classification of a literal value's kind — concrete values are discarded,
@@ -86,12 +89,19 @@ struct Occurrence {
     file: String,
 }
 
-fn detect_repeated_literal_shapes(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
+fn detect_repeated_literal_shapes(
+    fingerprints: &[&FileFingerprint],
+    scan_extensions: &[String],
+) -> Vec<Finding> {
+    if scan_extensions.is_empty() {
+        return Vec::new();
+    }
+
     // shape → all occurrences across all scanned files
     let mut shape_occurrences: HashMap<Shape, Vec<Occurrence>> = HashMap::new();
 
     for fp in fingerprints {
-        if !is_php(&fp.relative_path) {
+        if !has_scanned_extension(&fp.relative_path, scan_extensions) {
             continue;
         }
         if super::walker::is_test_path(&fp.relative_path) {
@@ -173,8 +183,15 @@ fn detect_repeated_literal_shapes(fingerprints: &[&FileFingerprint]) -> Vec<Find
     findings
 }
 
-fn is_php(path: &str) -> bool {
-    path.ends_with(".php")
+/// Whether a path carries one of the configured scan extensions. Extensions are
+/// matched without their leading dot (e.g. `ext` matches `Foo.ext`). Core ships
+/// no default — components declare which associative-array-literal languages to
+/// scan via `detector_profile.repeated_literal_shape_extensions`.
+fn has_scanned_extension(path: &str, scan_extensions: &[String]) -> bool {
+    scan_extensions.iter().any(|ext| {
+        let ext = ext.trim_start_matches('.');
+        !ext.is_empty() && path.ends_with(&format!(".{ext}"))
+    })
 }
 
 fn format_shape(shape: &Shape) -> String {
@@ -625,6 +642,10 @@ mod tests {
     use super::*;
     use crate::core::code_audit::conventions::Language;
 
+    fn scan_extensions() -> Vec<String> {
+        vec!["php".to_string()]
+    }
+
     fn fp(path: &str, content: &str) -> FileFingerprint {
         FileFingerprint {
             relative_path: path.to_string(),
@@ -738,7 +759,7 @@ mod tests {
             files.push(fp(&format!("inc/Abilities/F{}.php", i), &body));
         }
         let refs: Vec<&FileFingerprint> = files.iter().collect();
-        let findings = detect_repeated_literal_shapes(&refs);
+        let findings = detect_repeated_literal_shapes(&refs, &scan_extensions());
         assert_eq!(
             findings.len(),
             1,
@@ -760,7 +781,7 @@ mod tests {
             body.push_str("return ['success' => false, 'error' => $e];\n");
         }
         let file = fp("inc/Abilities/Small.php", &body);
-        let findings = detect_repeated_literal_shapes(&[&file]);
+        let findings = detect_repeated_literal_shapes(&[&file], &scan_extensions());
         assert!(
             findings.is_empty(),
             "below-threshold shapes must not fire, got {:?}",
@@ -776,7 +797,7 @@ mod tests {
             body.push_str("$x = ['a', 'b', 'c'];\n");
         }
         let file = fp("inc/Abilities/List.php", &body);
-        let findings = detect_repeated_literal_shapes(&[&file]);
+        let findings = detect_repeated_literal_shapes(&[&file], &scan_extensions());
         assert!(
             findings.is_empty(),
             "positional arrays must never fire, got {:?}",
@@ -793,7 +814,7 @@ mod tests {
             body.push_str("return ['success' => false, 'error' => $e];\n");
         }
         let file = fp("src/thing.js", &body);
-        let findings = detect_repeated_literal_shapes(&[&file]);
+        let findings = detect_repeated_literal_shapes(&[&file], &scan_extensions());
         assert!(findings.is_empty());
     }
 
@@ -819,7 +840,7 @@ mod tests {
             body.push_str("return ['success' => true, 'data' => $d];\n");
         }
         let file = fp("inc/Abilities/Mixed.php", &body);
-        let findings = detect_repeated_literal_shapes(&[&file]);
+        let findings = detect_repeated_literal_shapes(&[&file], &scan_extensions());
         assert_eq!(findings.len(), 2);
     }
 }

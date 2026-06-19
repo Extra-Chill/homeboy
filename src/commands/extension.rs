@@ -42,10 +42,10 @@ enum ExtensionCommand {
         /// Input values as key=value pairs
         #[arg(short, long, value_parser = super::parse_key_val)]
         input: Vec<(String, String)>,
-        /// Run only specific steps (comma-separated, e.g. --step phpunit,phpcs)
+        /// Run only specific steps (comma-separated, e.g. --step test,lint)
         #[arg(long)]
         step: Option<String>,
-        /// Skip specific steps (comma-separated, e.g. --skip phpstan,lint)
+        /// Skip specific steps (comma-separated, e.g. --skip analyze,lint)
         #[arg(long)]
         skip: Option<String>,
         /// Arguments to pass to the extension (for CLI extensions)
