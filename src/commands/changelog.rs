@@ -16,7 +16,7 @@ pub struct ChangelogArgs {
 
 #[derive(Subcommand)]
 pub enum ChangelogCommand {
-    /// Show a changelog (Homeboy's own if no component specified)
+    /// Show Homeboy's changelog, or a component changelog when an ID is provided
     Show {
         /// Component ID to show changelog for
         component_id: Option<String>,
@@ -40,7 +40,7 @@ pub enum ChangelogOutput {
 
 pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
     match (&args.command, args.show_self) {
-        (None, true) => show_homeboy_markdown(),
+        (None, _) => show_homeboy_markdown(),
         (Some(ChangelogCommand::Show { component_id: None }), _) => show_homeboy_markdown(),
         (
             Some(ChangelogCommand::Show {
@@ -51,21 +51,11 @@ pub fn run_markdown(args: ChangelogArgs) -> CmdResult<String> {
             let output = changelog::show(id)?;
             Ok((output.content, 0))
         }
-        (None, false) => Err(homeboy::core::Error::validation_invalid_argument(
-            "command",
-            "No subcommand provided. Use 'show' or --self to view Homeboy's changelog",
-            None,
-            Some(vec![
-                "homeboy changelog show".to_string(),
-                "homeboy changelog show <component_id>".to_string(),
-            ]),
-        )),
     }
 }
 
 pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
-    matches!(args.command, Some(ChangelogCommand::Show { .. }))
-        || (args.command.is_none() && args.show_self)
+    matches!(args.command, Some(ChangelogCommand::Show { .. })) || args.command.is_none()
 }
 
 pub fn run(
@@ -73,7 +63,7 @@ pub fn run(
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ChangelogOutput> {
     match (&args.command, args.show_self) {
-        (None, true) => {
+        (None, _) => {
             let (out, code) = show_homeboy_json()?;
             Ok((ChangelogOutput::Show(out), code))
         }
@@ -90,15 +80,6 @@ pub fn run(
             let output = changelog::show(id)?;
             Ok((ChangelogOutput::ShowComponent(output), 0))
         }
-        (None, false) => Err(homeboy::core::Error::validation_invalid_argument(
-            "command",
-            "No subcommand provided. Use 'show' or --self to view Homeboy's changelog",
-            None,
-            Some(vec![
-                "homeboy changelog show".to_string(),
-                "homeboy changelog show <component_id>".to_string(),
-            ]),
-        )),
     }
 }
 

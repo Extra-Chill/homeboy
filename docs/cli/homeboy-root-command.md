@@ -24,6 +24,7 @@ These are provided by clap:
 - `--artifact-root <DIR>`: copy persisted run artifacts to a specific directory
 - `--runner <RUNNER_ID>`: route commands with portable Lab offload support to a connected Homeboy Lab runner
 - `--allow-local-fallback`: permit a selected Lab runner to fall back to local execution after offload preflight fails
+- `--allow-dirty-lab-workspace`: permit Lab git workspace materialization to overwrite a dirty runner-side checkout
 
 `--output` is a global flag, so pass it before the subcommand:
 
