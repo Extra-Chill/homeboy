@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
+use homeboy::core::agent_tasks::AgentTaskOutcomeStatus;
 
 use super::super::CmdResult;
 use super::args::{CancelArgs, StatusArgs};
@@ -59,6 +60,10 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
     if let Some(summary) = diagnostic_summary_from_aggregate(&aggregate) {
         value["diagnostic_summary"] = summary;
     }
+    let failure_reasons = failure_reasons_from_aggregate(&aggregate);
+    if !failure_reasons.is_empty() {
+        value["failure_reasons"] = Value::Array(failure_reasons);
+    }
     Ok(())
 }
 
@@ -89,6 +94,183 @@ pub(crate) fn diagnostic_summary_from_aggregate(aggregate: &AgentTaskAggregate) 
     })
 }
 
+/// Cap the number of surfaced failure reasons so a pathological run with
+/// hundreds of nested diagnostics cannot flood the failure summary. Overflow is
+/// still available in the full nested payload (`--full` / aggregate file).
+const FAILURE_REASON_LIMIT: usize = 8;
+
+/// Build a prominent, top-level "failure reasons" summary for a failed run
+/// (#3806). The actual root cause of an agent-task failure (recipe validation
+/// issue, PHP fatal, provider registration error, missing path) is otherwise
+/// buried deep in nested outcome JSON — both in the typed
+/// `outcomes[].diagnostics[]` and in provider-specific nested structures such as
+/// `outputs.codebox.agent_runtime.workload.diagnostics[]`.
+///
+/// This collects diagnostics from BOTH the typed field and any nested
+/// `diagnostics[]` arrays found anywhere in each outcome's `outputs`/`metadata`,
+/// dedupes by `(class, message)`, and orders them so the most actionable
+/// root-cause classes (validation / fatal / registration / missing-path) appear
+/// first. The full nested JSON is left untouched; this only ADDS a surfaced
+/// summary so operators see WHY a run failed without hand-digging.
+pub(crate) fn failure_reasons_from_aggregate(aggregate: &AgentTaskAggregate) -> Vec<Value> {
+    let mut collected: Vec<CollectedDiagnostic> = Vec::new();
+
+    // Prefer failed/errored outcomes, but fall back to scanning every outcome so
+    // a root cause attached to a non-failed cell is still surfaced.
+    let failed_first = aggregate.outcomes.iter().filter(|outcome| {
+        matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Failed
+                | AgentTaskOutcomeStatus::ProviderError
+                | AgentTaskOutcomeStatus::Timeout
+                | AgentTaskOutcomeStatus::UnableToRemediate
+        )
+    });
+    let any_failed = failed_first.clone().next().is_some();
+
+    let scan: Vec<&homeboy::core::agent_tasks::AgentTaskOutcome> = if any_failed {
+        failed_first.collect()
+    } else {
+        aggregate.outcomes.iter().collect()
+    };
+
+    for outcome in scan {
+        for diagnostic in &outcome.diagnostics {
+            collected.push(CollectedDiagnostic {
+                task_id: outcome.task_id.clone(),
+                class: diagnostic.class.clone(),
+                message: diagnostic.message.clone(),
+                source: "diagnostics".to_string(),
+            });
+        }
+        collect_nested_diagnostics(
+            &outcome.task_id,
+            &outcome.outputs,
+            "outputs",
+            &mut collected,
+        );
+        collect_nested_diagnostics(
+            &outcome.task_id,
+            &outcome.metadata,
+            "metadata",
+            &mut collected,
+        );
+    }
+
+    // Dedupe by (class, message) keeping the first occurrence, then order the
+    // most actionable root-cause classes first.
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
+    for item in collected {
+        let trimmed = item.message.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = (item.class.to_ascii_lowercase(), trimmed.to_string());
+        if !seen.insert(key) {
+            continue;
+        }
+        deduped.push(item);
+    }
+
+    deduped.sort_by_key(|item| class_priority(&item.class));
+
+    deduped
+        .into_iter()
+        .take(FAILURE_REASON_LIMIT)
+        .map(|item| {
+            json!({
+                "task_id": item.task_id,
+                "class": item.class,
+                "message": item.message,
+                "source": item.source,
+            })
+        })
+        .collect()
+}
+
+struct CollectedDiagnostic {
+    task_id: String,
+    class: String,
+    message: String,
+    source: String,
+}
+
+/// Lower number = higher priority. Actionable root-cause classes
+/// (validation/fatal/registration/missing-path) are surfaced before generic or
+/// transient noise so the first reason an operator sees is the one worth acting
+/// on.
+fn class_priority(class: &str) -> u8 {
+    let class = class.to_ascii_lowercase();
+    if class.contains("valid") || class.contains("recipe") || class.contains("schema") {
+        0
+    } else if class.contains("fatal") || class.contains("error") || class.contains("exception") {
+        1
+    } else if class.contains("registr")
+        || class.contains("provider")
+        || class.contains("discovery")
+        || class.contains("capability")
+    {
+        2
+    } else if class.contains("missing")
+        || class.contains("not_found")
+        || class.contains("path")
+        || class.contains("io")
+    {
+        3
+    } else {
+        9
+    }
+}
+
+/// Recursively walk a provider-specific JSON value looking for `diagnostics`
+/// arrays of objects carrying a `message` (and optional `class`). This is how
+/// nested structures like `outputs.codebox.agent_runtime.workload.diagnostics[]`
+/// get surfaced without the renderer needing to know the exact provider path.
+fn collect_nested_diagnostics(
+    task_id: &str,
+    value: &Value,
+    source: &str,
+    out: &mut Vec<CollectedDiagnostic>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(items)) = map.get("diagnostics") {
+                for item in items {
+                    if let Some(message) = item
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    {
+                        let class = item
+                            .get("class")
+                            .or_else(|| item.get("kind"))
+                            .or_else(|| item.get("level"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("nested")
+                            .to_string();
+                        out.push(CollectedDiagnostic {
+                            task_id: task_id.to_string(),
+                            class,
+                            message,
+                            source: source.to_string(),
+                        });
+                    }
+                }
+            }
+            for nested in map.values() {
+                collect_nested_diagnostics(task_id, nested, source, out);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_nested_diagnostics(task_id, nested, source, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Build the compact, recovery-first `status` summary. Source data is the full
 /// run-record `Value` (already enriched with `diagnostic_summary`); the plan is
 /// loaded best-effort to map task ids back to issue URLs and prompt titles.
@@ -113,6 +295,14 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
     if let Some(diagnostic) = record.get("diagnostic_summary") {
         if !diagnostic.is_null() {
             summary["diagnostic_summary"] = diagnostic.clone();
+        }
+    }
+    if let Some(failure_reasons) = record.get("failure_reasons") {
+        if failure_reasons
+            .as_array()
+            .is_some_and(|reasons| !reasons.is_empty())
+        {
+            summary["failure_reasons"] = failure_reasons.clone();
         }
     }
     if let Some(aggregate_path) = record.get("aggregate_path") {

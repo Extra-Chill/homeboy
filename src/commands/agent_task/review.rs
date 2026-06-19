@@ -136,6 +136,9 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
     let aggregate_review =
         aggregate.map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes.clone()));
     let diagnostic_summary = aggregate.and_then(super::diagnostic_summary_from_aggregate);
+    let failure_reasons = aggregate
+        .map(super::status::failure_reasons_from_aggregate)
+        .filter(|reasons| !reasons.is_empty());
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
@@ -173,6 +176,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             "artifacts": artifacts,
             "aggregate_review": aggregate_review,
             "diagnostic_summary": diagnostic_summary,
+            "failure_reasons": failure_reasons,
             "promotion_candidates": promotion_candidates,
             "next_actions": next_actions,
             "transport": {
