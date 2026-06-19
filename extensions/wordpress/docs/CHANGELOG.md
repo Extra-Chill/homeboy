@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.43] - 2026-06-19
+
+### Changed
+- Preserve Codebox typed artifact handoffs
+
 ## [3.7.42] - 2026-06-19
 
 ### Changed
