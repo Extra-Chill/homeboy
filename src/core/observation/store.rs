@@ -518,15 +518,11 @@ impl ObservationStore {
             )
         })?;
 
-        let artifact = self
-            .list_artifacts(run_id)?
-            .into_iter()
-            .find(|artifact| artifact.id == id)
-            .ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "Inserted artifact record {id} but could not read it back"
-                ))
-            })?;
+        let artifact = self.get_artifact(&id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "Inserted artifact record {id} but could not read it back"
+            ))
+        })?;
         crate::core::publication_artifacts::index_published_artifact_refs(
             self,
             &artifact,
@@ -617,14 +613,11 @@ impl ObservationStore {
             )
         })?;
 
-        self.list_artifacts(run_id)?
-            .into_iter()
-            .find(|artifact| artifact.id == id)
-            .ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "Inserted directory artifact record {id} but could not read it back"
-                ))
-            })
+        self.get_artifact(&id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "Inserted directory artifact record {id} but could not read it back"
+            ))
+        })
     }
 
     pub fn record_url_artifact(
@@ -680,14 +673,11 @@ impl ObservationStore {
             )
         })?;
 
-        self.list_artifacts(run_id)?
-            .into_iter()
-            .find(|artifact| artifact.id == id)
-            .ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "Inserted artifact record {id} but could not read it back"
-                ))
-            })
+        self.get_artifact(&id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "Inserted artifact record {id} but could not read it back"
+            ))
+        })
     }
 
     pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>> {
@@ -784,24 +774,26 @@ impl ObservationStore {
     ) -> Result<Option<ArtifactRecord>> {
         validate_required("run_id", run_id)?;
         validate_required("artifact_token", artifact_token)?;
-        for artifact in self.list_artifacts(run_id)? {
-            if artifact.id == artifact_token
-                || artifact.kind == artifact_token
-                || artifact
-                    .metadata_json
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| value == artifact_token)
-                || artifact
-                    .metadata_json
-                    .get("original_manifest_id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| value == artifact_token)
-            {
-                return Ok(Some(artifact));
-            }
-        }
-        Ok(None)
+        self.connection
+            .query_row(
+                r#"
+                SELECT id, run_id, kind, artifact_type, path, sha256, size_bytes, mime, metadata_json, created_at
+                FROM artifacts
+                WHERE run_id = ?1
+                  AND (
+                    id = ?2
+                    OR kind = ?2
+                    OR json_extract(metadata_json, '$.name') = ?2
+                    OR json_extract(metadata_json, '$.original_manifest_id') = ?2
+                  )
+                ORDER BY created_at ASC
+                LIMIT 1
+                "#,
+                params![run_id, artifact_token],
+                row_to_artifact_record,
+            )
+            .optional()
+            .map_err(sqlite_error("read artifact record for run token"))
     }
 
     pub fn list_artifact_cleanup_candidates(
