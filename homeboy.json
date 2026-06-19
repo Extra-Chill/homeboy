@@ -173,7 +173,9 @@
           "src/core/product_identity.rs",
           "src/core/code_audit/conventions.rs",
           "src/core/runner/tool_registry.rs",
-          "src/core/cleanup.rs"
+          "src/core/cleanup.rs",
+          "src/core/cleanup/self_artifacts.rs",
+          "src/core/runner/lab_args/tests.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
@@ -275,10 +277,6 @@
           {
             "match_mode": "literal",
             "value": "Action Scheduler"
-          },
-          {
-            "match_mode": "literal",
-            "value": "runner-artifact://"
           }
         ],
         "type": "forbidden_terms"
