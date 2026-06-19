@@ -1430,6 +1430,7 @@ mod tests {
             .expect("claim succeeds")
             .expect("first job is claimed");
         assert_eq!(first_claim.job.id, first.id);
+        let first_claim_id = first_claim.job.claim_id.clone().expect("claim id");
 
         let saturated_claim = store
             .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
@@ -1444,6 +1445,7 @@ mod tests {
             .finish_remote_runner_job(
                 first.id,
                 "homeboy-lab",
+                &first_claim_id,
                 RemoteRunnerJobResult {
                     exit_code: 0,
                     stdout: None,
@@ -1594,7 +1596,7 @@ mod tests {
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
             .expect("remote runner job queues");
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
         let claim_id = claim.job.claim_id.expect("claim id");
@@ -1635,7 +1637,7 @@ mod tests {
             .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
             .expect("remote runner job queues");
         let claim = store
-            .claim_remote_runner_job("homeboy-lab", None, 30_000)
+            .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
             .expect("claim succeeds")
             .expect("job is claimed");
         let claim_id = claim.job.claim_id.expect("claim id");
