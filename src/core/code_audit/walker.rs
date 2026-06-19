@@ -131,8 +131,13 @@ pub fn is_test_path(relative_path: &str) -> bool {
     // Filename-based detection (case-sensitive for precision)
     let file_name = relative_path.rsplit('/').next().unwrap_or(relative_path);
 
-    // Rust: foo_test.rs, foo_tests.rs
-    if file_name.ends_with("_test.rs") || file_name.ends_with("_tests.rs") {
+    // Rust: foo_test.rs, foo_tests.rs, and bare test.rs / tests.rs modules
+    // (conventionally wired as `#[cfg(test)] mod tests;`).
+    if file_name.ends_with("_test.rs")
+        || file_name.ends_with("_tests.rs")
+        || file_name == "test.rs"
+        || file_name == "tests.rs"
+    {
         return true;
     }
     // PHP: FooTest.php
@@ -211,6 +216,9 @@ mod tests {
         assert!(is_test_path("src/components/Button.test.tsx"));
         assert!(is_test_path("src/utils/parse.spec.ts"));
         assert!(is_test_path("lib/test_runner.py"));
+        // Bare `tests.rs` / `test.rs` modules (conventionally `#[cfg(test)] mod tests;`).
+        assert!(is_test_path("src/commands/bench/tests.rs"));
+        assert!(is_test_path("src/core/triage/test.rs"));
     }
 
     #[test]
