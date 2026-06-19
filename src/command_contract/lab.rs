@@ -99,6 +99,7 @@ const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
 const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
 
 struct LabSupportedCommandSummary {
+    #[allow(dead_code)]
     contract_labels: &'static [&'static str],
     message_label: &'static str,
     hint_label: &'static str,
@@ -213,6 +214,7 @@ fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
     LAB_SUPPORTED_COMMAND_SUMMARIES
         .iter()

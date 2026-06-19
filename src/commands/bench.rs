@@ -90,6 +90,7 @@ impl BenchArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum BenchCommand {
     /// Run a local settings matrix and aggregate child bench runs
     Matrix(settings_matrix::BenchMatrixArgs),
