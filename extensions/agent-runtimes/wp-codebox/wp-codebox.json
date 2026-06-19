@@ -392,7 +392,16 @@
       ],
       "status": "active",
       "integration_contract": "homeboy-wordpress-agent-task/v1",
-      "runtime_gap_trackers": []
+      "runtime_gap_trackers": [
+        {
+          "gap": "runtime-profile-normalizer",
+          "needed_primitive": "WP Codebox should export a stable runtime-profile builder/normalizer that accepts Homeboy-provided component contracts, provider plugin paths, runtime env, overlays, and parent-tool bridge declarations without Homeboy reshaping dependency fields locally."
+        },
+        {
+          "gap": "typed-artifact-dto-normalizer",
+          "needed_primitive": "WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations, including file_refs/fileRefs and artifact_schema/artifactSchema aliases while allowing caller-owned metadata redaction policy."
+        }
+      ]
     }
   ]
 }

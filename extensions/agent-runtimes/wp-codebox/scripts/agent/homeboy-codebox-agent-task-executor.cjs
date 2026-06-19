@@ -9,7 +9,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { pathToFileURL } = require('node:url');
 
 /**
  * Internal dependencies
@@ -27,8 +26,10 @@ const {
   providerPluginValidation,
   providerSecretEnv,
 } = require('../../lib/provider-preflight-manifest');
+const {
+  loadWpCodeboxCore,
+} = require('../../../../wordpress/lib/wp-codebox-core-loader');
 
-const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const DEFAULT_TASK_RUNNER = path.resolve(__dirname, 'homeboy-wp-codebox-task-runner.cjs');
 function argValue(name) {
   const index = process.argv.indexOf(name);
@@ -634,31 +635,15 @@ function missingModelPreflightPayload(taskInput) {
 }
 
 async function loadCodeboxCoreNormalizers() {
-  const configuredModule = process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
-  const candidates = configuredModule ? [configuredModule] : [DEFAULT_CODEBOX_CORE_MODULE];
-
-  for (const candidate of candidates) {
-    try {
-      const module = await importModule(candidate);
-      if (typeof module.normalizeAgentTaskRunResult === 'function' || typeof module.normalizeRecipeRunSummary === 'function') {
-        return {
-          normalizeAgentTaskRunResult: typeof module.normalizeAgentTaskRunResult === 'function' ? module.normalizeAgentTaskRunResult : null,
-          normalizeRecipeRunSummary: typeof module.normalizeRecipeRunSummary === 'function' ? module.normalizeRecipeRunSummary : null,
-        };
-      }
-    } catch {
-      // Fall back to the local compatibility path when Codebox core is not installed yet.
-    }
+  const module = await loadWpCodeboxCore();
+  if (typeof module?.normalizeAgentTaskRunResult === 'function' || typeof module?.normalizeRecipeRunSummary === 'function') {
+    return {
+      normalizeAgentTaskRunResult: typeof module.normalizeAgentTaskRunResult === 'function' ? module.normalizeAgentTaskRunResult : null,
+      normalizeRecipeRunSummary: typeof module.normalizeRecipeRunSummary === 'function' ? module.normalizeRecipeRunSummary : null,
+    };
   }
 
   return {};
-}
-
-function importModule(specifier) {
-  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:')) {
-    return import(specifier.startsWith('file:') ? specifier : pathToFileURL(path.resolve(specifier)).href);
-  }
-  return import(specifier);
 }
 
 function runtimeOverlayConfigFailurePayload(error) {

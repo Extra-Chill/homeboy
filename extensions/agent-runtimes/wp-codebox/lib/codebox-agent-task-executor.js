@@ -119,7 +119,16 @@ const LEGACY_BUNDLE_KEYS = [
   `${LEGACY_RUNTIME_PREFIX}Bundle`,
 ];
 
-const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
+const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
+  {
+    gap: 'runtime-profile-normalizer',
+    needed_primitive: 'WP Codebox should export a stable runtime-profile builder/normalizer that accepts Homeboy-provided component contracts, provider plugin paths, runtime env, overlays, and parent-tool bridge declarations without Homeboy reshaping dependency fields locally.',
+  },
+  {
+    gap: 'typed-artifact-dto-normalizer',
+    needed_primitive: 'WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations, including file_refs/fileRefs and artifact_schema/artifactSchema aliases while allowing caller-owned metadata redaction policy.',
+  },
+];
 
 function assertAgentTaskRequest(request) {
   if (!request || request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
