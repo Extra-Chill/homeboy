@@ -10,19 +10,18 @@ homeboy list
 
 `homeboy list` is a convenience command that prints the same help text as `homeboy --help`.
 
-This command exists as a convenience entrypoint (for example when you want a quick command list without remembering `--help`).
+This command exists as a convenience entrypoint when you want a quick command list without remembering `--help`.
 
 ## Output
 
 This command prints clap-generated `homeboy --help` output to stdout.
 
-- Output is help-text (no JSON envelope).
+- Output is help text, not a JSON envelope.
 
-## Exit code
+## Exit Code
 
 - `0` on success.
 
 ## Related
 
-- [Root command](../cli/homeboy-root-command.md)
 - [Commands index](commands-index.md)
