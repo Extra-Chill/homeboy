@@ -26,6 +26,7 @@ pub mod agent_task_gate_executor;
 pub mod agent_task_lifecycle;
 pub mod agent_task_loop_controller;
 pub mod agent_task_loop_definition;
+pub mod agent_task_loop_runner_policy;
 mod agent_task_pr_body;
 pub mod agent_task_promotion;
 pub mod agent_task_provider;
