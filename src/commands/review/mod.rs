@@ -183,7 +183,7 @@ fn dispatch_review_plan_step(
     }
 }
 
-pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
+pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<(ReviewCommandOutput, i32)> {
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component = args.comp.load()?;
