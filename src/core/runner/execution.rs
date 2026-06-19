@@ -26,7 +26,8 @@ use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
 use super::{
-    connect, load, status, Runner, RunnerCapabilityPreflight, RunnerKind, RunnerTunnelMode,
+    connect, load, select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerKind,
+    RunnerTransport, RunnerTunnelMode,
 };
 use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
@@ -216,45 +217,46 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
         }
         connected = status(runner_id)?;
     }
-    if connected.connected {
-        if let Some(session) = connected.session {
+    match select_runner_transport(&runner, Some(&connected), false) {
+        RunnerTransport::DirectDaemon(handle) => {
             run_capability_preflight(&runner)?;
-            if let Some(local_url) = session.local_url.as_deref() {
-                return exec_via_daemon(
-                    &runner,
-                    local_url,
-                    cwd,
-                    options.project_id,
-                    options.command,
-                    request_env,
-                    secret_env_names,
-                    options.capture_patch,
-                    Some(plan.source_snapshot),
-                    options.require_paths,
-                );
-            }
-            if session.mode == RunnerTunnelMode::Reverse {
-                if let Some(broker_url) = session.broker_url.as_deref() {
-                    return exec_via_reverse_broker(
-                        &runner,
-                        broker_url,
-                        cwd,
-                        options.project_id,
-                        options.command,
-                        request_env,
-                        secret_env_names,
-                        options.capture_patch,
-                        Some(plan.source_snapshot),
-                        options.require_paths,
-                    );
-                }
-            }
+            exec_via_daemon(
+                &runner,
+                handle.endpoint_url(),
+                cwd,
+                options.project_id,
+                options.command,
+                request_env,
+                secret_env_names,
+                options.capture_patch,
+                Some(plan.source_snapshot),
+                options.require_paths,
+            )
         }
-    }
-
-    match runner.kind {
-        RunnerKind::Local => exec_local(plan),
-        RunnerKind::Ssh => Err(Error::validation_invalid_argument(
+        RunnerTransport::ReverseBroker(handle) => {
+            run_capability_preflight(&runner)?;
+            exec_via_reverse_broker(
+                &runner,
+                handle.endpoint_url(),
+                cwd,
+                options.project_id,
+                options.command,
+                request_env,
+                secret_env_names,
+                options.capture_patch,
+                Some(plan.source_snapshot),
+                options.require_paths,
+            )
+        }
+        RunnerTransport::Local => exec_local(plan),
+        RunnerTransport::DiagnosticSsh => exec_diagnostic_ssh(
+            &runner,
+            cwd,
+            options.command,
+            request_env,
+            options.require_paths,
+        ),
+        RunnerTransport::Unavailable => Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` or pass `--ssh` for explicit SSH diagnostics",
             Some(runner.id),
@@ -327,7 +329,8 @@ fn preflight_worker_local_capability_plan(
 }
 
 fn should_force_diagnostic_ssh(runner: &Runner, options: &RunnerExecOptions) -> bool {
-    runner.kind == RunnerKind::Ssh && options.allow_diagnostic_ssh
+    select_runner_transport(runner, None, options.allow_diagnostic_ssh)
+        == RunnerTransport::DiagnosticSsh
 }
 
 pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
