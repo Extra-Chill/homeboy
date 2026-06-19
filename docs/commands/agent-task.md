@@ -62,6 +62,13 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
+## Internal Bridge
+
+`agent-task tool` is a hidden provider-runtime bridge. It remains parseable for
+runtime adapters that dispatch tool requests through Homeboy, but it is omitted
+from `homeboy agent-task --help` and the visible command surface because it is
+not an operator-facing workflow.
+
 ## Controller Events
 
 `agent-task controller events` is the stable generic primitive for applying an
