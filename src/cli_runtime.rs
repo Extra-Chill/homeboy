@@ -1,5 +1,6 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 use crate::cli_surface::{Cli, Commands};
 use crate::commands;
@@ -11,8 +12,7 @@ use crate::core::extension::{list_summaries, load_all_extensions};
 use crate::core::upgrade;
 
 pub struct CliRuntime {
-    extension_info: Vec<ExtensionCliInfo>,
-    extension_health: ExtensionCliHealth,
+    extension_discovery: OnceLock<ExtensionCliDiscovery>,
 }
 
 struct ExtensionCliCommand {
@@ -62,10 +62,8 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
 
 impl CliRuntime {
     pub fn new() -> Self {
-        let discovery = collect_extension_cli_info();
         Self {
-            extension_info: discovery.info,
-            extension_health: discovery.health,
+            extension_discovery: OnceLock::new(),
         }
     }
 
@@ -81,18 +79,31 @@ impl CliRuntime {
     }
 
     fn parse_matches(&self, normalized: Vec<String>) -> ArgMatches {
-        match self
-            .build_augmented_command()
-            .try_get_matches_from(normalized)
-        {
+        match Cli::command().try_get_matches_from(normalized.clone()) {
             Ok(matches) => matches,
-            Err(err) => {
-                if let Some(output) = try_augment_clap_error(&err, &self.extension_health) {
-                    eprintln!("{}", output);
-                    std::process::exit(2);
+            Err(static_err) => match self
+                .build_augmented_command()
+                .try_get_matches_from(normalized)
+            {
+                Ok(matches) => matches,
+                Err(err) => {
+                    if let Some(output) =
+                        try_augment_clap_error(&err, &self.extension_discovery().health)
+                    {
+                        eprintln!("{}", output);
+                        std::process::exit(2);
+                    }
+
+                    if let Some(output) =
+                        try_augment_clap_error(&static_err, &self.extension_discovery().health)
+                    {
+                        eprintln!("{}", output);
+                        std::process::exit(2);
+                    }
+
+                    err.exit();
                 }
-                err.exit();
-            }
+            },
         }
     }
 
@@ -203,11 +214,22 @@ impl CliRuntime {
     }
 
     fn build_augmented_command(&self) -> Command {
-        build_augmented_command(&self.extension_info, &self.extension_health)
+        let discovery = self.extension_discovery();
+        build_augmented_command(&discovery.info, &discovery.health)
     }
 
     fn try_parse_extension_cli_command(&self, matches: &ArgMatches) -> Option<ExtensionCliCommand> {
-        try_parse_extension_cli_command(matches, &self.extension_info)
+        let (tool, _) = matches.subcommand()?;
+        if is_builtin_subcommand(tool) {
+            return None;
+        }
+
+        try_parse_extension_cli_command(matches, &self.extension_discovery().info)
+    }
+
+    fn extension_discovery(&self) -> &ExtensionCliDiscovery {
+        self.extension_discovery
+            .get_or_init(collect_extension_cli_info)
     }
 }
 
@@ -395,11 +417,15 @@ fn try_parse_extension_cli_command(
     })
 }
 
+fn is_builtin_subcommand(name: &str) -> bool {
+    Cli::command()
+        .get_subcommands()
+        .any(|command| command.get_name() == name)
+}
+
 fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
-        if let Ok((resources, _)) = crate::commands::doctor::resources::run(
-            crate::commands::doctor::resources::ResourcesArgs {},
-        ) {
+        if let Ok((resources, _)) = crate::commands::doctor::resources::run_preflight() {
             let default_lab_runner = if hot_command.lab_offload_supported {
                 crate::core::runner::resolve_default_lab_runner()
                     .ok()
