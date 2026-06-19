@@ -4,37 +4,41 @@
  * Internal dependencies
  */
 const {
-  datamachineAgentCiCodeboxExecutorConfig,
-} = require('./datamachine-agent-ci-codebox-adapter');
+  datamachineAgentCiExecutorConfig,
+  datamachineAgentCiRuntimeBackend,
+  datamachineAgentCiRuntimeProvider,
+} = require('./datamachine-agent-ci-runtime-adapter');
 const datamachineAgentCi = require('../../datamachine-agent-ci');
 
 function datamachineAgentCiBundleTaskRequest(options = {}) {
-  return datamachineAgentCi.datamachineAgentCiBundleTaskRequest(datamachineAgentCiCodeboxOptions(options), {
+  return datamachineAgentCi.datamachineAgentCiBundleTaskRequest(datamachineAgentCiRuntimeOptions(options), {
     taskExecutorConfig: datamachineAgentCiTaskExecutorConfig,
   });
 }
 
 function datamachineAgentCiAbilityTaskRequest(options = {}) {
-  return datamachineAgentCi.datamachineAgentCiAbilityTaskRequest(datamachineAgentCiCodeboxOptions(options), {
+  return datamachineAgentCi.datamachineAgentCiAbilityTaskRequest(datamachineAgentCiRuntimeOptions(options), {
     taskExecutorConfig: datamachineAgentCiTaskExecutorConfig,
   });
 }
 
 function datamachineAgentCiRunnerSpec(options = {}) {
-  return datamachineAgentCi.datamachineAgentCiRunnerSpec(datamachineAgentCiCodeboxOptions(options), {
+  return datamachineAgentCi.datamachineAgentCiRunnerSpec(datamachineAgentCiRuntimeOptions(options), {
     taskExecutorConfig: datamachineAgentCiTaskExecutorConfig,
   });
 }
 
-function datamachineAgentCiCodeboxOptions(options = {}) {
+function datamachineAgentCiRuntimeOptions(options = {}) {
+  const runtimeProvider = datamachineAgentCiRuntimeProvider(options);
   return {
     ...options,
-    backend: options.backend || options.runtimeBackend || options.runtime_backend || 'codebox',
+    backend: datamachineAgentCiRuntimeBackend(options, runtimeProvider),
+    runtime: options.runtime || options.runtimeId || options.runtime_id || runtimeProvider.id,
   };
 }
 
 function datamachineAgentCiTaskExecutorConfig(options = {}) {
-  return datamachineAgentCiCodeboxExecutorConfig(
+  return datamachineAgentCiExecutorConfig(
     datamachineAgentCi.datamachineAgentCiTaskExecutorConfig(options)
   );
 }

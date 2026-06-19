@@ -53,6 +53,7 @@
         "schema",
         "task_id",
         "executor.backend",
+        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [
@@ -330,6 +331,21 @@
         }
       },
       "role_aliases": {
+        "artifact_roles": {
+          "artifact_bundle": ["codebox-artifact-bundle", "artifact-bundle", "codebox-artifact-directory", "codebox-session-artifacts"],
+          "changed_files": ["codebox-changed-files"],
+          "patch": ["codebox-patch"],
+          "transcript": ["codebox-transcript", "agent-runtime-transcript", "agent-runtime-transcript-summary"],
+          "runtime_log": ["codebox-runtime-log", "codebox-recipe-startup-log"],
+          "command_log": ["codebox-command-log"],
+          "typed_artifact": ["typed-bundle-output"],
+          "replay_bundle": ["agent-runtime-replay-bundle"],
+          "pull_request": ["agent-runtime-pull-request"],
+          "probe_result": ["codebox-recipe-probe-json", "recipe-probe-result"],
+          "screenshot": ["codebox-recipe-screenshot"],
+          "side_effects": ["codebox-recipe-fake-side-effects"],
+          "preflight_evidence": ["codebox-command-evidence", "codebox-agent-task-input"]
+        },
         "artifact_kinds": {
           "patch": ["codebox-patch"]
         },

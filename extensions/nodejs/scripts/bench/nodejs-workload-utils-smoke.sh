@@ -158,11 +158,11 @@ process.stdout.write(JSON.stringify({
 `);
 await chmod(fakeCli, 0o755);
 
-const visualResult = await utils.runVisualParityWorkload({
+const visualResult = await utils.runWordPressCodeboxVisualParityWorkload({
   id: 'Visual Contract',
   artifactsDir: join(process.env.HOMEBOY_COMPONENT_PATH, 'visual-artifacts'),
   runId: 'visual-run',
-  wpCodeboxCli: fakeCli,
+  backend: { codeboxCli: fakeCli },
   source: { path: sourceDir, ref: 'source-ref', label: 'static-source', port: 48531 },
   candidate: {
     url: '/',

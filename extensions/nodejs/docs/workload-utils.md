@@ -20,7 +20,6 @@ concepts:
 - `metric(value, fallback)` coerces finite numeric values.
 - `runCommand(command, args, options)` runs a subprocess with redacted output by default.
 - `runPackageScriptBench(options)` runs a `package.json` script with optional spec args and returns the standard bench workload shape: `{ metrics, artifacts, metadata }`.
-- `runVisualParityWorkload(options)` runs a WP Codebox `wordpress.visual-compare` recipe and returns the standard bench workload shape with a typed `homeboy/VisualParityArtifact/v1` JSON artifact.
 - `writeJson(file, data)` and `writeText(file, data)` create parent directories and redact common secrets.
 - `runId(name)` creates a sanitized run identifier.
 - `artifactDir(name)` returns a directory under `HOMEBOY_BENCH_SHARED_STATE` or the OS temp directory.
@@ -29,21 +28,22 @@ concepts:
 
 Use `{ redact: false }` with `runCommand()`, `writeJson()`, or `writeText()` only when a workload needs raw output for parsing before writing a redacted artifact.
 
-## Visual Parity Workloads
+## WordPress/Codebox Visual Parity Workloads
 
-`runVisualParityWorkload()` is the reusable primitive for visual comparison
-workloads that already have a WP Codebox CLI available. It accepts a source URL
-or local source path, a candidate WordPress context, viewport/threshold settings,
-and emits a normalized `homeboy/VisualParityArtifact/v1` artifact while preserving
-the underlying WP Codebox artifact references.
+`runWordPressCodeboxVisualParityWorkload()` is the WordPress/Codebox-specific
+primitive for visual comparison workloads. Callers explicitly provide the Codebox
+backend, a source URL or local source path, a candidate WordPress context,
+viewport/threshold settings, and receive a normalized
+`homeboy/VisualParityArtifact/v1` artifact while preserving the underlying
+Codebox artifact references.
 
 ```js
-const { runVisualParityWorkload } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
+const { runWordPressCodeboxVisualParityWorkload } = await import(process.env.HOMEBOY_NODEJS_WORKLOAD_UTILS);
 
 export default async function () {
-  return runVisualParityWorkload({
+  return runWordPressCodeboxVisualParityWorkload({
     id: 'homepage-parity',
-    wpCodeboxCli: process.env.WP_CODEBOX_CLI,
+    backend: { codeboxCli: process.env.CODEBOX_CLI },
     source: {
       path: './dist/site',
       ref: process.env.GITHUB_SHA,
@@ -67,9 +67,10 @@ export default async function () {
 }
 ```
 
-The helper stays product-neutral. Callers own site-specific import steps,
-scoring, PR comments, retry policy, and reviewer gates. Homeboy Extensions owns
-the reusable recipe invocation and artifact normalization shape:
+The generic Node.js bench runner does not auto-discover or export WordPress
+helpers. Callers own backend discovery, site-specific import steps, scoring, PR
+comments, retry policy, and reviewer gates. Homeboy Extensions owns the reusable
+recipe invocation and artifact normalization shape:
 
 ```json
 {

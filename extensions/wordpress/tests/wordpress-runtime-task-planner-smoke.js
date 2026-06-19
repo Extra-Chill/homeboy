@@ -45,6 +45,7 @@ assert.equal(plan.tasks.length, 2);
 for (const task of plan.tasks) {
 	assert.equal(task.schema, contract.schemas.request);
 	assert.equal(task.executor.backend, 'codebox');
+	assert.equal(task.executor.runtime, 'wp-codebox');
 	assert.equal(task.executor.config.runtime_id, 'wp-codebox');
 	assert.equal(task.executor.config.runtime_task.ability, 'datamachine/run-runtime-task');
 	assert.equal(task.executor.config.runtime_task.input.operation, 'extract');
@@ -66,7 +67,9 @@ const genericBackendPlan = wordpressRuntimeTaskPlan({
 	runtimeId: 'opencode-local',
 });
 assert.equal(genericBackendPlan.metadata.backend, 'opencode');
+assert.equal(genericBackendPlan.metadata.runtime, 'opencode-local');
 assert.equal(genericBackendPlan.tasks[0].executor.backend, 'opencode');
+assert.equal(genericBackendPlan.tasks[0].executor.runtime, 'opencode-local');
 assert.equal(genericBackendPlan.tasks[0].executor.config.runtime_id, 'opencode-local');
 
 const request = wordpressRuntimeTaskRequest({
@@ -74,6 +77,7 @@ const request = wordpressRuntimeTaskRequest({
 	ability: 'example/materialize-artifact',
 	abilityInput: { slug: 'example' },
 	backend: 'codebox',
+	runtime: 'wp-codebox',
 });
 assert.equal(request.schema, contract.schemas.request);
 assert.equal(request.task_id, 'single-runtime-task-smoke');
@@ -94,6 +98,8 @@ assert.equal(result.status, 0, result.stderr || result.stdout);
 const cliPlan = JSON.parse(result.stdout);
 assert.equal(cliPlan.schema, contract.schemas.plan);
 assert.equal(cliPlan.tasks[0].schema, contract.schemas.request);
+assert.equal(cliPlan.tasks[0].executor.runtime, 'wp-codebox');
+assert.equal(cliPlan.tasks[0].executor.config.runtime_id, 'wp-codebox');
 assert.equal(cliPlan.tasks[0].executor.config.runtime_task.input.dla_url, 'https://dla.example/export/123');
 assert.deepEqual(cliPlan.tasks[0].expected_artifacts, ['validation-report']);
 assert.equal(cliPlan.tasks[0].limits.task_timeout_seconds, 60);

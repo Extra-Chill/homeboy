@@ -182,7 +182,7 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime_provider`. Today the supported value is `wp-codebox`.
+- Agent CI runs through the selected `runtime_provider`. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.

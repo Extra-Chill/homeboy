@@ -62,6 +62,7 @@ const bundleTask = datamachineAgentCiBundleTaskRequest({
 
 assert.equal(bundleTask.schema, 'homeboy/agent-task-request/v1');
 assert.equal(bundleTask.executor.backend, 'codebox');
+assert.equal(bundleTask.executor.runtime, 'wp-codebox');
 assert.deepEqual(bundleTask.executor.secret_env, ['AI_PROVIDER_OPENAI_API_KEY']);
 assert.equal(bundleTask.executor.config.runtime_task.ability, 'datamachine/run-agent-bundle');
 assert.equal(bundleTask.executor.config.runtime_execution.kind, 'bundle');
@@ -140,6 +141,7 @@ const bundleRunnerSpec = datamachineAgentCiRunnerSpec({
 
 assert.equal(bundleRunnerSpec.schema, AGENT_TASK_RUNNER_SPEC_SCHEMA);
 assert.equal(bundleRunnerSpec.executor.backend, 'codebox');
+assert.equal(bundleRunnerSpec.executor.runtime, 'wp-codebox');
 assert.equal(bundleRunnerSpec.executor.config.provider, 'openai');
 assert.deepEqual(bundleRunnerSpec.executor.secret_env, ['AI_PROVIDER_OPENAI_API_KEY']);
 assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec: bundleRunnerSpec }), {
@@ -157,6 +159,30 @@ assert.equal(datamachineAgentCiRunnerSpec({
   pipelineSlug: 'concept-pipeline',
   flowSlug: 'concept-flow',
 }).executor.backend, 'codebox');
+
+const opencodeRunnerSpec = datamachineAgentCiRunnerSpec({
+  taskId: 'opencode-runtime-id',
+  runtimeProvider: 'opencode',
+  source: '/workspace/example-repo/bundles/concept-agent',
+  agentSlug: 'concept-agent',
+  pipelineSlug: 'concept-pipeline',
+  flowSlug: 'concept-flow',
+});
+assert.equal(opencodeRunnerSpec.executor.backend, 'opencode');
+assert.equal(opencodeRunnerSpec.executor.config.runtime_provider, 'opencode');
+assert.equal(opencodeRunnerSpec.executor.config.runtime_id, 'opencode');
+
+assert.throws(
+  () => datamachineAgentCi.datamachineAgentCiRunnerSpec({
+    taskId: 'generic-missing-runtime',
+    backend: 'codebox',
+    source: '/workspace/example-repo/bundles/concept-agent',
+    agentSlug: 'concept-agent',
+    pipelineSlug: 'concept-pipeline',
+    flowSlug: 'concept-flow',
+  }),
+  /runtime is required/
+);
 
 const abilityTask = datamachineAgentCiAbilityTaskRequest({
   taskId: 'validate-artifact',

@@ -14,13 +14,13 @@ const { spawnSync } = require('node:child_process');
  * Internal dependencies
  */
 const {
-  datamachineAgentCiCodeboxExecutorConfig,
-} = require('../../lib/datamachine-agent-ci-codebox-adapter');
-const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+  datamachineAgentCiExecutorConfig,
+  datamachineAgentCiRuntimeBackend,
+  datamachineAgentCiRuntimeProvider,
+} = require('../../lib/datamachine-agent-ci-runtime-adapter');
 
 const SCRIPT_DIR = __dirname;
 const EXTENSION_PATH = path.resolve(SCRIPT_DIR, '..', '..');
-const REPO_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..');
 
 function readConfigPath() {
   const configPath = process.argv[2] || process.env.HOMEBOY_DATAMACHINE_AGENT_CONFIG_PATH || '';
@@ -67,7 +67,7 @@ function expectedArtifactsFromConfig(config) {
     .filter(Boolean);
 }
 
-function buildAgentTaskRequest(config, configPath) {
+function buildAgentTaskRequest(config, configPath, runtimeProvider) {
   const taskId = config.task_id || config.workload_id || config.flow_slug || 'datamachine-agent-ci';
   const timeoutMs = Number.parseInt(config.time_budget_ms || '', 10);
   const timeoutSeconds = Number.parseInt(config.task_timeout_seconds || config.taskTimeoutSeconds || '', 10);
@@ -79,7 +79,7 @@ function buildAgentTaskRequest(config, configPath) {
     agent_runtime_tools: config.agent_runtime_tools || config.agent_runtime_tools_path || runtimeComponents.data_machine_code,
     runtime: runtimeComponents.runtime,
   }).filter(([, value]) => nonEmpty(value)));
-  const executorConfig = datamachineAgentCiCodeboxExecutorConfig(Object.fromEntries(Object.entries({
+  const executorConfig = datamachineAgentCiExecutorConfig(Object.fromEntries(Object.entries({
     ...config,
     execution_kind: config.execution_kind || 'agent_bundle',
     agents_api: config.agents_api || config.agents_api_path || runtimeComponents.agents_api,
@@ -119,7 +119,8 @@ function buildAgentTaskRequest(config, configPath) {
       },
     },
     executor: {
-      backend: 'codebox',
+      backend: datamachineAgentCiRuntimeBackend(config, runtimeProvider),
+      runtime: runtimeProvider.id,
       model: config.model || '',
       config: executorConfig,
       secret_env: config.secret_env || [],
@@ -177,8 +178,8 @@ function writeOutcome(outcome) {
 try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
-  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.AGENT_RUNTIME || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
-  const request = buildAgentTaskRequest(config, configPath);
+  const runtime = datamachineAgentCiRuntimeProvider(config, { workspace: config.component_path || process.cwd() });
+  const request = buildAgentTaskRequest(config, configPath, runtime);
   const result = spawnSync(process.execPath, [runtime.executor.path], {
     encoding: 'utf8',
     input: JSON.stringify(request),
@@ -190,14 +191,15 @@ try {
     process.stderr.write(result.stderr);
   }
 
+  const noOutcomeSummary = `${runtime.id} agent task executor produced no JSON outcome.`;
   const outcome = result.stdout.trim() ? JSON.parse(result.stdout) : {
     schema: 'homeboy/agent-task-outcome/v1',
     task_id: request.task_id,
     status: 'failed',
-    summary: 'WP Codebox agent task executor produced no JSON outcome.',
+    summary: noOutcomeSummary,
     diagnostics: [{
       class: 'homeboy.datamachine_agent_task.no_outcome',
-      message: 'WP Codebox agent task executor produced no JSON outcome.',
+      message: noOutcomeSummary,
       data: { exit_status: result.status ?? 1 },
     }],
   };

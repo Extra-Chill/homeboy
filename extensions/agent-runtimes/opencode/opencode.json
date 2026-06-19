@@ -17,6 +17,7 @@
         "schema",
         "task_id",
         "executor.backend",
+        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [

@@ -170,6 +170,21 @@ const LEGACY_BUNDLE_KEYS = [
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
 
 const WP_CODEBOX_ROLE_ALIASES = {
+  artifact_roles: {
+    artifact_bundle: ['codebox-artifact-bundle', 'artifact-bundle', 'codebox-artifact-directory', 'codebox-session-artifacts'],
+    changed_files: ['codebox-changed-files'],
+    patch: ['codebox-patch'],
+    transcript: ['codebox-transcript', 'agent-runtime-transcript', 'agent-runtime-transcript-summary'],
+    runtime_log: ['codebox-runtime-log', 'codebox-recipe-startup-log'],
+    command_log: ['codebox-command-log'],
+    typed_artifact: ['typed-bundle-output'],
+    replay_bundle: ['agent-runtime-replay-bundle'],
+    pull_request: ['agent-runtime-pull-request'],
+    probe_result: ['codebox-recipe-probe-json', 'recipe-probe-result'],
+    screenshot: ['codebox-recipe-screenshot'],
+    side_effects: ['codebox-recipe-fake-side-effects'],
+    preflight_evidence: ['codebox-command-evidence', 'codebox-agent-task-input'],
+  },
   artifact_kinds: {
     patch: ['codebox-patch'],
   },
@@ -2345,7 +2360,7 @@ function typedBundleOutputArtifacts(result) {
 }
 
 function artifactFromCodeboxArtifact(artifact, index) {
-  return agentTaskArtifactFromRef(
+  const normalized = agentTaskArtifactFromRef(
     {
       ...artifact,
       id: artifact.id || artifact.sha256 || artifact.path || artifact.url || `codebox-artifact-${index + 1}`,
@@ -2354,6 +2369,75 @@ function artifactFromCodeboxArtifact(artifact, index) {
     index,
     sanitizePublicMetadata
   );
+  return normalizeCodeboxArtifactOutcome(normalized, artifact);
+}
+
+function normalizeCodeboxArtifactOutcome(artifact, rawArtifact = {}) {
+  if (!artifact) {
+    return artifact;
+  }
+  const nativeKind = rawArtifact.kind || rawArtifact.type || artifact.kind || '';
+  const role = providerNeutralArtifactRole({ ...artifact, kind: nativeKind });
+  const metadata = artifact.metadata && typeof artifact.metadata === 'object' && !Array.isArray(artifact.metadata)
+    ? artifact.metadata
+    : {};
+  return {
+    ...artifact,
+    role,
+    metadata: sanitizePublicMetadata({
+      ...metadata,
+      wp_codebox: {
+        id: rawArtifact.id || artifact.id,
+        kind: nativeKind,
+        name: rawArtifact.name || artifact.name,
+        raw: rawArtifact,
+      },
+    }),
+  };
+}
+
+function providerNeutralArtifactRole(artifact = {}) {
+  const label = `${artifact.kind || ''} ${artifact.name || ''} ${artifact.id || ''} ${artifact.path || ''} ${artifact.url || ''}`;
+  if (/patch|diff/i.test(label)) {
+    return 'patch';
+  }
+  if (/changed[-_ ]?files/i.test(label)) {
+    return 'changed_files';
+  }
+  if (/transcript|conversation|messages/i.test(label)) {
+    return 'transcript';
+  }
+  if (/typed[-_ ]?bundle[-_ ]?output|typed[-_ ]?artifact/i.test(label)) {
+    return 'typed_artifact';
+  }
+  if (/replay[-_ ]?bundle/i.test(label)) {
+    return 'replay_bundle';
+  }
+  if (/pull[-_ ]?request/i.test(label)) {
+    return 'pull_request';
+  }
+  if (/screenshot/i.test(label)) {
+    return 'screenshot';
+  }
+  if (/probe/i.test(label)) {
+    return 'probe_result';
+  }
+  if (/side[-_ ]?effects?/i.test(label)) {
+    return 'side_effects';
+  }
+  if (/command[-_ ]?evidence|agent[-_ ]?task[-_ ]?input|homeboy-codebox-task-runner\.json/i.test(label)) {
+    return 'preflight_evidence';
+  }
+  if (/command[-_ ]?log/i.test(label)) {
+    return 'command_log';
+  }
+  if (/runtime[-_ ]?log|startup[-_ ]?log/i.test(label)) {
+    return 'runtime_log';
+  }
+  if (/artifact[-_ ]?bundle|artifact[-_ ]?directory|session[-_ ]?artifacts/i.test(label)) {
+    return 'artifact_bundle';
+  }
+  return 'artifact';
 }
 
 function pathValue(source, dottedPath) {

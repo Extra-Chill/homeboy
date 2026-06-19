@@ -22,7 +22,7 @@
     "./agent-task-runner-spec": "./lib/agent-task-runner-spec.js",
     "./datamachine-agent-ci-plan": "./lib/datamachine-agent-ci-plan.js",
     "./datamachine-agent-ci-codebox-adapter": "./lib/datamachine-agent-ci-codebox-adapter.js",
-    "./datamachine-agent-ci-runtime-adapter": "./lib/datamachine-agent-ci-codebox-adapter.js",
+    "./datamachine-agent-ci-runtime-adapter": "./lib/datamachine-agent-ci-runtime-adapter.js",
     "./timing-correlator": "./lib/timing-correlator.js",
     "./codebox-memory-report": "./lib/codebox-memory-report.js",
     "./wp-codebox-apply-adapter": "./lib/wp-codebox-apply-adapter.js",

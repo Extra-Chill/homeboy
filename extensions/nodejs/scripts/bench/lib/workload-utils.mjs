@@ -255,12 +255,12 @@ export async function runPackageScriptBench(options = {}) {
 }
 
 /**
- * Run a WP Codebox wordpress.visual-compare recipe and emit a normalized,
- * product-neutral visual parity artifact for Homeboy bench workloads.
+ * Run a WordPress/Codebox visual-compare recipe and emit a normalized visual
+ * parity artifact for Homeboy bench workloads.
  */
-export async function runVisualParityWorkload(options = {}) {
+export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
-        throw new Error('runVisualParityWorkload requires an options object.');
+        throw new Error('runWordPressCodeboxVisualParityWorkload requires an options object.');
     }
 
     const id = sanitizeSegment(options.id || 'visual-parity');
@@ -277,6 +277,7 @@ export async function runVisualParityWorkload(options = {}) {
     const source = normalizeVisualParitySource(options.source, { cwd });
     const candidate = normalizeVisualParityCandidate(options.candidate);
     const compare = normalizeVisualParityCompareOptions(options);
+    const backend = normalizeWordPressCodeboxBackend(options.backend || { codeboxCli: options.codeboxCli });
     const recipe = buildVisualParityRecipe({ artifactDirectory, candidate, compare, source });
     const recipePath = context.artifactPath(`${id}-wp-codebox-recipe`, { kind: 'json', extension: 'json' });
     await writeJson(recipePath, recipe, { redact: false });
@@ -286,11 +287,7 @@ export async function runVisualParityWorkload(options = {}) {
 
     let codeboxResult;
     try {
-        const wpCodeboxCli = options.wpCodeboxCli || process.env.WP_CODEBOX_CLI;
-        if (!wpCodeboxCli) {
-            throw new Error('runVisualParityWorkload requires wpCodeboxCli or WP_CODEBOX_CLI.');
-        }
-        const result = await runNode([wpCodeboxCli, 'recipe-run', '--recipe', recipePath, '--json'], {
+        const result = await runNode([backend.codeboxCli, 'recipe-run', '--recipe', recipePath, '--json'], {
             cwd,
             timeoutMs: options.timeoutMs,
             redact: false,
@@ -404,19 +401,19 @@ function sanitizeSegment(value) {
 
 function normalizeVisualParitySource(source, options = {}) {
     if (!source || typeof source !== 'object' || Array.isArray(source)) {
-        throw new Error('runVisualParityWorkload requires source to be an object.');
+        throw new Error('runWordPressCodeboxVisualParityWorkload requires source to be an object.');
     }
     const label = String(source.label || source.ref || 'source');
     if (source.url) {
         return { label, ref: source.ref || null, url: String(source.url), path: source.path || null };
     }
     if (!source.path) {
-        throw new Error('runVisualParityWorkload source requires url or path.');
+        throw new Error('runWordPressCodeboxVisualParityWorkload source requires url or path.');
     }
     const root = resolvePath(source.path, { baseDir: options.cwd });
     const port = Number(source.port || source.serverPort || 4173);
     if (!Number.isInteger(port) || port <= 0) {
-        throw new Error(`runVisualParityWorkload source port must be a positive integer: ${source.port}`);
+        throw new Error(`runWordPressCodeboxVisualParityWorkload source port must be a positive integer: ${source.port}`);
     }
     const entry = source.entry || 'index.html';
     return {
@@ -430,10 +427,10 @@ function normalizeVisualParitySource(source, options = {}) {
 
 function normalizeVisualParityCandidate(candidate) {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        throw new Error('runVisualParityWorkload requires candidate to be an object.');
+        throw new Error('runWordPressCodeboxVisualParityWorkload requires candidate to be an object.');
     }
     if (!candidate.url) {
-        throw new Error('runVisualParityWorkload candidate requires url.');
+        throw new Error('runWordPressCodeboxVisualParityWorkload candidate requires url.');
     }
     return {
         label: String(candidate.label || candidate.ref || 'candidate'),
@@ -448,7 +445,7 @@ function normalizeVisualParityCompareOptions(options) {
     const viewport = normalizeViewport(options.viewport || { width: options.width, height: options.height });
     const threshold = Number(options.threshold ?? options.maxMismatchRatio ?? 0.015);
     if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
-        throw new Error(`runVisualParityWorkload threshold must be between 0 and 1: ${threshold}`);
+        throw new Error(`runWordPressCodeboxVisualParityWorkload threshold must be between 0 and 1: ${threshold}`);
     }
     return {
         viewport,
@@ -465,9 +462,20 @@ function normalizeViewport(viewport) {
     const width = Number(viewport?.width ?? 1280);
     const height = Number(viewport?.height ?? 1600);
     if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
-        throw new Error(`runVisualParityWorkload viewport must include positive integer width and height: ${JSON.stringify(viewport)}`);
+        throw new Error(`runWordPressCodeboxVisualParityWorkload viewport must include positive integer width and height: ${JSON.stringify(viewport)}`);
     }
     return { width, height };
+}
+
+function normalizeWordPressCodeboxBackend(backend) {
+    if (!backend || typeof backend !== 'object' || Array.isArray(backend)) {
+        throw new Error('runWordPressCodeboxVisualParityWorkload requires backend.codeboxCli.');
+    }
+    const codeboxCli = backend.codeboxCli || backend.cli;
+    if (!codeboxCli || typeof codeboxCli !== 'string') {
+        throw new Error('runWordPressCodeboxVisualParityWorkload requires backend.codeboxCli.');
+    }
+    return { codeboxCli };
 }
 
 function positiveInteger(value, fallback) {

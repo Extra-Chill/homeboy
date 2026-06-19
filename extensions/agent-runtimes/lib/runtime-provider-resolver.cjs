@@ -31,7 +31,9 @@ function runtimeRegistry(options = {}) {
 		if (!isRuntimeManifest(manifest)) {
 			continue;
 		}
-		manifests[manifest.id] = manifest;
+		if (!manifests[manifest.id]) {
+			manifests[manifest.id] = manifest;
+		}
 	}
 	return manifests;
 }
@@ -44,17 +46,30 @@ function runtimeManifestPaths(runtimesRoot) {
 		return [];
 	}
 	return entries
+		.sort((a, b) => a.name.localeCompare(b.name))
 		.filter((entry) => entry.isDirectory())
 		.flatMap((entry) => {
 			const runtimeDir = path.join(runtimesRoot, entry.name);
 			try {
 				return fs.readdirSync(runtimeDir, { withFileTypes: true })
 					.filter((candidate) => candidate.isFile() && candidate.name.endsWith('.json'))
+					.sort((a, b) => manifestFileSort(entry.name, a.name, b.name))
 					.map((candidate) => path.join(runtimeDir, candidate.name));
 			} catch {
 				return [];
 			}
 		});
+}
+
+function manifestFileSort(runtimeId, a, b) {
+	const exact = `${runtimeId}.json`;
+	if (a === exact && b !== exact) {
+		return -1;
+	}
+	if (b === exact && a !== exact) {
+		return 1;
+	}
+	return a.localeCompare(b);
 }
 
 function isRuntimeManifest(manifest) {
@@ -151,5 +166,6 @@ function executorScriptArg(provider) {
 module.exports = {
 	DEFAULT_RUNTIME_ID,
 	resolveRuntimeProvider,
+	runtimeManifestPath,
 	runtimeRegistry,
 };

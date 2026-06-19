@@ -4,11 +4,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { normalizeProviderPlugin, run } = require('./lib/common.cjs');
-const { resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../agent-runtimes/lib/runtime-provider-resolver.cjs');
 
 try {
   const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const runtime = resolveRuntimeProvider(process.env.RUNTIME_PROVIDER || 'wp-codebox', { workspace });
+  const runtime = resolveRuntimeProvider(process.env.RUNTIME_PROVIDER || DEFAULT_RUNTIME_ID, { workspace });
   run('composer', ['install', '--no-interaction', '--no-progress', '--prefer-dist'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
   run('npm', ['install'], { cwd: path.join(workspace, '.ci/homeboy-extensions/wordpress') });
   for (const command of [...runtime.setupCommands, ...runtime.buildCommands]) {

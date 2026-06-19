@@ -8,7 +8,7 @@ const AGENT_TASK_EVIDENCE_REF_SCHEMA = 'homeboy/agent-task-evidence-ref/v1';
 const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA = 'homeboy/agent-task-executor-provider/v1';
 const SECRET_ENV_REQUIREMENT_SCHEMA = 'homeboy/secret-env-requirement/v1';
 
-const AGENT_TASK_REQUEST_REQUIRED_FIELDS = ['schema', 'task_id', 'executor.backend', 'instructions'];
+const AGENT_TASK_REQUEST_REQUIRED_FIELDS = ['schema', 'task_id', 'executor.backend', 'executor.runtime', 'instructions'];
 
 const AGENT_TASK_OUTCOME_STATUSES = [
   'succeeded',
