@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::core::engine::command;
@@ -136,6 +136,12 @@ pub fn run_git_output(
         })
 }
 
+/// Resolve a git revision to its commit/object id, returning None when the ref
+/// cannot be resolved.
+pub fn rev_parse(git_root: &Path, git_ref: &str) -> Option<String> {
+    output_optional(git_root, &["rev-parse", git_ref])
+}
+
 /// Run a git command and return stdout bytes when the command succeeds.
 pub fn output_optional_bytes(git_root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
@@ -185,6 +191,33 @@ pub fn remote_url(git_root: &Path, remote: &str) -> Option<String> {
 /// Get the git repository root directory from any path within the repo.
 pub fn toplevel(git_root: &Path) -> Option<String> {
     output_optional(git_root, &["rev-parse", "--show-toplevel"])
+}
+
+/// Get the git repository root directory from any path within the repo.
+pub fn repo_root(path: &Path) -> Option<PathBuf> {
+    toplevel(path).map(PathBuf::from)
+}
+
+/// Stage all changes in a repository.
+pub fn stage_all(git_root: &Path) -> Result<()> {
+    run_git(git_root, &["add", "-A"], "git add -A")?;
+    Ok(())
+}
+
+/// Return true when the index contains staged changes.
+pub fn has_staged_changes(git_root: &Path) -> Result<bool> {
+    let output = run_git_output(git_root, &["diff", "--cached", "--quiet"], "git diff")?;
+    Ok(!output.status.success())
+}
+
+/// Commit staged changes with an explicit author string.
+pub fn commit_staged_with_author(git_root: &Path, message: &str, author: &str) -> Result<()> {
+    run_git(
+        git_root,
+        &["commit", "-m", message, "--author", author],
+        "git commit",
+    )?;
+    Ok(())
 }
 
 pub fn current_branch(git_root: &Path) -> Option<String> {
