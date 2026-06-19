@@ -177,6 +177,18 @@ pub struct CommandDescriptor {
 }
 
 impl CommandOutputDescriptor {
+    pub const fn json_envelope(
+        json_family: CommandJsonFamily,
+        output_file_mode: CommandOutputFileMode,
+    ) -> Self {
+        Self {
+            response_mode: CommandResponseMode::Json,
+            output_file_mode,
+            json_family,
+            output_contract: CommandOutputContractKind::JsonEnvelope,
+        }
+    }
+
     fn with_lab_contract(
         self,
         contract: Option<super::lab::LabCommandContract>,
@@ -400,12 +412,7 @@ fn json_envelope_descriptor(
     json_family: CommandJsonFamily,
     output_file_mode: CommandOutputFileMode,
 ) -> CommandOutputDescriptor {
-    CommandOutputDescriptor {
-        response_mode: CommandResponseMode::Json,
-        output_file_mode,
-        json_family,
-        output_contract: CommandOutputContractKind::JsonEnvelope,
-    }
+    CommandOutputDescriptor::json_envelope(json_family, output_file_mode)
 }
 
 fn registered_json_envelope_descriptor(
@@ -533,6 +540,21 @@ mod tests {
         assert!(aggregate_descriptor
             .lab_runner_unsupported_reason
             .is_some_and(|reason| reason.contains("Changed-scope lint")));
+    }
+
+    #[test]
+    fn json_envelope_descriptor_uses_shared_contract_shape() {
+        assert_eq!(
+            CommandOutputDescriptor::json_envelope(
+                CommandJsonFamily::Workspace,
+                CommandOutputFileMode::GenericEnvelope,
+            ),
+            workspace_descriptor(
+                CommandResponseMode::Json,
+                CommandOutputFileMode::GenericEnvelope,
+                CommandOutputContractKind::JsonEnvelope,
+            )
+        );
     }
 
     #[test]

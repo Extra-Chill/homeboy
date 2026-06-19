@@ -8,9 +8,7 @@ use homeboy::core::project::Project;
 use homeboy::core::EntityCrudOutput;
 
 use super::{adapter, CmdResult, DynamicSetArgs};
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode, LabCommandContract,
-};
+use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode, LabCommandContract};
 
 const FLEET_EXEC_LAB_UNSUPPORTED_REASON: &str = "`fleet exec` stays local because it depends on local fleet, project, and server configuration before opening SSH sessions to each project; runner-side config parity is not guaranteed.";
 
@@ -191,12 +189,7 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
 pub(crate) fn adapter(
     output_file_mode: CommandOutputFileMode,
 ) -> adapter::TypedCommandAdapter<FleetArgs> {
-    adapter::TypedCommandAdapter::json_only(
-        CommandJsonFamily::Ops,
-        output_file_mode,
-        CommandOutputContractKind::JsonEnvelope,
-        run_json,
-    )
+    adapter::TypedCommandAdapter::json_only(CommandJsonFamily::Ops, output_file_mode, run_json)
 }
 
 fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonCommandRun {

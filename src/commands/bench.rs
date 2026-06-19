@@ -21,8 +21,7 @@ use super::utils::args::{
 };
 use super::{runs, CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode,
-    CommandResponseMode, LabCommandContract,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
 };
 
 mod fanout;
@@ -44,12 +43,7 @@ impl BenchArgs {
         &self,
         output_file_mode: CommandOutputFileMode,
     ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor {
-            response_mode: CommandResponseMode::Json,
-            output_file_mode,
-            json_family: CommandJsonFamily::Quality,
-            output_contract: CommandOutputContractKind::JsonEnvelope,
-        }
+        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {

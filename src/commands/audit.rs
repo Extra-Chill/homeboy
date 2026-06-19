@@ -19,7 +19,7 @@ use super::utils::observed_workflow::{
 };
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandOutputContractKind, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
 };
 
 const AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`audit --changed-since` is not Lab-portable yet because changed-since audit depends on git base refs that the current Lab workspace sync may not have fetched.";
@@ -66,12 +66,7 @@ impl AuditArgs {
         &self,
         output_file_mode: CommandOutputFileMode,
     ) -> CommandOutputDescriptor {
-        CommandOutputDescriptor {
-            response_mode: crate::command_contract::CommandResponseMode::Json,
-            output_file_mode,
-            json_family: crate::command_contract::CommandJsonFamily::Quality,
-            output_contract: CommandOutputContractKind::JsonEnvelope,
-        }
+        CommandOutputDescriptor::json_envelope(CommandJsonFamily::Quality, output_file_mode)
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
