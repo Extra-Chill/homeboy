@@ -21,6 +21,7 @@ pub mod app;
 pub mod artifact_index;
 pub mod capabilities;
 pub mod check;
+mod discovery;
 pub mod expand;
 pub mod install;
 mod json_config;
