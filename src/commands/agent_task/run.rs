@@ -5,11 +5,29 @@ use serde_json::Value;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
+use homeboy::core::agent_tasks::scheduler::{
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
+};
 use homeboy::core::agent_tasks::service as agent_task_service;
 
 use super::super::CmdResult;
 use super::args::{AgentTaskLoopArgs, RetryArgs, RunPlanArgs, StatusArgs, SubmitArgs};
+
+/// Serialize a completed run aggregate and, when the run did not fully succeed,
+/// surface a prominent top-level `failure_reasons` summary so the operator sees
+/// the root cause (recipe validation, PHP fatal, provider registration, missing
+/// path) without hand-digging the nested outcome JSON (#3806). The full nested
+/// payload is preserved unchanged; this only ADDS the surfaced summary.
+fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
+    let mut value = serde_json::to_value(aggregate).unwrap_or(Value::Null);
+    let failure_reasons = super::status::failure_reasons_from_aggregate(aggregate);
+    if !failure_reasons.is_empty() {
+        if let Value::Object(map) = &mut value {
+            map.insert("failure_reasons".to_string(), Value::Array(failure_reasons));
+        }
+    }
+    value
+}
 
 pub(super) fn run_loop(args: AgentTaskLoopArgs) -> CmdResult<Value> {
     run_loop_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
@@ -123,7 +141,7 @@ where
 {
     let result = agent_task_service::run_loaded_plan(plan, record_run_id, executor)?;
     Ok((
-        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        aggregate_value_with_failure_reasons(&result.value),
         result.exit_code,
     ))
 }
@@ -138,7 +156,7 @@ where
 {
     let result = agent_task_service::run_submitted(run_id, executor)?;
     Ok((
-        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        aggregate_value_with_failure_reasons(&result.value),
         result.exit_code,
     ))
 }
@@ -156,7 +174,7 @@ where
         return Ok((serde_json::json!({ "claimed": false }), 0));
     };
     Ok((
-        serde_json::to_value(aggregate).unwrap_or(Value::Null),
+        aggregate_value_with_failure_reasons(&aggregate),
         result.exit_code,
     ))
 }
@@ -176,7 +194,7 @@ where
 {
     let result = agent_task_service::resume(run_id, executor)?;
     Ok((
-        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        aggregate_value_with_failure_reasons(&result.value),
         result.exit_code,
     ))
 }
