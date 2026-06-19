@@ -73,6 +73,12 @@ pub struct RunnerSession {
     #[serde(default)]
     pub homeboy_build_identity: Option<String>,
     pub connected_at: String,
+    #[serde(default)]
+    pub worker_identity: Option<String>,
+    #[serde(default)]
+    pub worker_pid: Option<u32>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
