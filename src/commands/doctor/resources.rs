@@ -92,40 +92,54 @@ pub struct RigLeaseRow {
 }
 
 pub fn run(_args: ResourcesArgs) -> CmdResult<DoctorOutput> {
+    run_with_mode(ResourceProbeMode::Full)
+}
+
+pub fn run_preflight() -> CmdResult<DoctorOutput> {
+    run_with_mode(ResourceProbeMode::Preflight)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceProbeMode {
+    Full,
+    Preflight,
+}
+
+fn run_with_mode(mode: ResourceProbeMode) -> CmdResult<DoctorOutput> {
     let mut notes = Vec::new();
     let load = collect_load_summary();
 
-    let memory = match collect_memory_summary() {
-        Ok(summary) => Some(summary),
-        Err(note) => {
-            notes.push(note);
-            None
-        }
+    let memory = match mode {
+        ResourceProbeMode::Full => match collect_memory_summary() {
+            Ok(summary) => Some(summary),
+            Err(note) => {
+                notes.push(note);
+                None
+            }
+        },
+        ResourceProbeMode::Preflight => None,
     };
 
-    let processes = match collect_process_summary() {
-        Ok(summary) => summary,
-        Err(note) => {
-            notes.push(note);
-            ProcessSummary {
-                relevant_count: 0,
-                top_cpu: Vec::new(),
-                top_rss: Vec::new(),
-                recommendation: ResourceRecommendation::Ok,
+    let processes = match mode {
+        ResourceProbeMode::Full => match collect_process_summary() {
+            Ok(summary) => summary,
+            Err(note) => {
+                notes.push(note);
+                empty_process_summary()
             }
-        }
+        },
+        ResourceProbeMode::Preflight => empty_process_summary(),
     };
 
-    let rig_leases = match collect_rig_leases() {
-        Ok(summary) => summary,
-        Err(note) => {
-            notes.push(note);
-            RigLeaseSummary {
-                active_count: 0,
-                leases: Vec::new(),
-                recommendation: ResourceRecommendation::Ok,
+    let rig_leases = match mode {
+        ResourceProbeMode::Full => match collect_rig_leases() {
+            Ok(summary) => summary,
+            Err(note) => {
+                notes.push(note);
+                empty_rig_lease_summary()
             }
-        }
+        },
+        ResourceProbeMode::Preflight => empty_rig_lease_summary(),
     };
 
     let recommendation = overall_recommendation(&[
@@ -150,6 +164,23 @@ pub fn run(_args: ResourcesArgs) -> CmdResult<DoctorOutput> {
         },
         0,
     ))
+}
+
+fn empty_process_summary() -> ProcessSummary {
+    ProcessSummary {
+        relevant_count: 0,
+        top_cpu: Vec::new(),
+        top_rss: Vec::new(),
+        recommendation: ResourceRecommendation::Ok,
+    }
+}
+
+fn empty_rig_lease_summary() -> RigLeaseSummary {
+    RigLeaseSummary {
+        active_count: 0,
+        leases: Vec::new(),
+        recommendation: ResourceRecommendation::Ok,
+    }
 }
 
 fn collect_load_summary() -> LoadSummary {
@@ -451,5 +482,17 @@ mod tests {
         };
 
         assert!(!is_relevant_process(&row));
+    }
+
+    #[test]
+    fn preflight_probe_uses_load_only_snapshot() {
+        let (output, _) = run_preflight().expect("preflight resources");
+
+        assert!(output.memory.is_none());
+        assert_eq!(output.processes.relevant_count, 0);
+        assert!(output.processes.top_cpu.is_empty());
+        assert!(output.processes.top_rss.is_empty());
+        assert_eq!(output.rig_leases.active_count, 0);
+        assert!(output.rig_leases.leases.is_empty());
     }
 }
