@@ -23,26 +23,34 @@ homeboy api <project_id> get <endpoint>
 ### `post`
 
 ```sh
-homeboy api <project_id> post <endpoint> [--body <json>] [--form <key=value>]...
+homeboy api <project_id> post <endpoint> --apply [--body <json>] [--form <key=value>]...
 ```
+
+Mutating requests require `--apply`.
 
 ### `put`
 
 ```sh
-homeboy api <project_id> put <endpoint> [--body <json>] [--form <key=value>]...
+homeboy api <project_id> put <endpoint> --apply [--body <json>] [--form <key=value>]...
 ```
+
+Mutating requests require `--apply`.
 
 ### `patch`
 
 ```sh
-homeboy api <project_id> patch <endpoint> [--body <json>] [--form <key=value>]...
+homeboy api <project_id> patch <endpoint> --apply [--body <json>] [--form <key=value>]...
 ```
+
+Mutating requests require `--apply`.
 
 ### `delete`
 
 ```sh
-homeboy api <project_id> delete <endpoint>
+homeboy api <project_id> delete <endpoint> --apply
 ```
+
+Mutating requests require `--apply`.
 
 ## Notes
 
@@ -50,6 +58,7 @@ homeboy api <project_id> delete <endpoint>
 - `--body` is parsed as JSON. If parsing fails, the request is sent with `body: null`.
 - `--form key=value` may be repeated for `post`, `put`, and `patch`; form fields take precedence over `--body`.
 - If `--body` and `--form` are omitted, `body` is `null`.
+- `get` is allowed without `--apply`; `post`, `put`, `patch`, and `delete` require `--apply` before Homeboy sends the request.
 
 ## Output
 

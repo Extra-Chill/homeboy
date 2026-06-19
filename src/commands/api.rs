@@ -23,6 +23,9 @@ enum ApiCommand {
     Post {
         /// API endpoint
         endpoint: String,
+        /// Confirm the mutating request should be sent.
+        #[arg(long)]
+        apply: bool,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -34,6 +37,9 @@ enum ApiCommand {
     Put {
         /// API endpoint
         endpoint: String,
+        /// Confirm the mutating request should be sent.
+        #[arg(long)]
+        apply: bool,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -45,6 +51,9 @@ enum ApiCommand {
     Patch {
         /// API endpoint
         endpoint: String,
+        /// Confirm the mutating request should be sent.
+        #[arg(long)]
+        apply: bool,
         /// JSON body
         #[arg(long)]
         body: Option<String>,
@@ -56,12 +65,55 @@ enum ApiCommand {
     Delete {
         /// API endpoint
         endpoint: String,
+        /// Confirm the mutating request should be sent.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
 pub fn run(args: ApiArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<api::ApiOutput> {
+    require_apply_for_mutation(&args)?;
     let input = build_api_json(&args);
     api::run(&input)
+}
+
+fn require_apply_for_mutation(args: &ApiArgs) -> homeboy::core::Result<()> {
+    let Some((command, endpoint, apply)) = mutating_command(&args.command) else {
+        return Ok(());
+    };
+
+    if *apply {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "homeboy api {command} sends a mutating request and requires explicit --apply. Suggested command: homeboy api {} {command} {} --apply",
+            args.project_id, endpoint
+        ),
+        None,
+        Some(vec![format!(
+            "homeboy api {} {command} {} --apply",
+            args.project_id, endpoint
+        )]),
+    ))
+}
+
+fn mutating_command(command: &ApiCommand) -> Option<(&'static str, &str, &bool)> {
+    match command {
+        ApiCommand::Get { .. } => None,
+        ApiCommand::Post {
+            endpoint, apply, ..
+        } => Some(("post", endpoint, apply)),
+        ApiCommand::Put {
+            endpoint, apply, ..
+        } => Some(("put", endpoint, apply)),
+        ApiCommand::Patch {
+            endpoint, apply, ..
+        } => Some(("patch", endpoint, apply)),
+        ApiCommand::Delete { endpoint, apply } => Some(("delete", endpoint, apply)),
+    }
 }
 
 fn build_api_json(args: &ApiArgs) -> String {
@@ -69,6 +121,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ApiCommand::Get { endpoint } => ("GET", endpoint.clone(), None, "json"),
         ApiCommand::Post {
             endpoint,
+            apply: _,
             body,
             form,
         } => (
@@ -79,6 +132,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ),
         ApiCommand::Put {
             endpoint,
+            apply: _,
             body,
             form,
         } => (
@@ -89,6 +143,7 @@ fn build_api_json(args: &ApiArgs) -> String {
         ),
         ApiCommand::Patch {
             endpoint,
+            apply: _,
             body,
             form,
         } => (
@@ -97,7 +152,7 @@ fn build_api_json(args: &ApiArgs) -> String {
             build_body(body, form),
             body_format(form),
         ),
-        ApiCommand::Delete { endpoint } => ("DELETE", endpoint.clone(), None, "json"),
+        ApiCommand::Delete { endpoint, apply: _ } => ("DELETE", endpoint.clone(), None, "json"),
     };
 
     serde_json::json!({
@@ -109,6 +164,10 @@ fn build_api_json(args: &ApiArgs) -> String {
     })
     .to_string()
 }
+
+#[cfg(test)]
+#[path = "../../tests/commands/api_test.rs"]
+mod api_test;
 
 fn build_body(body: &Option<String>, form: &[String]) -> Option<serde_json::Value> {
     if !form.is_empty() {
