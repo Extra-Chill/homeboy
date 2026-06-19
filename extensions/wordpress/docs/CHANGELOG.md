@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.34] - 2026-06-19
+
+### Changed
+- Mount bundled Agents API for Codebox runtimes
+
 ## [3.7.33] - 2026-06-19
 
 ### Changed
