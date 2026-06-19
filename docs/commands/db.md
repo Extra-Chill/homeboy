@@ -60,18 +60,25 @@ homeboy db search mysite wp_posts --column post_status --exact --pattern publish
 ### `delete-row`
 
 ```sh
-homeboy db delete-row <project_id> [<subtarget>] <table> <row_id>
+homeboy db delete-row <project_id> [--apply] [<subtarget>] <table> <row_id>
 ```
 
 Notes:
 
+- Without `--apply`, this command returns a non-mutating plan with the SQL that would run.
+- Pass `--apply` before the trailing table arguments to delete the row.
 - `<row_id>` must be numeric.
 
 ### `drop-table`
 
 ```sh
-homeboy db drop-table <project_id> [<subtarget>] <table>
+homeboy db drop-table <project_id> [--apply] [<subtarget>] <table>
 ```
+
+Notes:
+
+- Without `--apply`, this command returns a non-mutating plan with the SQL that would run.
+- Pass `--apply` before the trailing table argument to drop the table.
 
 ### `tunnel`
 
@@ -89,6 +96,7 @@ Common fields:
 - `project_id`
 - `exit_code`, `success`
 - `stdout`, `stderr` (for remote command execution)
+- `dry_run`, `action_required` (for guarded destructive commands)
 
 Action-specific fields:
 

@@ -55,3 +55,55 @@ fn file_read_json_includes_size_metadata() {
     assert_eq!(payload.content.as_deref(), Some(content));
     assert_eq!(payload.size, Some(content.len() as i64));
 }
+
+#[test]
+fn file_delete_without_apply_returns_plan_and_preserves_file() {
+    let project_root = tempfile::tempdir().expect("project tempdir");
+    let project_id = "local-file-delete-plan";
+    let file_path = project_root.path().join("sample.txt");
+    std::fs::write(&file_path, "keep me").expect("write sample file");
+
+    let result = with_isolated_home(|home| {
+        let project_dir = home
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("projects")
+            .join(project_id);
+        std::fs::create_dir_all(&project_dir).expect("create project config dir");
+        let config = serde_json::json!({
+            "base_path": project_root.path().to_string_lossy(),
+        });
+        std::fs::write(
+            project_dir.join(format!("{project_id}.json")),
+            serde_json::to_vec(&config).expect("serialize project config"),
+        )
+        .expect("write project config");
+
+        run(
+            FileArgs {
+                command: FileCommand::Delete {
+                    project_id: project_id.to_string(),
+                    path: "sample.txt".to_string(),
+                    recursive: false,
+                    apply: false,
+                },
+            },
+            &GlobalArgs {},
+        )
+    });
+
+    let (output, code) = result.expect("run homeboy file delete");
+    let FileCommandOutput::Standard(payload) = output else {
+        panic!("expected standard file output");
+    };
+
+    assert_eq!(code, 0);
+    assert_eq!(payload.command, "file.delete");
+    assert!(payload.dry_run);
+    assert_eq!(
+        payload.action_required.as_deref(),
+        Some("Re-run with --apply to delete the remote path.")
+    );
+    assert!(file_path.exists());
+}

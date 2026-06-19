@@ -68,6 +68,9 @@ enum DbCommand {
     DeleteRow {
         /// Project ID
         project_id: String,
+        /// Apply the destructive mutation. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
         /// Table name and row ID
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -76,6 +79,9 @@ enum DbCommand {
     DropTable {
         /// Project ID
         project_id: String,
+        /// Apply the destructive mutation. Without this flag, prints a plan only.
+        #[arg(long)]
+        apply: bool,
         /// Table name
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
@@ -93,8 +99,16 @@ enum DbCommand {
 #[derive(Serialize)]
 pub struct DbOutput {
     pub command: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_required: Option<String>,
     #[serde(flatten)]
     pub result: DbResultVariant,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub enum DbResultVariant {
@@ -158,8 +172,16 @@ pub fn run(args: DbArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DbO
             limit,
             subtarget.as_deref(),
         ),
-        DbCommand::DeleteRow { project_id, args } => delete_row(&project_id, &args),
-        DbCommand::DropTable { project_id, args } => drop_table(&project_id, &args),
+        DbCommand::DeleteRow {
+            project_id,
+            apply,
+            args,
+        } => delete_row(&project_id, &args, apply),
+        DbCommand::DropTable {
+            project_id,
+            apply,
+            args,
+        } => drop_table(&project_id, &args, apply),
         DbCommand::Tunnel {
             project_id,
             local_port,
@@ -171,6 +193,8 @@ fn status() -> CmdResult<DbOutput> {
     Ok((
         DbOutput {
             command: "db.status".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Status(store::status()?),
         },
         0,
@@ -207,6 +231,8 @@ fn tables(project_id: &str, args: &[String]) -> CmdResult<DbOutput> {
     Ok((
         DbOutput {
             command: "db.tables".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
@@ -224,6 +250,8 @@ fn describe(project_id: &str, args: &[String]) -> CmdResult<DbOutput> {
     Ok((
         DbOutput {
             command: "db.describe".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
@@ -240,6 +268,8 @@ fn query(project_id: &str, args: &[String]) -> CmdResult<DbOutput> {
     Ok((
         DbOutput {
             command: "db.query".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
@@ -261,41 +291,111 @@ fn search(
     Ok((
         DbOutput {
             command: "db.search".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
     ))
 }
 
-fn delete_row(project_id: &str, args: &[String]) -> CmdResult<DbOutput> {
+fn delete_row(project_id: &str, args: &[String], apply: bool) -> CmdResult<DbOutput> {
     let (subtarget, remaining) = parse_subtarget(project_id, args)?;
 
     // Core validates table_name and row_id
     let table_name = remaining.first().map(|s| s.as_str());
     let row_id = remaining.get(1).map(|s| s.as_str());
+    if !apply {
+        let table = table_name
+            .ok_or_else(|| homeboy::core::Error::config("Table name required".to_string()))?;
+        let row_id: i64 = row_id
+            .ok_or_else(|| homeboy::core::Error::config("Row ID required".to_string()))?
+            .parse()
+            .map_err(|_| homeboy::core::Error::config("Row ID must be numeric".to_string()))?;
+        let sql = format!("DELETE FROM {} WHERE ID = {} LIMIT 1", table, row_id);
+
+        return Ok((
+            DbOutput {
+                command: "db.deleteRow".to_string(),
+                dry_run: true,
+                action_required: Some(
+                    "Re-run with --apply before the trailing table arguments to delete the row."
+                        .to_string(),
+                ),
+                result: DbResultVariant::Query(db::DbResult {
+                    project_id: project_id.to_string(),
+                    base_path: None,
+                    domain: None,
+                    cli_path: None,
+                    stdout: None,
+                    stderr: None,
+                    exit_code: 0,
+                    success: true,
+                    tables: None,
+                    table: Some(table.to_string()),
+                    sql: Some(sql),
+                }),
+            },
+            0,
+        ));
+    }
     let result = db::delete_row(project_id, table_name, row_id, subtarget.as_deref())?;
     let exit_code = result.exit_code;
 
     Ok((
         DbOutput {
             command: "db.deleteRow".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
     ))
 }
 
-fn drop_table(project_id: &str, args: &[String]) -> CmdResult<DbOutput> {
+fn drop_table(project_id: &str, args: &[String], apply: bool) -> CmdResult<DbOutput> {
     let (subtarget, remaining) = parse_subtarget(project_id, args)?;
 
     // Core validates table_name
     let table_name = remaining.first().map(|s| s.as_str());
+    if !apply {
+        let table = table_name
+            .ok_or_else(|| homeboy::core::Error::config("Table name required".to_string()))?;
+        let sql = format!("DROP TABLE {}", table);
+
+        return Ok((
+            DbOutput {
+                command: "db.dropTable".to_string(),
+                dry_run: true,
+                action_required: Some(
+                    "Re-run with --apply before the trailing table argument to drop the table."
+                        .to_string(),
+                ),
+                result: DbResultVariant::Query(db::DbResult {
+                    project_id: project_id.to_string(),
+                    base_path: None,
+                    domain: None,
+                    cli_path: None,
+                    stdout: None,
+                    stderr: None,
+                    exit_code: 0,
+                    success: true,
+                    tables: None,
+                    table: Some(table.to_string()),
+                    sql: Some(sql),
+                }),
+            },
+            0,
+        ));
+    }
     let result = db::drop_table(project_id, table_name, subtarget.as_deref())?;
     let exit_code = result.exit_code;
 
     Ok((
         DbOutput {
             command: "db.dropTable".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Query(result),
         },
         exit_code,
@@ -309,6 +409,8 @@ fn tunnel(project_id: &str, local_port: Option<u16>) -> CmdResult<DbOutput> {
     Ok((
         DbOutput {
             command: "db.tunnel".to_string(),
+            dry_run: false,
+            action_required: None,
             result: DbResultVariant::Tunnel(result),
         },
         exit_code,
