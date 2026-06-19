@@ -63,6 +63,7 @@ fn lint_args(root: &Path) -> LintArgs {
         force: false,
         setting_args: SettingArgs::default(),
         baseline_args: BaselineArgs::default(),
+        precomputed_changed_files: None,
         json_summary: false,
     }
 }
@@ -81,6 +82,7 @@ fn test_args(root: &Path) -> TestArgs {
         since: "HEAD~10".to_string(),
         changed_since: None,
         ci_job: None,
+        precomputed_changed_files: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
         json_summary: false,
