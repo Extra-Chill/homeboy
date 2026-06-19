@@ -591,6 +591,13 @@ long-running loops can reuse named bundles across repos and persist normalized
 `passed`, `failed`, or `warn` results against a loop, entity, PR, finding, or
 run.
 
+`retry` and `request_changes` are executable generic controller actions.
+`retry` queues a new durable agent-task run from the target run's original plan
+and records parent/child run lineage on the controller. `request_changes` records
+a normalized feedback artifact with `status: "changes_requested"` against the
+target run so downstream agents and reviewers can consume the same controller
+state without product-specific glue.
+
 ## Fixture Backend
 
 The built-in `fixture` backend is intentionally narrow. It exists for smoke
