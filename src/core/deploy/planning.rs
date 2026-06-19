@@ -453,15 +453,6 @@ fn component_git_root(component: &Component) -> Option<String> {
     git::get_git_root(&component.local_path).ok()
 }
 
-/// Calculate component status based on local and remote versions.
-pub(super) fn calculate_component_status(
-    component: &Component,
-    remote_versions: &HashMap<String, String>,
-) -> ComponentStatus {
-    let mut git_probe_cache = GitProbeCache::default();
-    calculate_component_status_with_git_cache(component, remote_versions, &mut git_probe_cache)
-}
-
 pub(super) fn calculate_component_status_with_git_cache(
     component: &Component,
     remote_versions: &HashMap<String, String>,
@@ -862,6 +853,14 @@ mod tests {
             artifact_path: None,
         }]);
         component
+    }
+
+    fn calculate_component_status(
+        component: &Component,
+        remote_versions: &HashMap<String, String>,
+    ) -> ComponentStatus {
+        let mut git_probe_cache = GitProbeCache::default();
+        calculate_component_status_with_git_cache(component, remote_versions, &mut git_probe_cache)
     }
 
     fn deploy_config() -> DeployConfig {
