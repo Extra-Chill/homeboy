@@ -29,11 +29,14 @@ impl ArtifactReference {
         if let Some(rest) = value.strip_prefix(RUNNER_ARTIFACT_REF_SCHEME) {
             let parts = rest.split('/').collect::<Vec<_>>();
             if parts.len() == 3 {
+                let runner_id = decode_uri_component(parts[0]);
+                let run_id = decode_uri_component(parts[1]);
+                let artifact_id = decode_uri_component(parts[2]);
                 return Self::RunnerArtifact {
                     value,
-                    runner_id: decode_uri_component(parts[0]),
-                    run_id: decode_uri_component(parts[1]),
-                    artifact_id: decode_uri_component(parts[2]),
+                    runner_id,
+                    run_id,
+                    artifact_id,
                 };
             }
         }
