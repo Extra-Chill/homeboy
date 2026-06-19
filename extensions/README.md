@@ -178,12 +178,19 @@ types owned by the caller; Homeboy Extensions only forwards the generic runtime
 task contract.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
-`component_contracts`, `extra_plugins`, `runtime_overlays`, `env`, and
-`provider_plugins`. Homeboy Extensions declares the temporary
-`homeboy_parent_tool_bridge` compatibility field in that payload only when a
-profile does not already expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
-component or `parent_tool_bridge` declaration. The expected upstream primitive is
-a Codebox-owned parent-tool bridge that maps parent-owned tools into
+generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
+`themes`, `overlays`, `runtime_overlays`, `env`, and `provider_plugins`.
+Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
+and derives `component_contracts` / `extra_plugins` only as adapter
+compatibility for Codebox agent-task entry points that still consume component
+contracts directly. Data Machine ability selection, tool policy, hook/tool
+registration, and Homeboy schemas stay in Homeboy Extensions.
+
+Homeboy Extensions declares the temporary `homeboy_parent_tool_bridge`
+compatibility field in the runtime profile only when the profile does not already
+expose a Codebox-owned `wp-codebox/parent-tool-bridge/v1`, `parent_tool_bridge`,
+or generic parent-tool bridge component descriptor. The expected upstream
+primitive is a Codebox-owned parent-tool bridge that maps parent-owned tools into
 sandbox-visible descriptors without Homeboy injecting the bridge env directly.
 
 Each extension also exposes a CLI binding for direct use against a project or component:
