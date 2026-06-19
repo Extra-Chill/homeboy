@@ -1,6 +1,6 @@
 # `homeboy wp`
 
-Run WP-CLI commands through Homeboy's WordPress extension routing.
+Run WP-CLI commands through an extension-provided top-level CLI verb.
 
 ## Synopsis
 
@@ -9,6 +9,11 @@ homeboy wp <project_id> [args]...
 ```
 
 For multisite projects, use `project:subtarget` as the project ID.
+
+`wp` is not a core subcommand compiled into Homeboy. It is registered at runtime
+by an installed extension with CLI tool metadata, typically the WordPress
+extension. Use `homeboy docs list` to confirm the command is available in the
+current installation.
 
 ## Examples
 

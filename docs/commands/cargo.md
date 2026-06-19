@@ -1,6 +1,6 @@
 # `homeboy cargo`
 
-Run Cargo commands through Homeboy's Rust extension routing.
+Run Cargo commands through an extension-provided top-level CLI verb.
 
 ## Synopsis
 
@@ -10,7 +10,14 @@ homeboy cargo <project_id> [args]...
 
 ## Usage
 
-Use this command when a project is configured for Rust-aware command execution and you want Homeboy to route the Cargo invocation through the project/extension layer.
+`cargo` is not a core subcommand compiled into Homeboy. It is registered at
+runtime by an installed extension with CLI tool metadata, typically the Rust
+extension. Use this command when a component or project is configured for
+Rust-aware command execution and you want Homeboy to route the Cargo invocation
+through the project/extension layer.
+
+If `homeboy cargo ...` is unavailable, install or link the extension that
+provides the Cargo CLI tool, then confirm it appears in `homeboy docs list`.
 
 ## Related
 
