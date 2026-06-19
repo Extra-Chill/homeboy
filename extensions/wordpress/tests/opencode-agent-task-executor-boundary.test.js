@@ -14,7 +14,7 @@ const { spawnSync } = require('node:child_process');
  */
 const {
 	OPENCODE_SECRET_ENV,
-	experimentalOutcome,
+	executeOpenCodeAgentTask,
 	providerContract,
 } = require('../../agent-runtimes/opencode');
 
@@ -27,7 +27,7 @@ function secretEnvRequirementForProvider(contract, provider) {
 const provider = providerContract();
 assert.equal(provider.id, 'opencode.agent-task-executor');
 assert.equal(provider.backend, 'opencode');
-assert.equal(provider.status, 'experimental');
+assert.equal(provider.status, 'available');
 assert.equal(provider.integration_contract, 'homeboy-opencode-agent-task/v1');
 assert.equal(provider.lifecycle.max_concurrency_default, 1);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
@@ -68,22 +68,57 @@ try {
 	);
 	assert.equal(fs.existsSync(scriptPath), true, `provider command target should exist: ${scriptPath}`);
 
+	const mockCliPath = path.join(root, 'mock-opencode.cjs');
+	fs.writeFileSync(mockCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+assert.equal(process.argv[2], 'run');
+assert.equal(process.argv.at(-1), 'Prove the OpenCode provider boundary without leaking secrets.');
+process.stdout.write(process.env.AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN || 'missing secret');
+process.stderr.write(process.env.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN || 'missing secret');
+process.exit(0);
+`);
+
 	const contractResult = spawnSync(process.execPath, [scriptPath, '--provider-contract'], { encoding: 'utf8' });
 	assert.equal(contractResult.status, 0, contractResult.stderr);
 	assert.deepEqual(JSON.parse(contractResult.stdout), providerContract());
 
 	const runResult = spawnSync(process.execPath, [scriptPath], {
 		encoding: 'utf8',
+		env: {
+			...process.env,
+			AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN: 'refresh-token-must-not-leak',
+			AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'access-token-must-not-leak',
+		},
 		input: JSON.stringify({
 			schema: 'homeboy/agent-task-request/v1',
-			task_id: 'opencode-contract-only',
-			executor: { backend: 'opencode', config: { provider: 'codex' } },
-			instructions: 'Prove the OpenCode provider boundary without running a model.',
+			task_id: 'opencode-real-executor',
+			executor: {
+				backend: 'opencode',
+				config: {
+					provider: 'codex',
+					command: process.execPath,
+					command_args: [mockCliPath],
+				},
+			},
+			instructions: 'Prove the OpenCode provider boundary without leaking secrets.',
 		}),
 	});
-	assert.notEqual(runResult.status, 0, 'experimental provider should fail fast until execution is implemented');
-	assert.deepEqual(JSON.parse(runResult.stdout), experimentalOutcome({ task_id: 'opencode-contract-only' }));
-	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'), false);
+	assert.equal(runResult.status, 0, runResult.stderr);
+	assert.deepEqual(JSON.parse(runResult.stdout), executeOpenCodeAgentTask({
+		schema: 'homeboy/agent-task-request/v1',
+		task_id: 'opencode-real-executor',
+		executor: {
+			backend: 'opencode',
+			config: {
+				provider: 'codex',
+				command: process.execPath,
+				command_args: [mockCliPath],
+			},
+		},
+		instructions: 'Prove the OpenCode provider boundary without leaking secrets.',
+	}));
+	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('refresh-token-must-not-leak'), false);
+	assert.equal(`${runResult.stdout}\n${runResult.stderr}`.includes('access-token-must-not-leak'), false);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

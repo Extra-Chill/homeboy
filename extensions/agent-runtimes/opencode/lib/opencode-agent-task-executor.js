@@ -1,9 +1,15 @@
 'use strict';
 
 /**
+ * External dependencies
+ */
+const { spawnSync } = require('node:child_process');
+
+/**
  * Internal dependencies
  */
 const {
+	AGENT_TASK_REQUEST_SCHEMA,
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 	AGENT_TASK_OUTCOME_SCHEMA,
 	agentTaskProviderContractFields,
@@ -65,33 +71,174 @@ function providerContract(options = {}) {
 			patch: ['git-diff', 'patch'],
 			report: ['json', 'markdown'],
 		},
-		status: 'experimental',
+		status: 'available',
 		integration_contract: 'homeboy-opencode-agent-task/v1',
-		runtime_gap_trackers: ['https://github.com/Extra-Chill/homeboy-extensions/issues/967'],
 	};
 }
 
-function experimentalOutcome(request = {}) {
+function outcome(request = {}, values = {}) {
 	return {
 		schema: AGENT_TASK_OUTCOME_SCHEMA,
 		task_id: request.task_id || '',
-		status: 'provider_error',
-		failure_classification: 'provider',
-		failure_code: 'agent_task.opencode_executor_not_implemented',
-		summary: 'OpenCode agent task executor is registered as an experimental provider contract only; process execution is not implemented yet.',
+		status: values.status || 'provider_error',
+		...(values.failure_classification ? { failure_classification: values.failure_classification } : {}),
+		...(values.failure_code ? { failure_code: values.failure_code } : {}),
+		summary: values.summary || 'OpenCode agent task executor failed before producing a detailed outcome.',
+		diagnostics: values.diagnostics || [],
 		artifacts: [],
 		evidence_refs: [],
 		metadata: {
 			provider: OPENCODE_PROVIDER_ID,
-			issue: 'https://github.com/Extra-Chill/homeboy-extensions/issues/967',
+			...(values.metadata || {}),
 		},
 	};
+}
+
+function validationFailure(request, message) {
+	return outcome(request, {
+		status: 'provider_error',
+		failure_classification: 'invalid_input',
+		failure_code: 'agent_task.invalid_opencode_request',
+		summary: 'OpenCode request validation failed.',
+		diagnostics: [{ classification: 'request_validation', message }],
+	});
+}
+
+function executeOpenCodeAgentTask(request = {}, options = {}) {
+	const validationError = validateRequest(request);
+	if (validationError) {
+		return validationFailure(request, validationError);
+	}
+
+	const config = request.executor.config || {};
+	const commandSpec = resolveCommandSpec(config, options);
+	if (commandSpec.error) {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: 'provider',
+			failure_code: 'agent_task.invalid_opencode_command',
+			summary: 'OpenCode command configuration is invalid.',
+			diagnostics: [{ classification: 'provider_setup', message: commandSpec.error }],
+		});
+	}
+
+	const args = [
+		...commandSpec.args,
+		'run',
+		...(config.model ? ['--model', config.model] : []),
+		...(config.agent ? ['--agent', config.agent] : []),
+		...(config.variant ? ['--variant', config.variant] : []),
+		...(config.title ? ['--title', config.title] : []),
+		request.instructions,
+	];
+	const timeoutSeconds = Number(request.limits?.task_timeout_seconds || config.timeout_seconds || 0);
+	const spawnResult = spawnSync(commandSpec.command, args, {
+		cwd: resolveCwd(request, config),
+		env: process.env,
+		encoding: 'utf8',
+		maxBuffer: options.maxBuffer || 10 * 1024 * 1024,
+		...(timeoutSeconds > 0 ? { timeout: timeoutSeconds * 1000 } : {}),
+	});
+
+	if (spawnResult.error?.code === 'ENOENT') {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: 'provider',
+			failure_code: 'agent_task.opencode_command_not_found',
+			summary: 'OpenCode command was not found.',
+			diagnostics: [{ classification: 'provider_setup', message: 'Install opencode or configure executor.config.command.' }],
+		});
+	}
+
+	if (spawnResult.error) {
+		const timedOut = spawnResult.error.code === 'ETIMEDOUT';
+		return outcome(request, {
+			status: timedOut ? 'timeout' : 'provider_error',
+			failure_classification: timedOut ? 'timeout' : 'provider',
+			failure_code: timedOut ? 'agent_task.opencode_timeout' : 'agent_task.opencode_spawn_failed',
+			summary: timedOut ? 'OpenCode execution timed out.' : 'OpenCode process failed to start or complete.',
+			diagnostics: [{ classification: timedOut ? 'timeout' : 'provider_setup', message: spawnResult.error.message }],
+		});
+	}
+
+	if (spawnResult.status === 0) {
+		return outcome(request, {
+			status: 'succeeded',
+			summary: 'OpenCode completed successfully.',
+			diagnostics: [{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' }],
+			metadata: { exit_code: 0 },
+		});
+	}
+
+	return outcome(request, {
+		status: 'failed',
+		failure_classification: 'execution_failed',
+		failure_code: 'agent_task.opencode_failed',
+		summary: 'OpenCode execution failed.',
+		diagnostics: [{ classification: 'execution_failed', message: `OpenCode CLI exited with status ${spawnResult.status}.` }],
+		metadata: {
+			exit_code: spawnResult.status,
+			...(spawnResult.signal ? { signal: spawnResult.signal } : {}),
+		},
+	});
+}
+
+function validateRequest(request) {
+	if (!request || typeof request !== 'object' || Array.isArray(request)) {
+		return 'Request must be a JSON object.';
+	}
+	if (request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
+		return `Request schema must be ${AGENT_TASK_REQUEST_SCHEMA}.`;
+	}
+	if (!request.task_id || typeof request.task_id !== 'string') {
+		return 'Request task_id is required.';
+	}
+	if (request.executor?.backend !== 'opencode') {
+		return 'Request executor.backend must be opencode.';
+	}
+	if (!request.executor.config || typeof request.executor.config !== 'object' || Array.isArray(request.executor.config)) {
+		return 'Request executor.config is required.';
+	}
+	if (!request.instructions || typeof request.instructions !== 'string') {
+		return 'Request instructions are required.';
+	}
+	return null;
+}
+
+function resolveCommandSpec(config = {}, options = {}) {
+	const configuredCommand = options.command || config.command || process.env.HOMEBOY_OPENCODE_COMMAND || 'opencode';
+	const configuredArgs = options.commandArgs || config.command_args || parseEnvCommandArgs();
+	if (typeof configuredCommand !== 'string' || configuredCommand.trim() === '') {
+		return { error: 'executor.config.command must be a non-empty string when provided.' };
+	}
+	if (!Array.isArray(configuredArgs) || configuredArgs.some((arg) => typeof arg !== 'string')) {
+		return { error: 'executor.config.command_args must be an array of strings when provided.' };
+	}
+	return { command: configuredCommand.trim(), args: configuredArgs };
+}
+
+function parseEnvCommandArgs() {
+	if (!process.env.HOMEBOY_OPENCODE_COMMAND_ARGS) {
+		return [];
+	}
+	try {
+		const value = JSON.parse(process.env.HOMEBOY_OPENCODE_COMMAND_ARGS);
+		return Array.isArray(value) ? value : [];
+	} catch {
+		return [];
+	}
+}
+
+function resolveCwd(request = {}, config = {}) {
+	return config.cwd || request.workspace_path || request.workspace?.path || process.cwd();
 }
 
 module.exports = {
 	OPENCODE_PROVIDER_ID,
 	OPENCODE_PROVIDER_LABEL,
 	OPENCODE_SECRET_ENV,
-	experimentalOutcome,
+	executeOpenCodeAgentTask,
+	outcome,
 	providerContract,
+	validationFailure,
 };

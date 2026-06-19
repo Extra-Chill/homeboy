@@ -3,7 +3,7 @@
   "id": "opencode",
   "name": "OpenCode",
   "version": "1.0.0",
-  "description": "Experimental OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
+  "description": "OpenCode agent runtime for nested orchestration and repository-scoped agent tasks.",
   "agent_task_executors": [
     {
       "schema": "homeboy/agent-task-executor-provider/v1",
@@ -102,11 +102,8 @@
         "patch": ["git-diff", "patch"],
         "report": ["json", "markdown"]
       },
-      "status": "experimental",
-      "integration_contract": "homeboy-opencode-agent-task/v1",
-      "runtime_gap_trackers": [
-        "https://github.com/Extra-Chill/homeboy-extensions/issues/967"
-      ]
+      "status": "available",
+      "integration_contract": "homeboy-opencode-agent-task/v1"
     }
   ]
 }
