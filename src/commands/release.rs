@@ -31,6 +31,10 @@ pub struct ReleaseArgs {
     #[command(flatten)]
     dry_run_args: DryRunArgs,
 
+    /// Confirm risky release execution modes.
+    #[arg(long)]
+    apply: bool,
+
     /// Deploy to all projects using this component after release
     #[arg(long)]
     deploy: bool,
@@ -193,6 +197,7 @@ impl ReleaseArgs {
             outdated,
             path,
             dry_run_args: DryRunArgs { dry_run },
+            apply: false,
             deploy,
             recover,
             retag: false,
@@ -212,9 +217,10 @@ pub fn run(
     args: ReleaseArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
+    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
+    validate_apply_boundary(&args, skip_checks)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
-    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -312,6 +318,36 @@ pub fn run(
             result: batch_result,
         }),
         exit_code,
+    ))
+}
+
+fn validate_apply_boundary(args: &ReleaseArgs, skip_checks: bool) -> homeboy::core::Result<()> {
+    if args.apply
+        || args.dry_run_args.dry_run
+        || (!args.deploy && !args.recover && !args.retag && !args.head && !skip_checks)
+    {
+        return Ok(());
+    }
+
+    let risky_flags = [
+        (args.deploy, "--deploy"),
+        (args.recover, "--recover"),
+        (args.retag, "--retag"),
+        (args.head, "--head"),
+        (skip_checks, "bare --skip-checks"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, flag)| enabled.then_some(flag))
+    .collect::<Vec<_>>()
+    .join(" and ");
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "Real releases with {risky_flags} require explicit --apply. Use --dry-run to preview or re-run with --apply to release."
+        ),
+        None,
+        None,
     ))
 }
 
@@ -456,6 +492,7 @@ mod tests {
             outdated: false,
             path: None,
             dry_run_args: DryRunArgs { dry_run: true },
+            apply: false,
             deploy: false,
             recover: false,
             retag: false,
@@ -503,5 +540,58 @@ mod tests {
             .expect_err("unknown check rejected");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.to_string().contains("Unknown check 'bogus'"));
+    }
+
+    #[test]
+    fn risky_real_release_requires_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.head = true;
+
+        let err = validate_apply_boundary(&args, false).expect_err("--head requires --apply");
+
+        assert!(err
+            .message
+            .contains("Real releases with --head require explicit --apply"));
+    }
+
+    #[test]
+    fn risky_dry_run_release_does_not_require_apply() {
+        let mut args = args(&["fixture"]);
+        args.head = true;
+
+        validate_apply_boundary(&args, false).expect("dry-run may preview risky mode");
+    }
+
+    #[test]
+    fn bare_skip_checks_real_release_requires_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+
+        let err =
+            validate_apply_boundary(&args, true).expect_err("bare --skip-checks requires --apply");
+
+        assert!(err
+            .message
+            .contains("Real releases with bare --skip-checks require explicit --apply"));
+    }
+
+    #[test]
+    fn granular_skip_checks_real_release_does_not_require_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+
+        validate_apply_boundary(&args, false).expect("granular skip-checks is not guarded");
+    }
+
+    #[test]
+    fn apply_confirms_risky_real_release() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.recover = true;
+        args.retag = true;
+        args.apply = true;
+
+        validate_apply_boundary(&args, false).expect("--apply confirms risky release mode");
     }
 }

@@ -14,6 +14,7 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 - `--project <PROJECT>` / `-p <PROJECT>`: Release components from a project
 - `--outdated`: With `--project`, release only components with unreleased commits
 - `--path <PATH>`: Override local path for a single-component release
+- `--apply`: Confirm risky real release modes such as `--deploy`, `--recover`, `--retag`, `--head`, or bare `--skip-checks`
 - `--deploy`: Deploy this component to all projects that use it after release
 - `--recover`: Recover from an interrupted release
 - `--head`: Finish the release pipeline for the version commit and tag already checked out at HEAD
@@ -30,6 +31,8 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 `homeboy release` executes component releases: detects or applies a version bump, finalizes generated changelog entries, commits, tags, pushes, and optionally publishes release artifacts. Use `--dry-run` to preview the release plan without making changes.
 
 `--head` is for CI jobs where another step already created the release commit and tag, but Homeboy should still own the rest of the release lifecycle. It keeps the safe preflight checks, skips changelog/version/git mutation steps, populates release state from the version and tag at HEAD, then runs `release.package` (unless `--from-artifacts` is provided), `github.release`, `release.publish`, cleanup, and post-release hooks through the normal pipeline.
+
+Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 
 When `--bump` requests a lower keyword bump than Homeboy detects from releasable commits, release execution requires confirmation in an interactive terminal. Non-interactive runs must pass `--force-lower-bump`; otherwise Homeboy refuses before creating release artifacts, commits, tags, or pushes. Dry-run still returns the plan and semver recommendation for review.
 
@@ -51,7 +54,7 @@ homeboy release <component_id>
 ```sh
 # Build/package artifacts somewhere else, then let Homeboy create/update the
 # GitHub Release and run publish hooks without re-tagging.
-homeboy release <component_id> --head --from-artifacts ./artifacts --skip-checks
+homeboy release <component_id> --head --from-artifacts ./artifacts --skip-checks --apply
 ```
 
 ## Release Pipeline
