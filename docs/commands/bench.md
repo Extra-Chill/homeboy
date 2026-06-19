@@ -27,6 +27,16 @@ directly include `public_url`; bundle-relative or internal artifacts include
 `relative_to` and `fetch_command` so agents can fetch them with
 `homeboy runs artifact get` instead of guessing public URL shapes.
 
+### Output
+
+By default `homeboy bench` prints a **compact human summary** for run and
+comparison invocations: pass/fail, the persisted run ID, runner, component
+SHA, selected scenarios, key metrics, and artifact pointers, followed by the
+`homeboy runs show <run-id>` / `homeboy runs artifacts <run-id>` commands to
+see everything. No data is dropped — the full structured payload is always
+written to `--output <file>`, and `--json` prints it to stdout instead of the
+summary.
+
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
 baseline primitive (`homeboy.json` → `baselines.bench`) are shared with
@@ -61,6 +71,9 @@ the other capabilities.
 - `--setting-json <key=json>`: Override component settings with typed JSON
   values for arrays, objects, numbers, booleans, or null.
 - `--path <PATH>`: Override the component's `local_path` for this run.
+- `--json`: Print the full JSON output envelope to stdout instead of the
+  compact human summary. The full payload is also always written to
+  `--output <file>`; this flag only changes the default stdout presentation.
 - `--json-summary`: Include a compact machine-readable summary in the
   JSON output envelope (for CI wrappers).
 - `--report side-by-side`: Select the combined side-by-side comparison
