@@ -460,12 +460,14 @@ fn claim_job(
 }
 
 fn append_progress(client: &Client, broker_url: &str, runner_id: &str, job: &Job) -> Result<()> {
+    let claim_id = remote_runner_claim_id(job)?;
     broker_http::post_json(
         client,
         broker_url,
         &format!("/runner/jobs/{}/events", job.id),
         json!({
             "runner_id": runner_id,
+            "claim_id": claim_id,
             "kind": "progress",
             "message": "reverse runner worker started execution",
         }),
@@ -481,12 +483,14 @@ fn finish_job(
     job: &Job,
     result: RemoteRunnerJobResult,
 ) -> Result<Job> {
+    let claim_id = remote_runner_claim_id(job)?;
     let data = broker_http::post_json(
         client,
         broker_url,
         &format!("/runner/jobs/{}/finish", job.id),
         json!({
             "runner_id": runner_id,
+            "claim_id": claim_id,
             "result": result,
         }),
         "finish reverse runner job",
@@ -495,6 +499,17 @@ fn finish_job(
         Error::internal_json(
             err.to_string(),
             Some("parse finished reverse runner job".to_string()),
+        )
+    })
+}
+
+fn remote_runner_claim_id(job: &Job) -> Result<&str> {
+    job.claim_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "claim_id",
+            "claimed remote runner job is missing a claim id",
+            Some(job.id.to_string()),
+            None,
         )
     })
 }
@@ -846,6 +861,7 @@ mod tests {
                 .append_remote_runner_event(
                     job_id,
                     "lab",
+                    request.body["claim_id"].as_str().expect("event claim id"),
                     JobEventKind::Progress,
                     request.body["message"].as_str().map(ToString::to_string),
                     None,
@@ -865,7 +881,12 @@ mod tests {
             let result: RemoteRunnerJobResult =
                 serde_json::from_value(request.body["result"].clone()).expect("finish result");
             let job = store
-                .finish_remote_runner_job(job_id, "lab", result)
+                .finish_remote_runner_job(
+                    job_id,
+                    "lab",
+                    request.body["claim_id"].as_str().expect("finish claim id"),
+                    result,
+                )
                 .expect("finish job");
             return serde_json::json!({
                 "success": true,

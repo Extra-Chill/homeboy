@@ -3537,10 +3537,15 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(20));
                 };
                 let job_id = claim["job"]["id"].as_str().expect("job id").to_string();
+                let claim_id = claim["job"]["claim_id"]
+                    .as_str()
+                    .expect("claim id")
+                    .to_string();
                 client
                     .post(format!("{}/runner/jobs/{job_id}/events", worker_broker_url))
                     .json(&json!({
                         "runner_id": "lab",
+                        "claim_id": claim_id.clone(),
                         "kind": "progress",
                         "message": "running test worker"
                     }))
@@ -3550,6 +3555,7 @@ mod tests {
                     .post(format!("{}/runner/jobs/{job_id}/finish", worker_broker_url))
                     .json(&json!({
                         "runner_id": "lab",
+                        "claim_id": claim_id,
                         "result": {
                             "exit_code": 0,
                             "stdout": "reverse ok",

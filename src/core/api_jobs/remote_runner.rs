@@ -206,11 +206,12 @@ impl JobStore {
         &self,
         job_id: Uuid,
         runner_id: &str,
+        claim_id: &str,
         kind: JobEventKind,
         message: Option<String>,
         data: Option<Value>,
     ) -> Result<JobEvent> {
-        self.ensure_remote_runner_claim(job_id, runner_id)?;
+        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
         self.append_event(job_id, kind, message, data)
     }
 
@@ -218,9 +219,10 @@ impl JobStore {
         &self,
         job_id: Uuid,
         runner_id: &str,
+        claim_id: &str,
         result: RemoteRunnerJobResult,
     ) -> Result<Job> {
-        self.ensure_remote_runner_claim(job_id, runner_id)?;
+        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
         let status = if result.exit_code == 0 {
             JobStatus::Succeeded
         } else {
@@ -296,7 +298,12 @@ impl JobStore {
         Ok(reconciled)
     }
 
-    fn ensure_remote_runner_claim(&self, job_id: Uuid, runner_id: &str) -> Result<()> {
+    fn ensure_remote_runner_claim(
+        &self,
+        job_id: Uuid,
+        runner_id: &str,
+        claim_id: &str,
+    ) -> Result<()> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let stored = inner
             .jobs
@@ -318,10 +325,38 @@ impl JobStore {
                 None,
             ));
         }
+        if claim_id.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "claim_id",
+                "remote runner event or result requires a claim id",
+                None,
+                None,
+            ));
+        }
+        if stored.job.claim_id.as_deref() != Some(claim_id) {
+            return Err(Error::validation_invalid_argument(
+                "claim_id",
+                "remote runner job is not claimed by this claim id",
+                Some(claim_id.to_string()),
+                None,
+            ));
+        }
         if stored.job.status != JobStatus::Running {
             return Err(Error::validation_invalid_argument(
                 "status",
                 "remote runner job must be running before events or results are returned",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let now = timestamp_ms();
+        if match stored.job.claim_expires_at_ms {
+            Some(expires_at) => expires_at <= now,
+            None => true,
+        } {
+            return Err(Error::validation_invalid_argument(
+                "claim_expires_at_ms",
+                "remote runner claim has expired",
                 Some(job_id.to_string()),
                 None,
             ));

@@ -22,6 +22,7 @@ struct ClaimRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct EventRequest {
     runner_id: String,
+    claim_id: String,
     kind: JobEventKind,
     #[serde(default)]
     message: Option<String>,
@@ -32,6 +33,7 @@ struct EventRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct FinishRequest {
     runner_id: String,
+    claim_id: String,
     result: RemoteRunnerJobResult,
 }
 
@@ -224,6 +226,7 @@ fn append_event(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Resu
     let event = job_store.append_remote_runner_event(
         job_id,
         &request.runner_id,
+        &request.claim_id,
         request.kind,
         request.message,
         request.data,
@@ -236,7 +239,12 @@ fn append_event(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Resu
 
 fn finish(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Value> {
     let request: FinishRequest = parse_body(body, "remote runner finish request")?;
-    let job = job_store.finish_remote_runner_job(job_id, &request.runner_id, request.result)?;
+    let job = job_store.finish_remote_runner_job(
+        job_id,
+        &request.runner_id,
+        &request.claim_id,
+        request.result,
+    )?;
     Ok(json!({
         "command": "api.runner.jobs.finish",
         "job": job,
