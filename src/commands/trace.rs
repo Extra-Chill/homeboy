@@ -44,6 +44,7 @@ mod profile_tests;
 pub(super) mod repeat;
 #[cfg(test)]
 mod rig_tests;
+mod run_service;
 mod schedule;
 #[cfg(test)]
 mod test_fixture;
@@ -73,6 +74,7 @@ use output::{
 };
 use probes::trace_probes_for_args;
 use repeat::run_repeat;
+use run_service::{execute_trace_run, TraceRunExecution};
 pub(super) use schedule::{
     plan_trace_run_order, TraceRunPlanEntry, TraceSchedule, TraceVariantMatrixMode,
 };
@@ -514,13 +516,7 @@ pub(super) fn required_trace_scenario(args: &TraceArgs) -> homeboy::core::Result
     })
 }
 
-struct TraceRunExecution {
-    workflow: extension_trace::TraceRunWorkflowResult,
-    run_dir: RunDir,
-    rig_state: Option<rig::RigStateSnapshot>,
-}
-
-fn execute_trace_run(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution> {
+fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExecution> {
     let scenario = required_trace_scenario(&args)?;
     let rig_context = load_rig_context(args.rig.as_deref())?;
     let effective_id = resolve_component_id(&args.comp, rig_context.as_ref().map(|c| &c.rig_spec))?;
