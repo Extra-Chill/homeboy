@@ -13,6 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::core::agent_task::{
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskTypedArtifact, AgentTaskWorkflowEvidence,
+};
 use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_loop_controller::{
     self as controller, AgentTaskGateBundle, AgentTaskGateBundleCheckKind,
@@ -25,7 +28,9 @@ use crate::core::agent_task_loop_controller::{
     AgentTaskLoopTransition, AgentTaskPrOwnershipRequest, AgentTaskPrOwnershipState,
     AgentTaskPrOwnershipStatusUpdate,
 };
-use crate::core::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
+use crate::core::agent_task_scheduler::{
+    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
+};
 use crate::core::agent_task_service::{self, AgentTaskRunResult};
 use crate::core::git::{pr_find, pr_view, PrFindOptions, PrState};
 use crate::core::plan::{HomeboyPlan, PlanArtifact, PlanKind, PlanStep, PlanStepStatus};

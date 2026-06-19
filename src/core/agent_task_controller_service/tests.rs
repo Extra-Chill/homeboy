@@ -1,8 +1,10 @@
 //! Tests split from `agent_task_controller_service` god file (#5208).
 use super::*;
 use crate::core::agent_task::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskTypedArtifact,
+    AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_loop_controller::{
     AgentTaskGateBundle, AgentTaskGateBundleCheck, AgentTaskGateBundleCheckKind,
@@ -28,6 +30,9 @@ struct CapturingDispatchHook {
 struct ArtifactDispatchHook {
     observed_requests: Arc<Mutex<Vec<Value>>>,
 }
+
+#[derive(Clone, Default)]
+struct EvidenceExecutor;
 
 impl ControllerDispatchHook for CapturingDispatchHook {
     fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
@@ -175,6 +180,52 @@ impl AgentTaskExecutorAdapter for CapturingExecutor {
             evidence_refs: Vec::new(),
             diagnostics: Vec::new(),
             outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+impl AgentTaskExecutorAdapter for EvidenceExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("evidence captured".to_string()),
+            failure_classification: None,
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "report".to_string(),
+                kind: "report".to_string(),
+                name: Some("review report".to_string()),
+                path: Some("artifacts/report.md".to_string()),
+                url: None,
+                mime: Some("text/markdown".to_string()),
+                size_bytes: Some(128),
+                sha256: Some("abc123".to_string()),
+                metadata: Value::Null,
+            }],
+            typed_artifacts: vec![AgentTaskTypedArtifact {
+                name: "decision".to_string(),
+                artifact_type: Some("review-decision".to_string()),
+                artifact_schema: Some("example/review-decision/v1".to_string()),
+                payload: json!({ "accepted": true }),
+                artifact: None,
+                metadata: Value::Null,
+            }],
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "artifacts/transcript.log".to_string(),
+                label: Some("transcript".to_string()),
+            }],
+            diagnostics: Vec::new(),
+            outputs: json!({ "ok": true }),
             workflow: None,
             follow_up: None,
             metadata: Value::Null,
@@ -1031,6 +1082,75 @@ fn run_next_executes_spawn_task_action_and_records_lineage() {
 }
 
 #[test]
+fn run_next_indexes_spawn_task_evidence_into_lineage_and_entity_outputs() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-spawn-evidence".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        let entity_id = record.upsert_entity(
+            "candidate".to_string(),
+            "one".to_string(),
+            Vec::new(),
+            Value::Null,
+        );
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "candidate:one:review".to_string(),
+                entity_id: Some(entity_id.clone()),
+                request: json!({
+                    "mode": "run_plan",
+                    "run_id": "controller-service-spawn-evidence-a",
+                    "plan": test_plan(),
+                }),
+            },
+            "candidate emitted",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = run_next(
+            "loop-service-spawn-evidence",
+            EvidenceExecutor,
+            &NoopDispatchHook,
+        )
+        .expect("controller action executed");
+
+        assert_eq!(result.exit_code, 0);
+        let loaded =
+            controller::load_controller("loop-service-spawn-evidence").expect("controller");
+        let lineage = &loaded.task_lineage[0];
+        assert_eq!(lineage.run_id, "controller-service-spawn-evidence-a");
+        assert_eq!(lineage.artifact_refs.len(), 3);
+        assert_eq!(
+            lineage.outputs["evidence_index"]["schema"],
+            json!("homeboy/agent-task-loop-controller-evidence-index/v1")
+        );
+        assert_eq!(
+            lineage.outputs["evidence_index"]["entries"][0]["artifacts"][0]["id"],
+            json!("report")
+        );
+        assert_eq!(
+            lineage.outputs["evidence_index"]["entries"][0]["evidence_refs"][0]["uri"],
+            json!("artifacts/transcript.log")
+        );
+        assert_eq!(
+            lineage.outputs["evidence_index"]["entries"][0]["typed_artifacts"][0]["name"],
+            json!("decision")
+        );
+
+        let entity = loaded.entities.get(&entity_id).expect("entity indexed");
+        assert_eq!(entity.artifact_refs.len(), 3);
+        assert_eq!(
+            entity.metadata["outputs"]["evidence_indexes"][0]["run_id"],
+            json!("controller-service-spawn-evidence-a")
+        );
+    });
+}
+
+#[test]
 fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
@@ -1077,6 +1197,54 @@ fn run_next_treats_zero_item_fan_out_as_deterministic_no_actionable_findings() {
             AgentTaskLoopTerminalStatus::NoActionableFindings
         );
         assert_eq!(loaded.terminal_outcomes[0].details["item_count"], json!(0));
+    });
+}
+
+#[test]
+fn fan_out_indexes_each_child_task_evidence_on_its_entity() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-fanout-evidence".to_string(),
+            phase: "review".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        let first = record.upsert_entity("candidate", "first", Vec::new(), Value::Null);
+        let second = record.upsert_entity("candidate", "second", Vec::new(), Value::Null);
+
+        record.record_action(
+            AgentTaskLoopPolicyAction::FanOut {
+                dedupe_key: "candidate:review".to_string(),
+                entity_ids: vec![first.clone(), second.clone()],
+                request_template: json!({
+                    "mode": "run_plan",
+                    "plan": test_plan(),
+                }),
+            },
+            "review candidates",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = run_next(
+            "loop-service-fanout-evidence",
+            EvidenceExecutor,
+            &NoopDispatchHook,
+        )
+        .expect("fan-out action executed");
+
+        assert_eq!(result.exit_code, 0);
+        let loaded =
+            controller::load_controller("loop-service-fanout-evidence").expect("controller");
+        assert_eq!(loaded.task_lineage.len(), 2);
+        for entity_id in [first, second] {
+            let entity = loaded.entities.get(&entity_id).expect("entity indexed");
+            assert_eq!(entity.artifact_refs.len(), 3);
+            assert_eq!(
+                entity.metadata["outputs"]["evidence_indexes"][0]["entries"][0]["typed_artifacts"]
+                    [0]["artifact_schema"],
+                json!("example/review-decision/v1")
+            );
+        }
     });
 }
 

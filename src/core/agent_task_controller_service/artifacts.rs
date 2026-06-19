@@ -2,6 +2,30 @@
 #![allow(unused_imports)]
 use super::*;
 
+const CONTROLLER_EVIDENCE_INDEX_SCHEMA: &str =
+    "homeboy/agent-task-loop-controller-evidence-index/v1";
+
+#[derive(Debug, Clone, Serialize)]
+struct ControllerEvidenceIndex {
+    schema: &'static str,
+    run_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    entries: Vec<ControllerEvidenceIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ControllerEvidenceIndexEntry {
+    task_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_refs: Vec<AgentTaskLoopArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifacts: Vec<AgentTaskArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    evidence_refs: Vec<AgentTaskEvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    typed_artifacts: Vec<AgentTaskTypedArtifact>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct RequiredWorkflowArtifact {
     artifact_id: String,
@@ -259,6 +283,248 @@ pub(super) fn record_controller_spawn(
     );
     controller::write_controller(record)?;
     Ok(())
+}
+
+pub(super) fn record_controller_aggregate_evidence(
+    record: &mut AgentTaskLoopControllerRecord,
+    entity_id: Option<&str>,
+    run_id: &str,
+    aggregate: &AgentTaskAggregate,
+) -> Result<()> {
+    let entries = aggregate
+        .outcomes
+        .iter()
+        .filter_map(|outcome| {
+            evidence_index_entry(
+                &outcome.task_id,
+                outcome.artifacts.clone(),
+                workflow_evidence_refs(outcome.workflow.as_ref())
+                    .chain(outcome.evidence_refs.iter().cloned())
+                    .collect(),
+                outcome.typed_artifacts.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    record_controller_evidence_index(
+        record,
+        entity_id,
+        ControllerEvidenceIndex {
+            schema: CONTROLLER_EVIDENCE_INDEX_SCHEMA,
+            run_id: run_id.to_string(),
+            entries,
+        },
+    )
+}
+
+pub(super) fn record_controller_result_evidence(
+    record: &mut AgentTaskLoopControllerRecord,
+    entity_id: Option<&str>,
+    run_id: &str,
+    result: &Value,
+) -> Result<()> {
+    let artifacts = parse_array::<AgentTaskArtifact>(&result["artifacts"])?;
+    let evidence_refs = parse_array::<AgentTaskEvidenceRef>(&result["evidence_refs"])?;
+    let typed_artifacts = parse_array::<AgentTaskTypedArtifact>(&result["typed_artifacts"])?;
+    let entries = evidence_index_entry("result", artifacts, evidence_refs, typed_artifacts)
+        .into_iter()
+        .collect();
+    record_controller_evidence_index(
+        record,
+        entity_id,
+        ControllerEvidenceIndex {
+            schema: CONTROLLER_EVIDENCE_INDEX_SCHEMA,
+            run_id: run_id.to_string(),
+            entries,
+        },
+    )
+}
+
+fn record_controller_evidence_index(
+    record: &mut AgentTaskLoopControllerRecord,
+    entity_id: Option<&str>,
+    index: ControllerEvidenceIndex,
+) -> Result<()> {
+    if index.entries.is_empty() {
+        return Ok(());
+    }
+    let artifact_refs = index
+        .entries
+        .iter()
+        .flat_map(|entry| entry.artifact_refs.clone())
+        .collect::<Vec<_>>();
+    let index_value = serde_json::to_value(&index)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+
+    if let Some(lineage) = record
+        .task_lineage
+        .iter_mut()
+        .find(|lineage| lineage.run_id == index.run_id)
+    {
+        extend_artifact_refs(&mut lineage.artifact_refs, artifact_refs.clone());
+        lineage.outputs =
+            merge_controller_evidence_output(lineage.outputs.clone(), index_value.clone());
+    }
+
+    if let Some(entity_id) = entity_id {
+        if let Some(entity) = record.entities.get_mut(entity_id) {
+            extend_artifact_refs(&mut entity.artifact_refs, artifact_refs);
+            entity.metadata = merge_entity_evidence_output(entity.metadata.clone(), index_value);
+        }
+    }
+
+    Ok(())
+}
+
+fn evidence_index_entry(
+    task_id: &str,
+    artifacts: Vec<AgentTaskArtifact>,
+    evidence_refs: Vec<AgentTaskEvidenceRef>,
+    typed_artifacts: Vec<AgentTaskTypedArtifact>,
+) -> Option<ControllerEvidenceIndexEntry> {
+    let mut artifact_refs = Vec::new();
+    for artifact in &artifacts {
+        push_artifact_ref_once(&mut artifact_refs, artifact_ref_from_artifact(artifact));
+    }
+    for evidence_ref in &evidence_refs {
+        push_artifact_ref_once(
+            &mut artifact_refs,
+            artifact_ref_from_evidence_ref(evidence_ref),
+        );
+    }
+    for typed_artifact in &typed_artifacts {
+        push_artifact_ref_once(
+            &mut artifact_refs,
+            artifact_ref_from_typed_artifact(task_id, typed_artifact),
+        );
+    }
+
+    (!artifact_refs.is_empty()).then(|| ControllerEvidenceIndexEntry {
+        task_id: task_id.to_string(),
+        artifact_refs,
+        artifacts,
+        evidence_refs,
+        typed_artifacts,
+    })
+}
+
+fn workflow_evidence_refs(
+    workflow: Option<&AgentTaskWorkflowEvidence>,
+) -> impl Iterator<Item = AgentTaskEvidenceRef> + '_ {
+    workflow.into_iter().flat_map(|workflow| {
+        workflow
+            .steps
+            .iter()
+            .flat_map(|step| step.artifact_refs.iter().cloned())
+    })
+}
+
+fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArtifactRef {
+    AgentTaskLoopArtifactRef {
+        uri: artifact
+            .url
+            .clone()
+            .or_else(|| artifact.path.clone())
+            .unwrap_or_else(|| format!("artifact:{}", artifact.id)),
+        kind: Some(artifact.kind.clone()),
+        label: artifact.name.clone().or_else(|| Some(artifact.id.clone())),
+    }
+}
+
+fn artifact_ref_from_evidence_ref(evidence_ref: &AgentTaskEvidenceRef) -> AgentTaskLoopArtifactRef {
+    AgentTaskLoopArtifactRef {
+        uri: evidence_ref.uri.clone(),
+        kind: Some(evidence_ref.kind.clone()),
+        label: evidence_ref.label.clone(),
+    }
+}
+
+fn artifact_ref_from_typed_artifact(
+    task_id: &str,
+    typed_artifact: &AgentTaskTypedArtifact,
+) -> AgentTaskLoopArtifactRef {
+    typed_artifact
+        .artifact
+        .as_ref()
+        .map(artifact_ref_from_artifact)
+        .unwrap_or_else(|| AgentTaskLoopArtifactRef {
+            uri: format!("typed-artifact:{task_id}:{}", typed_artifact.name),
+            kind: typed_artifact.artifact_type.clone(),
+            label: Some(typed_artifact.name.clone()),
+        })
+}
+
+fn extend_artifact_refs(
+    target: &mut Vec<AgentTaskLoopArtifactRef>,
+    refs: Vec<AgentTaskLoopArtifactRef>,
+) {
+    for artifact_ref in refs {
+        push_artifact_ref_once(target, artifact_ref);
+    }
+}
+
+fn push_artifact_ref_once(
+    target: &mut Vec<AgentTaskLoopArtifactRef>,
+    artifact_ref: AgentTaskLoopArtifactRef,
+) {
+    if target.iter().any(|existing| {
+        existing.uri == artifact_ref.uri
+            && existing.kind == artifact_ref.kind
+            && existing.label == artifact_ref.label
+    }) {
+        return;
+    }
+    target.push(artifact_ref);
+}
+
+fn merge_controller_evidence_output(outputs: Value, index: Value) -> Value {
+    let mut object = outputs.as_object().cloned().unwrap_or_default();
+    object.insert("evidence_index".to_string(), index);
+    Value::Object(object)
+}
+
+fn merge_entity_evidence_output(metadata: Value, index: Value) -> Value {
+    let mut metadata = metadata.as_object().cloned().unwrap_or_default();
+    let outputs = metadata
+        .entry("outputs".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !outputs.is_object() {
+        *outputs = serde_json::json!({});
+    }
+    let indexes = outputs
+        .as_object_mut()
+        .expect("outputs object")
+        .entry("evidence_indexes".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !indexes.is_array() {
+        *indexes = serde_json::json!([]);
+    }
+    let indexes = indexes.as_array_mut().expect("evidence indexes array");
+    let run_id = index.get("run_id").cloned();
+    if let Some(position) = indexes
+        .iter()
+        .position(|existing| existing.get("run_id").cloned() == run_id)
+    {
+        indexes[position] = index;
+    } else {
+        indexes.push(index);
+    }
+    Value::Object(metadata)
+}
+
+fn parse_array<T>(value: &Value) -> Result<Vec<T>>
+where
+    T: DeserializeOwned,
+{
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_value(value.clone()).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("controller evidence array".to_string()),
+            Some(value.to_string()),
+        )
+    })
 }
 
 pub(super) fn first_pending_action_id(record: &AgentTaskLoopControllerRecord) -> Option<String> {
