@@ -226,6 +226,99 @@ function normalizeAllowedStatuses(value) {
 	return new Set(normalizeStringList(value).map(String));
 }
 
+function normalizeBudgetRule(rule = {}) {
+	if (!isPlainObject(rule)) {
+		throw new TypeError('REST matrix budget rules must be objects');
+	}
+	const normalized = {};
+	for (const [from, to] of [
+		['maxDurationMs', 'maxDurationMs'],
+		['max_duration_ms', 'maxDurationMs'],
+		['maxQueryCount', 'maxQueryCount'],
+		['max_query_count', 'maxQueryCount'],
+		['allowedStatuses', 'allowedStatuses'],
+		['allowed_statuses', 'allowedStatuses'],
+		['allowedStatusCodes', 'allowedStatuses'],
+		['allowed_status_codes', 'allowedStatuses'],
+	]) {
+		if (rule[from] !== undefined) {
+			normalized[to] = Array.isArray(rule[from]) ? [...rule[from]] : rule[from];
+		}
+	}
+	return normalized;
+}
+
+function normalizeBudgetRuleList(value, fields) {
+	return (Array.isArray(value) ? value : []).map((entry) => {
+		if (!isPlainObject(entry)) {
+			throw new TypeError('REST matrix scoped budget rules must be objects');
+		}
+		const normalized = normalizeBudgetRule(entry);
+		for (const field of fields) {
+			if (entry[field] !== undefined) {
+				normalized[field] = String(entry[field]);
+			}
+		}
+		return normalized;
+	}).sort((a, b) => fields.map((field) => sortText(a[field], b[field])).find((result) => result !== 0) || 0);
+}
+
+function normalizeRestRouteMatrixBudgetManifest(input = {}) {
+	const manifest = isPlainObject(input) ? input : {};
+	const budgets = isPlainObject(manifest.budgets) ? manifest.budgets : manifest;
+	return {
+		schema: 'homeboy/wordpress-rest-route-matrix-budgets/v1',
+		type: 'wordpress-rest-route-matrix-budgets',
+		defaults: normalizeBudgetRule(budgets.defaults || budgets.default || budgets.global || budgets),
+		namespaces: normalizeBudgetRuleList(budgets.namespaces || budgets.byNamespace, ['namespace']),
+		methods: normalizeBudgetRuleList(budgets.methods || budgets.byMethod, ['method']).map((rule) => ({ ...rule, method: normalizeRestRouteMethod(rule.method) })),
+		routes: normalizeBudgetRuleList(budgets.routes || budgets.byRoute, ['id', 'route', 'method']).map((rule) => ({
+			...rule,
+			method: rule.method ? normalizeRestRouteMethod(rule.method) : undefined,
+			route: rule.route ? normalizeOptionalRoutePath(rule.route) : undefined,
+		})),
+	};
+}
+
+function budgetRuleAppliesToRow(rule, row) {
+	if (rule.namespace && row.namespace !== rule.namespace) {
+		return false;
+	}
+	if (rule.method && row.method !== rule.method) {
+		return false;
+	}
+	if (rule.id && row.id !== rule.id) {
+		return false;
+	}
+	if (rule.route && normalizeOptionalRoutePath(row.route || row.path) !== rule.route) {
+		return false;
+	}
+	return true;
+}
+
+function resolveRestRouteMatrixBudgets(row, manifest = {}) {
+	const normalized = manifest?.schema === 'homeboy/wordpress-rest-route-matrix-budgets/v1'
+		? manifest
+		: normalizeRestRouteMatrixBudgetManifest(manifest);
+	const resolved = { ...normalized.defaults };
+	for (const rule of normalized.namespaces) {
+		if (budgetRuleAppliesToRow(rule, row)) {
+			Object.assign(resolved, normalizeBudgetRule(rule));
+		}
+	}
+	for (const rule of normalized.methods) {
+		if (budgetRuleAppliesToRow(rule, row)) {
+			Object.assign(resolved, normalizeBudgetRule(rule));
+		}
+	}
+	for (const rule of normalized.routes) {
+		if (budgetRuleAppliesToRow(rule, row)) {
+			Object.assign(resolved, normalizeBudgetRule(rule));
+		}
+	}
+	return resolved;
+}
+
 function budgetFinding(row, type, metric, actual, budget) {
 	return {
 		type,
@@ -289,6 +382,7 @@ function normalizeInputResults(input = {}) {
 function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 	const cases = normalizeInputCases(input, options);
 	const results = normalizeInputResults(input);
+	const budgetManifest = normalizeRestRouteMatrixBudgetManifest(options.budgets || input.budgets || {});
 	const resultById = new Map(results.filter((result) => result.id).map((result) => [result.id, result]));
 	const rowsById = new Map();
 
@@ -337,7 +431,7 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 		for (const finding of row.findings || []) {
 			budgetFindings.push({ id: row.id, method: row.method, path: row.path, namespace: row.namespace, ...finding });
 		}
-		budgetFindings.push(...restMatrixBudgetFindings(row, options.budgets || input.budgets || {}));
+		budgetFindings.push(...restMatrixBudgetFindings(row, resolveRestRouteMatrixBudgets(row, budgetManifest)));
 	}
 
 	const slowestByDuration = rows
@@ -370,6 +464,7 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 		missingRoutes: missingRoutes.sort((a, b) => sortText(a.id, b.id)),
 		uncoveredRoutes: uncoveredRoutes.sort((a, b) => sortText(a.id, b.id)),
 		budgetFindings: budgetFindings.sort((a, b) => sortText(a.id, b.id) || sortText(a.type, b.type)),
+		budgets: budgetManifest,
 		routes: rows,
 	};
 }
@@ -855,10 +950,12 @@ module.exports = {
 	classifyRestRoute,
 	formatRestRouteMatrixMarkdownReport,
 	normalizeRestRouteMethod,
+	normalizeRestRouteMatrixBudgetManifest,
 	normalizeWordPressRestRouteMatrix,
 	generateWordPressRestRequestCases,
 	generateWordPressRestRequestCasesForEntry,
 	restRouteMatrixKey,
+	resolveRestRouteMatrixBudgets,
 	summarizeRouteArgs,
 	summarizeSchema,
 };

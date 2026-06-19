@@ -12,8 +12,10 @@ const {
 	buildRestRouteMatrixArtifact,
 	classifyRestRoute,
 	formatRestRouteMatrixMarkdownReport,
+	normalizeRestRouteMatrixBudgetManifest,
 	normalizeWordPressRestRouteMatrix,
 	restRouteMatrixKey,
+	resolveRestRouteMatrixBudgets,
 	summarizeRouteArgs,
 	summarizeSchema,
 } = require('../lib/rest-route-matrix');
@@ -182,5 +184,46 @@ assert.match(markdown, /`GET \/wc\/store\/v1\/cart` \| 200 \| 95 \| 14/);
 assert.match(markdown, /## Missing or uncovered routes/);
 assert.match(markdown, /`GET \/demo\/v1\/private`/);
 assert.match(markdown, /## Budget findings/);
+
+const budgetManifest = normalizeRestRouteMatrixBudgetManifest({
+	defaults: { maxDurationMs: 200, maxQueryCount: 30, allowedStatuses: [200] },
+	namespaces: [{ namespace: 'wc/store/v1', maxQueryCount: 12 }],
+	methods: [{ method: 'POST', allowedStatuses: [200, 201, 204] }],
+	routes: [{ id: 'rest:get:wc-store-v1-cart', maxDurationMs: 90, maxQueryCount: 8 }],
+});
+
+assert.equal(budgetManifest.schema, 'homeboy/wordpress-rest-route-matrix-budgets/v1');
+assert.deepEqual(budgetManifest.defaults, { maxDurationMs: 200, maxQueryCount: 30, allowedStatuses: [200] });
+assert.deepEqual(resolveRestRouteMatrixBudgets({
+	id: 'rest:get:wc-store-v1-cart',
+	method: 'GET',
+	route: '/wc/store/v1/cart',
+	namespace: 'wc/store/v1',
+}, budgetManifest), { maxDurationMs: 90, maxQueryCount: 8, allowedStatuses: [200] });
+assert.deepEqual(resolveRestRouteMatrixBudgets({
+	id: 'rest:post:wc-store-v1-cart',
+	method: 'POST',
+	route: '/wc/store/v1/cart',
+	namespace: 'wc/store/v1',
+}, budgetManifest), { maxDurationMs: 200, maxQueryCount: 12, allowedStatuses: [200, 201, 204] });
+
+const budgetedArtifact = buildRestRouteMatrixArtifact({
+	routes: restIndex,
+	caseResults: [
+		{ method: 'GET', route: '/wc/store/v1/cart', status: 200, durationMs: 95, queryCount: 9 },
+		{ method: 'POST', route: '/wc/store/v1/cart', status: 500, durationMs: 80, queryCount: 13 },
+	],
+	budgets: budgetManifest,
+}, {
+	methods: ['GET', 'POST'],
+});
+
+assert.equal(budgetedArtifact.budgets.schema, 'homeboy/wordpress-rest-route-matrix-budgets/v1');
+assert.deepEqual(budgetedArtifact.budgetFindings.map((finding) => `${finding.id}:${finding.type}`), [
+	'rest:get:wc-store-v1-cart:duration_budget_exceeded',
+	'rest:get:wc-store-v1-cart:query_count_budget_exceeded',
+	'rest:post:wc-store-v1-cart:query_count_budget_exceeded',
+	'rest:post:wc-store-v1-cart:status_not_allowed',
+]);
 
 console.log('REST route matrix smoke passed.');
