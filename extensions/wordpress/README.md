@@ -18,7 +18,7 @@ extension scripts for these verbs:
 | `test` | PHPUnit and real-WordPress host smokes via WP Codebox | `scripts/test/test-runner.sh` |
 | `lint` | PHPCS + PHPStan (PHP) and ESLint (JS/TS) | `scripts/lint/lint-runner.sh` |
 | `build` | Production ZIP with composer `--no-dev`, asset build, syntax check | `scripts/build/build.sh` |
-| `bench` | Benchmark workloads via WP Codebox; optional browser handoff | `scripts/bench/bench-runner.sh` |
+| `bench` | Benchmark workloads via the WordPress bench runtime backend; optional browser handoff | `scripts/bench/bench-runner.sh` |
 | `trace` | Project-owned scenario traces | `scripts/trace/trace-runner.sh` |
 | `audit` | Detector rules over PHP for lifecycle / role tagging | `scripts/audit/setup-references.sh` + rules in `wordpress.json` |
 | `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
@@ -58,6 +58,11 @@ homeboy audit <component-id>
 ```
 
 ## Bench Helpers
+
+`scripts/bench/bench-runner.sh` selects the WordPress bench runtime backend.
+The default backend is `wp-codebox`, preserving the existing WP Codebox
+sandbox/artifact behavior. Set `HOMEBOY_WORDPRESS_BENCH_RUNTIME_BACKEND` to
+select a backend; currently supported value: `wp-codebox`.
 
 Reusable WordPress/WooCommerce workload helpers live under `scripts/bench/lib/`.
 Workloads can require them from the WP Codebox-mounted extension path.
@@ -132,8 +137,8 @@ Available factories from the WordPress test framework: `user`, `post`,
 ### Real-WordPress host smokes
 
 Standalone smoke files matching `tests/**/*-smoke.php` are diagnostic/operator
-targets, not default release gates. Run one explicitly through the same WP
-Codebox-backed real WordPress harness when you need it. The selected file is
+targets, not default release gates. Run one explicitly through the same selected
+real WordPress runtime harness when you need it. The selected file is
 mounted with the component and executed via `wordpress.run-php`, so WordPress
 functions and runtime dependencies are available.
 
@@ -147,6 +152,19 @@ The focused command does not change default test discovery or add smokes to CI.
 Output preserves the machine-readable `HOST_SMOKE_BEGIN`,
 `HOST_SMOKE_PROGRESS`, `HOST_SMOKE_OK`, `HOST_SMOKE_FAIL`, and
 `HOST_SMOKE_SUMMARY` markers.
+
+### Test runtime backend
+
+`scripts/test/test-runner.sh` selects a generic real-WordPress runtime backend
+for PHPUnit and core-dev test runs. The current backend implementation is
+`wp-codebox`, and it remains the default:
+
+```bash
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy test <component-id>
+```
+
+The `test-runner-wp-codebox.sh` script name and existing WP Codebox settings are
+preserved for compatibility with the current implementation.
 
 ### Runtime dependencies
 
@@ -607,6 +625,19 @@ shorthand; Homeboy core only sees generic durable agent-task plans.
 `../agent-runtimes/wp-codebox` is the runtime package surface for imports
 and runtime-path dispatch; it forwards to the WordPress payload so both monorepo
 and installed extension layouts use the same implementation.
+
+### Static-site fanout adapter
+
+`lib/static-site-fanout-adapter.js` groups static-site import validation findings
+into generic `homeboy/agent-task-request/v1` requests by default. The adapter does
+not default the executor backend to WP Codebox; callers that need a runtime should
+pass an explicit `backend`/`runtime_backend` value or an `agent_task.backend`
+override.
+
+Legacy WP Codebox request compatibility remains available as an explicit
+compatibility path. Pass `compatibility_provider: "wp-codebox"` for new
+compatibility callers, or keep `request_kind: "wp-codebox"` for existing callers
+that already use that flag. Both produce `wp-codebox/task-input/v1` task requests.
 
 The generic provider boundary is documented in
 [`docs/AGENT_CI_WP_CODEBOX.md`](docs/AGENT_CI_WP_CODEBOX.md#agent-task-executor-provider).

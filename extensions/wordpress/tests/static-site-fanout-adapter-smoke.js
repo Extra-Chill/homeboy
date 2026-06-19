@@ -33,7 +33,7 @@ async function main() {
   const goldenPlan = readJson(path.join(__dirname, 'fixtures', 'static-site-fanout-adapter', 'golden-agent-plan-summary.json'));
   assert.deepEqual(projectPlan(plan), goldenPlan);
   assert.equal(plan.task_requests[0].schema, 'homeboy/agent-task-request/v1');
-  assert.equal(plan.task_requests[0].executor.backend, 'codebox');
+  assert.equal(plan.task_requests[0].executor.backend, undefined);
   assert.equal(plan.task_requests[0].inputs.finding_ids.length, 2);
   assert.equal(plan.task_requests[0].inputs.artifact_refs[0].kind, 'diagnostic');
 
@@ -59,6 +59,20 @@ async function main() {
   assert.equal(codeboxPlan.task_requests[0].schema, 'wp-codebox/task-input/v1');
   assert.equal(codeboxPlan.task_requests[0].context.findings[0].id, 'visual-parity-demo-store');
   assert.equal(codeboxPlan.task_requests[0].context.artifact_refs[0].kind, 'visual_parity_artifact');
+
+  const explicitCodeboxCompatibilityPlan = createStaticSiteFanoutPlan({
+    run_id: 'explicit-codebox-compatibility-run',
+    compatibility_provider: 'wp-codebox',
+    groups: [
+      {
+        group_key: 'visual-parity',
+        findings: [findings[2]],
+      },
+    ],
+  });
+  assert.equal(explicitCodeboxCompatibilityPlan.orchestrator.compatibility_provider, 'wp-codebox');
+  assert.equal(explicitCodeboxCompatibilityPlan.orchestrator.request_schema, 'wp-codebox/task-input/v1');
+  assert.equal(explicitCodeboxCompatibilityPlan.task_requests[0].schema, 'wp-codebox/task-input/v1');
 
   const emptyPlan = createStaticSiteFanoutPlan({ run_id: 'empty-run', findings: [] });
   assert.equal(emptyPlan.static_site.no_actionable_findings, true);
@@ -111,7 +125,7 @@ function projectPlan(plan) {
     orchestrator: plan.orchestrator,
     summary: plan.summary,
     groups: plan.groups,
-    task_requests: plan.task_requests.map((request) => ({
+    task_requests: plan.task_requests.map((request) => stripUndefined({
       schema: request.schema,
       task_id: request.task_id,
       group_key: request.group_key,
@@ -127,6 +141,10 @@ function projectPlan(plan) {
     reconciliation: plan.reconciliation,
     static_site: plan.static_site,
   };
+}
+
+function stripUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
 main().catch((error) => {

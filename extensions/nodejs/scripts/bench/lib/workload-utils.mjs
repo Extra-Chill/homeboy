@@ -179,11 +179,6 @@ export function runNode(args, options = {}) {
     return runCommand(options.nodeBinary || process.env.HOMEBOY_NODE_BINARY || 'node', args, options);
 }
 
-export async function runWordPressCodeboxVisualParityWorkload(options = {}) {
-    const { runWordPressCodeboxVisualParityWorkload: runWordPressVisualParity } = await import('../../../../wordpress/lib/wordpress-codebox-visual-parity-workload.mjs');
-    return runWordPressVisualParity(options);
-}
-
 /**
  * Run a package.json script as a benchmark workload and return the standard
  * `{ metrics, artifacts, metadata }` shape consumed by bench-runner.mjs.

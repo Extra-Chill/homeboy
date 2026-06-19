@@ -54,3 +54,9 @@ jobs:
 Data Machine-specific ability names, source bundles, tool policy, and runtime
 dependencies belong in caller inputs or runtime profiles. Homeboy Extensions only
 forwards the generic runtime task contract.
+
+The legacy `wordpress/scripts/agent/run-datamachine-agent.sh` runner remains a
+WP Codebox-backed recipe lane. It accepts generic aliases for common boundary
+inputs (`runtime_bin`, `runtime_artifacts_dir`, `runtime_mounts`, and
+`runtime_components`) and normalizes them to the legacy `wp_codebox_*` contract
+before dispatch, preserving the existing WP Codebox artifact shape.

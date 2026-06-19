@@ -9,6 +9,11 @@ WPGYM_EVAL_ROW_PROJECTOR="$SCRIPT_DIR/project-wpgym-eval-row.js"
 WPGYM_EVAL_ROW_VALIDATOR="$SCRIPT_DIR/validate-wpgym-eval-row.js"
 WP_CODEBOX_PATHS_HELPER="$SCRIPT_DIR/../lib/wp-codebox-paths.sh"
 
+# This runner is the legacy Data Machine CI lane backed by WP Codebox recipes.
+# Keep the implementation explicit while accepting generic runtime aliases at
+# this boundary so callers do not need to speak wp_codebox_* for common inputs.
+HOMEBOY_DATAMACHINE_AGENT_RUNTIME_BACKEND="wp-codebox"
+
 # shellcheck source=../lib/wp-codebox-paths.sh
 source "$WP_CODEBOX_PATHS_HELPER"
 
@@ -47,6 +52,23 @@ homeboy_datamachine_agent_wp_codebox_secret_env_names() {
         ]
         | map(select(type == "string" and . != ""))
         | unique[]
+    ' <<<"$CONFIG_JSON"
+}
+
+homeboy_datamachine_agent_normalize_legacy_wp_codebox_config() {
+    jq -c '
+        def object_or_empty($value): if ($value | type) == "object" then $value else {} end;
+        object_or_empty(.runtime_components) as $runtimeComponents
+        | object_or_empty(.wp_codebox_components) as $wpCodeboxComponents
+        | .wp_codebox_bin = (.wp_codebox_bin // .runtime_bin // "")
+        | .wp_codebox_artifacts_dir = (.wp_codebox_artifacts_dir // .runtime_artifacts_dir // "")
+        | .wp_codebox_mounts = (.wp_codebox_mounts // .runtime_mounts // [])
+        | .wp_codebox_components = ($wpCodeboxComponents + {
+            wp_codebox: ($wpCodeboxComponents.wp_codebox // $runtimeComponents.runtime // empty),
+            agents_api: ($wpCodeboxComponents.agents_api // $runtimeComponents.agents_api // empty),
+            data_machine: ($wpCodeboxComponents.data_machine // $runtimeComponents.data_machine // empty),
+            data_machine_code: ($wpCodeboxComponents.data_machine_code // $runtimeComponents.data_machine_code // empty)
+        })
     ' <<<"$CONFIG_JSON"
 }
 
@@ -116,12 +138,19 @@ homeboy_datamachine_agent_add_wp_codebox_mount() {
 }
 
 homeboy_datamachine_agent_wp_codebox_run() {
+    if [ -z "${HOMEBOY_WP_CODEBOX_BIN:-}" ] && [ -n "${HOMEBOY_AGENT_RUNTIME_BIN:-}" ]; then
+        export HOMEBOY_WP_CODEBOX_BIN="$HOMEBOY_AGENT_RUNTIME_BIN"
+    fi
+    if [ -z "${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}" ] && [ -n "${HOMEBOY_AGENT_RUNTIME_ARTIFACTS_DIR:-}" ]; then
+        export HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$HOMEBOY_AGENT_RUNTIME_ARTIFACTS_DIR"
+    fi
+
     local wp_codebox_bin
     wp_codebox_bin="$(homeboy_wp_codebox_resolve_bin "$CONFIG_JSON" "config")" || exit 1
 
     local artifacts_dir="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
     if [ -z "$artifacts_dir" ]; then
-        artifacts_dir=$(jq -r '.wp_codebox_artifacts_dir // empty' "$CONFIG_PATH")
+        artifacts_dir=$(jq -r '.wp_codebox_artifacts_dir // empty' <<<"$CONFIG_JSON")
     fi
     if [ -z "$artifacts_dir" ]; then
         if [ -z "$RUNTIME_DIR" ]; then
@@ -145,23 +174,23 @@ PHP
     local data_machine_code_path="${HOMEBOY_DATA_MACHINE_CODE_PATH:-${DATA_MACHINE_CODE_PATH:-}}"
     local wp_codebox_plugin_path="${HOMEBOY_WP_CODEBOX_PLUGIN_PATH:-${WP_CODEBOX_PLUGIN_PATH:-}}"
     if [ -z "$wp_codebox_plugin_path" ]; then
-        wp_codebox_plugin_path=$(jq -r '.wp_codebox_components.wp_codebox // .wp_codebox_plugin_path // empty' "$CONFIG_PATH")
+        wp_codebox_plugin_path=$(jq -r '.wp_codebox_components.wp_codebox // .wp_codebox_plugin_path // empty' <<<"$CONFIG_JSON")
     fi
     if [ -z "$agents_api_path" ]; then
-        agents_api_path=$(jq -r '.wp_codebox_components.agents_api // .wp_codebox_agents_api_path // empty' "$CONFIG_PATH")
+        agents_api_path=$(jq -r '.wp_codebox_components.agents_api // .wp_codebox_agents_api_path // empty' <<<"$CONFIG_JSON")
     fi
     if [ -z "$data_machine_path" ]; then
-        data_machine_path=$(jq -r '.wp_codebox_components.data_machine // .wp_codebox_data_machine_path // empty' "$CONFIG_PATH")
+        data_machine_path=$(jq -r '.wp_codebox_components.data_machine // .wp_codebox_data_machine_path // empty' <<<"$CONFIG_JSON")
     fi
     if [ -z "$data_machine_code_path" ]; then
-        data_machine_code_path=$(jq -r '.wp_codebox_components.data_machine_code // .wp_codebox_data_machine_code_path // empty' "$CONFIG_PATH")
+        data_machine_code_path=$(jq -r '.wp_codebox_components.data_machine_code // .wp_codebox_data_machine_code_path // empty' <<<"$CONFIG_JSON")
     fi
     if [ -z "$agents_api_path" ] || [ -z "$data_machine_path" ] || [ -z "$data_machine_code_path" ]; then
-        echo "ERROR: wp-codebox runtime requires Agents API, Data Machine, and Data Machine Code paths via env or config" >&2
+        echo "ERROR: wp-codebox runtime requires Agents API, Data Machine, and Data Machine Code paths via generic runtime aliases, env, or legacy config" >&2
         exit 1
     fi
     if [ -z "$wp_codebox_plugin_path" ]; then
-        echo "ERROR: wp-codebox runtime requires the WP Codebox WordPress plugin path via env or config" >&2
+        echo "ERROR: wp-codebox runtime requires the WP Codebox WordPress plugin path via generic runtime aliases, env, or legacy config" >&2
         exit 1
     fi
 
@@ -934,6 +963,7 @@ if [ -z "$COMPONENT_ID" ]; then
 fi
 
 CONFIG_JSON=$(jq -c . "$CONFIG_PATH")
+CONFIG_JSON=$(homeboy_datamachine_agent_normalize_legacy_wp_codebox_config)
 BUNDLE_PATH=""
 BUNDLE_GUEST_PATH=""
 BUNDLE_REPO=$(jq -r '.bundle_repo // empty' "$CONFIG_PATH")

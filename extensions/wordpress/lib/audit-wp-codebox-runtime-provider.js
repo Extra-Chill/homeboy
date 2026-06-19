@@ -365,8 +365,26 @@ function directorySizeBytes(directory) {
   }
 }
 
+function wpCodeboxAuditRuntimeOptions(options = {}) {
+  const previousRuntimeEnv = options.runtime_env;
+
+  return {
+    ...options,
+    command: options.command || options.runtime_command || options.wp_codebox_command,
+    args: options.args || options.runtime_args || options.wp_codebox_args || [],
+    runtime_env: (taskRequest, requestJson, runtimeOptions) => ({
+      ...(typeof previousRuntimeEnv === 'function'
+        ? previousRuntimeEnv(taskRequest, requestJson, runtimeOptions)
+        : (previousRuntimeEnv || {})),
+      HOMEBOY_WP_CODEBOX_TASK_REQUEST: requestJson,
+      HOMEBOY_WP_CODEBOX_SANDBOX_SESSION_ID: taskRequest.sandbox_session_id || '',
+      HOMEBOY_WP_CODEBOX_GROUP_KEY: taskRequest.group_key || '',
+    }),
+  };
+}
+
 function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
-  const dispatch = executeAuditFanoutRuntimeTaskSync(taskRequest, options);
+  const dispatch = executeAuditFanoutRuntimeTaskSync(taskRequest, wpCodeboxAuditRuntimeOptions(options));
   const { result, stdout, stderr } = dispatch;
   const parsed = tryParseJson(stdout);
   const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
@@ -405,7 +423,7 @@ function executeWpCodeboxTaskRequest(taskRequest, options = {}) {
 }
 
 async function executeWpCodeboxTaskRequestAsync(taskRequest, options = {}) {
-  const dispatch = await executeAuditFanoutRuntimeTask(taskRequest, options);
+  const dispatch = await executeAuditFanoutRuntimeTask(taskRequest, wpCodeboxAuditRuntimeOptions(options));
   const { result, stdout, stderr } = dispatch;
   const parsed = tryParseJson(stdout);
   const artifact = parsed && typeof parsed === 'object' && parsed.artifacts ? parsed.artifacts : null;
@@ -745,4 +763,5 @@ module.exports = {
   sandboxSessionId,
   taskOutcome,
   taskOutcomeSucceeded,
+  wpCodeboxAuditRuntimeOptions,
 };
