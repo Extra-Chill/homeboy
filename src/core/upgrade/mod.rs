@@ -3,6 +3,7 @@ mod execution;
 mod helpers;
 mod planning;
 mod runners;
+mod services;
 mod types;
 pub mod update_check;
 mod validation;
@@ -14,7 +15,8 @@ pub use helpers::{
 };
 pub use planning::resolve_binary_on_path;
 pub use types::{
-    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, UpgradeResult, VersionCheck,
+    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeResult,
+    VersionCheck,
 };
 pub use validation::check_for_updates;
 
