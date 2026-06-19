@@ -1265,14 +1265,21 @@ function requestRuntimeComponents(request, mounts = []) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(request.component_contracts || []);
   const workspaceRoot = workspaceRootFromMounts(mounts);
+  const requestedAgentRuntimePath = explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine'));
+  const localAgentRuntimePath = firstExistingPath(
+    explicit.agent_runtime,
+    contractPaths.agent_runtime,
+    legacyValue(request),
+    siblingPath(workspaceRoot, 'data-machine')
+  ) || requestedAgentRuntimePath;
   const agentRuntimePath = remapLabWorkspacePath(
-    explicit.agent_runtime || contractPaths.agent_runtime || legacyValue(request) || firstExistingPath(siblingPath(workspaceRoot, 'data-machine')),
+    requestedAgentRuntimePath,
     'data-machine'
   );
   return Object.fromEntries(Object.entries({
     ...contractPaths,
     ...explicit,
-    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(agentRuntimePath), 'agents-api'),
+    agents_api: remapLabWorkspacePath(explicit.agents_api || contractPaths.agents_api || request.agents_api_path || request.agents_api || bundledAgentsApiPath(localAgentRuntimePath), 'agents-api'),
     agent_runtime: agentRuntimePath,
     agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools || legacyValue(request, 'code') || firstExistingPath(siblingPath(workspaceRoot, 'data-machine-code')), 'data-machine-code'),
   }).filter(([, value]) => value !== '' && value !== undefined));
