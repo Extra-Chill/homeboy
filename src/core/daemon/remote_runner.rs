@@ -220,7 +220,9 @@ fn update(path: &str, body: Option<Value>, job_store: &JobStore) -> HttpResponse
                 "path",
                 "unknown remote runner job operation",
                 Some(operation.to_string()),
-                Some(vec!["Supported operations are events, finish, and heartbeat.".to_string()]),
+                Some(vec![
+                    "Supported operations are events, finish, and heartbeat.".to_string(),
+                ]),
             ),
         ),
     }

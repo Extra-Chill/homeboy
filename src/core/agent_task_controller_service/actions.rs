@@ -360,6 +360,12 @@ where
                 request,
             )?;
             let run_result = agent_task_service::run_submitted(submitted.run_id.clone(), executor)?;
+            record_controller_aggregate_evidence(
+                record,
+                entity_id,
+                &submitted.run_id,
+                &run_result.value,
+            )?;
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
@@ -397,6 +403,7 @@ where
             let run_id = required_string(request, "run_id")?;
             record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
             let run_result = agent_task_service::run_submitted(run_id.clone(), executor)?;
+            record_controller_aggregate_evidence(record, entity_id, &run_id, &run_result.value)?;
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
@@ -408,6 +415,7 @@ where
             let run_id = required_string(request, "run_id")?;
             record_controller_spawn(record, action, dedupe_key, entity_id, &run_id, request)?;
             let run_result = agent_task_service::resume(run_id.clone(), executor)?;
+            record_controller_aggregate_evidence(record, entity_id, &run_id, &run_result.value)?;
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
@@ -434,6 +442,7 @@ where
             let (value, exit_code) = dispatch.dispatch(request)?;
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
                 record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
+                record_controller_result_evidence(record, entity_id, run_id, &value)?;
             }
             Ok((
                 serde_json::json!({ "mode": mode, "result": value }),

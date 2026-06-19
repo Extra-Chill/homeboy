@@ -367,10 +367,12 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(heartbeat.status_code, 200);
     assert_eq!(heartbeat.body["endpoint"], "runner.jobs.heartbeat");
     assert_eq!(heartbeat.body["body"]["job"]["id"], job_id);
-    assert!(heartbeat.body["body"]["job"]["claim_expires_at_ms"]
-        .as_u64()
-        .expect("renewed expiry")
-        > original_expiry);
+    assert!(
+        heartbeat.body["body"]["job"]["claim_expires_at_ms"]
+            .as_u64()
+            .expect("renewed expiry")
+            > original_expiry
+    );
 
     let event = route_with_job_store_and_body(
         "POST",
@@ -466,7 +468,9 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
         })),
         &store,
     );
-    let expired_job_id = expired_job.body["body"]["job"]["id"].as_str().expect("job id");
+    let expired_job_id = expired_job.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id");
     let expired_claim = route_with_job_store_and_body(
         "POST",
         "/runner/jobs/claim",
