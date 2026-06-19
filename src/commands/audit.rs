@@ -45,6 +45,11 @@ pub struct AuditArgs {
     #[arg(long = "exclude", value_name = "kind")]
     pub exclude: Vec<String>,
 
+    /// Detector profile to run. `full` preserves the default full audit;
+    /// `pr` runs cheap root-level blockers for changed-file review.
+    #[arg(long, value_name = "PROFILE", default_value = "full", value_parser = ["full", "pr", "architecture"])]
+    pub profile: String,
+
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
 
@@ -112,9 +117,16 @@ fn parse_finding_kinds(
         .collect()
 }
 
+fn parse_audit_profile(value: &str) -> homeboy::core::Result<code_audit::AuditProfile> {
+    value.parse().map_err(|msg| {
+        homeboy::core::Error::validation_invalid_argument("profile", msg, None, None)
+    })
+}
+
 pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutput> {
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
+    let profile = parse_audit_profile(&args.profile)?;
 
     let source_ctx = resolve_source_context(
         &args.comp,
@@ -136,6 +148,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
         exclude_kinds,
         only_labels: args.only,
         exclude_labels: args.exclude,
+        profile,
         extension_overrides: args.extension_override.extensions,
         baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
             baseline: args.baseline_args.baseline,
@@ -239,6 +252,9 @@ fn audit_observation_command(component_id: &str, args: &AuditArgs) -> String {
     for kind in &args.exclude {
         parts.push(format!("--exclude={kind}"));
     }
+    if args.profile != "full" {
+        parts.push(format!("--profile={}", args.profile));
+    }
     for extension in &args.extension_override.extensions {
         parts.push(format!("--extension={extension}"));
     }
@@ -258,6 +274,7 @@ fn audit_observation_initial_metadata(source_path: &str, args: &AuditArgs) -> se
     serde_json::json!({
         "source_path": source_path,
         "mode": if args.conventions { "conventions" } else { "audit" },
+        "profile": args.profile,
         "only": args.only,
         "exclude": args.exclude,
         "extensions": args.extension_override.extensions,
@@ -488,6 +505,7 @@ mod tests {
             conventions: false,
             only: vec![],
             exclude: vec![],
+            profile: "full".to_string(),
             baseline_args: BaselineArgs {
                 baseline: false,
                 ignore_baseline: false,
@@ -645,11 +663,14 @@ mod tests {
             "rust",
             "--changed-since",
             "origin/main",
+            "--profile",
+            "pr",
         ])
         .expect("audit should parse --extension override");
 
         assert_eq!(cli.audit.extension_override.extensions, vec!["rust"]);
         assert_eq!(cli.audit.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(cli.audit.profile, "pr");
     }
 
     #[test]
@@ -902,6 +923,7 @@ mod tests {
                 conventions: false,
                 only: vec![],
                 exclude: vec![],
+                profile: "full".to_string(),
                 baseline_args: BaselineArgs {
                     baseline: false,
                     ignore_baseline: true,

@@ -24,6 +24,7 @@ pub struct AuditRunWorkflowArgs {
     pub exclude_kinds: Vec<code_audit::AuditFinding>,
     pub only_labels: Vec<String>,
     pub exclude_labels: Vec<String>,
+    pub profile: code_audit::AuditProfile,
     pub extension_overrides: Vec<String>,
     pub baseline_flags: crate::core::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
@@ -200,10 +201,14 @@ fn scope_convention_outliers_to_findings(result: &mut CodeAuditResult) {
 
 /// Run the audit scan (scoped or full). Returns None if changed-since found no files.
 fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWithAnalysis>> {
-    let plan = if args.baseline_flags.baseline {
+    let plan = if args.baseline_flags.baseline || args.conventions {
         code_audit::AuditExecutionPlan::full()
     } else {
-        code_audit::AuditExecutionPlan::from_filters(&args.only_kinds, &args.exclude_kinds)
+        code_audit::AuditExecutionPlan::from_profile_and_filters(
+            args.profile,
+            &args.only_kinds,
+            &args.exclude_kinds,
+        )
     };
 
     if let Some(ref git_ref) = args.changed_since {

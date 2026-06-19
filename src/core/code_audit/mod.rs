@@ -67,6 +67,7 @@ pub use compare::{
 };
 pub use conventions::{AuditFinding, Convention, Deviation, Language, Outlier};
 pub use duplication::DuplicateGroup;
+pub use execution_plan::AuditProfile;
 pub(crate) use execution_plan::{
     AuditExecutionPlan, DetectorDescriptor, DetectorRuntime, FingerprintDetectorRunner,
     RootDetectorRunner,
@@ -512,6 +513,7 @@ fn audit_internal(
             root,
             plan,
             extension_overrides,
+            scoped_execution.file_filter,
             &mut timing,
         );
         timing.push_ok("detectors", detector_started.elapsed());
@@ -1433,6 +1435,7 @@ fn audit_root_only(
     root: &Path,
     plan: &AuditExecutionPlan,
     extension_overrides: &[String],
+    file_filter: Option<&[String]>,
     timing: &mut AuditTiming,
 ) -> CodeAuditResult {
     let audit_config = audit_config_for(component_id, root, extension_overrides);
@@ -1567,6 +1570,22 @@ fn audit_root_only(
         findings.extend(artifact_portability_findings);
     }
 
+    let command_status_findings = time_audit_detector(
+        timing,
+        "detector.command_status_contracts",
+        plan.run_command_status_contracts(),
+        || command_status_contracts::run(root, &audit_config.command_status_contracts),
+        Vec::new,
+    );
+    if !command_status_findings.is_empty() {
+        log_status!(
+            "audit",
+            "Command status contracts: {} finding(s) (inconsistent no-op/dry-run status fields)",
+            command_status_findings.len()
+        );
+        findings.extend(command_status_findings);
+    }
+
     let thin_command_adapter_findings = time_audit_detector(
         timing,
         "detector.thin_command_adapter",
@@ -1581,6 +1600,22 @@ fn audit_root_only(
             thin_command_adapter_findings.len()
         );
         findings.extend(thin_command_adapter_findings);
+    }
+
+    if let Some(filter) = file_filter {
+        let scope_started = std::time::Instant::now();
+        let before = findings.len();
+        findings.retain(|finding| filter.iter().any(|scope| finding.file.contains(scope)));
+        let filtered_out = before - findings.len();
+        if filtered_out > 0 {
+            log_status!(
+                "audit",
+                "Scoped: filtered {} root-only finding(s) from out-of-scope files ({} remaining)",
+                filtered_out,
+                findings.len()
+            );
+        }
+        timing.push_ok("scope.filter", scope_started.elapsed());
     }
 
     let outliers_found = findings.len();
