@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.32] - 2026-06-19
+
+### Changed
+- Clean up agent runtime package surface
+
 ## [3.7.31] - 2026-06-19
 
 ### Fixed
