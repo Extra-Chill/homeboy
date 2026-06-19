@@ -1,4 +1,5 @@
 use clap::{Command, CommandFactory, Parser, Subcommand};
+use serde::Serialize;
 use std::path::PathBuf;
 
 use crate::commands::{
@@ -166,7 +167,11 @@ pub enum Commands {
     Upgrade(upgrade::UpgradeArgs),
     /// List available commands (deprecated alias for --help)
     #[command(hide = true)]
-    List,
+    List {
+        /// Print the recursive command safety manifest as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,7 +200,7 @@ pub struct CommandSurfaceEntry {
     pub subcommands: Vec<CommandSurfaceEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSafetyManifest {
     pub commands: Vec<CommandSafetyEntry>,
 }
@@ -213,7 +218,7 @@ impl CommandSafetyManifest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandSafetyEntry {
     pub name: String,
     pub path: Vec<String>,
@@ -240,25 +245,25 @@ impl CommandSafetyEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandDryRunMetadata {
     pub supported: bool,
     pub flag: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandOutputMetadata {
     pub structured: bool,
     pub notes: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandLabMetadata {
     pub supported: bool,
     pub notes: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandDocsMetadata {
     pub path: Option<String>,
 }
@@ -335,7 +340,7 @@ impl Commands {
             Commands::Api(_) => "api",
             Commands::Http(_) => "http",
             Commands::Upgrade(_) => "upgrade",
-            Commands::List => "list",
+            Commands::List { .. } => "list",
         }
     }
 }
@@ -450,10 +455,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
             metadata.operator = true;
+            metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
         }
         ["file", "write"] | ["file", "delete"] => {
             metadata.mutates = true;
             metadata.operator = true;
+            metadata.output_notes = "default output is a non-mutating plan; pass --apply to mutate";
         }
         ["file", "mkdir"] | ["file", "rename"] => {
             metadata.mutates = true;
@@ -657,6 +664,12 @@ mod tests {
         let fleet_exec = manifest.find_path(&["fleet", "exec"]).unwrap();
         assert_eq!(fleet_exec.dry_run.flag.as_deref(), Some("--check"));
         assert!(fleet_exec.lab.notes.contains("local-only"));
+
+        let db_delete_row = manifest.find_path(&["db", "delete-row"]).unwrap();
+        assert!(db_delete_row.output.notes.contains("--apply"));
+
+        let file_write = manifest.find_path(&["file", "write"]).unwrap();
+        assert!(file_write.output.notes.contains("--apply"));
     }
 
     #[test]
@@ -702,6 +715,19 @@ mod tests {
             ["homeboy", "runner", "connect", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "status", "homeboy-lab"].as_slice(),
             ["homeboy", "runner", "disconnect", "homeboy-lab"].as_slice(),
+            [
+                "homeboy",
+                "db",
+                "delete-row",
+                "mysite",
+                "--apply",
+                "wp_posts",
+                "1",
+            ]
+            .as_slice(),
+            ["homeboy", "db", "drop-table", "mysite", "--apply", "wp_tmp"].as_slice(),
+            ["homeboy", "file", "delete", "mysite", "tmp.txt", "--apply"].as_slice(),
+            ["homeboy", "file", "write", "mysite", "tmp.txt", "--apply"].as_slice(),
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|error| {
                 panic!("documented command form failed to parse: {args:?}\n{error}")

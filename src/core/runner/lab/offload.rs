@@ -18,7 +18,7 @@
 
 use std::path::Path;
 
-use crate::command_contract::{lab_runner_unsupported_hint, lab_runner_unsupported_message};
+use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
 use crate::core::agent_task_provider::{resolve_provider_for_backend, ProviderResolution};
 use crate::core::agent_tasks::provider::{
@@ -202,7 +202,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             "runner",
             message,
             Some(runner_id.to_string()),
-            Some(unsupported_runner_hints(runner_id, request.normalized_args)),
+            Some(unsupported_runner_hints(
+                runner_id,
+                request.normalized_args,
+                lab_runner_support_summary().hint,
+            )),
         )
     };
     let mut plan = base_lab_plan(request.command.as_ref());
@@ -210,7 +214,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if let Some(runner_id) = request.explicit_runner {
             return Err(unsupported_runner_error(
                 runner_id,
-                lab_runner_unsupported_message(),
+                lab_runner_support_summary().unsupported_message,
             ));
         }
         return Ok(LabOffloadOutcome::RunLocal {
@@ -223,7 +227,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     if !contract.portable {
         if let Some(runner_id) = request.explicit_runner {
             let message = contract.unsupported_reason.map_or_else(
-                lab_runner_unsupported_message,
+                || lab_runner_support_summary().unsupported_message,
                 |reason| format!("--runner is unavailable for this local-only resource-pressure command. {reason}"),
             );
             return Err(unsupported_runner_error(runner_id, message));
@@ -372,8 +376,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     run_lab_offload_inner(request, selection, contract, plan, messages)
 }
 
-fn unsupported_runner_hints(runner_id: &str, normalized_args: &[String]) -> Vec<String> {
-    let mut hints = vec![lab_runner_unsupported_hint()];
+fn unsupported_runner_hints(
+    runner_id: &str,
+    normalized_args: &[String],
+    support_hint: String,
+) -> Vec<String> {
+    let mut hints = vec![support_hint];
 
     if let Some(service_command) = tunnel_service_command(normalized_args) {
         hints.push(format!(
@@ -2763,6 +2771,7 @@ mod tests {
     #[test]
     fn lab_workspace_mapping_metadata_records_local_to_remote_paths() {
         let snapshot = RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
             local_path: "/Users/user/Developer/app".to_string(),
@@ -2777,6 +2786,7 @@ mod tests {
             validation_dependencies: Vec::new(),
         };
         let git = RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
             local_path: "/Users/user/Developer/dep".to_string(),
@@ -3543,6 +3553,7 @@ mod tests {
     #[test]
     fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
         let exec_output = RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab-default".to_string(),
             dry_run: false,
