@@ -8,6 +8,7 @@ use super::constants::{CRATES_IO_API, GITHUB_RELEASES_API, VERSION};
 use super::execution::{execute_upgrade, resolve_source_workspace};
 use super::planning::resolve_binary_on_path;
 use super::runners;
+use super::services;
 use super::types::*;
 use super::validation::check_for_updates;
 
@@ -154,11 +155,13 @@ pub(crate) fn version_is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_upgrade_with_method(
     force: bool,
     method_override: Option<InstallMethod>,
     skip_extensions: bool,
     skip_runners: bool,
+    skip_services: bool,
     runner_targets: &[String],
     source_path: Option<&Path>,
 ) -> Result<UpgradeResult> {
@@ -219,6 +222,10 @@ pub fn run_upgrade_with_method(
                 extensions_skipped,
                 runners_updated,
                 runners_skipped,
+                // No binary swap happened, so resident services already run the
+                // current binary and need no restart.
+                services_restarted: Vec::new(),
+                services_pending_restart: Vec::new(),
             });
         }
     }
@@ -253,6 +260,13 @@ pub fn run_upgrade_with_method(
         (vec![], vec![])
     };
 
+    // After a verified binary swap, long-running services still hold the old
+    // binary in memory until restarted. Restart each declared resident service
+    // (config-driven; nothing is hardcoded in core) unless restarts were
+    // skipped, in which case report each as pending with its recovery command.
+    let (services_restarted, services_pending_restart) =
+        restart_resident_services_after_swap(success, skip_services);
+
     Ok(UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
@@ -285,7 +299,74 @@ pub fn run_upgrade_with_method(
         extensions_skipped,
         runners_updated,
         runners_skipped,
+        services_restarted,
+        services_pending_restart,
     })
+}
+
+/// Restart declared binary-resident services after a successful binary swap.
+///
+/// Returns `(restarted, pending)`. When the swap did not succeed there is no
+/// new binary to load, so nothing is restarted. When `skip_services` is set,
+/// every declared service is reported as pending with its recovery command.
+fn restart_resident_services_after_swap(
+    swap_succeeded: bool,
+    skip_services: bool,
+) -> (Vec<ServiceRestartEntry>, Vec<ServiceRestartEntry>) {
+    if !swap_succeeded {
+        return (Vec::new(), Vec::new());
+    }
+
+    let resident_services = defaults::load_config().resident_services;
+    if resident_services.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    if skip_services {
+        let pending = services::pending_when_skipped(&resident_services);
+        warn_pending_resident_services(&pending);
+        return (Vec::new(), pending);
+    }
+
+    log_status!(
+        "upgrade",
+        "Restarting {} binary-resident service(s) to load the new binary...",
+        resident_services.len()
+    );
+
+    let (restarted, pending) =
+        services::restart_resident_services(&resident_services, services::run_restart_command);
+
+    for entry in &restarted {
+        log_status!("upgrade", "  {} restarted", entry.service_id);
+    }
+    warn_pending_resident_services(&pending);
+
+    (restarted, pending)
+}
+
+/// Surface declared resident services that still hold the old binary, with the
+/// exact recovery command, instead of failing the upgrade silently.
+fn warn_pending_resident_services(pending: &[ServiceRestartEntry]) {
+    for entry in pending {
+        let detail = entry.detail.as_deref().unwrap_or("restart required");
+        if entry.restart_command.is_empty() {
+            log_status!(
+                "upgrade",
+                "  WARNING: {} not restarted ({})",
+                entry.service_id,
+                detail,
+            );
+        } else {
+            log_status!(
+                "upgrade",
+                "  WARNING: {} not restarted ({}). Run: {}",
+                entry.service_id,
+                detail,
+                entry.restart_command,
+            );
+        }
+    }
 }
 
 fn source_upgrade_path_for_method(

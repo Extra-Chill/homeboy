@@ -56,6 +56,42 @@ pub struct HomeboyConfig {
     /// or set HOMEBOY_NO_UPDATE_CHECK=1.
     #[serde(default = "default_true")]
     pub update_check: bool,
+
+    /// Long-running services that keep an in-memory copy of the Homeboy binary
+    /// resident and therefore must be restarted after `homeboy upgrade` swaps
+    /// the on-disk binary. These are declared per host/environment in config —
+    /// core ships none by default and hardcodes no service name, unit, or host.
+    ///
+    /// `homeboy upgrade` restarts each declared service after a successful
+    /// binary swap (unless `--no-restart-services` is passed) and reports the
+    /// outcome via `services_restarted` / `services_pending_restart`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resident_services: Vec<ResidentServiceConfig>,
+}
+
+/// A long-running, binary-resident service that must be restarted to pick up a
+/// newly-swapped Homeboy binary.
+///
+/// Intentionally generic and config-driven: a descriptor either names a
+/// `systemd_unit` (restarted with `systemctl restart <unit>`) or supplies an
+/// explicit `restart_command` shell line. No service name, unit, or host is
+/// hardcoded in core — every value comes from the host's own config, keeping
+/// the upgrade flow org/host-agnostic (see #5118).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResidentServiceConfig {
+    /// Stable identifier for the service, used in upgrade result reporting.
+    pub id: String,
+
+    /// systemd unit name (e.g. `homeboy-preview-ingress`). When set and no
+    /// `restart_command` is given, the service is restarted with
+    /// `systemctl restart <unit>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub systemd_unit: Option<String>,
+
+    /// Explicit restart command (shell line) overriding the systemd default.
+    /// Use this for non-systemd supervisors or custom restart logic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_command: Option<String>,
 }
 
 impl Default for HomeboyConfig {
@@ -70,6 +106,7 @@ impl Default for HomeboyConfig {
             release_gate: ReleaseGateConfig::default(),
             artifact_root: None,
             update_check: true,
+            resident_services: Vec::new(),
         }
     }
 }

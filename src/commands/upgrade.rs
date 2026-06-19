@@ -27,6 +27,11 @@ pub struct UpgradeArgs {
     #[arg(long)]
     pub skip_runners: bool,
 
+    /// Skip restarting declared binary-resident services after the binary swap.
+    /// They will be reported as pending with their recovery commands instead.
+    #[arg(long)]
+    pub no_restart_services: bool,
+
     /// Upgrade only the named configured runner. Repeat to target multiple runners.
     #[arg(long = "upgrade-runner", value_name = "RUNNER_ID")]
     pub runners: Vec<String>,
@@ -73,6 +78,7 @@ pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
         method_override,
         args.skip_extensions,
         args.skip_runners,
+        args.no_restart_services,
         &args.runners,
         args.source_path.as_deref(),
     )?;
@@ -185,6 +191,8 @@ mod tests {
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
             extensions_unrefreshed: Vec::new(),
+            services_restarted: Vec::new(),
+            services_pending_restart: Vec::new(),
         }
     }
 }

@@ -79,6 +79,33 @@ pub struct UpgradeResult {
     /// Each entry carries the exact recovery command to bring the clone current.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extensions_unrefreshed: Vec<UnrefreshedExtensionWarning>,
+    /// Long-running, binary-resident services (declared in config) that were
+    /// successfully restarted to pick up the newly-swapped binary. Distinct
+    /// from `restart_required`, which only describes the CLI process itself.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services_restarted: Vec<ServiceRestartEntry>,
+    /// Declared resident services that still hold the old binary and need a
+    /// restart: either because a restart attempt failed, or because the
+    /// upgrade was run with `--no-restart-services`. Each entry carries the
+    /// exact recovery command so the operator can restart it manually.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services_pending_restart: Vec<ServiceRestartEntry>,
+}
+
+/// Outcome of attempting to restart one declared binary-resident service after
+/// an upgrade. Used both for successful restarts (`services_restarted`) and for
+/// services that still need attention (`services_pending_restart`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceRestartEntry {
+    /// Configured service id.
+    pub service_id: String,
+    /// The restart command that was run (or would need to be run).
+    pub restart_command: String,
+    /// Whether the restart succeeded.
+    pub restarted: bool,
+    /// Failure or skip detail when `restarted` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// A symlinked extension in the invoking user's config dir that a privileged
