@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde::Serialize;
@@ -15,7 +15,9 @@ use crate::core::error::{Error, Result};
 
 use super::broker_http;
 use super::capabilities::RunnerCapabilityPreflight;
-use super::execution::{exec_worker_local, RunnerExecOptions};
+use super::execution::{exec_worker_local_until_cancelled, RunnerExecOptions};
+
+const BROKER_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct ReverseRunnerWorkerOptions {
@@ -285,8 +287,8 @@ fn run_once_output(
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
     // starting execution, so a missing tool fails before remote dispatch instead
-    // of mid-run (#5093). `exec_worker_local` runs this preflight before handing
-    // the claimed job directly to the local worker runtime.
+    // of mid-run (#5093). The local worker execution path runs this preflight
+    // before handing the claimed job directly to the local runtime.
     let capability_preflight = reverse_worker_capability_preflight(&claim.request);
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -299,7 +301,9 @@ fn run_once_output(
             result,
         )
     };
-    let exec_result = exec_worker_local(
+    let mut cancel_seen = false;
+    let mut last_cancel_poll = Instant::now();
+    let exec_result = exec_worker_local_until_cancelled(
         &options.runner_id,
         RunnerExecOptions {
             cwd: claim.request.cwd.clone(),
@@ -314,6 +318,16 @@ fn run_once_output(
             capability_preflight,
             required_extensions: Vec::new(),
             require_paths: claim.request.require_paths.clone(),
+        },
+        || {
+            if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {
+                return cancel_seen;
+            }
+            last_cancel_poll = Instant::now();
+            cancel_seen = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)
+                .map(|job| job.is_some())
+                .unwrap_or(false);
+            cancel_seen
         },
     );
     let (exec_output, exit_code) = match exec_result {
@@ -942,6 +956,82 @@ mod tests {
             assert_eq!(exit_code, 0);
             let job = output.job.expect("job");
             assert_eq!(job.status, JobStatus::Cancelled);
+            handle.join().expect("mock broker joins");
+            let seen_paths = seen_paths.lock().expect("seen paths");
+            assert!(!seen_paths.iter().any(|path| path.ends_with("/finish")));
+            let events = store.events(job.id).expect("events");
+            assert!(!events
+                .iter()
+                .any(|event| event.kind == JobEventKind::Result));
+        });
+    }
+
+    #[test]
+    fn reverse_worker_interrupts_running_job_when_broker_cancel_is_observed() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(
+                r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+                false,
+            )
+            .expect("create runner");
+            crate::core::runner::merge(
+                Some("lab"),
+                &serde_json::json!({
+                    "policy": RunnerPolicy {
+                        allow_raw_exec: Some(true),
+                        workspace_roots: vec!["/tmp".to_string()],
+                        allowed_commands: vec!["sh".to_string()],
+                        ..Default::default()
+                    }
+                })
+                .to_string(),
+                &[],
+            )
+            .expect("set policy");
+            let cwd = std::env::temp_dir().join(format!(
+                "homeboy-reverse-worker-cancel-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&cwd).expect("create test cwd");
+            let marker = cwd.join("should-not-exist");
+            let store = JobStore::default();
+            store
+                .submit_remote_runner_job(RemoteRunnerJobRequest {
+                    runner_id: "lab".to_string(),
+                    project_id: None,
+                    operation: "runner.exec".to_string(),
+                    command: vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        format!("sleep 1; touch {}", marker.display()),
+                    ],
+                    cwd: Some(cwd.display().to_string()),
+                    env: Default::default(),
+                    secret_env_names: Vec::new(),
+                    capture_patch: false,
+                    source_snapshot: None,
+                    require_paths: Vec::new(),
+                    metadata: None,
+                })
+                .expect("submit job");
+            let seen_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (broker_url, handle) = spawn_cancelling_on_second_snapshot_broker(
+                store.clone(),
+                5,
+                Some(seen_paths.clone()),
+            );
+            write_reverse_controller_session(&broker_url);
+
+            let (output, exit_code) =
+                run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+            assert_eq!(exit_code, 0);
+            let job = output.job.expect("job");
+            assert_eq!(job.status, JobStatus::Cancelled);
+            assert!(
+                !marker.exists(),
+                "cancelled reverse worker job left the child command running"
+            );
             handle.join().expect("mock broker joins");
             let seen_paths = seen_paths.lock().expect("seen paths");
             assert!(!seen_paths.iter().any(|path| path.ends_with("/finish")));
