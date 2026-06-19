@@ -673,6 +673,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> Json
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_raw_exec(
     id: String,
     cwd: Option<String>,
@@ -1066,6 +1067,7 @@ fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec(
     runner_id: &str,
     cwd: Option<String>,
@@ -1329,8 +1331,8 @@ fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
     let runner = runner::load(runner_id)?;
     let effective_env = runner::effective_env(runner_id)?;
     let env = effective_env
-        .into_iter()
-        .map(|(key, _value)| (key, REDACTED_ENV_VALUE.to_string()))
+        .into_keys()
+        .map(|key| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
     let secret_env = runner
         .secret_env
@@ -1590,7 +1592,7 @@ mod tests {
 
     #[test]
     fn read_bounded_marks_truncated_when_source_exceeds_limit() {
-        let source = vec![b'x'; 16];
+        let source = [b'x'; 16];
         let (bytes, capture) = read_bounded(&source[..], 4).expect("read bounded");
 
         assert_eq!(bytes.len(), 4);
