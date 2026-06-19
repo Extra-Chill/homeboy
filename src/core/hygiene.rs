@@ -108,7 +108,10 @@ pub struct DependencyHygieneOptions {
     pub allow_stale: bool,
 }
 
-pub fn require_dependency_hygiene_for_source(
+// Thin wrapper over `require_dependency_hygiene_for_source_with_settings`, kept for
+// callers that do not need settings; currently exercised by tests.
+#[allow(dead_code)]
+pub(crate) fn require_dependency_hygiene_for_source(
     source_path: &Path,
     extension_path: Option<&Path>,
     options: DependencyHygieneOptions,
