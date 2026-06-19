@@ -400,6 +400,7 @@ fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_runner_resident_lab_offload(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -539,6 +540,7 @@ struct LabOffloadWorkspaceStage {
     rig_component_path_overrides: Vec<(String, String)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_lab_offload_workspace_stage(
     request: &LabOffloadRequest<'_>,
     contract: &LabOffloadCommand,
@@ -1587,6 +1589,7 @@ struct AgentTaskProviderSelection {
     selector: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preflight_agent_task_provider_on_runner(
     runner_id: &str,
     command_prefix: &[String],
@@ -1915,6 +1918,7 @@ fn provider_available(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_task_provider_selection_preflight_error(
     runner_id: &str,
     selection: &AgentTaskProviderSelection,
