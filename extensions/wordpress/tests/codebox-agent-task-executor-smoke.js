@@ -349,7 +349,7 @@ assert.equal(provider.backend, 'codebox');
 assert.equal(provider.command, 'node {{runtime_path}}/scripts/agent/homeboy-codebox-agent-task-executor.cjs');
 assert.equal(provider.request_schema, 'homeboy/agent-task-request/v1');
 assert.equal(provider.outcome_schema, 'homeboy/agent-task-outcome/v1');
-assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'executor.runtime', 'instructions']);
+assert.deepEqual(provider.request_required_fields, ['schema', 'task_id', 'executor.backend', 'instructions']);
 assert.deepEqual(provider.outcome_statuses, AGENT_TASK_OUTCOME_STATUSES);
 assert.deepEqual(provider.failure_classifications, AGENT_TASK_FAILURE_CLASSIFICATIONS);
 assert.deepEqual(provider.redacted_metadata_keys, AGENT_TASK_REDACTED_METADATA_KEYS);

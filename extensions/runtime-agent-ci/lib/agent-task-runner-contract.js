@@ -9,25 +9,34 @@ function agentTaskRunnerSpec(options = {}) {
   }
 
   const backend = requiredString(options.backend, 'backend');
-  const runtime = requiredString(options.runtime || options.runtimeId || options.runtime_id, 'runtime');
+  const runtime = options.runtime || options.runtimeId || options.runtime_id;
   const taskTimeoutSeconds = options.taskTimeoutSeconds || options.task_timeout_seconds;
+  const timeoutMs = options.timeoutMs || options.timeout_ms || secondsToMs(taskTimeoutSeconds);
+  const maxRuntimeMs = options.maxRuntimeMs || options.max_runtime_ms;
   const limits = stripUndefined({
-    ...(taskTimeoutSeconds ? { task_timeout_seconds: taskTimeoutSeconds } : {}),
     ...(options.limits || {}),
+    ...(timeoutMs ? { timeout_ms: timeoutMs } : {}),
+    ...(maxRuntimeMs ? { max_runtime_ms: maxRuntimeMs } : {}),
+    // Compatibility for existing runtime adapters that still read seconds.
+    ...(taskTimeoutSeconds ? { task_timeout_seconds: taskTimeoutSeconds } : {}),
   });
+  const artifactDeclarations = normalizeArray(options.artifactDeclarations || options.artifact_declarations);
+  const expectedArtifacts = normalizeArray(options.expectedArtifacts || options.expected_artifacts);
 
   const spec = stripUndefined({
     schema: AGENT_TASK_RUNNER_SPEC_SCHEMA,
     executor: stripUndefined({
       backend,
-      runtime,
+      ...(runtime ? { runtime } : {}),
       ...(normalizeArray(options.secretEnv || options.secret_env).length > 0
         ? { secret_env: normalizeArray(options.secretEnv || options.secret_env) }
         : {}),
       config: executorConfig,
     }),
     limits,
-    expected_artifacts: normalizeArray(options.expectedArtifacts || options.expected_artifacts),
+    artifact_declarations: artifactDeclarations,
+    // Compatibility for active workflows that still submit artifact names only.
+    expected_artifacts: expectedArtifacts,
   });
 
   validateAgentTaskRunnerSpec(spec);
@@ -39,6 +48,7 @@ function agentTaskRequestFromRunnerSpec(options = {}) {
   return stripUndefined({
     executor: runnerSpec.executor,
     limits: runnerSpec.limits,
+    artifact_declarations: runnerSpec.artifact_declarations,
     expected_artifacts: runnerSpec.expected_artifacts,
   });
 }
@@ -54,7 +64,9 @@ function validateAgentTaskRunnerSpec(spec) {
     throw new Error('runner spec executor is required.');
   }
   requiredString(spec.executor.backend, 'runner spec executor.backend');
-  requiredString(spec.executor.runtime, 'runner spec executor.runtime');
+  if (spec.executor.runtime !== undefined) {
+    requiredString(spec.executor.runtime, 'runner spec executor.runtime');
+  }
   if (!spec.executor.config || typeof spec.executor.config !== 'object' || Array.isArray(spec.executor.config)) {
     throw new Error('runner spec executor.config is required.');
   }
@@ -66,6 +78,9 @@ function validateAgentTaskRunnerSpec(spec) {
   }
   if (spec.expected_artifacts !== undefined && !Array.isArray(spec.expected_artifacts)) {
     throw new Error('runner spec expected_artifacts must be an array.');
+  }
+  if (spec.artifact_declarations !== undefined && !Array.isArray(spec.artifact_declarations)) {
+    throw new Error('runner spec artifact_declarations must be an array.');
   }
   return spec;
 }
@@ -88,6 +103,11 @@ function stripUndefined(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined)
   );
+}
+
+function secondsToMs(value) {
+  const seconds = Number(value || 0);
+  return seconds > 0 ? seconds * 1000 : undefined;
 }
 
 module.exports = {

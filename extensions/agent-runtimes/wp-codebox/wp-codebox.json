@@ -54,7 +54,6 @@
         "schema",
         "task_id",
         "executor.backend",
-        "executor.runtime",
         "instructions"
       ],
       "outcome_statuses": [
@@ -69,6 +68,7 @@
       ],
       "failure_classifications": [
         "provider",
+        "transient",
         "timeout",
         "policy_denied",
         "capability_missing",
