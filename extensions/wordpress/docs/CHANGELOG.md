@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.48] - 2026-06-19
+
+### Changed
+- Add WordPress DB inventory artifacts
+
 ## [3.7.47] - 2026-06-19
 
 ### Changed
