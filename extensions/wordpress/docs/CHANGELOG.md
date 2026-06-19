@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.45] - 2026-06-19
+
+### Changed
+- Profile REST route DB queries
+
 ## [3.7.44] - 2026-06-19
 
 ### Changed
