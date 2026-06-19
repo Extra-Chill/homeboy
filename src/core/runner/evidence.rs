@@ -235,7 +235,9 @@ pub fn mirror_reverse_broker_evidence(
     let patch = mirrored_reverse_patch_result(
         &store,
         &run.id,
-        result.get("patch").or_else(|| result.pointer("/data/patch")),
+        result
+            .get("patch")
+            .or_else(|| result.pointer("/data/patch")),
     )?;
     Ok(Some(MirroredDaemonEvidence { run, patch }))
 }
@@ -510,7 +512,9 @@ fn reverse_broker_artifact_record(
         viewer_url: None,
         viewer_links: Vec::new(),
         sha256: artifact.sha256.clone(),
-        size_bytes: artifact.size_bytes.and_then(|size| i64::try_from(size).ok()),
+        size_bytes: artifact
+            .size_bytes
+            .and_then(|size| i64::try_from(size).ok()),
         mime: artifact.mime.clone(),
         metadata_json: json!({
             "runner_id": runner.id.clone(),
