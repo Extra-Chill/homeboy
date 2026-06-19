@@ -34,6 +34,12 @@ pub struct ObservationDbStatus {
     pub table_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunArtifactRecord {
+    pub run: RunRecord,
+    pub artifact: ArtifactRecord,
+}
+
 pub struct ObservationStore {
     connection: Connection,
     path: PathBuf,
@@ -751,6 +757,92 @@ impl ObservationStore {
         Ok(artifacts_by_run)
     }
 
+    pub fn list_run_artifacts(
+        &self,
+        filter: RunListFilter,
+        started_since: Option<&str>,
+    ) -> Result<Vec<RunArtifactRecord>> {
+        if let Some(started_since) = started_since {
+            validate_required("started_since", started_since)?;
+            let mut statement = self
+                .connection
+                .prepare(
+                    r#"
+                    SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at,
+                           r.status, r.command, r.cwd, r.homeboy_version, r.git_sha,
+                           r.rig_id, r.metadata_json,
+                           a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
+                           a.size_bytes, a.mime, a.metadata_json, a.created_at
+                    FROM runs r
+                    INNER JOIN artifacts a ON a.run_id = r.id
+                    WHERE r.started_at >= ?1
+                      AND (?2 IS NULL OR r.kind = ?2)
+                      AND (?3 IS NULL OR r.component_id = ?3)
+                      AND (?4 IS NULL OR r.status = ?4)
+                      AND (?5 IS NULL OR r.rig_id = ?5)
+                    ORDER BY r.started_at DESC, a.created_at ASC
+                    "#,
+                )
+                .map_err(sqlite_error("prepare joined run artifact records"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        started_since,
+                        filter.kind.as_deref(),
+                        filter.component_id.as_deref(),
+                        filter.status.as_deref(),
+                        filter.rig_id.as_deref(),
+                    ],
+                    row_to_run_artifact_record,
+                )
+                .map_err(sqlite_error("list joined run artifact records"))?;
+
+            return collect_rows(rows, "collect joined run artifact records");
+        }
+
+        let limit = filter.limit.unwrap_or(100).clamp(1, 1000);
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                WITH selected_runs AS (
+                    SELECT rowid AS run_rowid, id, kind, component_id, started_at, finished_at,
+                           status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json
+                    FROM runs
+                    WHERE (?1 IS NULL OR kind = ?1)
+                      AND (?2 IS NULL OR component_id = ?2)
+                      AND (?3 IS NULL OR status = ?3)
+                      AND (?4 IS NULL OR rig_id = ?4)
+                    ORDER BY started_at DESC, rowid DESC
+                    LIMIT ?5
+                )
+                SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at,
+                       r.status, r.command, r.cwd, r.homeboy_version, r.git_sha,
+                       r.rig_id, r.metadata_json,
+                       a.id, a.run_id, a.kind, a.artifact_type, a.path, a.sha256,
+                       a.size_bytes, a.mime, a.metadata_json, a.created_at
+                FROM selected_runs r
+                INNER JOIN artifacts a ON a.run_id = r.id
+                ORDER BY r.started_at DESC, r.run_rowid DESC, a.created_at ASC
+                "#,
+            )
+            .map_err(sqlite_error("prepare joined run artifact records"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    filter.kind.as_deref(),
+                    filter.component_id.as_deref(),
+                    filter.status.as_deref(),
+                    filter.rig_id.as_deref(),
+                    limit,
+                ],
+                row_to_run_artifact_record,
+            )
+            .map_err(sqlite_error("list joined run artifact records"))?;
+
+        collect_rows(rows, "collect joined run artifact records")
+    }
+
     pub fn get_artifact(&self, artifact_id: &str) -> Result<Option<ArtifactRecord>> {
         validate_required("artifact_id", artifact_id)?;
         self.connection
@@ -1164,25 +1256,39 @@ fn row_to_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
 }
 
 fn row_to_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRecord> {
+    row_to_artifact_record_at(row, 0)
+}
+
+fn row_to_artifact_record_at(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<ArtifactRecord> {
     Ok(ArtifactRecord {
-        id: row.get(0)?,
-        run_id: row.get(1)?,
-        kind: row.get(2)?,
-        artifact_type: row.get(3)?,
-        path: row.get(4)?,
-        url: if row.get_ref(3)?.as_str()? == "url" {
-            Some(row.get(4)?)
+        id: row.get(offset)?,
+        run_id: row.get(offset + 1)?,
+        kind: row.get(offset + 2)?,
+        artifact_type: row.get(offset + 3)?,
+        path: row.get(offset + 4)?,
+        url: if row.get_ref(offset + 3)?.as_str()? == "url" {
+            Some(row.get(offset + 4)?)
         } else {
             None
         },
         public_url: None,
         viewer_url: None,
         viewer_links: Vec::new(),
-        sha256: row.get(5)?,
-        size_bytes: row.get(6)?,
-        mime: row.get(7)?,
-        metadata_json: parse_metadata(row.get(8)?)?,
-        created_at: row.get(9)?,
+        sha256: row.get(offset + 5)?,
+        size_bytes: row.get(offset + 6)?,
+        mime: row.get(offset + 7)?,
+        metadata_json: parse_metadata(row.get(offset + 8)?)?,
+        created_at: row.get(offset + 9)?,
+    })
+}
+
+fn row_to_run_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunArtifactRecord> {
+    Ok(RunArtifactRecord {
+        run: row_to_run_record(row)?,
+        artifact: row_to_artifact_record_at(row, 12)?,
     })
 }
 
