@@ -435,6 +435,65 @@ assert.deepEqual(repoLoopBundleTaskInput.artifact_declarations, [{
   required: true,
 }]);
 
+const controllerClientContextArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'controller-client-context-artifacts-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a controller workflow with domain artifact declarations in client context.',
+  dispatch: {
+    client_context: JSON.stringify({
+      artifacts: [{
+        artifact_id: 'concept_packet',
+        kind: 'wp-site-generator/ConceptPacket/v1',
+        required: true,
+      }],
+    }),
+  },
+  inputs: {
+    ability_request: { name: 'agents/run-runtime-package' },
+  },
+});
+
+assert.deepEqual(controllerClientContextArtifactsTaskInput.artifact_declarations, [{
+  schema: 'wp-codebox/artifact-declaration/v1',
+  name: 'concept_packet',
+  artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+  required: true,
+}]);
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
+assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.engine_data_outputs, {
+  concept_packet: 'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload',
+});
+
+const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'provider-and-controller-artifacts-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  instructions: 'Run a controller workflow with provider and domain artifact declarations.',
+  artifact_declarations: [{
+    name: 'patch',
+    required: true,
+  }],
+  dispatch: {
+    client_context: JSON.stringify({
+      artifacts: [{
+        artifact_id: 'concept_packet',
+        kind: 'wp-site-generator/ConceptPacket/v1',
+        required: true,
+      }],
+    }),
+  },
+  inputs: {
+    ability_request: { name: 'agents/run-runtime-package' },
+  },
+});
+assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['patch', 'concept_packet']);
+assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['patch', 'concept_packet']);
+assert.equal(
+  providerAndControllerArtifactsTaskInput.runtime_task.input.engine_data_outputs.concept_packet,
+  'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload'
+);
+
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-generic-ability-task-1',

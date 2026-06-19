@@ -116,7 +116,17 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
     }
   : null;
 const runtimeTaskResult = isRuntimeTask
-  ? {
+  ? (input.runtime_task.ability === 'agents/run-runtime-package' && process.env.FIXTURE_WP_CODEBOX_CHAT_REPLY
+    ? {
+        agent_runtime: {
+          success: true,
+          input: input.runtime_task.input || {},
+          result: {
+            reply: '## Commerce Concept Packet\\n\\nA focused commerce concept packet.',
+          },
+        },
+      }
+    : {
       agent_runtime: {
         success: true,
         input: input.runtime_task.input || {},
@@ -136,7 +146,7 @@ const runtimeTaskResult = isRuntimeTask
           }
         }
       }
-    }
+    })
   : null;
 const agentResult = isRuntimeTask
   ? runtimeTaskResult
@@ -652,6 +662,39 @@ try {
   assert.equal(failedRuntimeMetadataOutput.diagnostics.some((diagnostic) => diagnostic.class === 'agent_runtime.failed'), true);
   assert.equal(failedRuntimeMetadataOutput.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.required_typed_artifacts_missing'), true);
   assert.equal(failedRuntimeMetadataOutput.session.status, 'failed');
+
+  const chatReplyTypedArtifactResult = spawnSync(process.execPath, [
+    wpCodeboxTaskRunner,
+    '--wp-codebox-bin', fixtureWpCodebox,
+  ], {
+    encoding: 'utf8',
+    input: JSON.stringify({
+      ...request,
+      runtime_task: {
+        ability: 'agents/run-runtime-package',
+        input: { required_artifacts: ['concept_packet'] },
+      },
+      artifact_declarations: [{
+        schema: 'wp-codebox/artifact-declaration/v1',
+        name: 'concept_packet',
+        type: 'ConceptPacket',
+        artifact_schema: 'example/concept-packet/v1',
+        required: true,
+      }],
+    }),
+    env: {
+      ...process.env,
+      FIXTURE_WP_CODEBOX_CAPTURE: path.join(root, 'capture-chat-reply-typed-artifact.json'),
+      FIXTURE_WP_CODEBOX_CHAT_REPLY: '1',
+      OPENCODE_API_KEY: 'redacted-test-key',
+    },
+  });
+  assert.equal(chatReplyTypedArtifactResult.status, 0, chatReplyTypedArtifactResult.stderr || chatReplyTypedArtifactResult.stdout);
+  const chatReplyTypedArtifactOutput = JSON.parse(chatReplyTypedArtifactResult.stdout);
+  assert.equal(chatReplyTypedArtifactOutput.success, true);
+  assert.equal(chatReplyTypedArtifactOutput.outputs.typed_artifacts.concept_packet.artifact_schema, 'example/concept-packet/v1');
+  assert.match(chatReplyTypedArtifactOutput.outputs.typed_artifacts.concept_packet.payload.content, /Commerce Concept Packet/);
+  assert.equal(chatReplyTypedArtifactOutput.diagnostics.some((diagnostic) => diagnostic.class === 'wp-codebox.required_typed_artifacts_missing'), false);
 
   const codexCapturePath = path.join(root, 'capture-codex.json');
   const codexSecretEnv = [

@@ -1519,6 +1519,45 @@ function transcriptTypedArtifactsFromAgentResult(input, agentResult, config = {}
     .filter(([, artifact]) => artifact));
 }
 
+function replyTextFromAgentResult(agentResult) {
+  const candidates = [
+    agentResult?.result?.reply,
+    agentResult?.reply,
+    agentResult?.metadata?.result?.reply,
+    agentResult?.outputs?.reply,
+    agentResult?.outputs?.text,
+    agentResult?.outputs?.content,
+  ];
+  return candidates.find((candidate) => typeof candidate === 'string' && candidate.trim() !== '') || '';
+}
+
+function replyTypedArtifactsFromAgentResult(input, agentResult, config = {}) {
+  const reply = replyTextFromAgentResult(agentResult);
+  if (!reply) {
+    return {};
+  }
+  return Object.fromEntries(requiredArtifactDeclarations(input, config)
+    .filter((declaration) => !isTranscriptArtifactDeclaration(declaration))
+    .map((declaration) => {
+      const name = artifactDeclarationName(declaration);
+      if (!name) {
+        return null;
+      }
+      return [name, normalizeTypedArtifactEntry(name, {
+        name,
+        type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || name,
+        artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema,
+        payload: {
+          content: reply,
+          format: 'markdown',
+        },
+        provenance: { source: 'agent_reply' },
+      })];
+    })
+    .filter(Boolean)
+    .filter(([, artifact]) => artifact));
+}
+
 function sandboxToolPolicy(input, allowedTools) {
   const explicit = input.parent_request?.sandbox_tool_policy
     || input.parent_request?.sandboxToolPolicy
@@ -1639,6 +1678,7 @@ function normalizeAgentTaskRun(input, result) {
       outputs: mergeTypedArtifactOutputs(
         plainObject(agentResult.outputs) ? agentResult.outputs : {},
         transcriptTypedArtifactsFromAgentResult(input, agentResult, config),
+        replyTypedArtifactsFromAgentResult(input, agentResult, config),
       ),
     };
   }

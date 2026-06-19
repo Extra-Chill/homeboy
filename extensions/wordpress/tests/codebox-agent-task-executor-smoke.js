@@ -2068,6 +2068,88 @@ assert.equal(projectedTypedArtifactBundleOutcome.outputs.typed_artifacts.example
 assert.equal(projectedTypedArtifactBundleOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
 assert.equal(projectedTypedArtifactBundleOutcome.artifacts.some((artifact) => artifact.kind === 'typed-bundle-output' && artifact.path === '/tmp/wp-codebox-artifacts/projected-review.json'), true);
 
+const engineDataTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'engine-data-typed-artifact-bundle-task-123',
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'concept_packet',
+    type: 'ConceptPacket',
+    artifact_schema: 'example/concept-packet/v1',
+    required: true,
+  }],
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  metadata: {
+    agent_runtime: {
+      workload: {
+        scenarios: [{
+          id: 'agent-bundle',
+          metadata: {
+            engine_data: {
+              outputs: {
+                typed_artifacts: {
+                  concept_packet: {
+                    schema: 'example/concept-packet/v1',
+                    artifact: 'ConceptPacket',
+                    payload: { title: 'Projected concept' },
+                  },
+                },
+              },
+            },
+          },
+        }],
+      },
+    },
+  },
+});
+assert.equal(engineDataTypedArtifactBundleOutcome.status, 'succeeded');
+assert.equal(engineDataTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.artifact_schema, 'example/concept-packet/v1');
+assert.equal(engineDataTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.payload.title, 'Projected concept');
+assert.equal(engineDataTypedArtifactBundleOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+
+const replyTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
+  ...request,
+  task_id: 'reply-typed-artifact-bundle-task-123',
+  artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'concept_packet',
+    type: 'ConceptPacket',
+    artifact_schema: 'example/concept-packet/v1',
+    required: true,
+  }],
+  executor: { backend: 'codebox' },
+}, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  metadata: {
+    agent_runtime: {
+      workload: {
+        id: 'runtime-task',
+        success: true,
+        status: 'completed',
+        outputs: {},
+        metadata: {
+          result: {
+            reply: '## Commerce Concept Packet\n\nA focused commerce concept packet.',
+          },
+        },
+      },
+    },
+  },
+});
+assert.equal(replyTypedArtifactBundleOutcome.status, 'succeeded');
+assert.equal(replyTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.artifact_schema, 'example/concept-packet/v1');
+assert.equal(replyTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.artifact_id, 'concept_packet');
+assert.equal(replyTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.kind, 'example/concept-packet/v1');
+assert.match(replyTypedArtifactBundleOutcome.outputs.typed_artifacts.concept_packet.payload.content, /Commerce Concept Packet/);
+assert.equal(replyTypedArtifactBundleOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
+assert.equal(replyTypedArtifactBundleOutcome.typed_artifacts.some((artifact) => artifact.name === 'concept_packet'), true);
+assert.equal(replyTypedArtifactBundleOutcome.typed_artifacts.find((artifact) => artifact.name === 'concept_packet').artifact_id, 'concept_packet');
+assert.equal(replyTypedArtifactBundleOutcome.typed_artifacts.find((artifact) => artifact.name === 'concept_packet').kind, 'example/concept-packet/v1');
+
 const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
   task_id: 'failed-projected-typed-artifact-bundle-task-123',
