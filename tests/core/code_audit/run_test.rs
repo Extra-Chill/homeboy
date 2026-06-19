@@ -103,6 +103,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
             ratchet: false,
         },
         changed_since: None,
+        precomputed_changed_files: None,
         json_summary: false,
         include_fixability,
     }

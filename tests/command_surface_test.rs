@@ -106,7 +106,7 @@ fn agent_task_controller_resume_dispatch_defaults_parse() {
         "resume",
         "loop-1",
         "--dispatch-backend",
-        "sandbox-runner",
+        "sandbox-provider",
         "--dispatch-selector",
         "homeboy-lab",
         "--dispatch-model",

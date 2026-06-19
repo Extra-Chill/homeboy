@@ -178,6 +178,14 @@ pub fn detect_drift(component: &str, opts: &DriftOptions) -> Result<DriftReport>
     // Step 1: Get changed production files from git diff
     let changed_files = get_changed_files(&opts.root, &opts.since)?;
 
+    detect_drift_for_changed_files(component, opts, &changed_files)
+}
+
+pub fn detect_drift_for_changed_files(
+    component: &str,
+    opts: &DriftOptions,
+    changed_files: &[String],
+) -> Result<DriftReport> {
     // Filter to production files only (exclude tests)
     let prod_files: Vec<&str> = changed_files
         .iter()

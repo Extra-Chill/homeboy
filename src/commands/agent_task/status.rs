@@ -223,9 +223,9 @@ fn class_priority(class: &str) -> u8 {
 }
 
 /// Recursively walk a provider-specific JSON value looking for `diagnostics`
-/// arrays of objects carrying a `message` (and optional `class`). This surfaces
-/// nested diagnostics without the renderer needing to know the exact provider
-/// path.
+/// arrays of objects carrying a `message` (and optional `class`). This is how
+/// provider-owned runtime diagnostics get surfaced without the renderer needing
+/// to know the exact provider path.
 fn collect_nested_diagnostics(
     task_id: &str,
     value: &Value,

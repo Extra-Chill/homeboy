@@ -16,7 +16,7 @@ In JSON output mode, the default `show` output is returned as JSON (with a `cont
 
 ## Subcommands
 
-### Default (show)
+### Default
 
 ```sh
 homeboy changelog
@@ -29,7 +29,7 @@ Shows the embedded Homeboy CLI changelog documentation (from `docs/changelog.md`
 
 Options:
 
-- `--self`: Show Homeboy's own changelog (release notes) instead of a component's changelog
+- `--self`: explicit alias for the default Homeboy changelog output
 
 This prints raw markdown to stdout.
 
@@ -87,7 +87,7 @@ This section applies only when JSON output is used.
 
 ## Errors
 
-- `show`: errors if embedded docs do not contain `changelog`, or if the component's changelog path cannot be resolved (when a component ID is provided)
+- `show <component_id>`: errors if the component's changelog path cannot be resolved
 
 ## Related
 

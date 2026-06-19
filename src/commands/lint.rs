@@ -56,6 +56,9 @@ pub struct LintArgs {
     #[arg(long, conflicts_with = "changed_only")]
     pub changed_since: Option<String>,
 
+    #[arg(skip)]
+    pub precomputed_changed_files: Option<Vec<String>>,
+
     /// Run using env from a single extension-declared CI lint job.
     #[arg(long, value_name = "ID", conflicts_with = "fix")]
     pub ci_job: Option<String>,
@@ -217,6 +220,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             glob: args.glob.clone(),
             changed_only: args.changed_only,
             changed_since: args.changed_since.clone(),
+            precomputed_changed_files: args.precomputed_changed_files.clone(),
             errors_only: args.errors_only,
             sniffs: args.sniffs.clone(),
             exclude_sniffs: args.exclude_sniffs.clone(),
