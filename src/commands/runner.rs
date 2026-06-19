@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn read_bounded_marks_truncated_when_source_exceeds_limit() {
-        let source = vec![b'x'; 16];
+        let source = [b'x'; 16];
         let (bytes, capture) = read_bounded(&source[..], 4).expect("read bounded");
 
         assert_eq!(bytes.len(), 4);
