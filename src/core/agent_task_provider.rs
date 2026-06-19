@@ -1493,12 +1493,55 @@ fn select_provider<'a>(
     )
 }
 
-pub(crate) fn provider_available_for_backend(
-    providers: &[AgentTaskExecutorProvider],
+/// Structured outcome of resolving a `--backend`/`--selector` request against a
+/// concrete provider list. This is the single source of truth shared by every
+/// caller that asks "can this backend/selector run here?" — execution-time
+/// selection, the local availability check, and the Lab runner preflight. By
+/// returning a typed reason (rather than a bare `Option`/`bool`) the preflight
+/// can explain *why* a provider that `agent-task providers` lists is still not
+/// selectable, instead of emitting a misleading "availability is false".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderResolution<'a> {
+    /// Exactly one provider matched the backend/selector.
+    Resolved(&'a AgentTaskExecutorProvider),
+    /// No provider matched the backend either exactly or via extension alias.
+    NotFound,
+    /// Multiple providers share `extension_id == backend` and no selector
+    /// disambiguated them, so the alias is ambiguous. The candidate provider
+    /// ids are surfaced so callers can tell the operator which `--selector`
+    /// values would resolve it.
+    AmbiguousExtensionAlias { candidate_ids: Vec<String> },
+    /// One or more providers matched the backend/extension alias, but the
+    /// supplied selector did not match any of them. The selectable provider
+    /// ids are surfaced so the operator can correct the `--selector`.
+    SelectorMismatch { available_ids: Vec<String> },
+}
+
+impl<'a> ProviderResolution<'a> {
+    pub(crate) fn resolved(self) -> Option<&'a AgentTaskExecutorProvider> {
+        match self {
+            ProviderResolution::Resolved(provider) => Some(provider),
+            _ => None,
+        }
+    }
+}
+
+/// Resolve a backend/selector request against a provider list, returning a
+/// structured outcome. This is the shared resolution contract; execution-time
+/// `select_provider`, the local availability check, and the Lab preflight all
+/// funnel through here so they can never disagree about the same provider list.
+pub(crate) fn resolve_provider_for_backend<'a>(
+    providers: &'a [AgentTaskExecutorProvider],
     backend: &str,
     selector: Option<&str>,
-) -> bool {
-    select_provider_by_backend(providers, backend, selector).is_some()
+) -> ProviderResolution<'a> {
+    if let Some(provider) = providers
+        .iter()
+        .find(|provider| provider_matches_exact_backend(provider, backend, selector))
+    {
+        return ProviderResolution::Resolved(provider);
+    }
+    resolve_provider_by_extension_alias(providers, backend, selector)
 }
 
 fn select_provider_by_backend<'a>(
@@ -1506,10 +1549,7 @@ fn select_provider_by_backend<'a>(
     backend: &str,
     selector: Option<&str>,
 ) -> Option<&'a AgentTaskExecutorProvider> {
-    providers
-        .iter()
-        .find(|provider| provider_matches_exact_backend(provider, backend, selector))
-        .or_else(|| select_provider_by_extension_alias(providers, backend, selector))
+    resolve_provider_for_backend(providers, backend, selector).resolved()
 }
 
 fn provider_matches_exact_backend(
@@ -1520,22 +1560,45 @@ fn provider_matches_exact_backend(
     provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
 }
 
-fn select_provider_by_extension_alias<'a>(
+fn resolve_provider_by_extension_alias<'a>(
     providers: &'a [AgentTaskExecutorProvider],
     backend: &str,
     selector: Option<&str>,
-) -> Option<&'a AgentTaskExecutorProvider> {
-    let mut matches = providers
+) -> ProviderResolution<'a> {
+    let alias_matches: Vec<&AgentTaskExecutorProvider> = providers
         .iter()
-        .filter(|provider| provider.extension_id.as_deref() == Some(backend));
-    let provider = matches.next()?;
-    if matches.next().is_some() {
-        return None;
+        .filter(|provider| provider.extension_id.as_deref() == Some(backend))
+        .collect();
+
+    if alias_matches.is_empty() {
+        return ProviderResolution::NotFound;
     }
-    if selector.is_none_or(|selector| provider.id == selector) {
-        Some(provider)
-    } else {
-        None
+
+    match selector {
+        None => {
+            if alias_matches.len() == 1 {
+                ProviderResolution::Resolved(alias_matches[0])
+            } else {
+                ProviderResolution::AmbiguousExtensionAlias {
+                    candidate_ids: alias_matches
+                        .iter()
+                        .map(|provider| provider.id.clone())
+                        .collect(),
+                }
+            }
+        }
+        Some(selector) => match alias_matches
+            .iter()
+            .find(|provider| provider.id == selector)
+        {
+            Some(provider) => ProviderResolution::Resolved(provider),
+            None => ProviderResolution::SelectorMismatch {
+                available_ids: alias_matches
+                    .iter()
+                    .map(|provider| provider.id.clone())
+                    .collect(),
+            },
+        },
     }
 }
 
