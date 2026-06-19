@@ -50,4 +50,15 @@ node wordpress/scripts/agent/homeboy-generic-fanout-reconcile.cjs \
 
 Records are matched by `id`, `task_id`, `sandbox_session_id`, or `group_key`. Successful statuses default to `completed`, `success`, and `passed`; override with `success_statuses` in config. Outcomes default to the record `outcome` field; override with `outcome_path`.
 
+## Finding Packets
+
+`wordpress/lib/generic-fanout-reconcile-workflow.js` also exports helpers for diagnostic/finding packet inputs:
+
+- `normalizeFindingPacketItems(packets, policy)` flattens packet-level `findings` or `diagnostics` arrays into generic items with stable packet/finding IDs.
+- `materializeFindingPacketFanoutConfig({ packets, policy, ...config })` applies policy-driven grouping and returns the generic config/groups/items needed by the planner.
+- `createFindingPacketFanoutPlan(input)` creates the fanout plan directly from packets.
+- `createFindingPacketReconcileInput({ packets, policy, plan, records })` normalizes executed task records into the input shape accepted by `createGenericFanoutReconcileResult()`.
+
+Grouping policy is data-driven. By default packets group by `finding.type` and `finding.severity`; callers can pass `group_by`/`groupBy` path arrays or a `group_key_template` such as `{{finding.type}}:{{finding.severity}}`. The default task request carries generic `item_ids`, `packet_ids`, `finding_count`, and `inputs.findings`; callers can still provide their own `task_request_template` and opaque `runtime_execution` descriptor.
+
 Execution descriptors are caller-owned and opaque to this helper. Keep provider names, credentials, WordPress setup, sandbox recipes, repository-specific instructions, and provider-specific request details such as `wp-codebox/task-input/v1` in caller config or implementation-specific workflow examples, not in this generic reconcile helper.

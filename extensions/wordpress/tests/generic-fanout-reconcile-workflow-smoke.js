@@ -6,8 +6,12 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
+  createFindingPacketFanoutPlan,
+  createFindingPacketReconcileInput,
   createGenericFanoutReconcilePlan,
   createGenericFanoutReconcileResult,
+  materializeFindingPacketFanoutConfig,
+  normalizeFindingPacketItems,
 } = require('../lib/generic-fanout-reconcile-workflow');
 
 function readJson(filePath) {
@@ -99,6 +103,76 @@ async function main() {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+
+  const packets = [
+    {
+      id: 'packet-a',
+      source: 'lint',
+      findings: [
+        { id: 'a1', type: 'syntax', severity: 'error', path: 'src/a.js', message: 'Unexpected token' },
+        { id: 'a2', type: 'style', severity: 'warning', path: 'src/b.js', message: 'Use const' },
+      ],
+    },
+    {
+      id: 'packet-b',
+      source: 'static-analysis',
+      diagnostics: [
+        { id: 'b1', type: 'syntax', severity: 'error', path: 'src/c.js', message: 'Missing semicolon' },
+      ],
+    },
+  ];
+  const packetPolicy = {
+    group_by: ['finding.type', 'finding.severity'],
+  };
+  const packetItems = normalizeFindingPacketItems(packets, packetPolicy);
+  assert.deepEqual(packetItems.map((item) => item.id), ['packet-a:a1', 'packet-a:a2', 'packet-b:b1']);
+  assert.deepEqual(packetItems.map((item) => item.group_key), ['syntax:error', 'style:warning', 'syntax:error']);
+
+  const materialized = materializeFindingPacketFanoutConfig({
+    packets,
+    policy: packetPolicy,
+    orchestrator: { run_id: 'finding-run' },
+  });
+  assert.equal(materialized.config.schema, 'homeboy/generic-finding-packet-fanout-config/v1');
+  assert.equal(materialized.config.summary.packet_count, 2);
+  assert.equal(materialized.config.summary.finding_count, 3);
+  assert.deepEqual(materialized.groups.map((group) => group.key), ['syntax:error', 'style:warning']);
+
+  const templated = materializeFindingPacketFanoutConfig({
+    packets,
+    policy: {
+      group_key_template: '{{packet.source}}/{{finding.severity}}',
+    },
+  });
+  assert.deepEqual(templated.groups.map((group) => group.key), ['lint/error', 'lint/warning', 'static-analysis/error']);
+
+  const packetPlan = createFindingPacketFanoutPlan({
+    packets,
+    policy: packetPolicy,
+    orchestrator: { run_id: 'finding-run' },
+  });
+  assert.deepEqual(packetPlan.task_requests.map((request) => request.id), ['finding-packet-syntax:error', 'finding-packet-style:warning']);
+  assert.deepEqual(packetPlan.task_requests[0].item_ids, ['packet-a:a1', 'packet-b:b1']);
+  assert.deepEqual(packetPlan.task_requests[0].packet_ids, ['packet-a', 'packet-b']);
+  assert.equal(packetPlan.task_requests[0].finding_count, 2);
+  assert.deepEqual(packetPlan.task_requests[0].inputs.findings.map((finding) => finding.finding_id), ['a1', 'b1']);
+  assert.equal(Object.hasOwn(packetPlan.task_requests[0], 'sandbox_session_id'), false);
+  assert.equal(Object.hasOwn(packetPlan.task_requests[0], 'wp_codebox_command'), false);
+
+  const reconcileInput = createFindingPacketReconcileInput({
+    packets,
+    policy: packetPolicy,
+    plan: packetPlan,
+    records: [
+      { id: 'finding-packet-syntax:error', status: 'completed', outcome: { applied: ['packet-a:a1', 'packet-b:b1'] } },
+      { id: 'finding-packet-style:warning', status: 'completed', outcome: { applied: ['packet-a:a2'] } },
+    ],
+  });
+  assert.equal(reconcileInput.plan, packetPlan);
+  assert.deepEqual(reconcileInput.records.map((record) => record.id), ['finding-packet-syntax:error', 'finding-packet-style:warning']);
+  const packetResult = await createGenericFanoutReconcileResult(reconcileInput);
+  assert.equal(packetResult.status, 'completed');
+  assert.equal(packetResult.reconciliation.success_count, 2);
 
   console.log('Homeboy generic fanout reconcile workflow smoke passed');
 }
