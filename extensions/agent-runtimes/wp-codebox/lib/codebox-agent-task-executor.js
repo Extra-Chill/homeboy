@@ -35,6 +35,7 @@ const {
   typedArtifactFileRefs: codeboxTypedArtifactFileRefs,
 } = require('./codebox-artifact-contract');
 const {
+  codeboxRuntimeComponentContracts,
   codeboxRuntimeProfilePayload,
 } = require('./codebox-runtime-profile');
 const {
@@ -328,10 +329,12 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
   const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
-  componentContracts = uniqueComponentContracts([
-    ...componentContracts,
-    ...normalizeArray(runtimeRequirements.component_contracts),
-  ]);
+  componentContracts = codeboxRuntimeComponentContracts({
+    componentContracts: [
+      ...componentContracts,
+      ...normalizeArray(runtimeRequirements.component_contracts),
+    ],
+  });
   components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const context = {
     ...(inputs.context || {}),
@@ -617,15 +620,15 @@ function runtimeOverlayDiagnostic(index, field, offendingField, value, message) 
 }
 
 function componentContractsFromAgentTaskRequest(request, config, options = {}) {
-  return uniqueComponentContracts([
-    ...normalizeArray(request.component_contracts),
-    ...normalizeArray(config.component_contracts),
-    ...normalizeArray(config.runtime_requirements?.component_contracts),
-    ...normalizeArray(config.runtime_requirements?.extra_plugins),
-    ...normalizeArray(options.runtimeProfile?.component_contracts),
-    ...normalizeArray(options.runtimeProfile?.extra_plugins),
-    ...normalizeArray(options.componentContracts),
-  ]);
+  return codeboxRuntimeComponentContracts({
+    profile: options.runtimeProfile,
+    runtimeRequirements: firstObject(config.runtime_requirements, config.runtimeRequirements) || {},
+    componentContracts: [
+      ...normalizeArray(request.component_contracts),
+      ...normalizeArray(config.component_contracts),
+      ...normalizeArray(options.componentContracts),
+    ],
+  });
 }
 
 function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
@@ -669,21 +672,6 @@ function providerPluginPathEntries(value) {
       return [];
     }
     return [entry.path, entry.source].filter(Boolean);
-  });
-}
-
-function uniqueComponentContracts(contracts) {
-  const seen = new Set();
-  return contracts.filter((contract) => {
-    if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
-      return false;
-    }
-    const key = `${contract.slug || ''}:${contract.path || contract.source || ''}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
   });
 }
 

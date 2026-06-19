@@ -9,7 +9,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const { codeboxTaskRequestFromAgentTaskRequest } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js')
 );
-const { codeboxRuntimeProfilePayload } = require(
+const { codeboxRuntimeComponentContracts, codeboxRuntimeExtraPlugins, codeboxRuntimeProfilePayload } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-runtime-profile.js')
 );
 
@@ -136,6 +136,26 @@ try {
 		{ path: '/runtime/provider-from-profile' },
 		{ path: '/runtime/provider-from-request' },
 	]);
+
+	assert.deepEqual(codeboxRuntimeComponentContracts({
+		profile: {
+			components: [{ slug: 'runtime-tools', source: '/runtime/tools' }],
+			plugins: [{ slug: 'runtime-provider', source: '/runtime/provider', activate: true }],
+		},
+		runtimeRequirements: {
+			component_contracts: [{ slug: 'existing-contract', path: '/runtime/existing' }],
+		},
+		componentContracts: [{ slug: 'request-contract', path: '/runtime/request' }],
+	}).map((contract) => ({ slug: contract.slug, path: contract.path, loadAs: contract.loadAs, activate: contract.activate })), [
+		{ slug: 'existing-contract', path: '/runtime/existing', loadAs: undefined, activate: undefined },
+		{ slug: 'runtime-tools', path: '/runtime/tools', loadAs: 'mu-plugin', activate: false },
+		{ slug: 'runtime-provider', path: '/runtime/provider', loadAs: 'plugin', activate: true },
+		{ slug: 'request-contract', path: '/runtime/request', loadAs: undefined, activate: undefined },
+	]);
+	assert.deepEqual(codeboxRuntimeExtraPlugins({
+		profile: { extra_plugins: [{ slug: 'profile-plugin', source: '/runtime/profile-plugin' }] },
+		componentContracts: [{ slug: 'request-contract', path: '/runtime/request' }],
+	}).map((plugin) => plugin.slug), ['profile-plugin', 'request-contract']);
 
 	console.log('wp-codebox runtime profile defaults smoke passed');
 } finally {
