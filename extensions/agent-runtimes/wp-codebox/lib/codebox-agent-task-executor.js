@@ -30,81 +30,20 @@ const {
   codeboxRuntimeProfilePayload,
   componentContractsFromRuntimeProfileDependencies,
 } = require('./codebox-runtime-profile');
-
-const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
-const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
-const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
-const WP_CODEBOX_BACKEND = 'codebox';
-const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = 'wp-codebox/provider-runtime-invocation-contract/v1';
-
-const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
-  workspaceCapture: 'wp-codebox.runner-workspace.capture',
-  workspaceCommand: 'wp-codebox.runner-workspace.command',
-  workspacePublish: 'wp-codebox.runner-workspace.publish',
-  toolCallTranscriptRecord: 'wp-codebox.tool-call-transcript.record',
-  artifactHandoff: 'wp-codebox.artifact-handoff',
-};
-
-const WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES = {
-  workspaceCapture: 'wp-codebox/runner-workspace-capture',
-  workspaceCommand: 'wp-codebox/runner-workspace-command',
-  workspacePublish: 'wp-codebox/runner-workspace-publish',
-  toolCallTranscriptRecord: 'wp-codebox/record-tool-call-transcript',
-  artifactHandoff: 'wp-codebox/handoff-artifacts',
-};
-
-const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS = {
-  workspace_capture: 'wp-codebox/runner-workspace-capture-result/v1',
-  workspace_command: 'wp-codebox/runner-workspace-command-result/v1',
-  workspace_publication: 'wp-codebox/runner-workspace-publication-result/v1',
-  tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
-  evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
-};
-
-const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS = {
-  workspaceCapture: 'workspace_capture',
-  workspaceCommand: 'workspace_command',
-  workspacePublish: 'workspace_publication',
-  toolCallTranscriptRecord: 'tool_call_transcript',
-  artifactHandoff: 'evidence_artifact_envelope',
-};
-
-const WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES = Object.fromEntries(Object.entries({
-  workspaceCapture: [
-    'workspaceCapture',
-    'workspace_capture',
-    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspaceCapture,
-    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspaceCapture,
-  ],
-  workspaceCommand: [
-    'workspaceCommand',
-    'workspace_command',
-    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspaceCommand,
-    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspaceCommand,
-  ],
-  workspacePublish: [
-    'workspacePublish',
-    'workspace_publish',
-    'workspacePublication',
-    'workspace_publication',
-    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.workspacePublish,
-    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.workspacePublish,
-  ],
-  toolCallTranscriptRecord: [
-    'toolCallTranscriptRecord',
-    'tool_call_transcript_record',
-    'toolCallTranscript',
-    'tool_call_transcript',
-    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.toolCallTranscriptRecord,
-    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.toolCallTranscriptRecord,
-  ],
-  artifactHandoff: [
-    'artifactHandoff',
-    'artifact_handoff',
-    WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES.artifactHandoff,
-    WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES.artifactHandoff,
-  ],
-}).flatMap(([key, aliases]) => aliases.map((alias) => [alias, key])));
+const {
+  WP_CODEBOX_BACKEND,
+  WP_CODEBOX_PROVIDER_ID,
+  WP_CODEBOX_PROVIDER_LABEL,
+  WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES,
+  WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
+  WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
+  WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+  WP_CODEBOX_ROLE_ALIASES,
+  WP_CODEBOX_TASK_REQUEST_SCHEMA,
+  wpCodeboxProviderRuntimeInvocationContract,
+  wpCodeboxProviderRuntimeOperationConfig,
+  wpCodeboxProviderRuntimeOperationEntry,
+} = require('./wp-codebox-adapter-contract');
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
@@ -169,36 +108,6 @@ const LEGACY_BUNDLE_KEYS = [
 ];
 
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [];
-
-const WP_CODEBOX_ROLE_ALIASES = {
-  artifact_roles: {
-    artifact_bundle: ['codebox-artifact-bundle', 'artifact-bundle', 'codebox-artifact-directory', 'codebox-session-artifacts'],
-    changed_files: ['codebox-changed-files'],
-    patch: ['codebox-patch'],
-    transcript: ['codebox-transcript', 'agent-runtime-transcript', 'agent-runtime-transcript-summary'],
-    runtime_log: ['codebox-runtime-log', 'codebox-recipe-startup-log'],
-    command_log: ['codebox-command-log'],
-    typed_artifact: ['typed-bundle-output'],
-    replay_bundle: ['agent-runtime-replay-bundle'],
-    pull_request: ['agent-runtime-pull-request'],
-    probe_result: ['codebox-recipe-probe-json', 'recipe-probe-result'],
-    screenshot: ['codebox-recipe-screenshot'],
-    side_effects: ['codebox-recipe-fake-side-effects'],
-    preflight_evidence: ['codebox-command-evidence', 'codebox-agent-task-input'],
-  },
-  artifact_kinds: {
-    patch: ['codebox-patch'],
-  },
-  artifact_filenames: {
-    preflight_evidence: ['homeboy-codebox-task-runner.json'],
-  },
-  outputs: {
-    provider_run_result: ['codebox_run_result'],
-  },
-  metadata: {
-    provider_run_result: ['codebox_run_result'],
-  },
-};
 
 function assertAgentTaskRequest(request) {
   if (!request || request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
@@ -281,13 +190,7 @@ function runtimeComponentDiscovery(options = {}) {
 }
 
 function providerRuntimeInvocationContract() {
-  return {
-    schema: WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
-    version: 1,
-    tasks: { ...WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES },
-    abilities: { ...WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES },
-    result_schemas: { ...WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS },
-  };
+  return wpCodeboxProviderRuntimeInvocationContract();
 }
 
 function providerRuntimeInvocationFromConfig(config = {}, inputs = {}, options = {}) {
@@ -345,27 +248,11 @@ function providerRuntimeOperationEntries(requested) {
 }
 
 function providerRuntimeOperationEntry(operation, fallbackKey = '') {
-  const rawName = typeof operation === 'string'
-    ? operation
-    : firstValue(operation?.key, operation?.operation, operation?.task, operation?.ability, fallbackKey);
-  const key = WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES[rawName] || WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES[fallbackKey];
-  if (!key) {
-    return null;
-  }
-  return [key, providerRuntimeOperationConfig(key, operation)];
+  return wpCodeboxProviderRuntimeOperationEntry(operation, fallbackKey);
 }
 
 function providerRuntimeOperationConfig(key, operation) {
-  const resultSchemaKey = WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS[key];
-  const explicitConfig = operation && typeof operation === 'object' && !Array.isArray(operation)
-    ? firstObject(operation.config, operation.input, operation.args) || {}
-    : {};
-  return withoutUndefinedValues({
-    task: WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES[key],
-    ability: WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES[key],
-    result_schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS[resultSchemaKey],
-    config: Object.keys(explicitConfig).length > 0 ? explicitConfig : undefined,
-  });
+  return wpCodeboxProviderRuntimeOperationConfig(key, operation);
 }
 
 function withoutUndefinedValues(value) {

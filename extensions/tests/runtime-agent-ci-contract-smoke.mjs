@@ -151,6 +151,7 @@ const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
 
 assert.equal(genericRequest.schema, 'homeboy/agent-task-request/v1');
 assert.equal(genericRequest.executor.backend, 'codebox');
+assert.equal(genericRequest.executor.runtime, 'codebox');
 assert.deepEqual(genericRequest.expected_artifacts, ['packet']);
 assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
 
