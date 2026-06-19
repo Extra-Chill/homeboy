@@ -495,10 +495,13 @@ fn detector_implementations_stay_domain_agnostic() {
         .cloned()
         .collect::<Vec<_>>();
 
-    assert!(
-        !current_policy_findings.is_empty(),
-        "detector-agnostic source policy should stay configured until #2836 child-issue debt is cleaned up"
-    );
+    // The detector-agnostic-source policy debt (#2836 / parent #2240) is now
+    // fully cleaned: no core detector under `code_audit::detectors` hardcodes an
+    // ecosystem literal, so the policy legitimately produces zero findings. The
+    // invariant we enforce is therefore the agnosticism itself — no NEW findings
+    // and no STALE baseline rows — not a transitional "must still have debt"
+    // floor. Reintroducing a hardcoded ecosystem literal fails the NEW-findings
+    // assertion below.
     assert!(
         new_policy_findings.is_empty(),
         "core audit detector implementations must stay codebase/language/domain agnostic. Move hardcoded behavior into extension-owned configuration or fixture-only tests. New audit findings:\n{}",
