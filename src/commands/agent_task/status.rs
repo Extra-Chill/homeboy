@@ -104,7 +104,7 @@ const FAILURE_REASON_LIMIT: usize = 8;
 /// issue, PHP fatal, provider registration error, missing path) is otherwise
 /// buried deep in nested outcome JSON — both in the typed
 /// `outcomes[].diagnostics[]` and in provider-specific nested structures such as
-/// `outputs.codebox.agent_runtime.workload.diagnostics[]`.
+/// `outputs.provider.agent_runtime.workload.diagnostics[]`.
 ///
 /// This collects diagnostics from BOTH the typed field and any nested
 /// `diagnostics[]` arrays found anywhere in each outcome's `outputs`/`metadata`,
@@ -225,7 +225,7 @@ fn class_priority(class: &str) -> u8 {
 
 /// Recursively walk a provider-specific JSON value looking for `diagnostics`
 /// arrays of objects carrying a `message` (and optional `class`). This is how
-/// nested structures like `outputs.codebox.agent_runtime.workload.diagnostics[]`
+/// nested structures like `outputs.provider.agent_runtime.workload.diagnostics[]`
 /// get surfaced without the renderer needing to know the exact provider path.
 fn collect_nested_diagnostics(
     task_id: &str,

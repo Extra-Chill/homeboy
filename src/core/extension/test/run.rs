@@ -158,7 +158,7 @@ fn setting_truthy(settings: &[(String, String)], key: &str) -> bool {
 
 pub fn run_main_test_workflow(
     component: &Component,
-    source_path: &PathBuf,
+    source_path: &Path,
     args: TestRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> crate::core::Result<TestRunWorkflowResult> {

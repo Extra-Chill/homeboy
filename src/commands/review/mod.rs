@@ -96,9 +96,9 @@ struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
 }
 
 enum ReviewStageRun {
-    Audit(ReviewStage<AuditCommandOutput>),
-    Lint(ReviewStage<LintCommandOutput>),
-    Test(ReviewStage<TestCommandOutput>),
+    Audit(Box<ReviewStage<AuditCommandOutput>>),
+    Lint(Box<ReviewStage<LintCommandOutput>>),
+    Test(Box<ReviewStage<TestCommandOutput>>),
 }
 
 impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Args, Output> {
@@ -154,7 +154,7 @@ fn dispatch_review_plan_step(
             };
             let (stage, _) =
                 descriptor.execute(args, global, component_label, precomputed_changed_files)?;
-            Ok(Some(ReviewStageRun::Audit(stage)))
+            Ok(Some(ReviewStageRun::Audit(Box::new(stage))))
         }
         "review.lint" => {
             let descriptor = ReviewStageDescriptor {
@@ -166,7 +166,7 @@ fn dispatch_review_plan_step(
             };
             let (stage, _) =
                 descriptor.execute(args, global, component_label, precomputed_changed_files)?;
-            Ok(Some(ReviewStageRun::Lint(stage)))
+            Ok(Some(ReviewStageRun::Lint(Box::new(stage))))
         }
         "review.test" => {
             let descriptor = ReviewStageDescriptor {
@@ -178,7 +178,7 @@ fn dispatch_review_plan_step(
             };
             let (stage, _) =
                 descriptor.execute(args, global, component_label, precomputed_changed_files)?;
-            Ok(Some(ReviewStageRun::Test(stage)))
+            Ok(Some(ReviewStageRun::Test(Box::new(stage))))
         }
         other => Err(homeboy::core::Error::internal_unexpected(format!(
             "review quality plan contains unsupported executable step '{other}'"
@@ -287,13 +287,13 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     for stage_run in stage_run.results {
         match stage_run {
             ReviewStageRun::Audit(stage) => {
-                audit_stage = Some(stage);
+                audit_stage = Some(*stage);
             }
             ReviewStageRun::Lint(stage) => {
-                lint_stage = Some(stage);
+                lint_stage = Some(*stage);
             }
             ReviewStageRun::Test(stage) => {
-                test_stage = Some(stage);
+                test_stage = Some(*stage);
             }
         }
     }
@@ -730,7 +730,7 @@ mod tests {
         let global = GlobalArgs {};
         let step = PlanStep::ready("review.unknown", "review.unknown").build();
 
-        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture") {
+        let err = match dispatch_review_plan_step(&step, &args, &global, "fixture", None) {
             Ok(_) => panic!("unsupported executable review step should fail"),
             Err(err) => err,
         };
