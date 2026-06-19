@@ -93,6 +93,7 @@ fn refresh(
             ratchet: false,
         },
         changed_since: Some(args.changed_since.clone()),
+        precomputed_changed_files: None,
         json_summary: false,
         include_fixability: false,
     })?;

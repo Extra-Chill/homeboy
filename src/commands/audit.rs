@@ -51,6 +51,9 @@ pub struct AuditArgs {
     #[arg(long)]
     pub changed_since: Option<String>,
 
+    #[arg(skip)]
+    pub precomputed_changed_files: Option<Vec<String>>,
+
     /// Include compact machine-readable summary for CI wrappers
     #[arg(long)]
     pub json_summary: bool,
@@ -139,6 +142,7 @@ pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutpu
             ratchet: args.baseline_args.ratchet,
         },
         changed_since: args.changed_since,
+        precomputed_changed_files: args.precomputed_changed_files,
         json_summary: args.json_summary,
         include_fixability: args.fixability,
     });
@@ -489,6 +493,7 @@ mod tests {
                 ratchet: false,
             },
             changed_since: Some("origin/main".to_string()),
+            precomputed_changed_files: None,
             json_summary: true,
             fixability: false,
         }
@@ -902,6 +907,7 @@ mod tests {
                     ratchet: false,
                 },
                 changed_since: None,
+                precomputed_changed_files: None,
                 json_summary: false,
                 fixability: false,
             };

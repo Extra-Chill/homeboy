@@ -72,6 +72,9 @@ pub struct TestArgs {
     #[arg(long, value_name = "REF")]
     pub changed_since: Option<String>,
 
+    #[arg(skip)]
+    pub precomputed_changed_files: Option<Vec<String>>,
+
     /// Run using env and passthrough args from a single extension-declared CI test job.
     #[arg(long, value_name = "ID", conflicts_with = "drift")]
     pub ci_job: Option<String>,
@@ -219,6 +222,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
                 ratchet: args.baseline_args.ratchet,
             },
             changed_since: args.changed_since.clone(),
+            precomputed_changed_files: args.precomputed_changed_files.clone(),
             json_summary: args.json_summary,
             ci_env: test_runner_ci_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),

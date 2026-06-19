@@ -34,6 +34,7 @@ pub struct LintRunWorkflowArgs {
     pub glob: Option<String>,
     pub changed_only: bool,
     pub changed_since: Option<String>,
+    pub precomputed_changed_files: Option<Vec<String>>,
     pub errors_only: bool,
     pub sniffs: Option<String>,
     pub exclude_sniffs: Option<String>,
@@ -831,11 +832,16 @@ fn resolve_scoped_lint_runs(
     args: &LintRunWorkflowArgs,
 ) -> crate::core::Result<Option<Vec<ScopedLintRun>>> {
     if args.changed_only {
-        let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
-        let mut changed_files: Vec<String> = Vec::new();
-        changed_files.extend(uncommitted.staged);
-        changed_files.extend(uncommitted.unstaged);
-        changed_files.extend(uncommitted.untracked);
+        let changed_files = if let Some(files) = &args.precomputed_changed_files {
+            files.clone()
+        } else {
+            let uncommitted = git::get_uncommitted_changes(&component.local_path)?;
+            let mut files: Vec<String> = Vec::new();
+            files.extend(uncommitted.staged);
+            files.extend(uncommitted.unstaged);
+            files.extend(uncommitted.untracked);
+            files
+        };
 
         if changed_files.is_empty() {
             println!("No files in working tree changes");
@@ -849,7 +855,10 @@ fn resolve_scoped_lint_runs(
 
         Ok(Some(build_changed_lint_runs(component, &changed_files)))
     } else if let Some(ref git_ref) = args.changed_since {
-        let changed_files = git::get_files_changed_since(&component.local_path, git_ref)?;
+        let changed_files = match &args.precomputed_changed_files {
+            Some(files) => files.clone(),
+            None => git::get_files_changed_since(&component.local_path, git_ref)?,
+        };
 
         if changed_files.is_empty() {
             println!("No files changed since {}", git_ref);
@@ -1035,6 +1044,7 @@ mod tests {
             glob: None,
             changed_only: false,
             changed_since: None,
+            precomputed_changed_files: None,
             errors_only: false,
             sniffs: None,
             exclude_sniffs: None,

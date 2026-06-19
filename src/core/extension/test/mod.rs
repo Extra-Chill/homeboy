@@ -416,12 +416,28 @@ pub fn compute_changed_test_files(
 
     let changed_files = git::get_files_changed_since(&source_path.to_string_lossy(), git_ref)?;
 
+    compute_changed_test_files_for_files(component, git_ref, &changed_files)
+}
+
+pub fn compute_changed_test_files_for_files(
+    component: &Component,
+    git_ref: &str,
+    changed_files: &[String],
+) -> crate::core::error::Result<Vec<String>> {
     let opts = resolve_drift_options(component, git_ref)?;
 
-    let report = drift::detect_drift(&component.id, &opts)?;
+    compute_changed_test_files_with_drift_options(component, changed_files, &opts)
+}
+
+fn compute_changed_test_files_with_drift_options(
+    component: &Component,
+    changed_files: &[String],
+    opts: &DriftOptions,
+) -> crate::core::error::Result<Vec<String>> {
+    let report = drift::detect_drift_for_changed_files(&component.id, opts, changed_files)?;
     let mut selected: BTreeSet<String> = BTreeSet::new();
 
-    for file in &changed_files {
+    for file in changed_files {
         if let Some(test_file) = changed_test_file_for_path(file) {
             selected.insert(test_file);
         }
@@ -432,6 +448,21 @@ pub fn compute_changed_test_files(
     }
 
     Ok(selected.into_iter().collect())
+}
+
+pub fn compute_changed_test_scope_for_files(
+    component: &Component,
+    git_ref: &str,
+    changed_files: &[String],
+) -> crate::core::error::Result<TestScopeOutput> {
+    let selected_files = compute_changed_test_files_for_files(component, git_ref, changed_files)?;
+
+    Ok(TestScopeOutput {
+        mode: "changed".to_string(),
+        changed_since: Some(git_ref.to_string()),
+        selected_count: selected_files.len(),
+        selected_files,
+    })
 }
 
 /// Compute changed test scope with metadata for command-layer output.

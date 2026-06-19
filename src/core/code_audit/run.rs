@@ -27,6 +27,7 @@ pub struct AuditRunWorkflowArgs {
     pub extension_overrides: Vec<String>,
     pub baseline_flags: crate::core::engine::baseline::BaselineFlags,
     pub changed_since: Option<String>,
+    pub precomputed_changed_files: Option<Vec<String>>,
     pub json_summary: bool,
     pub include_fixability: bool,
 }
@@ -206,7 +207,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> crate::core::Result<Option<AuditWit
     };
 
     if let Some(ref git_ref) = args.changed_since {
-        let changed = git::get_files_changed_since(&args.source_path, git_ref)?;
+        let changed = changed_files_for_scope(args, git_ref)?;
         if changed.is_empty() {
             crate::log_status!("audit", "No files changed since {}", git_ref);
             return Ok(None);
@@ -239,7 +240,7 @@ fn run_baseline_save(
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     let findings = result.findings.clone();
     let saved = if let Some(ref git_ref) = args.changed_since {
-        let changed = git::get_files_changed_since(&args.source_path, git_ref)?;
+        let changed = changed_files_for_scope(args, git_ref)?;
         if changed.is_empty() {
             crate::log_status!(
                 "baseline",
@@ -364,14 +365,13 @@ fn build_comparison_output(
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     let mut comparison = baseline::compare(&result, &existing_baseline);
     if let Some(ref git_ref) = args.changed_since {
-        let changed =
-            git::get_files_changed_since(&args.source_path, git_ref).unwrap_or_else(|_| {
-                result
-                    .findings
-                    .iter()
-                    .map(|finding| finding.file.clone())
-                    .collect()
-            });
+        let changed = changed_files_for_scope(args, git_ref).unwrap_or_else(|_| {
+            result
+                .findings
+                .iter()
+                .map(|finding| finding.file.clone())
+                .collect()
+        });
         retain_new_items_for_changed_files(&mut comparison, &changed);
     }
     let drift_increased = if args.changed_since.is_none() && !uses_finding_filters(args) {
@@ -467,6 +467,16 @@ fn retain_new_items_for_changed_files(
             .is_some_and(|file| changed_files.contains(file.as_str()))
     });
     comparison.drift_increased = !comparison.new_items.is_empty();
+}
+
+fn changed_files_for_scope(
+    args: &AuditRunWorkflowArgs,
+    git_ref: &str,
+) -> crate::core::Result<Vec<String>> {
+    match &args.precomputed_changed_files {
+        Some(files) => Ok(files.clone()),
+        None => git::get_files_changed_since(&args.source_path, git_ref),
+    }
 }
 
 fn compute_fixability_if_requested(
