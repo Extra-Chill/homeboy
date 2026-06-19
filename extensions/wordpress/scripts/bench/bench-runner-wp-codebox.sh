@@ -456,6 +456,8 @@ homeboy_wp_codebox_workload_scenario_id() {
     local scenario_id
     if [[ "$workload_name" == *.bench.* ]]; then
         scenario_id="${workload_name%%.bench.*}"
+    elif [[ "$workload_name" == *.workload.* ]]; then
+        scenario_id="${workload_name%%.workload.*}"
     else
         scenario_id="${workload_name%.*}"
     fi
@@ -561,11 +563,18 @@ homeboy_wp_codebox_append_extra_bench_workloads_configured_json() {
         [ -n "$workload_path" ] || continue
         workload_name="$(basename "$workload_path")"
         scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
-        WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
-            --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
-            --arg id "$scenario_id" \
-            --arg file ".homeboy/bench-rig/${workload_name}" \
-            '$workloads + [{id: $id, source: "rig", overridesDiscovered: true, run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
+        if [[ "$workload_name" == *.workload.json ]]; then
+            WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
+                --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+                --slurpfile workload "$workload_path" \
+                '$workloads + [($workload[0] + {source: "rig", overridesDiscovered: true, metadata: (($workload[0].metadata // {}) + {homeboy_bench_workload_source: "rig"})})]')
+        else
+            WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
+                --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+                --arg id "$scenario_id" \
+                --arg file ".homeboy/bench-rig/${workload_name}" \
+                '$workloads + [{id: $id, source: "rig", overridesDiscovered: true, run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
+        fi
     done
 }
 
