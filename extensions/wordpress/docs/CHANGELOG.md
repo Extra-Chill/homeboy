@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.47] - 2026-06-19
+
+### Changed
+- Prefer Codebox artifact result envelopes
+
 ## [3.7.46] - 2026-06-19
 
 ### Changed
