@@ -250,6 +250,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         session,
         stale_daemon,
         active_jobs: Vec::new(),
+        active_job_count: 0,
         session_path: session_path.display().to_string(),
     })
 }

@@ -140,6 +140,7 @@ impl JobStore {
         runner_id: &str,
         project_id: Option<&str>,
         lease_ms: u64,
+        concurrency_limit: Option<usize>,
     ) -> Result<Option<RemoteRunnerJobClaim>> {
         if runner_id.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -149,12 +150,34 @@ impl JobStore {
                 None,
             ));
         }
+        if concurrency_limit == Some(0) {
+            return Err(Error::validation_invalid_argument(
+                "concurrency_limit",
+                "remote runner claim concurrency_limit must be greater than zero",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
 
         let now = timestamp_ms();
         let lease_ms = lease_ms.max(1);
         let mut claimed: Option<(Uuid, RemoteRunnerJobRequest)> = None;
         {
             let mut inner = self.inner.lock().expect("job store mutex poisoned");
+            if let Some(limit) = concurrency_limit {
+                let running = inner
+                    .jobs
+                    .values()
+                    .filter(|stored| {
+                        stored.remote_runner.is_some()
+                            && stored.job.status == JobStatus::Running
+                            && stored.job.claimed_by_runner_id.as_deref() == Some(runner_id)
+                    })
+                    .count();
+                if running >= limit {
+                    return Ok(None);
+                }
+            }
             let mut candidates: Vec<_> = inner
                 .jobs
                 .values_mut()

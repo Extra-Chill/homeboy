@@ -129,6 +129,8 @@ pub struct RunnerStatusReport {
     pub stale_daemon: Option<RunnerStaleDaemonWarning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
+    #[serde(default)]
+    pub active_job_count: usize,
     pub session_path: String,
 }
 

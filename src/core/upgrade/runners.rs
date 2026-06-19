@@ -2601,6 +2601,7 @@ mod tests {
             session: None,
             stale_daemon: None,
             active_jobs: Vec::new(),
+            active_job_count: 0,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
     }
@@ -2619,6 +2620,7 @@ mod tests {
                 None,
             )),
             active_jobs: Vec::new(),
+            active_job_count: 0,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
     }

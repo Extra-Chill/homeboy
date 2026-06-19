@@ -23,6 +23,7 @@ pub struct ReverseRunnerWorkerOptions {
     pub broker_url: String,
     pub project_id: Option<String>,
     pub lease_ms: u64,
+    pub concurrency_limit: Option<usize>,
     pub loop_mode: bool,
     pub idle_backoff_ms: u64,
     pub max_idle_backoff_ms: u64,
@@ -444,6 +445,7 @@ fn claim_job(
             "runner_id": options.runner_id,
             "project_id": options.project_id,
             "lease_ms": options.lease_ms.max(1),
+            "concurrency_limit": options.concurrency_limit,
         }),
         "claim reverse runner job",
     )?;
@@ -515,6 +517,7 @@ mod tests {
             broker_url,
             project_id: None,
             lease_ms: 30_000,
+            concurrency_limit: None,
             loop_mode: false,
             idle_backoff_ms: 1,
             max_idle_backoff_ms: 10,
@@ -829,7 +832,7 @@ mod tests {
     fn handle_request(store: &JobStore, request: &MockRequest) -> Value {
         if request.path == "/runner/jobs/claim" {
             let claim = store
-                .claim_remote_runner_job("lab", None, 30_000)
+                .claim_remote_runner_job("lab", None, 30_000, None)
                 .expect("claim job");
             return serde_json::json!({
                 "success": true,

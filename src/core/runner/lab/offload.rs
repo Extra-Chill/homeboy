@@ -2604,6 +2604,7 @@ mod tests {
             }),
             stale_daemon: None,
             active_jobs: Vec::new(),
+            active_job_count: 0,
             session_path: "/tmp/lab.json".to_string(),
         }
     }
