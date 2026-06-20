@@ -5,7 +5,9 @@
 //! in CLI arguments and JSON payloads to their synced remote equivalents.
 
 use serde_json::Value;
+use std::iter::Peekable;
 use std::path::Path;
+use std::slice::Iter;
 
 /// A local -> remote path pair produced by Lab workspace sync, used to remap
 /// controller-side absolute paths embedded in a `--provider-config` payload to
@@ -16,14 +18,12 @@ pub(in crate::core::runner) struct LabPathRemap {
     pub remote: String,
 }
 
-pub(in crate::core::runner) fn remap_path_settings_in_args(
-    args: &[String],
-    mappings: &[LabPathRemap],
-) -> Vec<String> {
-    if mappings.is_empty() {
-        return args.to_vec();
-    }
-
+/// Order remap pairs most-specific-first so a longer local prefix wins over a
+/// shorter one it is nested under (and, for equal-length locals, the longer
+/// remote wins). Every Lab arg rewriter must remap against this ordering so the
+/// same controller path always resolves to the same remote path regardless of
+/// which flag carried it.
+pub(super) fn order_mappings_by_specificity(mappings: &[LabPathRemap]) -> Vec<&LabPathRemap> {
     let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
     ordered.sort_by_key(|mapping| {
         (
@@ -31,7 +31,21 @@ pub(in crate::core::runner) fn remap_path_settings_in_args(
             std::cmp::Reverse(mapping.remote.len()),
         )
     });
+    ordered
+}
 
+/// Walk `args` honoring the `--` passthrough boundary (everything after `--` is
+/// copied verbatim) and delegate each pre-passthrough argument to `rewrite`.
+///
+/// `rewrite` receives the current argument, a peekable iterator over the
+/// remaining arguments (so it can consume the value of a two-token `--flag
+/// value` pair), and the output buffer it must push its result onto. This is the
+/// single shared scaffold behind every Lab flag-value rewriter; only the
+/// per-flag matching differs between callers.
+pub(super) fn rewrite_flag_value_args<F>(args: &[String], mut rewrite: F) -> Vec<String>
+where
+    F: FnMut(&str, &mut Peekable<Iter<'_, String>>, &mut Vec<String>),
+{
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -45,37 +59,80 @@ pub(in crate::core::runner) fn remap_path_settings_in_args(
             out.push(arg.clone());
             continue;
         }
-        if arg == "--setting" {
+        rewrite(arg, &mut iter, &mut out);
+    }
+    out
+}
+
+/// Fallible variant of [`rewrite_flag_value_args`] for rewriters whose per-flag
+/// handler can fail (e.g. when materializing an `@file` spec). Short-circuits on
+/// the first error.
+pub(super) fn try_rewrite_flag_value_args<F>(
+    args: &[String],
+    mut rewrite: F,
+) -> crate::core::Result<Vec<String>>
+where
+    F: FnMut(&str, &mut Peekable<Iter<'_, String>>, &mut Vec<String>) -> crate::core::Result<()>,
+{
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
             out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            out.push(arg.clone());
+            continue;
+        }
+        rewrite(arg, &mut iter, &mut out)?;
+    }
+    Ok(out)
+}
+
+pub(in crate::core::runner) fn remap_path_settings_in_args(
+    args: &[String],
+    mappings: &[LabPathRemap],
+) -> Vec<String> {
+    if mappings.is_empty() {
+        return args.to_vec();
+    }
+
+    let ordered = order_mappings_by_specificity(mappings);
+
+    rewrite_flag_value_args(args, |arg, iter, out| {
+        if arg == "--setting" {
+            out.push(arg.to_string());
             if let Some(raw) = iter.next() {
                 out.push(remap_path_setting_pair(raw, &ordered));
             }
-            continue;
+            return;
         }
         if arg == "--setting-json" {
-            out.push(arg.clone());
+            out.push(arg.to_string());
             if let Some(raw) = iter.next() {
                 out.push(remap_path_json_setting_pair(raw, &ordered));
             }
-            continue;
+            return;
         }
         if let Some(raw) = arg.strip_prefix("--setting=") {
             out.push(format!(
                 "--setting={}",
                 remap_path_setting_pair(raw, &ordered)
             ));
-            continue;
+            return;
         }
         if let Some(raw) = arg.strip_prefix("--setting-json=") {
             out.push(format!(
                 "--setting-json={}",
                 remap_path_json_setting_pair(raw, &ordered)
             ));
-            continue;
+            return;
         }
-        out.push(arg.clone());
-    }
-    out
+        out.push(arg.to_string());
+    })
 }
 
 pub(super) fn remap_path_setting_pair(raw: &str, mappings: &[&LabPathRemap]) -> String {

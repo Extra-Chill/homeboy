@@ -492,7 +492,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-06-19T16:45:00Z",
-      "item_count": 407,
+      "item_count": 401,
       "known_fingerprints": [
         "compiler::src/core/deploy/planning.rs::CompilerWarning",
         "compiler::src/core/extension/test/run.rs::CompilerWarning",
@@ -765,7 +765,9 @@
         "output_capture::tests/agent_tool_dispatch.rs::UnboundedOutputCapture",
         "parallel-implementation::src/commands/report/browser_evidence_compare.rs::ParallelImplementation",
         "parallel-implementation::src/core/artifact_links.rs::ParallelImplementation",
+        "parallel-implementation::src/core/component/inventory.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/run.rs::ParallelImplementation",
+        "parallel-implementation::src/core/release/changelog/guard.rs::ParallelImplementation",
         "parallel-implementation::src/core/release/executor/publish.rs::ParallelImplementation",
         "remote_execution_preflight::src/core/runner/execution/policy.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/lab_workspaces.rs::RemoteExecutionPreflight",
