@@ -10,6 +10,7 @@ mod policy;
 pub(crate) mod provenance;
 pub mod release_download;
 mod safety_and_artifact;
+mod smoke;
 mod transfer;
 mod types;
 mod version_overrides;
