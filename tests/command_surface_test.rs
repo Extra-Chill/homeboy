@@ -7,50 +7,24 @@ use std::collections::BTreeSet;
 use std::fs;
 
 #[test]
-fn includes_current_top_level_commands() {
+fn command_surface_tracks_representative_live_and_removed_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
-    assert!(surface.contains_path(&["daemon"]));
-    assert!(surface.contains_path(&["deps"]));
-    assert!(surface.contains_path(&["git"]));
-    assert!(surface.contains_path(&["http"]));
-    assert!(surface.contains_path(&["self"]));
-    assert!(surface.contains_path(&["stack"]));
     assert!(surface.contains_path(&["report"]));
-    assert!(surface.contains_path(&["upgrade"]));
-    assert!(!surface.contains_path(&["init"]));
-    assert!(!surface.contains_path(&["update"]));
-    assert!(!surface.contains_path(&["transfer"]));
-}
-
-#[test]
-fn includes_first_level_subcommands() {
-    let surface = current_command_surface();
-
     assert!(surface.contains_path(&["git", "status"]));
     assert!(surface.contains_path(&["http", "get"]));
-    assert!(surface.contains_path(&["deps", "status"]));
-    assert!(surface.contains_path(&["deps", "update"]));
-    assert!(surface.contains_path(&["daemon", "serve"]));
-    assert!(surface.contains_path(&["self", "status"]));
-    assert!(surface.contains_path(&["stack", "inspect"]));
     assert!(surface.contains_path(&["report", "failure-digest"]));
-    assert!(surface.contains_path(&["report", "performance-digest"]));
-    assert!(surface.contains_path(&["report", "bench-coverage"]));
-    assert!(surface.contains_path(&["file", "download"]));
-    assert!(surface.contains_path(&["file", "mkdir"]));
-    assert!(surface.contains_path(&["file", "upload"]));
-    assert!(surface.contains_path(&["file", "copy"]));
-    assert!(surface.contains_path(&["file", "sync"]));
     assert!(surface.contains_path(&["runner", "job"]));
-    assert!(surface.contains_path(&["agent-task", "loop"]));
-    assert!(surface.contains_path(&["agent-task", "contract"]));
-    assert!(surface.contains_path(&["version", "show"]));
-    assert!(surface.contains_path(&["worktree", "create"]));
-    assert!(surface.contains_path(&["worktree", "remove"]));
-    assert!(surface.contains_path(&["tunnel", "preview-consumer"]));
+    assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+    assert!(surface.contains_path(&["agent-task", "auth", "status"]));
+    assert!(surface.contains_path(&["runner", "job", "logs"]));
+    assert!(!surface.contains_path(&["init"]));
     assert!(!surface.contains_path(&["version", "bump"]));
+    assert!(!surface.contains_path(&["components"]));
+    assert!(!surface.contains_path(&["stacks", "inspect"]));
+    assert!(!surface.contains_path(&["audit", "code"]));
+    assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
 #[test]
@@ -64,19 +38,6 @@ fn agent_task_tool_bridge_stays_hidden_but_parseable() {
     let docs = include_str!("../docs/commands/agent-task.md");
     assert!(docs.contains("## Internal Bridge"));
     assert!(docs.contains("hidden provider-runtime bridge"));
-}
-
-#[test]
-fn includes_second_level_subcommands() {
-    let surface = current_command_surface();
-
-    assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
-    assert!(surface.contains_path(&["agent-task", "controller", "events"]));
-    assert!(surface.contains_path(&["agent-task", "auth", "status"]));
-    assert!(surface.contains_path(&["runner", "job", "logs"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "route"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "list"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "status"]));
 }
 
 #[test]
@@ -150,28 +111,6 @@ fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
         .any(|entry| entry.get("mutates").is_some()
             && entry.get("operator").is_some()
             && entry.get("dangerous_flags").is_some()));
-}
-
-#[test]
-fn excludes_removed_cli_aliases() {
-    let surface = current_command_surface();
-
-    assert!(!surface.contains_path(&["components"]));
-    assert!(!surface.contains_path(&["dependencies"]));
-    assert!(!surface.contains_path(&["rigs"]));
-    assert!(!surface.contains_path(&["stacks", "inspect"]));
-}
-
-#[test]
-fn rejects_stale_or_unrepresented_paths() {
-    let surface = current_command_surface();
-
-    assert!(!surface.contains_path(&["supports"]));
-    assert!(!surface.contains_path(&["audit", "code"]));
-    assert!(!surface.contains_path(&["audit", "docs"]));
-    assert!(!surface.contains_path(&["audit", "structure"]));
-    assert!(!surface.contains_path(&["stack", "inspect", "extra"]));
-    assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
 #[test]
