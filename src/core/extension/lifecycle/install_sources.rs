@@ -191,12 +191,21 @@ pub(crate) fn resolve_cloned_extension(
     )))
 }
 
+/// Shared assets installed from a monorepo extension source root.
+///
+/// Each entry maps a source-relative directory to its install target. The
+/// `scripts/lib` narrowing (#4907) is deliberate: after the extension helper
+/// migration (homeboy-extensions#1466), installed extension layouts only source
+/// the shared library subtree via `../../../scripts/lib/...` for direct
+/// invocation. The rest of the monorepo `scripts/` tree is repo dev/CI tooling
+/// that never participates in the installed layout, so lifecycle no longer
+/// installs it under `~/.config/homeboy/extensions/scripts`.
 fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> Result<()> {
     let Some(extensions_dir) = extension_dir.parent() else {
         return Ok(());
     };
 
-    for shared_dir in ["scripts", "agent-runtimes", "runtime-agent-ci"] {
+    for shared_dir in ["scripts/lib", "agent-runtimes", "runtime-agent-ci"] {
         let source = source_root.join(shared_dir);
         if !source.is_dir() {
             continue;
@@ -205,8 +214,18 @@ fn install_shared_assets_from_root(source_root: &Path, extension_dir: &Path) -> 
         let target = match shared_dir {
             "agent-runtimes" => paths::agent_runtimes()?,
             "runtime-agent-ci" => paths::homeboy()?.join(shared_dir),
+            // Shared extension libraries install under the extensions root so
+            // installed wrappers can source `../../../scripts/lib/...`.
             _ => extensions_dir.join(shared_dir),
         };
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!("prepare shared extension {shared_dir}")),
+                )
+            })?;
+        }
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| {
                 Error::internal_io(
