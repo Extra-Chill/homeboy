@@ -31,11 +31,18 @@ directly include `public_url`; bundle-relative or internal artifacts include
 
 By default `homeboy bench` prints a **compact human summary** for run and
 comparison invocations: pass/fail, the persisted run ID, runner, component
-SHA, selected scenarios, key metrics, and artifact pointers, followed by the
+SHA, selected scenarios, key metrics, generic hotspots, and artifact pointers, followed by the
 `homeboy runs show <run-id>` / `homeboy runs artifacts <run-id>` commands to
 see everything. No data is dropped — the full structured payload is always
 written to `--output <file>`, and `--json` prints it to stdout instead of the
 summary.
+
+For successful full-surface runs, the hotspot section ranks the slowest numeric
+timing metrics and the hottest query/count-style metric families directly from
+the bench payload. The extraction is schema-blind and component-agnostic: it
+uses metric names such as `duration`, `elapsed`, `*_ms`, `*_ms_per_item`,
+`*_queries_per_*`, and grouped count metrics rather than product-specific
+scenario names.
 
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
