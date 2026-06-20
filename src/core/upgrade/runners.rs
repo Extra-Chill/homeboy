@@ -8,6 +8,7 @@ use crate::core::runner::{
 use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::{Error, Result};
 use std::path::Path;
+use std::process::Command;
 
 use super::helpers::{current_version, version_is_newer};
 use super::types::{
@@ -190,6 +191,11 @@ fn upgrade_runner_with_executor(
     let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
         .ok()
         .flatten();
+    let expected_source_identity = if method_override == Some(InstallMethod::Source) {
+        source_path.and_then(source_checkout_build_identity)
+    } else {
+        None
+    };
     let command_source_path = match runner_upgrade_source_path(
         runner,
         method_override,
@@ -284,6 +290,7 @@ fn upgrade_runner_with_executor(
         command_source_path.as_deref(),
         &upgrade_homeboy_path,
         new_version.as_deref(),
+        expected_source_identity.as_deref(),
         exec,
     ) {
         match update_homeboy_path(&runner.id, &realignment.homeboy_path) {
@@ -681,17 +688,20 @@ fn source_upgrade_homeboy_path_realignment(
     command_source_path: Option<&str>,
     configured_homeboy_path: &str,
     configured_version: Option<&str>,
+    expected_source_identity: Option<&str>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> Option<SourceUpgradeHomeboyPathRealignment> {
     if method_override != Some(InstallMethod::Source) {
         return None;
     }
-    let current_identity = build_identity::current().display;
+    let expected_identity = expected_source_identity
+        .map(str::to_string)
+        .unwrap_or_else(|| build_identity::current().display);
     let configured_identity = runner_homeboy_identity(runner, configured_homeboy_path, exec)
         .ok()
         .flatten();
     if configured_version == Some(current_version())
-        && configured_identity.as_deref() == Some(current_identity.as_str())
+        && configured_identity.as_deref() == Some(expected_identity.as_str())
     {
         return None;
     }
@@ -713,7 +723,7 @@ fn source_upgrade_homeboy_path_realignment(
         else {
             continue;
         };
-        if identity != current_identity {
+        if identity != expected_identity {
             continue;
         }
         return Some(SourceUpgradeHomeboyPathRealignment {
@@ -726,6 +736,42 @@ fn source_upgrade_homeboy_path_realignment(
     }
 
     None
+}
+
+fn source_checkout_build_identity(source_path: &Path) -> Option<String> {
+    let commit = git_output(source_path, &["rev-parse", "--short=12", "HEAD"])?;
+    let status = git_output(source_path, &["status", "--porcelain"])?;
+    let dirty_suffix = if status.trim().is_empty() {
+        ""
+    } else {
+        "-dirty"
+    };
+
+    Some(format!(
+        "homeboy {}+{}{}",
+        current_version(),
+        commit,
+        dirty_suffix
+    ))
+}
+
+fn git_output(source_path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(source_path)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn sync_runner_extensions(
@@ -2379,6 +2425,83 @@ mod tests {
     }
 
     #[test]
+    fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
+        let source_dir = git_source_checkout();
+        let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
+        assert_ne!(expected_identity, build_identity::current().display);
+
+        let stale_path = "/home/user/Developer/_lab_workspaces/homeboy-old/target/debug/homeboy";
+        let remote_source = "/home/user/Developer/_lab_workspaces/homeboy-current-main";
+        let source_binary = format!("{remote_source}/target/release/homeboy");
+        let runner = ssh_runner("lab", Some(stale_path));
+        let mut commands = Vec::new();
+        let mut path_updates = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+            &[runner],
+            true,
+            Some(InstallMethod::Source),
+            Some(source_dir.path()),
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let (stdout, stderr, exit_code) = match commands.len() {
+                    1 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
+                    2 => ("{\"success\":true}\n".to_string(), String::new(), 0),
+                    3 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
+                    4 => (
+                        format!("homeboy {}+oldbuild\n", current_version()),
+                        String::new(),
+                        0,
+                    ),
+                    5 if options.command[0] == source_binary => {
+                        (format!("homeboy {}\n", current_version()), String::new(), 0)
+                    }
+                    6 if options.command[0] == source_binary => {
+                        (format!("{expected_identity}\n"), String::new(), 0)
+                    }
+                    other => (
+                        String::new(),
+                        format!("unexpected command {other}: {:?}", options.command),
+                        1,
+                    ),
+                };
+                Ok((
+                    exec_output(runner_id, options.command, &stdout, &stderr, exit_code),
+                    exit_code,
+                ))
+            },
+            runner_status,
+            |runner, path| {
+                assert_eq!(runner.id, "lab");
+                assert_eq!(path, source_dir.path());
+                Ok(remote_source.to_string())
+            },
+            |runner_id, homeboy_path| {
+                path_updates.push((runner_id.to_string(), homeboy_path.to_string()));
+                Ok(())
+            },
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].success);
+        assert!(updated[0].upgraded);
+        assert_eq!(updated[0].homeboy_path, source_binary);
+        assert_eq!(updated[0].new_version.as_deref(), Some(current_version()));
+        assert_eq!(updated[0].path_drift, None);
+        assert_eq!(path_updates, vec![("lab".to_string(), source_binary)]);
+    }
+
+    #[test]
     fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
         let mut commands = Vec::new();
@@ -2640,6 +2763,36 @@ mod tests {
             resources: HashMap::new(),
             policy: Default::default(),
         }
+    }
+
+    fn git_source_checkout() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("README.md"), "test\n").expect("write readme");
+        run_git(dir.path(), &["init"]);
+        run_git(
+            dir.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        run_git(dir.path(), &["config", "user.name", "Homeboy Test"]);
+        run_git(dir.path(), &["add", "README.md"]);
+        run_git(dir.path(), &["commit", "-m", "Initial commit"]);
+        dir
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn exec_output(
