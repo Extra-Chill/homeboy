@@ -10,8 +10,8 @@ use crate::core::code_audit::checks::CheckStatus;
 use crate::core::code_audit::conventions::{Deviation, Outlier};
 use crate::core::code_audit::findings::{Finding, Severity};
 use crate::core::code_audit::{
-    AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditSummary, CodeAuditResult,
-    ConventionReport, DetectorRuntime,
+    AuditAnalysisContext, AuditExecutionPlan, AuditFinding, AuditProfile, AuditSummary,
+    CodeAuditResult, ConventionReport, DetectorRuntime,
 };
 use crate::core::plan::PlanStepStatus;
 
@@ -96,7 +96,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         exclude_kinds: vec![],
         only_labels: vec![],
         exclude_labels: vec![],
-        profile: crate::core::code_audit::AuditProfile::Full,
+        profile: AuditProfile::Full,
         extension_overrides: vec![],
         baseline_flags: crate::core::engine::baseline::BaselineFlags {
             baseline: false,
