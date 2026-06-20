@@ -308,12 +308,16 @@ impl Commands {
                     },)
                 ) =>
             {
-                LabCommandContract::explicit_runner(
+                let mut contract = LabCommandContract::explicit_runner(
                     AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
                     None,
                     false,
                     LAB_NO_EXTRA_TOOLS,
-                )
+                );
+                if agent_task_provider_requires_cwd_git_checkout(&args.command) {
+                    contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+                }
+                contract
             }
             Commands::AgentTask(args)
                 if matches!(
@@ -475,6 +479,22 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
             let backend = args.backend.clone().or_else(default_backend);
             backend.as_ref().is_some_and(|backend| {
                 provider_requires_cwd_git_checkout(backend, args.selector.as_deref())
+            })
+        }
+        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
+            command:
+                agent_task::AgentTaskControllerCommand::FromSpec(
+                    agent_task::AgentTaskControllerFromSpecArgs {
+                        resume: true,
+                        dispatch_backend,
+                        dispatch_selector,
+                        ..
+                    },
+                ),
+        }) => {
+            let backend = dispatch_backend.clone().or_else(default_backend);
+            backend.as_ref().is_some_and(|backend| {
+                provider_requires_cwd_git_checkout(backend, dispatch_selector.as_deref())
             })
         }
         _ => false,
@@ -1316,6 +1336,51 @@ mod tests {
             &args.command,
             || Some("default-patch-provider".to_string()),
             |backend, selector| backend == "default-patch-provider" && selector.is_none(),
+        ));
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_covers_controller_from_spec_resume_backend() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "controller",
+            "from-spec",
+            "loop.json",
+            "--resume",
+            "--dispatch-backend",
+            "patch-provider",
+            "--dispatch-selector",
+            "selected",
+        ]);
+        let Commands::AgentTask(args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || None,
+            |backend, selector| backend == "patch-provider" && selector == Some("selected"),
+        ));
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_skips_controller_materialize() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "controller",
+            "materialize",
+            "loop.json",
+        ]);
+        let Commands::AgentTask(args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(!agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || Some("patch-provider".to_string()),
+            |backend, _| backend == "patch-provider",
         ));
     }
 
