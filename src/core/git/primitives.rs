@@ -318,6 +318,20 @@ pub(crate) fn is_git_repo(path: &str) -> bool {
     command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
 }
 
+/// Report whether `relative` (a repo-relative path) is committed/tracked in the
+/// git repository rooted at (or containing) `repo_dir`.
+///
+/// Returns `false` when the path is gitignored, untracked, or the directory is
+/// not a git repository. Uses `git ls-files --error-unmatch`, which only
+/// succeeds for paths recorded in the index.
+pub(crate) fn is_tracked_path(repo_dir: &Path, relative: &str) -> bool {
+    command::succeeded_in(
+        &repo_dir.to_string_lossy(),
+        "git",
+        &["ls-files", "--error-unmatch", "--", relative],
+    )
+}
+
 /// Get the git repository root directory from any path within the repo.
 pub fn get_git_root(path: &str) -> Result<String> {
     run_git(

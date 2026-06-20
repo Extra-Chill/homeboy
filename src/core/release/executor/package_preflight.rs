@@ -14,6 +14,12 @@ pub(crate) fn run_package_preflight(
     component_local_path: &str,
     skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
+    // Inspect the original component checkout (which still has its `.git`) for
+    // git-pinned dependencies that lack a committed lockfile. The isolated
+    // build copy below excludes `.git`, so this committed-state check must run
+    // against the source tree before we mutate or build anything.
+    super::lockfile_guard::guard_committed_lockfiles(Path::new(component_local_path))?;
+
     let temp = create_release_preflight_tempdir()?;
     let temp_component_path = temp.join("component");
     copy_release_preflight_tree(Path::new(component_local_path), &temp_component_path)?;
