@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.53] - 2026-06-20
+
+### Changed
+- Emit REST DB query shapes
+
 ## [3.7.52] - 2026-06-20
 
 ### Changed
