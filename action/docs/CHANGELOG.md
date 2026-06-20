@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.14] - 2026-06-20
+
+### Fixed
+- give the release failed-SHA marker manual + tooling-aware escape hatches
+
 ## [2.7.13] - 2026-06-20
 
 ### Fixed
