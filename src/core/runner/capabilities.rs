@@ -6,7 +6,7 @@ use crate::core::error::{Error, Result};
 use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use crate::core::server::{self, SshClient};
 
-use super::{Runner, RunnerToolRegistry};
+use super::{Runner, RunnerKind, RunnerToolRegistry};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunnerCapabilityPreflight {
@@ -214,6 +214,15 @@ impl RunnerCapabilitySnapshot {
         runner: &Runner,
         required_commands: &[String],
     ) -> Result<Self> {
+        if runner.kind == RunnerKind::Local {
+            let probe = Self::local_batch_tool_and_command_probe(runner, required_commands)?;
+            return Ok(Self {
+                tools: probe.tools,
+                commands: probe.commands,
+                components: configured_runner_components(runner),
+            });
+        }
+
         let client = Self::ssh_client_for_runner(runner)?;
         let probe = Self::batch_tool_and_command_probe(runner, &client, required_commands);
 
@@ -254,6 +263,45 @@ impl RunnerCapabilitySnapshot {
         let command_names = normalized_command_names(required_commands);
         let output = client.execute(&batch_probe_script(&tool_commands, &command_names));
         parse_batch_probe_output(&output.stdout, &tool_commands, &command_names)
+    }
+
+    fn local_batch_tool_and_command_probe(
+        runner: &Runner,
+        required_commands: &[String],
+    ) -> Result<RunnerCapabilityProbeResult> {
+        let tool_commands = RunnerToolRegistry::required_tools()
+            .iter()
+            .copied()
+            .map(|tool| {
+                let command = if tool == RunnerRequiredTool::Homeboy {
+                    runner.settings.homeboy_path.as_deref().unwrap_or("homeboy")
+                } else {
+                    RunnerToolRegistry::spec_for_required_tool(tool)
+                        .map(|spec| spec.command)
+                        .unwrap_or_else(|| tool.id())
+                };
+                (tool, command.to_string())
+            })
+            .collect::<Vec<_>>();
+        let command_names = normalized_command_names(required_commands);
+        let script = batch_probe_script(&tool_commands, &command_names);
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .envs(runner.env.iter())
+            .output()
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("probe local runner capabilities".to_string()),
+                )
+            })?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(parse_batch_probe_output(
+            &stdout,
+            &tool_commands,
+            &command_names,
+        ))
     }
 
     fn playwright_condition() -> &'static str {

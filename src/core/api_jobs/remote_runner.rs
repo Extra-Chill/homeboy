@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::{
     job_not_found, timestamp_ms, Job, JobEvent, JobEventKind, JobStatus, JobStore, StoredJob,
 };
+use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner::RunnerResourceMetrics;
 use crate::core::source_snapshot::SourceSnapshot;
@@ -73,6 +74,8 @@ pub struct RemoteRunnerJobResult {
     pub artifacts: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CommandCaptureMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

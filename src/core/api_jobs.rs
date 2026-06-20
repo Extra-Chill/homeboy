@@ -1487,6 +1487,7 @@ mod tests {
                     data: None,
                     artifacts: Vec::new(),
                     metrics: None,
+                    capture: None,
                 },
             )
             .expect("first job completes");
@@ -1563,6 +1564,7 @@ mod tests {
                         metadata: Some(json!({ "kind": "test_report" })),
                     }],
                     metrics: None,
+                    capture: None,
                 },
             )
             .expect("runner completes job");
@@ -1608,6 +1610,7 @@ mod tests {
                     data: None,
                     artifacts: Vec::new(),
                     metrics: None,
+                    capture: None,
                 },
             )
             .expect("runner fails job");

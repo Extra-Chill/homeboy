@@ -355,6 +355,7 @@ fn run_once_output(
                 })),
                 artifacts: Vec::new(),
                 metrics: None,
+                capture: None,
             })?;
             let exit_code = 1;
             return Ok((
@@ -391,6 +392,7 @@ fn run_once_output(
         })),
         artifacts: Vec::new(),
         metrics: exec_output.metrics.clone(),
+        capture: exec_output.capture.clone(),
     })?;
 
     Ok((
@@ -683,7 +685,6 @@ mod tests {
             let (output, exit_code) =
                 run_reverse_worker(worker_options(broker_url.clone())).expect("run worker");
 
-            assert_eq!(exit_code, 0);
             assert!(output.claimed);
             let serialized = serde_json::to_value(&output).expect("serialize output");
             assert_eq!(serialized["command"], serde_json::json!("runner.work"));
@@ -692,20 +693,24 @@ mod tests {
             assert!(serialized.get("iterations").is_none());
             assert!(serialized.get("jobs_claimed").is_none());
             assert!(serialized.get("last_claim").is_none());
-            let job = output.job.expect("job");
-            assert_eq!(job.status, JobStatus::Succeeded);
-            handle.join().expect("mock broker joins");
+            let job = output.job.clone().expect("job");
             let events = store.events(job.id).expect("events");
-            assert!(events.iter().any(|event| {
-                event.kind == JobEventKind::Result
-                    && event.data.as_ref().expect("result data")["stdout"]
-                        == serde_json::json!("worker-ok")
-            }));
             let result = events
                 .iter()
                 .find(|event| event.kind == JobEventKind::Result)
                 .and_then(|event| event.data.as_ref())
                 .expect("result event data");
+            assert_eq!(
+                exit_code, 0,
+                "worker output: {output:#?}; result: {result:#}"
+            );
+            assert_eq!(job.status, JobStatus::Succeeded);
+            handle.join().expect("mock broker joins");
+            assert!(events.iter().any(|event| {
+                event.kind == JobEventKind::Result
+                    && event.data.as_ref().expect("result data")["stdout"]
+                        == serde_json::json!("worker-ok")
+            }));
             assert!(result["metrics"]["duration_ms"].as_u64().is_some());
             let seen_paths = seen_paths.lock().expect("seen paths");
             assert!(

@@ -510,6 +510,7 @@ fn exec_via_reverse_broker(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     } = runner_job_result_fields(
         &events,
@@ -550,7 +551,7 @@ fn exec_via_reverse_broker(
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
-            capture: None,
+            capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -657,6 +658,7 @@ fn exec_via_daemon(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
@@ -690,7 +692,7 @@ fn exec_via_daemon(
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
-            capture: None,
+            capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -1133,6 +1135,7 @@ struct RunnerJobResultFields {
     stdout: String,
     stderr: String,
     metrics: Option<RunnerResourceMetrics>,
+    capture: Option<CommandCaptureMetadata>,
     exit_code: i32,
 }
 
@@ -1155,6 +1158,9 @@ fn runner_job_result_fields(
     let metrics = result
         .get("metrics")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let capture = result
+        .get("capture")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     let exit_code = result
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -1171,6 +1177,7 @@ fn runner_job_result_fields(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     }
 }
