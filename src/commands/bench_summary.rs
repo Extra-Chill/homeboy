@@ -329,9 +329,7 @@ fn top_metric_families(
             )
         })
         .collect::<Vec<_>>();
-    families.sort_by(|a, b| {
-        b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
-    });
+    families.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     families.truncate(limit);
     families
 }
