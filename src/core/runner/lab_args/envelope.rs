@@ -5,6 +5,8 @@
 //! rewrite helpers can consume the typed refs one path at a time while preserving
 //! the exact argv output they already produced.
 
+use super::path_remap::{rewrite_flag_value_args, try_rewrite_flag_value_args};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::core::runner) struct ExecutionEnvelope {
     argv: Vec<String>,
@@ -87,66 +89,41 @@ impl ExecutionEnvelope {
         &self,
         mut rewrite: impl FnMut(&str) -> String,
     ) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.argv.len());
-        let mut iter = self.argv.iter().peekable();
-        let mut passthrough = false;
-        while let Some(arg) = iter.next() {
-            if passthrough {
-                out.push(arg.clone());
-                continue;
-            }
-            if arg == "--" {
-                passthrough = true;
-                out.push(arg.clone());
-                continue;
-            }
+        rewrite_flag_value_args(&self.argv, |arg, iter, out| {
             if arg == "--provider-config" {
-                out.push(arg.clone());
+                out.push(arg.to_string());
                 if let Some(spec) = iter.next() {
                     out.push(rewrite(spec));
                 }
-                continue;
+                return;
             }
             if let Some(spec) = arg.strip_prefix("--provider-config=") {
                 out.push(format!("--provider-config={}", rewrite(spec)));
-                continue;
+                return;
             }
-            out.push(arg.clone());
-        }
-        out
+            out.push(arg.to_string());
+        })
     }
 
     pub fn rewrite_agent_task_text_values(
         &self,
         mut rewrite: impl FnMut(&str, &str) -> crate::core::Result<String>,
     ) -> crate::core::Result<Vec<String>> {
-        let mut out = Vec::with_capacity(self.argv.len());
-        let mut iter = self.argv.iter().peekable();
-        let mut passthrough = false;
-        while let Some(arg) = iter.next() {
-            if passthrough {
-                out.push(arg.clone());
-                continue;
-            }
-            if arg == "--" {
-                passthrough = true;
-                out.push(arg.clone());
-                continue;
-            }
+        try_rewrite_flag_value_args(&self.argv, |arg, iter, out| {
             if let Some(flag) = agent_task_text_flag(arg) {
-                out.push(arg.clone());
+                out.push(arg.to_string());
                 if let Some(spec) = iter.next() {
                     out.push(rewrite(spec, flag)?);
                 }
-                continue;
+                return Ok(());
             }
             if let Some((flag, spec)) = agent_task_text_inline_arg(arg) {
                 out.push(format!("{}={}", flag, rewrite(spec, flag)?));
-                continue;
+                return Ok(());
             }
-            out.push(arg.clone());
-        }
-        Ok(out)
+            out.push(arg.to_string());
+            Ok(())
+        })
     }
 }
 

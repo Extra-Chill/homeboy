@@ -15,51 +15,35 @@ use crate::core::config::read_json_spec_to_string;
 use crate::core::{Error, Result};
 
 use super::envelope::ExecutionEnvelope;
-use super::path_remap::{remap_paths_in_value, LabPathRemap};
+use super::path_remap::{
+    order_mappings_by_specificity, remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
+};
 
 pub(in crate::core::runner) fn remap_agent_task_plan_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
     source_path: &Path,
 ) -> Result<Vec<String>> {
-    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
-    ordered.sort_by_key(|mapping| {
-        (
-            std::cmp::Reverse(mapping.local.len()),
-            std::cmp::Reverse(mapping.remote.len()),
-        )
-    });
+    let ordered = order_mappings_by_specificity(mappings);
 
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
+    try_rewrite_flag_value_args(args, |arg, iter, out| {
         if arg == "--plan" {
-            out.push(arg.clone());
+            out.push(arg.to_string());
             if let Some(spec) = iter.next() {
                 out.push(remap_agent_task_plan_spec(spec, &ordered, source_path)?);
             }
-            continue;
+            return Ok(());
         }
         if let Some(spec) = arg.strip_prefix("--plan=") {
             out.push(format!(
                 "--plan={}",
                 remap_agent_task_plan_spec(spec, &ordered, source_path)?
             ));
-            continue;
+            return Ok(());
         }
-        out.push(arg.clone());
-    }
-    Ok(out)
+        out.push(arg.to_string());
+        Ok(())
+    })
 }
 
 pub(in crate::core::runner) fn inline_agent_task_prompt_files_in_args(
