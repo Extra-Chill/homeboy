@@ -12,7 +12,7 @@
 //! to the `--output` file unchanged, so no data is lost — only the default
 //! human presentation becomes compact.
 //!
-//! Artifact pointers (shared-state files, WP Codebox bundle paths,
+//! Artifact pointers (shared-state files, runner bundle paths,
 //! scenario-specific artifacts) and the `homeboy runs show` follow-up
 //! command are surfaced near the top so they are easy to find (#3260).
 
@@ -21,6 +21,9 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
+
+mod coverage;
+pub(crate) use self::coverage::bench_coverage_lines;
 
 /// Render a compact summary for a serialized `BenchOutput` value. Returns
 /// `None` for variants where the full JSON is the better default (lists,
@@ -76,6 +79,7 @@ fn render_single_summary(output: &Value) -> String {
 
     lines.extend(key_metric_lines(output));
     lines.extend(bench_hotspot_lines(output));
+    lines.extend(bench_coverage_lines(output));
     lines.extend(gate_failure_lines(output));
     lines.extend(artifact_lines(output));
     lines.extend(failure_lines(output));
@@ -400,7 +404,7 @@ fn gate_failure_lines(output: &Value) -> Vec<String> {
     lines
 }
 
-/// Surface artifact pointers (#3260): shared-state files, WP Codebox bundle
+/// Surface artifact pointers (#3260): shared-state files, runner bundle
 /// paths, and scenario-specific artifacts. Each ref carries a path or a URL;
 /// we print whichever locates it, prefixed by scenario + name so it is
 /// grep-friendly.
@@ -599,7 +603,7 @@ mod tests {
                 {
                     "scenario_id": "rtc-smoke",
                     "name": "bundle",
-                    "url": "https://codebox.test/bundle.zip"
+                    "url": "https://runner.test/bundle.zip"
                 }
             ],
             "persisted_run": {
@@ -616,7 +620,7 @@ mod tests {
                     "iterations": 10,
                     "runs": 1,
                     "concurrency": 1,
-                    "runner": { "extension": "wp-codebox", "path": "/runner" }
+                    "runner": { "extension": "sample-runner", "path": "/runner" }
                 },
                 "scenarios": [
                     {
@@ -634,7 +638,7 @@ mod tests {
         assert!(summary.contains("Component: homeboy\n"));
         assert!(summary.contains("Iterations: 10\n"));
         assert!(summary.contains("Run: bench-run-42\n"));
-        assert!(summary.contains("Runner: wp-codebox\n"));
+        assert!(summary.contains("Runner: sample-runner\n"));
         assert!(summary.contains("Scenarios (1): rtc-smoke\n"));
         assert!(summary.contains("Key metrics:\n"));
         assert!(summary.contains("p50_ms=12.5"));
@@ -645,7 +649,7 @@ mod tests {
         // Surface artifact pointers (#3260).
         assert!(summary.contains("Artifacts (2):\n"));
         assert!(summary.contains("rtc-smoke/response-rows: /tmp/shared/response-rows.json\n"));
-        assert!(summary.contains("rtc-smoke/bundle: https://codebox.test/bundle.zip\n"));
+        assert!(summary.contains("rtc-smoke/bundle: https://runner.test/bundle.zip\n"));
         // Point at the persisted run for full evidence.
         assert!(summary.contains("Inspect: homeboy runs show bench-run-42\n"));
         assert!(summary.contains("Artifacts: homeboy runs artifacts bench-run-42\n"));
@@ -720,6 +724,66 @@ mod tests {
         assert!(lines.contains("  Hottest metric families:\n"));
         assert!(lines.contains("    query_families total=67 metrics=4"));
         assert!(lines.contains("    create total=36 metrics=2"));
+    }
+
+    #[test]
+    fn single_summary_surfaces_schema_blind_coverage_metadata() {
+        let payload = single_payload(json!({
+            "passed": true,
+            "status": "passed",
+            "component": "homeboy",
+            "iterations": 1,
+            "results": {
+                "coverage_summary": {
+                    "surface_count": 120,
+                    "exercised_count": 82,
+                    "skipped_count": 14,
+                    "failed_count": 3,
+                    "coverage_gaps": [
+                        { "group": "runner" },
+                        { "group": "runner" },
+                        { "group": "report" }
+                    ]
+                }
+            }
+        }));
+
+        let summary = render_bench_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Coverage:\n"));
+        assert!(summary
+            .contains("  Surfaces: discovered=120 exercised=82 skipped_unsafe=14 failed=3\n"));
+        assert!(summary.contains("  Coverage gaps: 3\n"));
+        assert!(summary.contains("  Top uncovered groups:\n"));
+        assert!(summary.contains("    runner: 2\n"));
+        assert!(summary.contains("    report: 1\n"));
+    }
+
+    #[test]
+    fn coverage_lines_use_artifact_metadata_and_degrade_gracefully() {
+        let payload = json!({
+            "artifacts": [
+                {
+                    "name": "coverage",
+                    "coverage_summary": {
+                        "surface_count": 9,
+                        "exercised_count": 5,
+                        "top_uncovered_groups": [
+                            { "name": "scheduler", "uncovered_count": 3 },
+                            "runner"
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let lines = bench_coverage_lines(&payload).join("\n");
+
+        assert!(lines.starts_with("Coverage:\n"));
+        assert!(lines.contains("  Surfaces: discovered=9 exercised=5"));
+        assert!(lines.contains("    scheduler: 3"));
+        assert!(lines.contains("    runner"));
+        assert!(bench_coverage_lines(&json!({ "coverage_summary": {} })).is_empty());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! `runs show` returns a `RunDetail` that embeds full run metadata and the
 //! complete artifact list. For bench runs in particular, the useful evidence
-//! — shared-state files, WP Codebox artifact bundles, scenario-specific
+//! — shared-state files, runner artifact bundles, scenario-specific
 //! artifacts — is buried in a large JSON payload (#3260).
 //!
 //! This module renders a compact summary from the serialized `RunsOutput`
@@ -56,6 +56,7 @@ fn render_run_detail(run: &Value) -> String {
         if let Some(metadata) = value_at(run, &["metadata"]) {
             lines.extend(super::bench_summary::bench_hotspot_lines(metadata));
         }
+        lines.extend(super::bench_summary::bench_coverage_lines(run));
     }
     lines.extend(artifact_lines(run, run_id));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
@@ -230,6 +231,45 @@ mod tests {
         assert!(summary.contains("  Hottest metric families:\n"));
         assert!(summary.contains("    work total=34 metrics=2\n"));
         assert!(summary.contains("Artifacts: none recorded\n"));
+    }
+
+    #[test]
+    fn bench_show_summary_surfaces_coverage_from_metadata() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "bench-run-42",
+                    "kind": "bench",
+                    "status": "pass",
+                    "metadata": {
+                        "coverage_summary": {
+                            "surface_count": 44,
+                            "exercised_count": 30,
+                            "skipped_count": 8,
+                            "failed_count": 1,
+                            "coverage_gaps": [
+                                "api::create",
+                                "api::delete",
+                                "cli::delete"
+                            ]
+                        }
+                    },
+                    "artifacts": []
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Coverage:\n"));
+        assert!(
+            summary.contains("  Surfaces: discovered=44 exercised=30 skipped_unsafe=8 failed=1\n")
+        );
+        assert!(summary.contains("  Coverage gaps: 3\n"));
+        assert!(summary.contains("    api: 2\n"));
+        assert!(summary.contains("    cli: 1\n"));
     }
 
     #[test]
