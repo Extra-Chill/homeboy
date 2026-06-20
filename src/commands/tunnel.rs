@@ -166,6 +166,16 @@ enum TunnelPreviewConsumerCommand {
         /// Override the config artifact directory
         #[arg(long)]
         artifacts_dir: Option<PathBuf>,
+
+        /// Start the command under supervision and return as soon as the
+        /// preview is ready, leaving the command running (held preview flows).
+        #[arg(long)]
+        non_blocking: bool,
+
+        /// Seconds to wait for the preview to report ready in non-blocking mode
+        /// before returning while leaving the command running.
+        #[arg(long, requires = "non_blocking")]
+        ready_timeout: Option<u64>,
     },
 }
 
@@ -721,7 +731,16 @@ fn run_preview_consumer(command: TunnelPreviewConsumerCommand) -> CmdResult<Tunn
             service_id,
             preview_public_url,
             artifacts_dir,
-        } => run_preview_consumer_config(config, service_id, preview_public_url, artifacts_dir),
+            non_blocking,
+            ready_timeout,
+        } => run_preview_consumer_config(
+            config,
+            service_id,
+            preview_public_url,
+            artifacts_dir,
+            non_blocking,
+            ready_timeout,
+        ),
     }
 }
 
@@ -730,12 +749,21 @@ fn run_preview_consumer_config(
     service_id: Option<String>,
     preview_public_url: Option<String>,
     artifacts_dir_override: Option<PathBuf>,
+    non_blocking: bool,
+    ready_timeout: Option<u64>,
 ) -> CmdResult<TunnelOutput> {
+    let mode = if non_blocking {
+        preview_consumer::PreviewConsumerRunMode::NonBlocking
+    } else {
+        preview_consumer::PreviewConsumerRunMode::Blocking
+    };
     let (result, exit_code) = preview_consumer::run(preview_consumer::PreviewConsumerRunRequest {
         config_path,
         service_id,
         preview_public_url,
         artifacts_dir_override,
+        mode,
+        ready_timeout: ready_timeout.map(std::time::Duration::from_secs),
     })?;
 
     Ok((
@@ -1396,6 +1424,8 @@ console.log(`Public result URL: ${publicUrl}/result`);
                 None,
                 Some("https://run.example.test".to_string()),
                 None,
+                false,
+                None,
             )
             .expect("preview consumer command succeeds");
 
@@ -1408,10 +1438,89 @@ console.log(`Public result URL: ${publicUrl}/result`);
                 result.public_result_url.as_deref(),
                 Some("https://run.example.test/result")
             );
+            assert_eq!(result.exit_code, Some(0));
+            assert!(matches!(
+                result.status,
+                preview_consumer::PreviewConsumerStatus::Completed
+            ));
+            assert!(result.preview_ready);
             assert!(artifacts
                 .path()
                 .join("homeboy-preview-consumer.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn preview_consumer_non_blocking_reports_running_without_waiting_for_exit() {
+        test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let script = checkout.path().join("held-consumer.mjs");
+            fs::write(
+                &script,
+                r#"
+const publicUrl = process.argv[process.argv.indexOf('--public-url') + 1];
+console.log(`Public result URL: ${publicUrl}/result`);
+// Stay alive to emulate a held preview runtime.
+setTimeout(() => {}, 60_000);
+"#,
+            )
+            .expect("script");
+            let artifacts = tempfile::tempdir().expect("artifacts");
+            let config = tempfile::NamedTempFile::new().expect("config");
+            fs::write(
+                config.path(),
+                serde_json::json!({
+                    "id": "held-consumer",
+                    "command": {
+                        "program": "node",
+                        "args": [
+                            script.display().to_string(),
+                            "--public-url",
+                            "${preview_public_url}"
+                        ],
+                        "artifacts_dir": artifacts.path()
+                    },
+                    "output": {
+                        "public_result_stdout_prefix": "Public result URL:"
+                    }
+                })
+                .to_string(),
+            )
+            .expect("config json");
+
+            let (output, exit_code) = run_preview_consumer_config(
+                config.path().to_path_buf(),
+                None,
+                Some("https://run.example.test".to_string()),
+                None,
+                true,
+                Some(30),
+            )
+            .expect("preview consumer command succeeds");
+
+            assert_eq!(exit_code, 0);
+            let result = output
+                .extra
+                .preview_consumer
+                .expect("preview consumer output");
+            assert!(matches!(
+                result.status,
+                preview_consumer::PreviewConsumerStatus::Running
+            ));
+            assert!(result.preview_ready);
+            assert_eq!(
+                result.public_result_url.as_deref(),
+                Some("https://run.example.test/result")
+            );
+            assert!(result.exit_code.is_none());
+            assert!(result.pid.is_some());
+
+            if let Some(pid) = result.pid {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
         });
     }
 }
