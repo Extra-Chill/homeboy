@@ -216,7 +216,7 @@ pub fn diagnose_auth(
     })
 }
 
-pub fn forward_to_local_origin(
+pub(crate) fn forward_to_local_origin(
     client: &Client,
     local_origin: &str,
     request: PreviewIngressRequest,

@@ -87,7 +87,7 @@ impl SourceSnapshot {
         Self::collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
     }
 
-    pub fn collect_local_with_policy(
+    pub(crate) fn collect_local_with_policy(
         runner_id: &str,
         path: &Path,
         remote_path: Option<&str>,
@@ -132,7 +132,7 @@ impl SourceSnapshot {
         Self::existing_remote_with_policy(runner_id, remote_path, workspace_root, &policy)
     }
 
-    pub fn existing_remote_with_policy(
+    pub(crate) fn existing_remote_with_policy(
         runner_id: &str,
         remote_path: &str,
         workspace_root: Option<&str>,
@@ -164,7 +164,7 @@ impl SourceSnapshot {
     }
 }
 
-pub fn default_sync_excludes() -> Vec<String> {
+pub(crate) fn default_sync_excludes() -> Vec<String> {
     DEFAULT_SYNC_EXCLUDES
         .iter()
         .map(|value| value.to_string())

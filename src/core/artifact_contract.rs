@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::artifact_ref::{ArtifactRef, EvidenceRef};
+use crate::core::artifact_ref::ArtifactRef;
 use crate::core::observation::ArtifactRecord;
 
 pub const ARTIFACT_CONTRACT_SCHEMA: &str = "homeboy/artifact-contract/v1";
@@ -76,7 +76,7 @@ impl ArtifactContract {
             .or(self.path.as_deref())
     }
 
-    pub fn into_evidence_contract(self) -> Option<EvidenceContract> {
+    pub(crate) fn into_evidence_contract(self) -> Option<EvidenceContract> {
         let target = self.target()?.to_string();
         let label = self.label.clone().unwrap_or_else(|| self.kind.clone());
         Some(EvidenceContract {
@@ -167,16 +167,6 @@ impl EvidenceContract {
         let mut evidence: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
         evidence.normalize()?;
         Ok(evidence)
-    }
-
-    pub fn to_evidence_ref(&self) -> EvidenceRef {
-        EvidenceRef {
-            schema: crate::core::artifact_ref::EVIDENCE_REF_SCHEMA.to_string(),
-            kind: self.kind.clone(),
-            target: self.target.clone(),
-            label: self.label.clone(),
-            artifact: None,
-        }
     }
 
     fn normalize(&mut self) -> Result<(), String> {

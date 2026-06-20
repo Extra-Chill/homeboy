@@ -268,7 +268,7 @@ pub fn remove_route(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn load_route(session_id: &str) -> Result<PreviewIngressRoute> {
+pub(crate) fn load_route(session_id: &str) -> Result<PreviewIngressRoute> {
     let path = paths::preview_ingress_route_file(session_id)?;
     let data = fs::read_to_string(&path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(path.display().to_string())))?;

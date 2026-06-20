@@ -38,7 +38,9 @@ pub struct LabRoutingRequest<'a> {
     pub active_run_id: Option<&'a str>,
 }
 
-pub fn route_lab_offload(request: LabRoutingRequest<'_>) -> Result<runners::LabOffloadOutcome> {
+pub(crate) fn route_lab_offload(
+    request: LabRoutingRequest<'_>,
+) -> Result<runners::LabOffloadOutcome> {
     if let Some(timeout) = request.timeout {
         return execute_lab_offload_with_timeout(request, timeout);
     }
@@ -249,7 +251,7 @@ fn lab_dispatch_metadata(
 /// Render offloaded stdout, attaching persisted-run retrieval guidance when a
 /// run was recorded. Mirrors the legacy CLI helper but is owned by core so the
 /// transformation is testable without constructing a clap `Cli`.
-pub fn stdout_with_persisted_run_retrieval(
+pub(crate) fn stdout_with_persisted_run_retrieval(
     stdout: &str,
     retrieval: Option<&PersistedRunRetrieval>,
 ) -> String {
@@ -332,7 +334,7 @@ pub fn lab_offload_command_from_contract(
     }
 }
 
-pub fn lab_route_plan_from_contract(
+pub(crate) fn lab_route_plan_from_contract(
     contract: LabCommandContract,
     required_extensions: Vec<String>,
 ) -> LabRoutePlan {

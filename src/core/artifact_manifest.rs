@@ -116,7 +116,7 @@ impl ArtifactManifest {
         }
     }
 
-    pub fn artifact_contracts(
+    pub(crate) fn artifact_contracts(
         &self,
     ) -> Result<Vec<crate::core::artifact_contract::ArtifactContract>> {
         if self.schema != ARTIFACT_MANIFEST_SCHEMA {
@@ -252,7 +252,9 @@ impl ArtifactManifest {
 }
 
 impl ArtifactManifestEntry {
-    pub fn to_artifact_contract(&self) -> Result<crate::core::artifact_contract::ArtifactContract> {
+    pub(crate) fn to_artifact_contract(
+        &self,
+    ) -> Result<crate::core::artifact_contract::ArtifactContract> {
         validate_entry_shape(self)?;
         let mut extra = std::collections::BTreeMap::new();
         if let Some(id) = &self.id {
