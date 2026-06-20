@@ -65,7 +65,9 @@ pub struct BenchPhaseFailureClassification {
 
 pub fn evaluate_phase_events(results: &mut BenchResults) {
     results.phase_summaries = summarize_phase_events(&results.phase_events);
-    results.failure_classification = classify_phase_failure(&results.phase_events);
+    if let Some(failure_classification) = classify_phase_failure(&results.phase_events) {
+        results.failure_classification = Some(failure_classification);
+    }
 }
 
 fn summarize_phase_events(events: &[BenchPhaseEvent]) -> Vec<BenchPhaseSummary> {
