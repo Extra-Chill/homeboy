@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::core::execution_contract::{decode_uri_component, encode_uri_component};
+use crate::core::execution_contract::decode_uri_component;
 use crate::core::observation::ArtifactRecord;
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
@@ -50,16 +50,6 @@ impl ArtifactReference {
         }
 
         Self::LocalPath(value)
-    }
-
-    pub fn runner_artifact(runner_id: &str, run_id: &str, artifact_id: &str) -> Self {
-        Self::parse(format!(
-            "{}{}/{}/{}",
-            RUNNER_ARTIFACT_REF_SCHEME,
-            encode_uri_component(runner_id),
-            encode_uri_component(run_id),
-            encode_uri_component(artifact_id)
-        ))
     }
 
     pub fn metadata_only(label: &str) -> Self {
@@ -134,7 +124,7 @@ impl ArtifactRef {
         }
     }
 
-    pub fn public_target(&self) -> Option<String> {
+    pub(crate) fn public_target(&self) -> Option<String> {
         self.public_url
             .clone()
             .or_else(|| self.url.clone())
@@ -167,7 +157,7 @@ impl EvidenceRef {
         }
     }
 
-    pub fn from_artifact(artifact: ArtifactRef) -> Option<Self> {
+    pub(crate) fn from_artifact(artifact: ArtifactRef) -> Option<Self> {
         let target = artifact.public_target()?;
         Some(Self {
             schema: EVIDENCE_REF_SCHEMA.to_string(),
