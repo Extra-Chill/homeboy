@@ -24,6 +24,11 @@ pub struct ArtifactCleanupOptions {
     pub apply: bool,
     pub self_artifacts: bool,
     pub temp_roots: Vec<PathBuf>,
+    /// Only reclaim artifacts from worktrees whose branch is already merged
+    /// into its upstream (ancestor or patch-equivalent / squash-merged). This
+    /// keeps in-progress cooks' build dirs intact while reclaiming the large
+    /// `target/` dirs left behind by merged worktrees.
+    pub merged_only: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -101,6 +106,21 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
 
     for worktree in &worktrees {
         let safety = git_safety(&worktree.path)?;
+        if options.merged_only && !branch_is_merged(&worktree.path) {
+            for declaration in artifact_declarations(&worktree.path)? {
+                let artifact_path = worktree.path.join(&declaration.relative_path);
+                if !artifact_path.exists() {
+                    continue;
+                }
+                skipped.push(skip_row(
+                    worktree,
+                    &declaration,
+                    artifact_path.to_string_lossy().to_string(),
+                    "worktree branch is not merged into its upstream",
+                ));
+            }
+            continue;
+        }
         for declaration in artifact_declarations(&worktree.path)? {
             let artifact_path = worktree.path.join(&declaration.relative_path);
             let display_path = artifact_path.to_string_lossy().to_string();
@@ -306,6 +326,56 @@ fn git_safety(worktree: &Path) -> Result<GitSafety> {
     })
 }
 
+/// Returns true when the worktree's current branch is already merged into its
+/// upstream tracking branch. "Merged" covers three git-native cases, so it is
+/// agnostic to merge strategy and ecosystem:
+///   1. HEAD has no commits ahead of `@{upstream}` (fast-forward / ancestor).
+///   2. Every commit ahead of `@{upstream}` is reported as already-applied by
+///      `git cherry` (prefix `-`), i.e. patch-equivalent — the rebase merge.
+///   3. Same patch-equivalence covers squash-merges whose single commit lands
+///      upstream with a matching patch-id.
+///
+/// When upstream cannot be resolved (no tracking branch) the worktree is
+/// treated as NOT merged, so its artifacts are preserved conservatively.
+fn branch_is_merged(worktree: &Path) -> bool {
+    let ahead = match git::run_git(
+        worktree,
+        &["rev-list", "--count", "@{upstream}..HEAD"],
+        "git rev-list upstream",
+    ) {
+        Ok(count) => count.trim().parse::<u32>().unwrap_or(u32::MAX),
+        Err(_) => return false,
+    };
+    if ahead == 0 {
+        return true;
+    }
+
+    // Commits exist ahead of upstream; treat as merged only if git reports
+    // every one of them as already applied upstream (patch-equivalent).
+    match git::run_git(
+        worktree,
+        &["cherry", "@{upstream}", "HEAD"],
+        "git cherry upstream",
+    ) {
+        Ok(output) => {
+            let mut saw_commit = false;
+            for line in output.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                saw_commit = true;
+                // `+ <sha>` means the commit is NOT present upstream.
+                if line.starts_with('+') {
+                    return false;
+                }
+            }
+            saw_commit
+        }
+        Err(_) => false,
+    }
+}
+
 fn status_path(line: &str) -> String {
     let raw = line.get(3..).unwrap_or_default();
     raw.rsplit(" -> ")
@@ -482,6 +552,7 @@ mod tests {
             apply: false,
             self_artifacts: true,
             temp_roots: Vec::new(),
+            merged_only: false,
         })
         .expect_err("reject ambiguous cleanup root");
 
@@ -514,6 +585,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("temp artifact candidates");
 
@@ -555,6 +627,7 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("apply cleanup");
 
@@ -589,6 +662,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("temp artifact candidates");
 
@@ -618,6 +692,7 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("apply cleanup");
 
@@ -647,6 +722,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("temp artifact candidates");
 
@@ -670,6 +746,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("temp artifact candidates");
 
@@ -694,6 +771,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("temp artifact candidates");
 
@@ -715,6 +793,7 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: vec![temp_root.path().to_path_buf()],
+            merged_only: false,
         })
         .expect("apply cleanup");
 
@@ -742,6 +821,7 @@ mod tests {
             apply: false,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            merged_only: false,
         })
         .expect("dry-run cleanup");
 
@@ -771,6 +851,7 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            merged_only: false,
         })
         .expect("apply cleanup");
 
@@ -814,6 +895,7 @@ mod tests {
             apply: true,
             self_artifacts: false,
             temp_roots: Vec::new(),
+            merged_only: false,
         })
         .expect("apply cleanup");
 
@@ -822,6 +904,113 @@ mod tests {
         assert!(output.skipped.iter().any(|row| {
             row.relative_path == "target" && row.reason.contains("tracked or staged source changes")
         }));
+    }
+
+    #[test]
+    fn branch_is_merged_detects_ancestor_and_unmerged_worktrees() {
+        // upstream "remote" repo
+        let remote = TempDir::new().expect("remote");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        let remote_url = remote.path().to_string_lossy().to_string();
+
+        let merged = git_repo();
+        git(merged.path(), &["remote", "add", "origin", &remote_url]);
+        git(merged.path(), &["push", "-u", "origin", "main"]);
+        // No commits ahead of upstream → merged (ancestor case).
+        assert!(branch_is_merged(merged.path()));
+
+        // Add a local commit that has not been pushed → not merged.
+        write_file(&merged.path().join("src/feature.rs"), "feature");
+        git(merged.path(), &["add", "src/feature.rs"]);
+        git(
+            merged.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "unmerged feature",
+            ],
+        );
+        assert!(!branch_is_merged(merged.path()));
+    }
+
+    #[test]
+    fn branch_is_merged_false_without_upstream() {
+        let repo = git_repo();
+        // No tracking branch configured at all.
+        assert!(!branch_is_merged(repo.path()));
+    }
+
+    #[test]
+    fn merged_only_preserves_unmerged_worktree_target() {
+        let remote = TempDir::new().expect("remote");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        let remote_url = remote.path().to_string_lossy().to_string();
+
+        let repo = git_repo();
+        git(repo.path(), &["remote", "add", "origin", &remote_url]);
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        // Local unmerged commit → branch is ahead of upstream.
+        write_file(&repo.path().join("src/feature.rs"), "feature");
+        git(repo.path(), &["add", "src/feature.rs"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "unmerged feature",
+            ],
+        );
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            merged_only: true,
+        })
+        .expect("merged-only cleanup");
+
+        assert_eq!(output.applied_count, 0, "unmerged target must be preserved");
+        assert!(repo.path().join("target/debug/app").exists());
+        assert!(output.skipped.iter().any(|row| {
+            row.relative_path == "target" && row.reason.contains("not merged into its upstream")
+        }));
+    }
+
+    #[test]
+    fn merged_only_reclaims_merged_worktree_target() {
+        let remote = TempDir::new().expect("remote");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        let remote_url = remote.path().to_string_lossy().to_string();
+
+        let repo = git_repo();
+        git(repo.path(), &["remote", "add", "origin", &remote_url]);
+        git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        // Branch tip equals upstream → merged. Leftover target/ should be reclaimed.
+        write_file(&repo.path().join("target/debug/app"), "artifact");
+
+        let output = cleanup_artifacts(ArtifactCleanupOptions {
+            path: Some(repo.path().to_path_buf()),
+            apply: true,
+            self_artifacts: false,
+            temp_roots: Vec::new(),
+            merged_only: true,
+        })
+        .expect("merged-only cleanup");
+
+        assert!(output.applied_count >= 1, "merged target must be reclaimed");
+        assert!(!repo.path().join("target").exists());
     }
 
     fn git_repo() -> TempDir {
