@@ -1505,9 +1505,7 @@ mod tests {
 
         let parsed = parse_bench_results_str(raw).unwrap();
 
-        assert!(!parsed.scenarios[0]
-            .artifacts
-            .contains_key("query-profile"));
+        assert!(!parsed.scenarios[0].artifacts.contains_key("query-profile"));
         assert!(parsed.scenarios[0].artifacts.contains_key("diagnostics"));
     }
 
