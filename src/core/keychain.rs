@@ -81,6 +81,28 @@ pub fn remove_many(project_id: &str, variable_names: &[String]) -> Result<usize>
     Ok(removed)
 }
 
+/// Returns true when a keychain error indicates the OS secure storage was
+/// reachable but could not service the request because no interactive UI is
+/// available (for example, macOS "dark wake", a locked login keychain, or a
+/// headless/SSH session). These conditions are recoverable by exporting the
+/// secret as a process environment variable instead of reading the keychain.
+///
+/// Detection is message-based because the underlying `keyring`/Security
+/// framework surfaces these conditions as opaque platform errors rather than a
+/// dedicated error variant. Kept OS-agnostic so callers on any platform get a
+/// consistent escape hatch when secure storage needs UI that isn't available.
+pub fn is_secure_storage_unavailable(error: &Error) -> bool {
+    let haystack = error.message.to_ascii_lowercase();
+    const NEEDLES: [&str; 5] = [
+        "dark wake",
+        "no ui possible",
+        "secure storage failure",
+        "user interaction is not allowed",
+        "interaction not allowed",
+    ];
+    NEEDLES.iter().any(|needle| haystack.contains(needle))
+}
+
 pub fn missing_error(project_id: &str, variable_name: &str) -> Error {
     Error::new(
         ErrorCode::ExtensionNotFound,
@@ -313,6 +335,19 @@ mod tests {
     #[test]
     fn account_key_uses_project_and_variable() {
         assert_eq!(account_key("wpcloud-api", "token"), "wpcloud-api:token");
+    }
+
+    #[test]
+    fn detects_dark_wake_secure_storage_failure() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "In dark wake, no UI possible".into();
+        let error = keyring_error(keyring::Error::PlatformFailure(boxed));
+        assert!(is_secure_storage_unavailable(&error));
+    }
+
+    #[test]
+    fn does_not_flag_ordinary_keychain_errors() {
+        let error = missing_error("wpcloud-api", "token");
+        assert!(!is_secure_storage_unavailable(&error));
     }
 
     #[test]
