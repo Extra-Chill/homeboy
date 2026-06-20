@@ -26,4 +26,5 @@ homeboy http request POST --apply https://example.com/api --json '{"ok":true}' -
 - `--form key=value` sends form fields.
 - `--apply` confirms mutating `request` methods other than `GET`, `HEAD`, and `OPTIONS`.
 
-Output is structured JSON with `method`, `url`, `status`, `headers`, and `body`.
+Output is structured JSON with `variant`, `method`, `url`, `status`, `headers`, and `body`.
+The `variant` discriminator is currently `response`.

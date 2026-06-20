@@ -122,6 +122,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: None,
     },
     PublicOutputVariantContract {
+        command: "http",
+        variant: "response",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("response"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
         command: "release",
         variant: "single",
         discriminator_field: Some("variant"),

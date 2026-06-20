@@ -20,6 +20,7 @@ pub struct HttpRequestInput {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpRequestOutput {
+    pub variant: String,
     pub method: String,
     pub url: String,
     pub status: u16,
@@ -107,6 +108,7 @@ fn response_output(method: &str, url: &str, response: Response) -> Result<HttpRe
     let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     Ok(HttpRequestOutput {
+        variant: "response".to_string(),
         method: method.to_string(),
         url: url.to_string(),
         status,
@@ -162,6 +164,7 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(output.variant, "response");
         assert_eq!(output.status, 200);
         assert_eq!(output.body["ok"], true);
         assert_eq!(output.headers["content-type"], vec!["application/json"]);
