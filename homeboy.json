@@ -183,7 +183,8 @@
           "src/core/runner/tool_registry.rs",
           "src/core/cleanup.rs",
           "src/core/cleanup/self_artifacts.rs",
-          "src/core/runner/lab_args/tests.rs"
+          "src/core/runner/lab_args/tests.rs",
+          "src/core/release/executor/lockfile_guard.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [

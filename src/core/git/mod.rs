@@ -64,7 +64,7 @@ pub use primitives::{
     short_head_revision, stage_all, status_porcelain, status_porcelain_bytes, toplevel,
     update_to_remote_default_branch,
 };
-pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
+pub(crate) use primitives::{is_git_repo, is_tracked_path, list_tracked_markdown_files};
 
 use std::path::Path;
 use std::process::Command;
