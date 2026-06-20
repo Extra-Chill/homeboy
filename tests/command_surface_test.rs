@@ -254,11 +254,10 @@ fn visible_safety_manifest_entries_advertise_live_command_docs() {
             continue;
         }
 
-        let path = entry
-            .docs
-            .path
-            .as_deref()
-            .unwrap_or_else(|| panic!("visible command {:?} is missing docs metadata", entry.path));
+        let path =
+            entry.docs.path.as_deref().unwrap_or_else(|| {
+                panic!("visible command {:?} is missing docs metadata", entry.path)
+            });
         let top_level = entry.path.first().expect("safety path should not be empty");
         assert_eq!(
             path,

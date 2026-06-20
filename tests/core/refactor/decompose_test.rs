@@ -137,14 +137,13 @@ fn test_parse_items() {
     fs::create_dir_all(root.join("src")).expect("create source dir");
     fs::write(root.join("src/example.unknown"), "content\n").expect("write source file");
 
-    let plan = refactor::build_plan("src/example.unknown", &root, "grouped", true)
-        .expect("build plan");
+    let plan =
+        refactor::build_plan("src/example.unknown", &root, "grouped", true).expect("build plan");
     assert_eq!(plan.total_items, 0);
-    assert!(
-        plan.warnings
-            .iter()
-            .any(|warning| warning.contains("No refactor parser available"))
-    );
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("No refactor parser available")));
 
     let _ = fs::remove_dir_all(root);
 }

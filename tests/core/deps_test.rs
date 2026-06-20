@@ -27,7 +27,9 @@ fn script_stack_component(
     let script = path.join("deps.sh");
     write_file(
         &script,
-        &format!("#!/bin/sh\nif [ \"$1\" = status ]; then\ncat <<'JSON'\n{status_json}\nJSON\nfi\n"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = status ]; then\ncat <<'JSON'\n{status_json}\nJSON\nfi\n"
+        ),
     );
     let mut component = stack_component(id, &path.display().to_string(), edges);
     component.scripts = Some(ComponentScriptsConfig {
@@ -113,7 +115,10 @@ fn status_reads_composer_direct_constraints_and_lock_details() {
         .unwrap();
     assert_eq!(transitive.manifest_section, None);
     assert_eq!(transitive.constraint, None);
-    assert_eq!(transitive.locked_reference.as_deref(), Some("transitive-ref"));
+    assert_eq!(
+        transitive.locked_reference.as_deref(),
+        Some("transitive-ref")
+    );
 }
 
 #[test]
@@ -132,7 +137,10 @@ fn status_filters_to_one_package() {
             }
         }"#,
     );
-    write_file(&root.join("composer.lock"), r#"{ "packages": [], "packages-dev": [] }"#);
+    write_file(
+        &root.join("composer.lock"),
+        r#"{ "packages": [], "packages-dev": [] }"#,
+    );
 
     let status = deps::status(Some("fixture"), Some(&root_path), Some("fixture/two")).unwrap();
 
@@ -200,7 +208,9 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
         ),
     ];
 
-    let plan = deps::stack_plan_from_components("example-org/html-to-blocks-converter", &components).unwrap();
+    let plan =
+        deps::stack_plan_from_components("example-org/html-to-blocks-converter", &components)
+            .unwrap();
 
     let steps = plan.planned_steps();
 
@@ -355,7 +365,10 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
     let steps = plan.planned_steps();
 
     assert_eq!(plan.step_count(), 1);
-    assert_eq!(steps[0].update_command, "fixture-provider update fixture/upstream");
+    assert_eq!(
+        steps[0].update_command,
+        "fixture-provider update fixture/upstream"
+    );
     assert_eq!(steps[0].post_update, vec!["fixture-provider build"]);
     assert_eq!(steps[0].test, vec!["fixture-provider test"]);
 }
@@ -468,8 +481,14 @@ esac
     assert_eq!(result.requested_constraint.as_deref(), Some("^2.0"));
     assert!(result.install.is_some());
     assert!(result.rebuild.is_some());
-    assert_eq!(fs::read_to_string(root.join("provider-install-marker")).unwrap(), "installed");
-    assert_eq!(fs::read_to_string(root.join("build-marker")).unwrap(), "rebuilt");
+    assert_eq!(
+        fs::read_to_string(root.join("provider-install-marker")).unwrap(),
+        "installed"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("build-marker")).unwrap(),
+        "rebuilt"
+    );
 }
 
 #[test]
@@ -564,7 +583,10 @@ fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
     )
     .unwrap();
 
-    assert_eq!(result.before.unwrap().locked_version.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        result.before.unwrap().locked_version.as_deref(),
+        Some("1.0.0")
+    );
     let after = result.after.unwrap();
     assert_eq!(after.constraint.as_deref(), Some("1.1.0"));
     assert_eq!(after.locked_version.as_deref(), Some("1.1.0"));
