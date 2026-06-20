@@ -5,7 +5,7 @@ use crate::extensions::deps_provider::ProviderDependencyStatus;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn npm_command_args(package: &str, constraint: Option<&str>) -> Vec<String> {
@@ -100,14 +100,10 @@ impl NpmDependencyProvider {
         _component: &Component,
         path: &Path,
     ) -> Result<Option<DependencyCommandResult>> {
-        let args = if path.join("package-lock.json").is_file() {
-            vec!["ci".to_string()]
-        } else {
-            vec!["install".to_string()]
-        };
-        let output = Command::new("npm")
-            .args(&args)
-            .current_dir(path)
+        let install = npm_install_command(path);
+        let output = Command::new(&install.binary)
+            .args(&install.args)
+            .current_dir(&install.cwd)
             .output()
             .map_err(|e| {
                 Error::internal_io(e.to_string(), Some("run dependency provider".to_string()))
@@ -128,21 +124,62 @@ impl NpmDependencyProvider {
                 ),
                 None,
                 Some(vec![format!(
-                    "Run manually in {}: npm {}",
-                    path.display(),
-                    args.join(" ")
+                    "Run manually in {}: {} {}",
+                    install.cwd.display(),
+                    install.binary,
+                    install.args.join(" ")
                 )]),
             ));
         }
 
         Ok(Some(DependencyCommandResult {
-            command: std::iter::once("npm".to_string()).chain(args).collect(),
+            command: std::iter::once(install.binary).chain(install.args).collect(),
             skipped: false,
             status,
             stdout,
             stderr,
         }))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NpmInstallCommand {
+    binary: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+}
+
+fn npm_install_command(path: &Path) -> NpmInstallCommand {
+    if let Some(root) = find_pnpm_root(path) {
+        return NpmInstallCommand {
+            binary: "pnpm".to_string(),
+            args: vec!["install".to_string(), "--frozen-lockfile".to_string()],
+            cwd: root,
+        };
+    }
+
+    let args = if path.join("package-lock.json").is_file() {
+        vec!["ci".to_string()]
+    } else {
+        vec!["install".to_string()]
+    };
+
+    NpmInstallCommand {
+        binary: "npm".to_string(),
+        args,
+        cwd: path.to_path_buf(),
+    }
+}
+
+fn find_pnpm_root(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if dir.join("pnpm-workspace.yaml").is_file() || dir.join("pnpm-lock.yaml").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 fn npm_package_snapshot(path: &Path, package: &str) -> Result<Option<DependencyPackage>> {
@@ -340,5 +377,38 @@ mod tests {
             std::fs::read_to_string(project.path().join("npm-args.txt")).unwrap(),
             "install\n"
         );
+    }
+
+    #[test]
+    fn npm_install_command_uses_pnpm_workspace_root_above_package() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let plugin = workspace.path().join("plugins/woocommerce");
+        std::fs::create_dir_all(&plugin).expect("plugin dir");
+        std::fs::write(workspace.path().join("pnpm-workspace.yaml"), "packages:\n  - plugins/*\n")
+            .expect("workspace file");
+        std::fs::write(workspace.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
+            .expect("lock file");
+        std::fs::write(plugin.join("package.json"), "{}").expect("package json");
+
+        let command = npm_install_command(&plugin);
+
+        assert_eq!(command.binary, "pnpm");
+        assert_eq!(
+            command.args,
+            vec!["install".to_string(), "--frozen-lockfile".to_string()]
+        );
+        assert_eq!(command.cwd, workspace.path());
+    }
+
+    #[test]
+    fn npm_install_command_keeps_npm_for_plain_package() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("package.json"), "{}").expect("package json");
+
+        let command = npm_install_command(project.path());
+
+        assert_eq!(command.binary, "npm");
+        assert_eq!(command.args, vec!["install".to_string()]);
+        assert_eq!(command.cwd, project.path());
     }
 }
