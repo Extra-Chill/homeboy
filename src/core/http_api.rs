@@ -473,6 +473,8 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
                 "command": "api.runs.artifact.content",
                 "run_id": run_id,
                 "artifact_id": artifact.id,
+                "content_available": true,
+                "retrieval": inline_content_retrieval(),
                 "filename": filename,
                 "mime": download.content_type.or_else(|| artifact.mime.clone()),
                 "size_bytes": size_bytes,
@@ -505,6 +507,8 @@ fn artifact_content(run_id: &str, artifact_id: &str) -> Result<Value> {
         "command": "api.runs.artifact.content",
         "run_id": run_id,
         "artifact_id": artifact.id,
+        "content_available": true,
+        "retrieval": inline_content_retrieval(),
         "filename": filename,
         "mime": artifact.mime,
         "size_bytes": artifact.size_bytes,
@@ -544,12 +548,23 @@ fn artifact_store_content(
         "command": "api.runs.artifact.content",
         "run_id": run_id,
         "artifact_id": artifact_id,
+        "content_available": true,
+        "retrieval": inline_content_retrieval(),
         "filename": filename,
         "mime": crate::core::artifact_metadata::content_type_from_path(&path),
         "size_bytes": size_bytes,
         "sha256": sha256,
         "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
     }))
+}
+
+fn inline_content_retrieval() -> Value {
+    json!({
+        "mode": "inline_base64",
+        "content_available": true,
+        "content_field": "content_base64",
+        "encoding": "base64",
+    })
 }
 
 fn safe_artifact_store_path(locator: &str) -> Result<std::path::PathBuf> {
