@@ -18,7 +18,7 @@ use crate::commands::CmdResult;
 #[path = "doctor/extension_parity.rs"]
 mod extension_parity;
 
-pub use types::RunnerDoctorOutput;
+pub use types::{RunnerDoctorOutput, RunnerDoctorStatus};
 
 #[derive(Debug, Default)]
 pub struct RunnerDoctorOptions {

@@ -13,6 +13,7 @@ pub mod args;
 pub mod auth;
 pub mod contract;
 pub mod controller;
+pub mod doctor;
 pub mod loop_definition;
 pub mod review;
 pub mod run;
@@ -25,14 +26,15 @@ pub use args::{
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
-    AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs,
-    GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs,
-    SubmitArgs, VerifyGateArgs,
+    AgentTaskDoctorArgs, AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs,
+    ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs,
+    ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
+        AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
         AgentTaskCommand::Cook(dispatch_args) => {
             super::agent_task_dispatch::cook(dispatch_args, global)
         }
