@@ -148,6 +148,7 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     filter_value_scenarios_by_ids(&mut value, scenario_ids);
     normalize_extension_sample_metrics(&mut value);
     normalize_diagnostic_producer_sources(&mut value);
+    normalize_inline_artifact_payloads(&mut value);
     let mut parsed: BenchResults = serde_json::from_value(value).map_err(|e| {
         Error::internal_json(
             format!("Failed to parse bench results JSON: {}", e),
@@ -161,6 +162,59 @@ fn parse_bench_results_str_with_artifact_context_and_scenarios(
     evaluate_spans(&mut parsed);
     artifact_validation::validate_artifact_paths(&parsed, rig_id)?;
     Ok(parsed)
+}
+
+fn normalize_inline_artifact_payloads(value: &mut serde_json::Value) {
+    let Some(scenarios) = value
+        .get_mut("scenarios")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for scenario in scenarios {
+        normalize_artifact_map(scenario.get_mut("artifacts"));
+
+        let Some(runs) = scenario
+            .get_mut("runs")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for run in runs {
+            normalize_artifact_map(run.get_mut("artifacts"));
+        }
+    }
+}
+
+fn normalize_artifact_map(value: Option<&mut serde_json::Value>) {
+    let Some(artifacts) = value.and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+
+    artifacts.retain(|_, artifact| artifact_has_pointer(artifact));
+}
+
+fn artifact_has_pointer(artifact: &serde_json::Value) -> bool {
+    let Some(object) = artifact.as_object() else {
+        return false;
+    };
+    [
+        "path",
+        "url",
+        "public_url",
+        "preview_url",
+        "viewer_url",
+        "local_url",
+        "observation_artifact_id",
+    ]
+    .iter()
+    .any(|field| {
+        object
+            .get(*field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 fn normalize_diagnostic_producer_sources(value: &mut serde_json::Value) {
@@ -1427,6 +1481,39 @@ mod tests {
         }"#;
 
         assert!(parse_bench_results_str(raw).is_err());
+    }
+
+    #[test]
+    fn accepts_inline_benchmark_artifacts_without_paths() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 1,
+            "scenarios": [
+                {
+                    "id": "rest-db-query-profile",
+                    "iterations": 1,
+                    "metrics": { "duration_ms": 12.0 },
+                    "artifacts": {
+                        "rest-db-query-profile": {
+                            "schema": "wp-codebox/wordpress-rest-db-query-profile/v1",
+                            "summary": { "query_count": 1 },
+                            "cases": [ { "case_id": "products", "samples": [] } ]
+                        },
+                        "diagnostics": {
+                            "path": "bench/diagnostics.json",
+                            "kind": "json"
+                        }
+                    }
+                }
+            ]
+        }"#;
+
+        let parsed = parse_bench_results_str(raw).unwrap();
+
+        assert!(!parsed.scenarios[0]
+            .artifacts
+            .contains_key("rest-db-query-profile"));
+        assert!(parsed.scenarios[0].artifacts.contains_key("diagnostics"));
     }
 
     #[test]
