@@ -2779,8 +2779,18 @@ mod tests {
             &["config", "user.email", "homeboy@example.test"],
         );
         run_git(dir.path(), &["config", "user.name", "Homeboy Test"]);
+        // Disable commit signing for the throwaway checkout. CI/dev environments
+        // that set `commit.gpgsign = true` globally would otherwise fail the
+        // commit (or leave the tree in a state where `rev-parse`/`status`
+        // misbehave), causing `source_checkout_build_identity` to return `None`
+        // and panic the caller's `.unwrap()`.
+        run_git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        run_git(dir.path(), &["config", "tag.gpgsign", "false"]);
         run_git(dir.path(), &["add", "README.md"]);
-        run_git(dir.path(), &["commit", "-m", "Initial commit"]);
+        run_git(
+            dir.path(),
+            &["commit", "--no-gpg-sign", "-m", "Initial commit"],
+        );
         dir
     }
 
@@ -2788,6 +2798,12 @@ mod tests {
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(path)
+            // Isolate from ambient global/system git config so the throwaway
+            // checkout behaves deterministically regardless of the host
+            // environment (e.g. dubious-ownership safe.directory checks or
+            // global signing settings).
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .args(args)
             .output()
             .expect("run git");
