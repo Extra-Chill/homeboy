@@ -8,8 +8,9 @@ use crate::core::component::{self, TargetSpec};
 use crate::core::{Error, Result};
 
 use super::{
-    exec, sync_workspace, workspace::git_output, RunnerExecOptions,
-    RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    exec, preflight_remote_argv_path_translation, sync_workspace, workspace::git_output,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerGitDependencyMaterializationOutput,
+    RunnerRequiredTool, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput,
 };
 
@@ -77,7 +78,11 @@ pub(super) fn sync_extra_lab_workspaces(
         .0;
         let entry = workspace_mapping_entry(&extra.role, &synced);
         if extra.bootstrap_node_dependencies {
-            bootstrap_source_cli_node_dependencies(runner_id, &synced.remote_path)?;
+            bootstrap_source_cli_node_dependencies(
+                runner_id,
+                &synced.local_path,
+                &synced.remote_path,
+            )?;
         }
         workspace_mapping.push(entry.clone());
         synced_entries.push(entry);
@@ -887,25 +892,66 @@ fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
         .is_some_and(|workspace| workspace.join("package-lock.json").is_file())
 }
 
-fn bootstrap_source_cli_node_dependencies(runner_id: &str, remote_path: &str) -> Result<()> {
+/// Capability-parity contract for the runner-side source-CLI dependency
+/// bootstrap. The `npm ci` install is executed by the runner's Node toolchain,
+/// so the runner must expose the `node` and `npm` tools. `exec` short-circuits
+/// this preflight for local runners and for SSH runners that already advertise
+/// the tools, so it is behavior-preserving on a provisioned runner and fails
+/// loudly before a remote run that would otherwise error mid-dispatch (#5422).
+fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPreflight {
+    RunnerCapabilityPreflight {
+        command: "lab.source_cli_bootstrap".to_string(),
+        required_tools: vec![RunnerRequiredTool::Node, RunnerRequiredTool::Npm],
+        required_commands: Vec::new(),
+        required_components: Vec::new(),
+        required_env: Vec::new(),
+    }
+}
+
+fn bootstrap_source_cli_node_dependencies(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    let command = vec![
+        "npm".to_string(),
+        "ci".to_string(),
+        "--omit=dev".to_string(),
+        "--ignore-scripts".to_string(),
+    ];
+
+    // Path-translation preflight: the source-built CLI workspace has already been
+    // synced to a runner-side remote path; the dependency install runs with the
+    // remote workspace as cwd. Assert that no controller-local workspace path
+    // survived un-translated into the dispatched argv before handing it to the
+    // remote runner, so a missed remap fails loudly here instead of installing
+    // against a non-existent local path (#5422).
+    preflight_remote_argv_path_translation(
+        "Lab source-CLI dependency bootstrap",
+        runner_id,
+        &command,
+        Path::new(local_path),
+        remote_path,
+    )?;
+
     let (output, exit_code) = exec(
         runner_id,
         RunnerExecOptions {
             cwd: Some(remote_path.to_string()),
             project_id: None,
             allow_diagnostic_ssh: false,
-            command: vec![
-                "npm".to_string(),
-                "ci".to_string(),
-                "--omit=dev".to_string(),
-                "--ignore-scripts".to_string(),
-            ],
+            command,
             env: HashMap::new(),
             secret_env_names: Vec::new(),
             capture_patch: false,
             raw_exec: true,
             source_snapshot: None,
-            capability_preflight: None,
+            // Validate remote capability parity before dispatch: the bootstrap is
+            // executed by the runner-side `npm`/`node` toolchain, so require those
+            // tools on the runner. `exec` no-ops this gate for local and
+            // already-capable SSH runners, so behavior is unchanged on a correctly
+            // provisioned runner and fails early otherwise (#5422).
+            capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
         },
