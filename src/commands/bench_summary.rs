@@ -244,20 +244,20 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
 }
 
 #[derive(Debug, Clone)]
-struct BenchMetricPoint {
+struct BenchMetricPointArgs {
     scenario_id: String,
     metric: String,
     value: f64,
 }
 
 #[derive(Debug, Clone)]
-struct MetricFamilyTotal {
+struct MetricFamilyTotalArgs {
     family: String,
     total: f64,
     metric_count: usize,
 }
 
-fn collect_bench_metric_points(output: &Value) -> Vec<BenchMetricPoint> {
+fn collect_bench_metric_points(output: &Value) -> Vec<BenchMetricPointArgs> {
     let scenarios = value_at(output, &["results", "scenarios"])
         .and_then(Value::as_array)
         .or_else(|| value_at(output, &["scenario_metrics"]).and_then(Value::as_array));
@@ -286,7 +286,7 @@ fn collect_numeric_metric_points(
     scenario_id: &str,
     group: Option<&str>,
     value: &Value,
-    points: &mut Vec<BenchMetricPoint>,
+    points: &mut Vec<BenchMetricPointArgs>,
 ) {
     let Some(object) = value.as_object() else {
         return;
@@ -299,7 +299,7 @@ fn collect_numeric_metric_points(
             Some(group) => format!("{group}.{name}"),
             None => name.clone(),
         };
-        points.push(BenchMetricPoint {
+        points.push(BenchMetricPointArgs {
             scenario_id: scenario_id.to_string(),
             metric,
             value: number,
@@ -307,7 +307,10 @@ fn collect_numeric_metric_points(
     }
 }
 
-fn top_slowest_metrics(points: &[BenchMetricPoint], limit: usize) -> Vec<BenchMetricPoint> {
+fn top_slowest_metrics(
+    points: &[BenchMetricPointArgs],
+    limit: usize,
+) -> Vec<BenchMetricPointArgs> {
     let mut timing = points
         .iter()
         .filter(|point| is_timing_metric(&point.metric))
@@ -323,7 +326,10 @@ fn top_slowest_metrics(points: &[BenchMetricPoint], limit: usize) -> Vec<BenchMe
     timing
 }
 
-fn top_metric_families(points: &[BenchMetricPoint], limit: usize) -> Vec<MetricFamilyTotal> {
+fn top_metric_families(
+    points: &[BenchMetricPointArgs],
+    limit: usize,
+) -> Vec<MetricFamilyTotalArgs> {
     let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     let mut metric_counts: HashMap<String, usize> = HashMap::new();
     for point in points
@@ -337,7 +343,7 @@ fn top_metric_families(points: &[BenchMetricPoint], limit: usize) -> Vec<MetricF
 
     let mut families = totals
         .into_iter()
-        .map(|(family, total)| MetricFamilyTotal {
+        .map(|(family, total)| MetricFamilyTotalArgs {
             metric_count: metric_counts.get(&family).copied().unwrap_or(0),
             family,
             total,
