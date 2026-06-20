@@ -20,6 +20,11 @@ pub(super) struct TraceRunExecution {
     pub(super) workflow: extension_trace::TraceRunWorkflowResult,
     pub(super) run_dir: RunDir,
     pub(super) rig_state: Option<rig::RigStateSnapshot>,
+    /// Observation run id of the child trace run, when an observation store was
+    /// available. Surfaced so compare orchestration can link child run records
+    /// into the first-class compare pair artifact instead of forcing downstream
+    /// reporting to rediscover run ids from artifact directories.
+    pub(super) run_id: Option<String>,
 }
 
 impl TraceRunService {
