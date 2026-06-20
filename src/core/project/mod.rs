@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub mod component;
 pub mod files;
 pub mod logs;
+mod path_resolution;
 pub mod pins;
 mod readiness;
 pub mod report;
@@ -28,6 +29,7 @@ pub use component::{
 };
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
+pub use path_resolution::resolve_project_remote_path;
 pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
     ProjectPinListItem, ProjectPinOutput,
