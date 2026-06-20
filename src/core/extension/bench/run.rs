@@ -245,10 +245,9 @@ fn bench_list_result(
     results_file: PathBuf,
     scenario_ids: &[String],
 ) -> Result<BenchListWorkflowResult> {
-    let parsed = apply_scenario_filter(
-        parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?,
-        scenario_ids,
-    )?;
+    let mut parsed = parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?;
+    normalize_workload_json_scenario_ids(&mut parsed);
+    let parsed = apply_scenario_filter(parsed, scenario_ids)?;
     let count = parsed.scenarios.len();
 
     Ok(BenchListWorkflowResult {
@@ -257,6 +256,23 @@ fn bench_list_result(
         scenarios: parsed.scenarios,
         count,
     })
+}
+
+fn normalize_workload_json_scenario_ids(results: &mut BenchResults) {
+    for scenario in &mut results.scenarios {
+        let Some(file) = scenario.file.as_deref() else {
+            continue;
+        };
+        let path = std::path::Path::new(file);
+        let Some(file_stem) = path.file_stem().map(|stem| stem.to_string_lossy()) else {
+            continue;
+        };
+        if !file_stem.contains(".workload") || scenario.id != file_stem {
+            continue;
+        }
+
+        scenario.id = scenario_id_for_workload_path(path);
+    }
 }
 
 fn apply_scenario_filter(
@@ -363,24 +379,25 @@ fn parse_execution_results_file(
     }
 
     if runner_success {
-        return Ok(Some(apply_scenario_filter(
-            parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-                results_file,
-                rig_id,
-                scenario_ids,
-            )?,
-            scenario_ids,
-        )?));
-    }
-
-    Ok(
-        parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
+        let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
             results_file,
             rig_id,
             scenario_ids,
-        )
-        .ok(),
+        )?;
+        normalize_workload_json_scenario_ids(&mut results);
+        return Ok(Some(apply_scenario_filter(results, scenario_ids)?));
+    }
+
+    let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
+        results_file,
+        rig_id,
+        scenario_ids,
     )
+    .ok();
+    if let Some(results) = &mut results {
+        normalize_workload_json_scenario_ids(results);
+    }
+    Ok(results)
 }
 
 fn failure_scenario_id(scenario_ids: &[String]) -> Option<String> {
@@ -1884,6 +1901,9 @@ mod tests {
         ChildProcessIdentity, ExtensionChildProcessSample, ExtensionChildResourceSample,
         ExtensionChildResourceSummary,
     };
+    use crate::core::extension::bench::test_support::{
+        results_with_scenarios, scenario_with_iterations,
+    };
     use crate::core::extension::path_list_env_value;
     use std::collections::BTreeMap;
 
@@ -1913,6 +1933,7 @@ mod tests {
             PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
             PathBuf::from("/tmp/bench/studio-bfb-write-path.bench.js"),
             PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+            PathBuf::from("/tmp/bench/generated-rest-request-cases.workload.json"),
         ];
 
         let filtered = filter_extra_workloads_by_scenario_ids(
@@ -1920,6 +1941,7 @@ mod tests {
             &[
                 "studio-agent-runtime".to_string(),
                 "wp-admin-load".to_string(),
+                "generated-rest-request-cases".to_string(),
             ],
         );
 
@@ -1928,6 +1950,34 @@ mod tests {
             vec![
                 PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
                 PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+                PathBuf::from("/tmp/bench/generated-rest-request-cases.workload.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_workload_json_scenario_ids_updates_legacy_filename_ids_only() {
+        let mut legacy = scenario_with_iterations("generated-rest-request-cases.workload", &[], 0);
+        legacy.file = Some("tests/bench/generated-rest-request-cases.workload.json".to_string());
+        let mut explicit = scenario_with_iterations("custom-declared-id", &[], 0);
+        explicit.file = Some("tests/bench/custom-source.workload.json".to_string());
+        let mut plain = scenario_with_iterations("plain-workload", &[], 0);
+        plain.file = Some("tests/bench/plain-workload.php".to_string());
+        let mut results = results_with_scenarios("woocommerce", 0, vec![legacy, explicit, plain]);
+
+        normalize_workload_json_scenario_ids(&mut results);
+
+        let ids: Vec<&str> = results
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "generated-rest-request-cases",
+                "custom-declared-id",
+                "plain-workload",
             ]
         );
     }
