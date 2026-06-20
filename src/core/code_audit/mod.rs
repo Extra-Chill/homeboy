@@ -12,6 +12,7 @@
 //! 6. Analyzing structural complexity (god files, high item counts)
 
 pub mod baseline;
+pub mod baseline_merge;
 mod checks;
 pub mod codebase_map;
 mod comment_blocks;
@@ -61,6 +62,7 @@ use self::detectors::{
 };
 use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
+pub use baseline_merge::{merge_baseline_only_conflict, BaselineMergeError, BaselineMergeResult};
 pub use checks::{CheckResult, CheckStatus};
 pub use compare::{
     finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
