@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.52] - 2026-06-20
+
+### Changed
+- Attach WP Codebox failure diagnostics artifacts
+- Guard WP Codebox external HTTP bench primitive
+- Preserve WP Codebox failed bench results
+- Load WP Codebox workload JSON fixtures
+
 ## [3.7.51] - 2026-06-19
 
 ### Changed
