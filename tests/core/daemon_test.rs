@@ -299,7 +299,10 @@ fn routes_registered_artifact_downloads_and_sync_manifest() {
     assert_eq!(sync.body["command"], "api.runs.artifacts.sync");
     assert_eq!(sync.body["artifacts"][0]["id"], artifact.id);
     assert_eq!(sync.body["artifacts"][0]["content_available"], true);
-    assert_eq!(sync.body["artifacts"][0]["retrieval"]["mode"], "direct_download");
+    assert_eq!(
+        sync.body["artifacts"][0]["retrieval"]["mode"],
+        "direct_download"
+    );
     assert_eq!(
         sync.body["artifacts"][0]["download_path"],
         format!("/runs/{}/artifacts/{}", run.id, artifact.id)

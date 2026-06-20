@@ -485,7 +485,10 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
         assert_eq!(response.body["size_bytes"], 12);
         assert_eq!(response.body["content_available"], true);
         assert_eq!(response.body["retrieval"]["mode"], "inline_base64");
-        assert_eq!(response.body["retrieval"]["content_field"], "content_base64");
+        assert_eq!(
+            response.body["retrieval"]["content_field"],
+            "content_base64"
+        );
         assert_eq!(
             response.body["content_base64"].as_str(),
             Some("eyJzdGVwcyI6W119")

@@ -695,7 +695,9 @@ if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
             .expect("json");
     assert_eq!(value["phase"], "install");
     assert!(value["command_label"].as_str().is_some());
-    assert!(value["samples"].as_array().is_some_and(|samples| !samples.is_empty()));
+    assert!(value["samples"]
+        .as_array()
+        .is_some_and(|samples| !samples.is_empty()));
     assert_eq!(value["samples"][0]["phase"], "install");
 }
 
