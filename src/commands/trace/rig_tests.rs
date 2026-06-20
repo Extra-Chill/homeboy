@@ -262,21 +262,30 @@ fn rig_trace_workload_expansion_warns_when_executed_path_differs_from_rig_root()
         rig_config_root: None,
     };
 
-    let warnings = rig_owned_trace_workload_expansion_warnings(
+    let warnings = super::rig_owned_trace_workload_expansion_warnings(
         Some(&context),
         Some(TRACE_FIXTURE_EXTENSION_ID),
     );
 
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("wc-stripe-trace"));
-    assert!(warnings[0]
-        .contains("${components.stripe.path}/bench/ece-product-page-waterfall.trace.mjs"));
-    assert!(warnings[0].contains(&format!("Rig source root: `{}`", rig_root.path().display())));
-    assert!(warnings[0].contains(&format!(
+    let warning = &warnings[0];
+    assert!(warning.starts_with("Warning: "));
+    assert!(warning.contains("wc-stripe-trace"));
+    assert!(
+        warning.contains("${components.stripe.path}/bench/ece-product-page-waterfall.trace.mjs")
+    );
+    assert!(warning.contains(&format!("Rig source root: `{}`", rig_root.path().display())));
+    assert!(warning.contains(&format!(
         "Executed extra workload path: `{}`",
         trace_path.display()
     )));
-    assert!(warnings[0].contains("refresh/reinstall the rig package"));
+    // The expanded workload file exists on disk, so the warning must use the
+    // staleness-oriented remediation phrasing rather than the missing-path variant.
+    assert!(warning.contains("If this is stale, refresh/reinstall the rig package"));
+    assert!(!warning.contains("check the expanded path before rerunning"));
+    // The executed path resolves outside the rig source root, which is exactly
+    // why the divergence warning fires.
+    assert!(!trace_path.starts_with(rig_root.path()));
 }
 
 #[test]
@@ -292,14 +301,43 @@ fn rig_trace_workload_expansion_is_quiet_inside_rig_root() {
     ))
     .expect("parse rig");
     let context = TraceRigContext {
-        rig_spec,
+        rig_spec: rig_spec.clone(),
         rig_package_root: Some(rig_root.path().to_path_buf()),
         rig_config_root: None,
     };
 
-    assert!(rig_owned_trace_workload_expansion_warnings(
+    // `${package.root}` resolves to the rig package root itself, so the expanded
+    // workload lives inside the source root and no divergence warning fires.
+    assert!(super::rig_owned_trace_workload_expansion_warnings(
         Some(&context),
         Some(TRACE_FIXTURE_EXTENSION_ID),
+    )
+    .is_empty());
+
+    // Quietness is anchored to the package root: `${package.root}` expansion tracks
+    // `rig_package_root`, so adding an unrelated config root does not change the
+    // containment check and the result stays quiet.
+    let other_root = tempfile::TempDir::new().expect("other root");
+    let config_context = TraceRigContext {
+        rig_spec,
+        rig_package_root: Some(rig_root.path().to_path_buf()),
+        rig_config_root: Some(other_root.path().to_path_buf()),
+    };
+    let warnings = super::rig_owned_trace_workload_expansion_warnings(
+        Some(&config_context),
+        Some(TRACE_FIXTURE_EXTENSION_ID),
+    );
+    assert!(
+        warnings.is_empty(),
+        "package.root expansion tracks rig_package_root regardless of config root: {warnings:?}"
+    );
+
+    // A missing extension id short-circuits to no warnings even with a valid context.
+    assert!(super::rig_owned_trace_workload_expansion_warnings(Some(&context), None).is_empty());
+    // A missing rig context likewise yields no warnings.
+    assert!(super::rig_owned_trace_workload_expansion_warnings(
+        None,
+        Some(TRACE_FIXTURE_EXTENSION_ID)
     )
     .is_empty());
 }
