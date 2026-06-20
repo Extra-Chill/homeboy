@@ -4,6 +4,7 @@
       "payload": {
         "data": {
           "command": "release",
+          "variant": "single",
           "result": {
             "bump_type": "minor",
             "component_id": "homeboy",
@@ -81,6 +82,7 @@
       "payload": {
         "data": {
           "command": "release.batch",
+          "variant": "batch",
           "result": {
             "results": [
               {

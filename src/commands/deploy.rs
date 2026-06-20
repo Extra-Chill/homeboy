@@ -44,6 +44,9 @@ pub struct DeployArgs {
     /// Preview what would be deployed without executing
     #[arg(long)]
     pub dry_run: bool,
+    /// Confirm dangerous deploy modes like --head or --force
+    #[arg(long)]
+    pub apply: bool,
     /// Check component status without building or deploying
     #[arg(long, visible_alias = "status")]
     pub check: bool,
@@ -79,6 +82,7 @@ pub struct DeployArgs {
 #[derive(Serialize)]
 pub struct DeployOutput {
     pub command: String,
+    pub variant: &'static str,
     pub project_id: String,
     pub all: bool,
     pub outdated: bool,
@@ -93,6 +97,7 @@ pub struct DeployOutput {
 #[derive(Serialize)]
 pub struct MultiProjectDeployOutput {
     pub command: String,
+    pub variant: &'static str,
     pub component_ids: Vec<String>,
     pub projects: Vec<ProjectDeployResult>,
     pub summary: MultiDeploySummary,
@@ -112,6 +117,8 @@ pub fn run(
     mut args: DeployArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
+    validate_apply_boundary(&args)?;
+
     // Fleet deploy
     if let Some(ref fleet_id) = args.fleet {
         let fl = homeboy::core::fleet::load(fleet_id)?;
@@ -168,6 +175,7 @@ pub fn run(
     Ok((
         DeployCommandOutput::Single(DeployOutput {
             command: "deploy.run".to_string(),
+            variant: "single",
             project_id,
             all: args.all,
             outdated: args.outdated,
@@ -183,6 +191,27 @@ pub fn run(
 }
 
 // === Argument resolution helpers ===
+
+fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
+    if args.apply || args.dry_run || args.check || (!args.head && !args.force) {
+        return Ok(());
+    }
+
+    let dangerous_flags = [(args.head, "--head"), (args.force, "--force")]
+        .into_iter()
+        .filter_map(|(enabled, flag)| enabled.then_some(flag))
+        .collect::<Vec<_>>()
+        .join(" and ");
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "Real deploys with {dangerous_flags} require explicit --apply. Use --dry-run to preview or re-run with --apply to deploy."
+        ),
+        None,
+        None,
+    ))
+}
 
 fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
     if let Some(ref comps) = args.component {
@@ -301,6 +330,7 @@ fn run_multi_output(
     Ok((
         DeployCommandOutput::Multi(MultiProjectDeployOutput {
             command: "deploy.run_multi".to_string(),
+            variant: "multi_project",
             component_ids: result.component_ids,
             projects: result.projects,
             summary: result.summary,
@@ -311,3 +341,7 @@ fn run_multi_output(
         exit_code,
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/commands/deploy_test.rs"]
+mod deploy_test;

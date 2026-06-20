@@ -19,6 +19,10 @@ enum HttpCommand {
         /// HTTP method
         method: String,
 
+        /// Confirm the mutating request should be sent.
+        #[arg(long)]
+        apply: bool,
+
         #[command(flatten)]
         args: RequestArgs,
     },
@@ -53,11 +57,42 @@ struct RequestArgs {
 pub fn run(args: HttpArgs, _global: &GlobalArgs) -> CmdResult<HttpRequestOutput> {
     let input = match args.command {
         HttpCommand::Get(args) => build_input("GET", args),
-        HttpCommand::Request { method, args } => build_input(&method, args),
+        HttpCommand::Request {
+            method,
+            apply,
+            args,
+        } => {
+            require_apply_for_request(&method, apply, &args.url)?;
+            build_input(&method, args)
+        }
     };
 
     let output = http_request::run(input)?;
     Ok((output, 0))
+}
+
+fn require_apply_for_request(method: &str, apply: bool, url: &str) -> homeboy::core::Result<()> {
+    if !is_mutating_method(method) || apply {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "homeboy http request {method} sends a mutating request and requires explicit --apply. Suggested command: homeboy http request {method} --apply {url}"
+        ),
+        None,
+        Some(vec![format!(
+            "homeboy http request {method} --apply {url}"
+        )]),
+    ))
+}
+
+fn is_mutating_method(method: &str) -> bool {
+    !matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    )
 }
 
 fn build_input(method: &str, args: RequestArgs) -> HttpRequestInput {
@@ -71,3 +106,7 @@ fn build_input(method: &str, args: RequestArgs) -> HttpRequestInput {
         form_body: args.form,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/commands/http_test.rs"]
+mod http_test;

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::core::api_jobs::{Job, JobEvent, JobStatus};
+use crate::core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use crate::core::error::{Error, Result};
 use crate::core::execution_contract::{
     decode_uri_component, encode_uri_component, EXECUTION_CONTRACT,
@@ -204,6 +204,42 @@ pub fn mirror_daemon_evidence(
         run: local_job_run,
         patch,
     }))
+}
+
+pub fn mirror_reverse_broker_evidence(
+    runner: &Runner,
+    broker_url: &str,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    events: &[JobEvent],
+    result: &Value,
+) -> Result<Option<MirroredDaemonEvidence>> {
+    let store = ObservationStore::open_initialized()?;
+    let mut run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
+    let artifacts = mirror_reverse_broker_artifacts(&store, runner, broker_url, &run.id, job)?;
+
+    let mut metadata = run.metadata_json.clone();
+    metadata["lab"]["reverse_broker"] = json!({
+        "runner_id": runner.id.clone(),
+        "job_id": job.id.to_string(),
+        "broker_url": broker_url,
+        "status": job.status,
+        "events": events,
+        "stdout": result.get("stdout").cloned().unwrap_or(Value::Null),
+        "stderr": result.get("stderr").cloned().unwrap_or(Value::Null),
+        "artifacts": artifacts,
+    });
+    run = store.update_run_metadata(&run.id, metadata)?;
+
+    let patch = mirrored_reverse_patch_result(
+        &store,
+        &run.id,
+        result
+            .get("patch")
+            .or_else(|| result.pointer("/data/patch")),
+    )?;
+    Ok(Some(MirroredDaemonEvidence { run, patch }))
 }
 
 pub fn mirror_daemon_job_progress(
@@ -434,6 +470,103 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
         return Ok(());
     }
     store.import_artifact(artifact)
+}
+
+fn mirror_reverse_broker_artifacts(
+    store: &ObservationStore,
+    runner: &Runner,
+    broker_url: &str,
+    run_id: &str,
+    job: &Job,
+) -> Result<Vec<ArtifactRecord>> {
+    let mut mirrored = Vec::new();
+    for artifact in &job.artifacts {
+        let record = reverse_broker_artifact_record(runner, broker_url, run_id, job, artifact);
+        import_artifact_if_absent(store, &record)?;
+        mirrored.push(record);
+    }
+    Ok(mirrored)
+}
+
+fn reverse_broker_artifact_record(
+    runner: &Runner,
+    broker_url: &str,
+    run_id: &str,
+    job: &Job,
+    artifact: &JobArtifactMetadata,
+) -> ArtifactRecord {
+    ArtifactRecord {
+        id: artifact.id.clone(),
+        run_id: run_id.to_string(),
+        kind: artifact
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("reverse_broker_artifact")
+            .to_string(),
+        artifact_type: "metadata".to_string(),
+        path: EXECUTION_CONTRACT.artifacts.metadata_only_ref(&artifact.id),
+        url: artifact.url.clone(),
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: artifact.sha256.clone(),
+        size_bytes: artifact
+            .size_bytes
+            .and_then(|size| i64::try_from(size).ok()),
+        mime: artifact.mime.clone(),
+        metadata_json: json!({
+            "runner_id": runner.id.clone(),
+            "job_id": job.id.to_string(),
+            "broker_url": broker_url,
+            "name": artifact.name.clone(),
+            "remote_path": artifact.path.clone(),
+            "url": artifact.url.clone(),
+            "broker_artifact_metadata_path": format!(
+                "/runner/jobs/{}/artifacts/{}",
+                job.id,
+                encode_uri_component(&artifact.id)
+            ),
+            "broker_artifact_retrieval": {
+                "mode": "metadata_only",
+                "content_available": false,
+                "hint": "Reverse broker artifact mirroring preserves metadata only; broker byte retrieval is a future content-proxy slice."
+            },
+            "metadata": artifact.metadata.clone(),
+        }),
+        created_at: ms_to_rfc3339(job.finished_at_ms.unwrap_or(job.updated_at_ms)),
+    }
+}
+
+fn mirrored_reverse_patch_result(
+    store: &ObservationStore,
+    run_id: &str,
+    patch: Option<&Value>,
+) -> Result<Option<Value>> {
+    let Some(patch) = patch.filter(|patch| !patch.is_null()) else {
+        return Ok(None);
+    };
+    let Some(artifact_id) = patch.get("patch_artifact_id").and_then(Value::as_str) else {
+        return Ok(Some(patch.clone()));
+    };
+    if artifact_id.is_empty() {
+        return Ok(Some(patch.clone()));
+    }
+    let Some(artifact) = store
+        .get_artifact(artifact_id)?
+        .filter(|artifact| artifact.run_id == run_id)
+    else {
+        return Ok(Some(patch.clone()));
+    };
+    let mut patched = patch.clone();
+    if let Some(object) = patched.as_object_mut() {
+        object.insert(
+            "patch_artifact_path".to_string(),
+            Value::String(artifact.path),
+        );
+    }
+    Ok(Some(patched))
 }
 
 fn remote_detail_to_run_record(

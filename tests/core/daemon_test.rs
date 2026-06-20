@@ -511,6 +511,61 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
 }
 
 #[test]
+fn broker_reconcile_route_owns_expired_reverse_runner_claims() {
+    let store = JobStore::default();
+    let submit = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "command": ["homeboy", "test", "sample-plugin"]
+        })),
+        &store,
+    );
+    let job_id = submit.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+
+    let claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "lease_ms": 1
+        })),
+        &store,
+    );
+    assert_eq!(claim.status_code, 200);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let reconcile = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/reconcile",
+        Some(serde_json::json!({})),
+        &store,
+    );
+
+    assert_eq!(reconcile.status_code, 200);
+    assert_eq!(reconcile.body["endpoint"], "runner.jobs.reconcile");
+    assert_eq!(
+        reconcile.body["body"]["command"],
+        "api.runner.jobs.reconcile"
+    );
+    assert_eq!(reconcile.body["body"]["reconciled_count"], 1);
+    assert_eq!(reconcile.body["body"]["reconciled"][0]["id"], job_id);
+    assert_eq!(reconcile.body["body"]["reconciled"][0]["status"], "failed");
+    assert_eq!(reconcile.body["body"]["policy"]["owner"], "broker");
+
+    let events = store
+        .events(uuid::Uuid::parse_str(&job_id).expect("job uuid"))
+        .expect("events");
+    assert!(events
+        .iter()
+        .any(|event| event.message.as_deref() == Some("remote runner claim expired")));
+}
+
+#[test]
 fn daemon_http_error_envelope_includes_error_payload() {
     let _home = HomeGuard::new();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");

@@ -18,7 +18,7 @@ use crate::core::observation::homeboy_findings_from_test_analysis_input;
 use crate::core::refactor::AppliedRefactor;
 use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct TestRunWorkflowArgs {

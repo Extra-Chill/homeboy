@@ -9,6 +9,62 @@ pub(crate) struct AuditExecutionPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditProfile {
+    Full,
+    Pr,
+    Architecture,
+}
+
+impl AuditProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Pr => "pr",
+            Self::Architecture => "architecture",
+        }
+    }
+
+    fn includes_detector(self, family: &DetectorDescriptor) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Pr => matches!(
+                family.id,
+                "structural"
+                    | "layer_ownership"
+                    | "test_topology"
+                    | "test_wiring"
+                    | "docs"
+                    | "command_status_contracts"
+                    | "thin_command_adapter"
+            ),
+            Self::Architecture => matches!(
+                family.id,
+                "structural"
+                    | "layer_ownership"
+                    | "docs"
+                    | "command_status_contracts"
+                    | "thin_command_adapter"
+            ),
+        }
+    }
+}
+
+impl std::str::FromStr for AuditProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "full" => Ok(Self::Full),
+            "pr" => Ok(Self::Pr),
+            "architecture" => Ok(Self::Architecture),
+            _ => Err(format!(
+                "unknown audit profile '{value}' (expected full, pr, or architecture)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetectorAccess {
     Discovery,
     RootOnly,
@@ -417,16 +473,26 @@ const DETECTOR_DESCRIPTORS: &[DetectorDescriptor] = &[
 
 impl AuditExecutionPlan {
     pub(crate) fn full() -> Self {
-        Self::from_enabled_families("full", |family| family_enabled(&[], &[], family.findings))
+        Self::from_profile_and_filters(AuditProfile::Full, &[], &[])
     }
 
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
-        if only.is_empty() && exclude.is_empty() {
-            return Self::full();
-        }
+        Self::from_profile_and_filters(AuditProfile::Full, only, exclude)
+    }
 
-        Self::from_enabled_families("filtered", |family| {
-            family_enabled(only, exclude, family.findings)
+    pub(crate) fn from_profile_and_filters(
+        profile: AuditProfile,
+        only: &[AuditFinding],
+        exclude: &[AuditFinding],
+    ) -> Self {
+        let mode = if profile == AuditProfile::Full && (!only.is_empty() || !exclude.is_empty()) {
+            "filtered"
+        } else {
+            profile.as_str()
+        };
+
+        Self::from_enabled_families(mode, |family| {
+            profile.includes_detector(family) && family_enabled(only, exclude, family.findings)
         })
     }
 
@@ -627,5 +693,33 @@ mod tests {
                 DetectorRuntime::Root(RootDetectorRunner::TestWiring),
             ]
         );
+    }
+
+    #[test]
+    fn pr_profile_uses_root_only_detector_families() {
+        let plan = AuditExecutionPlan::from_profile_and_filters(AuditProfile::Pr, &[], &[]);
+
+        assert!(!plan.requires_discovery());
+        assert!(plan.run_structural());
+        assert!(plan.detector_enabled("test_topology"));
+        assert!(plan.detector_enabled("command_status_contracts"));
+        assert!(plan.run_thin_command_adapter());
+        assert!(!plan.run_duplication());
+        assert!(!plan.run_dead_code());
+        assert!(!plan.run_source_policy());
+        assert!(!plan.run_compiler_warnings());
+    }
+
+    #[test]
+    fn profile_filters_are_applied_within_profile_scope() {
+        let plan = AuditExecutionPlan::from_profile_and_filters(
+            AuditProfile::Pr,
+            &[AuditFinding::DuplicateFunction],
+            &[],
+        );
+
+        assert!(!plan.run_structural());
+        assert!(!plan.run_duplication());
+        assert!(!plan.requires_discovery());
     }
 }

@@ -96,6 +96,7 @@ fn make_args(include_fixability: bool) -> AuditRunWorkflowArgs {
         exclude_kinds: vec![],
         only_labels: vec![],
         exclude_labels: vec![],
+        profile: crate::core::code_audit::AuditProfile::Full,
         extension_overrides: vec![],
         baseline_flags: crate::core::engine::baseline::BaselineFlags {
             baseline: false,
@@ -502,25 +503,44 @@ fn json_summary_for_targeted_detector_counts_current_and_unbaselined_findings() 
 }
 
 #[test]
-fn execution_plan_for_structural_only_skips_unrelated_detector_families() {
-    let plan = AuditExecutionPlan::from_filters(&[AuditFinding::GodFile], &[]);
+fn execution_plan_filters_to_requested_detector_family() {
+    let cases = [
+        (AuditFinding::GodFile, "structural", "duplication", true, false),
+        (
+            AuditFinding::DuplicateFunction,
+            "duplication",
+            "structural",
+            false,
+            true,
+        ),
+    ];
 
-    assert!(plan.run_structural());
-    assert!(!plan.run_duplication());
-    assert!(!plan.run_dead_code());
-    assert!(!plan.run_compiler_warnings());
-    assert_eq!(
-        detector_step_status(&plan, "conventions"),
-        &PlanStepStatus::Disabled
-    );
-    assert_eq!(
-        detector_step_status(&plan, "structural"),
-        &PlanStepStatus::Ready
-    );
-    assert_eq!(
-        detector_step_status(&plan, "duplication"),
-        &PlanStepStatus::Disabled
-    );
+    for (
+        finding,
+        ready_detector,
+        disabled_detector,
+        structural_enabled,
+        duplication_enabled,
+    ) in cases {
+        let plan = AuditExecutionPlan::from_filters(&[finding], &[]);
+
+        assert_eq!(plan.run_structural(), structural_enabled);
+        assert_eq!(plan.run_duplication(), duplication_enabled);
+        assert!(!plan.run_dead_code());
+        assert!(!plan.run_compiler_warnings());
+        assert_eq!(
+            detector_step_status(&plan, "conventions"),
+            &PlanStepStatus::Disabled
+        );
+        assert_eq!(
+            detector_step_status(&plan, ready_detector),
+            &PlanStepStatus::Ready
+        );
+        assert_eq!(
+            detector_step_status(&plan, disabled_detector),
+            &PlanStepStatus::Disabled
+        );
+    }
 }
 
 #[test]
@@ -536,18 +556,6 @@ fn output_capture_detector_is_explicit_first_slice() {
     assert_eq!(
         detector_step_status(&filtered_plan, "output_capture"),
         &PlanStepStatus::Ready
-    );
-}
-
-#[test]
-fn execution_plan_for_duplicate_only_skips_structural_detector_family() {
-    let plan = AuditExecutionPlan::from_filters(&[AuditFinding::DuplicateFunction], &[]);
-
-    assert!(plan.run_duplication());
-    assert!(!plan.run_structural());
-    assert_eq!(
-        detector_step_status(&plan, "conventions"),
-        &PlanStepStatus::Disabled
     );
 }
 

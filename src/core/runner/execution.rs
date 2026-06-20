@@ -21,7 +21,10 @@ use super::broker_http;
 use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
-use super::evidence::{mirror_daemon_evidence, mirror_daemon_job_progress};
+use super::daemon_http_get::daemon_get;
+use super::evidence::{
+    mirror_daemon_evidence, mirror_daemon_job_progress, mirror_reverse_broker_evidence,
+};
 use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
@@ -67,6 +70,7 @@ pub enum RunnerExecMode {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerExecOutput {
+    pub variant: &'static str,
     pub command: &'static str,
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -268,9 +272,21 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     }
 }
 
-pub(crate) fn exec_worker_local(
+pub(crate) fn exec_worker_local_until_cancelled(
     runner_id: &str,
     options: RunnerExecOptions,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<(RunnerExecOutput, i32)> {
+    let mut is_cancelled = is_cancelled;
+    exec_worker_local_with_process_output(runner_id, options, |plan| {
+        execute_runner_process_until_cancelled(plan, &mut is_cancelled)
+    })
+}
+
+fn exec_worker_local_with_process_output(
+    runner_id: &str,
+    options: RunnerExecOptions,
+    execute: impl FnOnce(&PreparedRunnerProcess) -> Result<ProcessOutput>,
 ) -> Result<(RunnerExecOutput, i32)> {
     let secret_env_names = runner_exec_secret_env_names(
         &options.command,
@@ -309,7 +325,18 @@ pub(crate) fn exec_worker_local(
         options.capability_preflight.as_ref(),
         &plan.env,
     )?;
-    exec_local(plan)
+    let output = execute(&plan)?;
+    Ok(exec_output(
+        &plan.runner,
+        RunnerExecMode::Local,
+        plan.cwd,
+        plan.command,
+        output,
+        Some(plan.source_snapshot),
+        plan.require_paths,
+        &plan.env,
+        &[],
+    ))
 }
 
 fn preflight_worker_local_capability_plan(
@@ -479,7 +506,7 @@ fn exec_via_reverse_broker(
     );
 
     let RunnerJobResultFields {
-        result: _,
+        result,
         stdout,
         stderr,
         metrics,
@@ -492,16 +519,22 @@ fn exec_via_reverse_broker(
         &redaction_secret_env_names,
     );
 
+    let mirror =
+        mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
+    let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
+    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
         &job.id.to_string(),
-        None,
+        mirror_run_id,
         DaemonJobHandoffState::Terminal(job.status),
     );
 
     Ok((
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -515,8 +548,8 @@ fn exec_via_reverse_broker(
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
-            mirror_run_id: None,
-            patch: None,
+            mirror_run_id: mirror.map(|evidence| evidence.run.id),
+            patch,
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -642,6 +675,7 @@ fn exec_via_daemon(
 
     Ok((
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -995,25 +1029,6 @@ fn runner_exec_wait_timeout() -> Duration {
 pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
     data.get("body")
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
-}
-
-fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
-    let response = client
-        .get(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
-    if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
 }
 
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
@@ -1900,6 +1915,7 @@ fn exec_output(
     );
     (
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: runner.id.clone(),
             dry_run: false,
@@ -2287,6 +2303,7 @@ mod tests {
 
     fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExecOutput {
         RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,
@@ -3766,7 +3783,21 @@ mod tests {
                         "result": {
                             "exit_code": 0,
                             "stdout": "reverse ok",
-                            "stderr": ""
+                            "stderr": "",
+                            "data": {
+                                "patch": {
+                                    "patch_artifact_id": "reverse-patch"
+                                }
+                            },
+                            "artifacts": [{
+                                "id": "reverse-patch",
+                                "name": "reverse.patch",
+                                "path": "/srv/homeboy/.homeboy/artifacts/reverse.patch",
+                                "mime": "text/x-diff",
+                                "size_bytes": 12,
+                                "sha256": "abc123",
+                                "metadata": { "kind": "lab_fix_patch" }
+                            }]
                         }
                     }))
                     .send()
@@ -3793,11 +3824,45 @@ mod tests {
             assert_eq!(output.stdout, "reverse ok");
             assert_eq!(output.runner_id, "lab");
             assert!(output.job_id.is_some());
+            let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
+            assert!(mirror_run_id.starts_with("runner-exec-lab-"));
+            assert_eq!(
+                output
+                    .patch
+                    .as_ref()
+                    .and_then(|patch| patch.get("patch_artifact_path").and_then(Value::as_str)),
+                Some("metadata-only:reverse-patch")
+            );
             assert!(output
                 .job_events
                 .expect("events")
                 .iter()
                 .any(|event| { event.kind == crate::core::api_jobs::JobEventKind::Progress }));
+
+            let store = crate::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let run = store
+                .get_run(mirror_run_id)
+                .expect("read mirror run")
+                .expect("mirror run");
+            assert_eq!(
+                run.metadata_json["lab"]["reverse_broker"]["runner_id"].as_str(),
+                Some("lab")
+            );
+            assert_eq!(
+                run.metadata_json["lab"]["reverse_broker"]["broker_url"].as_str(),
+                Some(broker_url.as_str())
+            );
+            assert_eq!(
+                run.metadata_json["lab"]["reverse_broker"]["stdout"].as_str(),
+                Some("reverse ok")
+            );
+            let artifact = store
+                .get_artifact("reverse-patch")
+                .expect("read reverse artifact")
+                .expect("reverse artifact");
+            assert_eq!(artifact.run_id, mirror_run_id);
+            assert_eq!(artifact.path, "metadata-only:reverse-patch");
         });
     }
 

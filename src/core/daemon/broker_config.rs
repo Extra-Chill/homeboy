@@ -98,13 +98,15 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
             "systemctl status homeboy-broker".to_string(),
             "journalctl -u homeboy-broker -f".to_string(),
             "homeboy daemon status".to_string(),
+            format!("curl -fsS -X POST http://{listen}/runner/jobs/reconcile"),
             format!("curl -fsS http://{listen}/health"),
             "homeboy runner status <runner-id>".to_string(),
         ],
         restart_caveats: vec![
             "The durable job store is reopened from /var/lib/homeboy/.config/homeboy/daemon/jobs.json after restart.".to_string(),
             "Queued remote-runner jobs survive daemon restart; running broker-owned jobs are marked failed as stale.".to_string(),
-            "Active reverse-runner claims remain claim-scoped until their lease expires; runners should reclaim after the lease window.".to_string(),
+            "Run POST /runner/jobs/reconcile before broker maintenance to let the broker fail expired reverse-runner claims explicitly.".to_string(),
+            "Active reverse-runner claims remain claim-scoped until their lease expires; runners should reclaim after the broker reconciliation window.".to_string(),
             "Use systemctl restart homeboy-broker only when runners can tolerate lease expiry or retry.".to_string(),
         ],
         retention_expectations: vec![
@@ -204,6 +206,10 @@ mod tests {
             .contains("ExecStart=/usr/local/bin/homeboy daemon serve --addr 127.0.0.1:7421"));
         assert!(config.systemd_unit.contains("Restart=on-failure"));
         assert!(config.safe_exposure.loopback_only);
+        assert!(config
+            .operational_commands
+            .iter()
+            .any(|command| command.contains("/runner/jobs/reconcile")));
         assert!(config
             .safe_exposure
             .public_reverse_proxy_blocked_by

@@ -321,6 +321,29 @@ impl JobStore {
         self.get(job_id)
     }
 
+    pub(crate) fn cancel_remote_runner_job(
+        &self,
+        job_id: Uuid,
+        reason: impl Into<String>,
+    ) -> Result<Job> {
+        {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            let stored = inner
+                .jobs
+                .get(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if stored.remote_runner.is_none() {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a remote runner job",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+        }
+        self.cancel(job_id, reason)
+    }
+
     pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
         let expired_ids = {
             let inner = self.inner.lock().expect("job store mutex poisoned");

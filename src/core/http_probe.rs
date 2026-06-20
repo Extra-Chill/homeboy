@@ -8,14 +8,21 @@ pub(crate) struct HttpProbeError {
     pub is_connect: bool,
 }
 
-pub(crate) fn get_status(url: &str, timeout: Duration) -> std::result::Result<u16, HttpProbeError> {
-    let client = reqwest::blocking::Client::builder()
+/// Build a blocking reqwest client with a request timeout. Shared by the HTTP
+/// probe helpers and other one-off probe call sites (artifact-link reachability,
+/// registry publish verification) so the `Client::builder().timeout().build()`
+/// boilerplate lives in one place (#5364).
+pub(crate) fn blocking_client(timeout: Duration) -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
-        .map_err(|e| HttpProbeError {
-            message: Error::internal_unexpected(format!("build http client: {}", e)).message,
-            is_connect: false,
-        })?;
+}
+
+pub(crate) fn get_status(url: &str, timeout: Duration) -> std::result::Result<u16, HttpProbeError> {
+    let client = blocking_client(timeout).map_err(|e| HttpProbeError {
+        message: Error::internal_unexpected(format!("build http client: {}", e)).message,
+        is_connect: false,
+    })?;
 
     let response = client.get(url).send().map_err(|e| HttpProbeError {
         message: format!("HTTP GET {} failed: {}", url, e),

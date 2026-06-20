@@ -846,6 +846,7 @@ mod tests {
 
     fn fake_synced_file(remote_spec: &str, role: &str) -> (String, LabWorkspaceMappingEntry) {
         let synced = crate::core::runner::RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
             command: "runner.workspace.sync",
             runner_id: "lab".to_string(),
             local_path: "/local/input".to_string(),

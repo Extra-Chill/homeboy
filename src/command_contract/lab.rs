@@ -92,6 +92,7 @@ pub(crate) const TEST_LAB_LABEL: &str = "test";
 pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
 const TRACE_LAB_LABEL: &str = "trace";
+#[cfg(test)]
 const REFACTOR_LAB_LABEL: &str = "refactor";
 const RIG_CHECK_LAB_LABEL: &str = "rig check";
 const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
@@ -99,19 +100,28 @@ const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
 const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
 
 struct LabSupportedCommandSummary {
-    #[allow(dead_code)]
+    #[cfg(test)]
     contract_labels: &'static [&'static str],
     message_label: &'static str,
     hint_label: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabRunnerSupportSummary {
+    pub supported_labels: Vec<&'static str>,
+    pub unsupported_message: String,
+    pub hint: String,
+}
+
 const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
         message_label: "agent-task dispatch/cook/loop/run-plan",
         hint_label: "agent-task dispatch/cook/loop/run-plan",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[
             AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
             AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
@@ -120,66 +130,79 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
         hint_label: "agent-task controller from-spec --resume/materialize/resume",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
         message_label: "agent-task retry --run",
         hint_label: "agent-task retry --run",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
         message_label: "agent-task status/logs/artifacts/review/providers",
         hint_label: "agent-task status/logs/artifacts/review/providers",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
         message_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
         hint_label: AGENT_TASK_AUTH_STATUS_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[LINT_LAB_LABEL],
         message_label: LINT_LAB_LABEL,
         hint_label: "full lint",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[TEST_LAB_LABEL],
         message_label: TEST_LAB_LABEL,
         hint_label: "full test",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[AUDIT_LAB_LABEL],
         message_label: AUDIT_LAB_LABEL,
         hint_label: AUDIT_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[BENCH_LAB_LABEL],
         message_label: BENCH_LAB_LABEL,
         hint_label: "bench run",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[TRACE_LAB_LABEL],
         message_label: TRACE_LAB_LABEL,
         hint_label: TRACE_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[REFACTOR_LAB_LABEL],
         message_label: "refactor source runs",
         hint_label: "refactor source runs",
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[RIG_CHECK_LAB_LABEL],
         message_label: RIG_CHECK_LAB_LABEL,
         hint_label: RIG_CHECK_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
         message_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
         hint_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[TUNNEL_SERVICE_EXPOSE_LAB_LABEL],
         message_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
         hint_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
     },
     LabSupportedCommandSummary {
+        #[cfg(test)]
         contract_labels: &[TUNNEL_SERVICE_START_LAB_LABEL],
         message_label: TUNNEL_SERVICE_START_LAB_LABEL,
         hint_label: TUNNEL_SERVICE_START_LAB_LABEL,
@@ -193,18 +216,26 @@ pub fn lab_runner_supported_labels() -> Vec<&'static str> {
         .collect()
 }
 
+pub fn lab_runner_support_summary() -> LabRunnerSupportSummary {
+    let supported_labels = lab_runner_supported_labels();
+    let hint_labels = lab_runner_supported_hint_labels();
+
+    LabRunnerSupportSummary {
+        unsupported_message: format!(
+            "--runner is only supported for commands with portable Lab offload support: {}",
+            human_join(&supported_labels)
+        ),
+        hint: format!("Current Lab offload support: {}.", human_join(&hint_labels)),
+        supported_labels,
+    }
+}
+
 pub fn lab_runner_unsupported_message() -> String {
-    format!(
-        "--runner is only supported for commands with portable Lab offload support: {}",
-        human_join(&lab_runner_supported_labels())
-    )
+    lab_runner_support_summary().unsupported_message
 }
 
 pub fn lab_runner_unsupported_hint() -> String {
-    format!(
-        "Current Lab offload support: {}.",
-        human_join(&lab_runner_supported_hint_labels())
-    )
+    lab_runner_support_summary().hint
 }
 
 fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
@@ -214,7 +245,7 @@ fn lab_runner_supported_hint_labels() -> Vec<&'static str> {
         .collect()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn lab_runner_summary_covers_contract_label(contract_label: &str) -> bool {
     LAB_SUPPORTED_COMMAND_SUMMARIES
         .iter()

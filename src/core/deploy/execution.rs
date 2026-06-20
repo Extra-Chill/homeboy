@@ -25,6 +25,50 @@ use super::version_overrides::{
     prefer_installed_binary, run_post_deploy_hooks,
 };
 
+/// Maximum number of bytes retained when reading a version-target file out of a
+/// deploy artifact. The artifact is downloaded release content and therefore
+/// attacker-influenced, so the retained bytes are capped with truncation
+/// metadata rather than slurping an unbounded `read_to_string`. Mirrors the
+/// bounded-capture pattern used by `agent_task_promotion` / runner exec captures
+/// (#5363). The cap is generous: a real version manifest is a few kilobytes, so
+/// the trailing window still contains any plausible version string.
+const ARTIFACT_VERSION_READ_LIMIT_BYTES: usize = 65_536;
+
+/// Truncation metadata describing how much of a captured stream was retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StreamCaptureMetadata {
+    limit_bytes: usize,
+    seen_bytes: usize,
+    retained_bytes: usize,
+    truncated: bool,
+}
+
+/// Read at most `limit` bytes from `reader`, keeping the trailing tail (the most
+/// relevant window for a version string that lives near the end of a manifest)
+/// and returning the retained text plus truncation metadata. Mirrors the
+/// `bound_captured_stream` pattern in `agent_task_promotion` so artifact reads
+/// cannot grow without bound.
+fn bound_captured_read<R: Read>(
+    mut reader: R,
+    limit: usize,
+) -> std::io::Result<(String, StreamCaptureMetadata)> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let seen = bytes.len();
+    let retained: &[u8] = if seen > limit {
+        &bytes[seen - limit..]
+    } else {
+        &bytes
+    };
+    let metadata = StreamCaptureMetadata {
+        limit_bytes: limit,
+        seen_bytes: seen,
+        retained_bytes: retained.len(),
+        truncated: seen > retained.len(),
+    };
+    Ok((String::from_utf8_lossy(retained).to_string(), metadata))
+}
+
 pub(super) struct PreparedComponentDeploy {
     pub component: Component,
     pub config: DeployConfig,
@@ -809,15 +853,27 @@ fn validate_predeploy_artifact_version(
                 error
             )
         })?;
-        let mut content = String::new();
-        entry.read_to_string(&mut content).map_err(|error| {
-            format!(
-                "Failed to read version target '{}' from artifact '{}': {}",
+        let (content, capture) = bound_captured_read(&mut entry, ARTIFACT_VERSION_READ_LIMIT_BYTES)
+            .map_err(|error| {
+                format!(
+                    "Failed to read version target '{}' from artifact '{}': {}",
+                    entry_name,
+                    artifact_path.display(),
+                    error
+                )
+            })?;
+        if capture.truncated {
+            log_status!(
+                "deploy",
+                "Version target '{}' in artifact '{}' is larger than the {}-byte read cap; \
+                 inspecting the retained {} of {} bytes (trailing tail) for the version string.",
                 entry_name,
                 artifact_path.display(),
-                error
-            )
-        })?;
+                capture.limit_bytes,
+                capture.retained_bytes,
+                capture.seen_bytes
+            );
+        }
 
         let observed = version::parse_version(&content, &pattern).ok_or_else(|| {
             format!(
@@ -1223,14 +1279,43 @@ fn cleanup_build_dependencies(
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_requires_component_extract_command, cleanup_deploy_build_artifact,
-        failed_component_deploy_result, resolve_preflight_artifact_path,
-        should_try_download_release_artifact, validate_predeploy_artifact_version,
+        artifact_requires_component_extract_command, bound_captured_read,
+        cleanup_deploy_build_artifact, failed_component_deploy_result,
+        resolve_preflight_artifact_path, should_try_download_release_artifact,
+        validate_predeploy_artifact_version, ARTIFACT_VERSION_READ_LIMIT_BYTES,
     };
     use crate::core::component::{ArtifactInput, Component, VersionTarget};
     use crate::core::deploy::types::DeployConfig;
     use std::io::Write;
     use std::process::Command;
+
+    #[test]
+    fn bound_captured_read_retains_full_source_within_limit() {
+        let (text, capture) = bound_captured_read(&b"Version: 1.2.3"[..], 64).expect("read");
+        assert_eq!(text, "Version: 1.2.3");
+        assert_eq!(capture.seen_bytes, 14);
+        assert_eq!(capture.retained_bytes, 14);
+        assert_eq!(capture.limit_bytes, 64);
+        assert!(!capture.truncated);
+    }
+
+    #[test]
+    fn bound_captured_read_keeps_trailing_tail_when_truncated() {
+        // The version string lives at the END of the manifest, so the retained
+        // trailing tail must still surface it even when the head is dropped.
+        let blob = format!("{}Version: 9.9.9", "x".repeat(100));
+        let (text, capture) = bound_captured_read(blob.as_bytes(), 16).expect("read");
+        assert_eq!(capture.limit_bytes, 16);
+        assert_eq!(capture.seen_bytes, blob.len());
+        assert_eq!(capture.retained_bytes, 16);
+        assert!(capture.truncated);
+        assert!(text.ends_with("Version: 9.9.9"));
+    }
+
+    #[test]
+    fn bound_captured_read_default_cap_is_nonzero() {
+        assert!(ARTIFACT_VERSION_READ_LIMIT_BYTES > 0);
+    }
 
     #[test]
     fn test_execute_component_deploy_failure_helper_preserves_build_exit_code() {

@@ -695,7 +695,7 @@ jobs:
         run: |
           cargo build --release --bin homeboy
           ./target/release/homeboy extension install-for-component --path . --source https://github.com/Extra-Chill/homeboy-extensions
-          ./target/release/homeboy release homeboy --head --from-artifacts artifacts --skip-checks
+          ./target/release/homeboy release homeboy --head --from-artifacts artifacts --skip-checks --apply
 
   publish-homebrew-formula:
     needs:

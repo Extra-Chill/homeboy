@@ -199,9 +199,11 @@ fn release_command_json_contract_matches_golden_fixture() {
         json!({
             "scenarios": [
                 scenario("release dry-run single", ReleaseCommandOutput::Single(ReleaseOutput {
+                    variant: "single",
                     result: release_result("homeboy", "minor", true, Some(release_plan())),
                 })),
                 scenario("release dry-run batch", ReleaseCommandOutput::Batch(BatchReleaseOutput {
+                    variant: "batch",
                     result: BatchReleaseResult {
                         results: vec![BatchReleaseComponentResult {
                             component_id: "homeboy".to_string(),
@@ -230,6 +232,7 @@ fn deploy_command_json_contract_matches_golden_fixture() {
             "scenarios": [
                 scenario("deploy dry-run single", DeployCommandOutput::Single(DeployOutput {
                     command: "deploy.run".to_string(),
+                    variant: "single",
                     project_id: "production".to_string(),
                     all: false,
                     outdated: false,
@@ -242,6 +245,7 @@ fn deploy_command_json_contract_matches_golden_fixture() {
                 })),
                 scenario("deploy dry-run multi-project", DeployCommandOutput::Multi(MultiProjectDeployOutput {
                     command: "deploy.multi".to_string(),
+                    variant: "multi_project",
                     component_ids: vec!["homeboy".to_string()],
                     projects: vec![ProjectDeployResult {
                         project_id: "production".to_string(),
