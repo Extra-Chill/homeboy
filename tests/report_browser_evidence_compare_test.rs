@@ -546,6 +546,70 @@ process.stdout.write(JSON.stringify({
 }
 
 #[test]
+fn ingests_metrics_from_declared_artifact_files() {
+    // Regression for #4621: per-run trace.json carried only a string summary plus a declared
+    // artifact link, while the request counts and browser metrics lived in
+    // artifacts/<name>-metrics.json. The reporter must read those artifact-backed metrics rather
+    // than printing "No comparable metrics found".
+    let guard = tmp_dir("artifact-backed-metrics");
+    let root = guard.path();
+
+    for (side, network, dom) in [("baseline", 18, 700), ("candidate", 24, 900)] {
+        write_fixture_file(
+            &root.join(side),
+            "trace.json",
+            r#"{
+                "scenario_id":"product-page-waterfall",
+                "profile":"desktop",
+                "summary":"Captured waterfall trace; see artifact for metrics.",
+                "assertions":[{"id":"ready","status":"pass"}],
+                "artifacts":[{"label":"metrics","path":"artifacts/waterfall-metrics.json"}]
+            }"#,
+        );
+        write_fixture_file(
+            &root.join(side).join("artifacts"),
+            "waterfall-metrics.json",
+            &format!(
+                r#"{{
+                    "request_count": {network},
+                    "request_summary": {{
+                        "by_host": {{ "example.test": {network} }},
+                        "by_type": {{ "script": {network} }}
+                    }},
+                    "browser_metrics": {{ "browser_dom_content_loaded_ms": {dom}, "browser_cls": 0 }}
+                }}"#
+            ),
+        );
+    }
+
+    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
+
+    assert_eq!(report.totals.baseline_samples, 1);
+    assert_eq!(report.totals.candidate_samples, 1);
+    let variant = report.variants.first().expect("variant should exist");
+    assert_eq!(
+        variant.request_totals.baseline.as_ref().unwrap().median,
+        18.0
+    );
+    assert_eq!(
+        variant.request_totals.candidate.as_ref().unwrap().median,
+        24.0
+    );
+    assert_eq!(variant.request_totals.median_delta, Some(6.0));
+    assert!(variant.request_by_host.contains_key("example.test"));
+    assert!(variant.request_by_type.contains_key("script"));
+    assert_eq!(
+        variant.browser_metrics["browser_dom_content_loaded_ms"].median_delta,
+        Some(200.0)
+    );
+    assert!(report.markdown.contains("Request Counts By Host"));
+    assert!(report.markdown.contains("browser_dom_content_loaded_ms"));
+    assert!(report
+        .markdown
+        .contains("ingested artifact-backed metrics from artifacts/waterfall-metrics.json"));
+}
+
+#[test]
 fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
     let guard = tmp_dir("artifact-manifests");
     let root = guard.path();
