@@ -37,19 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
+      tooling-identity: ${{ steps.release-check.outputs.tooling-identity }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Restore failure cache
-        id: failure-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            release-last-failed-${{ github.ref_name }}-
 
       - name: Dry-run release check
         id: release-check
@@ -60,15 +52,31 @@ jobs:
           release-skip-publish: 'true'
           release-skip-github-release: 'true'
 
+      # The failed-SHA marker is keyed by the resolved tooling identity, not
+      # just the SHA, so a CI-side fix (new homeboy binary / extension) that
+      # changes the resolved tooling produces a fresh key and self-heals a
+      # previously-blocked SHA. See homeboy-action#257.
+      - name: Restore failure cache
+        id: failure-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/homeboy-release-last-failed
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}
+
       - name: Decide whether to release
         id: check
+        env:
+          # A manual dispatch is an explicit human "retry this now" — it must
+          # never be silently skipped by a stale failed-SHA marker. The marker
+          # only guards the unattended push path against retry loops.
+          IS_MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
           FAILURE_MARKER="${RUNNER_TEMP}/homeboy-release-last-failed"
-          if [ -f "${FAILURE_MARKER}" ]; then
+          if [ "${IS_MANUAL_DISPATCH}" != "true" ] && [ -f "${FAILURE_MARKER}" ]; then
             LAST_FAILED="$(tr -d '[:space:]' < "${FAILURE_MARKER}")"
             if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
-              echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt — skipping until new commits"
+              echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt with the same tooling — skipping until new commits or new tooling (dispatch manually to force)"
               echo "should-release=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -133,7 +141,9 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+          # Keyed by tooling identity so a later tooling fix produces a new
+          # key and the prior failure no longer matches (homeboy-action#257).
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}
 
   # ── Clear failure cache on success ──
   clear-failure:

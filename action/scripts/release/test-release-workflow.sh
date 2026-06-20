@@ -72,6 +72,16 @@ assert_not_contains 'name: homeboy-ci-results$' "${ROOT_DIR}/action.yml" "CI res
 assert_not_contains 'name: homeboy-observations$' "${ROOT_DIR}/action.yml" "observation artifacts do not use a shared static name"
 assert_contains 'release-bump-type:' "${ROOT_DIR}/action.yml" "action exposes release bump type output"
 assert_contains 'skipped-reason:' "${ROOT_DIR}/action.yml" "action exposes skipped release reason output"
+
+# Failed-SHA marker escape hatches (homeboy-action#257):
+# 1. A manual dispatch must never be blocked by a stale marker.
+# 2. The marker is keyed by tooling identity so a CI-side fix self-heals.
+assert_contains 'tooling-identity:' "${ROOT_DIR}/action.yml" "action exposes resolved tooling identity output"
+assert_contains "github.event_name == 'workflow_dispatch'" "${WORKFLOW}" "release workflow detects manual dispatch for the marker bypass"
+assert_contains 'IS_MANUAL_DISPATCH' "${WORKFLOW}" "release workflow gates the failed-SHA skip on non-dispatch runs"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache restore key includes tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache save key includes tooling identity"
+assert_not_contains 'restore-keys:' "${WORKFLOW}" "failure cache no longer falls back to a stale-tooling marker via restore-keys"
 assert_contains 'git/ref/tags/v${release_version}' "${HOMEBOY_CONFIG}" "post-release hook reads the pushed release tag ref"
 assert_contains 'release_sha' "${HOMEBOY_CONFIG}" "post-release hook points v2 at the pushed release tag target"
 assert_not_contains 'sha=$(git rev-parse HEAD)' "${HOMEBOY_CONFIG}" "post-release hook does not point v2 at an unpushed local release commit"

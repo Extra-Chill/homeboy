@@ -48,6 +48,18 @@ echo "HOMEBOY_EXTENSION_REVISION=${EXTENSION_REVISION}" >> "${GITHUB_ENV}"
 echo "HOMEBOY_ACTION_REF=${ACTION_REF_USED}" >> "${GITHUB_ENV}"
 echo "HOMEBOY_ACTION_REPOSITORY=${ACTION_REPOSITORY_USED}" >> "${GITHUB_ENV}"
 
+# Expose the resolved tooling identity as a step output so workflows can key
+# caches/markers on "which release tooling actually ran" — a CI-side fix that
+# changes the resolved homeboy binary or extension naturally produces a new
+# value, so stale per-SHA state self-heals instead of blocking forever
+# (homeboy-action#257). Sanitized to a GitHub cache-key-safe token.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  TOOLING_IDENTITY="${HOMEBOY_CLI_VERSION}-${EXTENSION_REVISION}"
+  TOOLING_IDENTITY="$(printf '%s' "${TOOLING_IDENTITY}" | tr -c 'A-Za-z0-9._-' '-')"
+  echo "homeboy-version=${HOMEBOY_CLI_VERSION}" >> "${GITHUB_OUTPUT}"
+  echo "tooling-identity=${TOOLING_IDENTITY}" >> "${GITHUB_OUTPUT}"
+fi
+
 echo "Tooling metadata captured"
 echo "- Homeboy CLI: ${HOMEBOY_CLI_VERSION}"
 echo "- Extension: ${EXTENSION_ID_EFFECTIVE} (${EXTENSION_SOURCE_EFFECTIVE})"

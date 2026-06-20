@@ -241,6 +241,12 @@ outputs:
   skipped-reason:
     description: 'Why release was skipped when released is false'
     value: ${{ steps.release.outputs.skipped-reason }}
+  homeboy-version:
+    description: 'Resolved Homeboy CLI version string that actually ran (e.g. "homeboy 0.74.1")'
+    value: ${{ steps.tooling-metadata.outputs.homeboy-version }}
+  tooling-identity:
+    description: 'Cache-key-safe token identifying the resolved release tooling (homeboy CLI version + extension revision). Use to key per-SHA CI state so a tooling fix self-heals.'
+    value: ${{ steps.tooling-metadata.outputs.tooling-identity }}
   pr-policy-safe:
     description: 'Whether the PR policy marked this pull request safe for auto-merge (true/false)'
     value: ${{ steps.pr-policy.outputs.safe }}
@@ -374,6 +380,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/setup/install-extension.sh
 
     - name: Capture tooling metadata
+      id: tooling-metadata
       shell: bash
       env:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
