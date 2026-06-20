@@ -39,6 +39,8 @@ pub struct AgentTaskArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Readiness: run the one-command cook readiness repair chain and return a single ready/blocked verdict.
+    Doctor(AgentTaskDoctorArgs),
     /// Cook loop: sync a workspace when needed, dispatch an agent task, and return the durable run id.
     Cook(DispatchArgs),
     /// Cook loop: dispatch, promote, verify, retry red gates, and finalize.
@@ -143,6 +145,47 @@ pub struct ProvidersArgs {
     /// Secret environment variable name to check without exposing its value. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+}
+
+/// Arguments for `agent-task doctor`: the single preflight/repair path for cook
+/// readiness. It chains the provider-contract check and the runner readiness
+/// (`runner doctor --scope lab-offload`) checks the operator previously ran by
+/// hand, then emits one ready/blocked verdict.
+#[derive(Args, Debug)]
+pub struct AgentTaskDoctorArgs {
+    /// Runner ID to verify readiness against. Use `local`/`localhost`/`self`
+    /// for this machine; other values resolve through `homeboy runner` config.
+    #[arg(long, value_name = "RUNNER")]
+    pub runner: String,
+
+    /// Executor backend the cook will request. Defaults to the configured
+    /// coding backend when omitted.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Provider selector/id to disambiguate when more than one backend provider exists.
+    #[arg(long, value_name = "SELECTOR")]
+    pub selector: Option<String>,
+
+    /// Component/workspace path used as the runner extension parity probe cwd.
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<String>,
+
+    /// Required extension ID to resolve on the runner. Repeatable.
+    #[arg(long = "extension", value_name = "EXTENSION")]
+    pub extensions: Vec<String>,
+
+    /// Required command to resolve on the runner PATH. Repeatable.
+    #[arg(long = "require-tool", value_name = "TOOL")]
+    pub required_tools: Vec<String>,
+
+    /// Secret environment variable name to check without exposing its value. Repeatable.
+    #[arg(long = "secret-env", value_name = "ENV")]
+    pub secret_env: Vec<String>,
+
+    /// Apply safe repairs in sequence (reconnect a stale Lab daemon, etc.) instead of reporting only.
+    #[arg(long)]
+    pub repair: bool,
 }
 
 #[derive(Args, Debug)]
