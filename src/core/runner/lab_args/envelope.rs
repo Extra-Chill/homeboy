@@ -183,7 +183,10 @@ fn agent_task_text_flag(arg: &str) -> Option<&'static str> {
 
 fn agent_task_text_inline_arg(arg: &str) -> Option<(&'static str, &str)> {
     for flag in ["--prompt", "--task", "--tasks"] {
-        if let Some(value) = arg.strip_prefix(flag).and_then(|rest| rest.strip_prefix('=')) {
+        if let Some(value) = arg
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
             return Some((flag, value));
         }
     }
@@ -271,6 +274,9 @@ mod tests {
             ArgValue::InlineText("Fix it".to_string())
         );
         assert_eq!(envelope.inputs.agent_task_text_specs[2].flag, "--tasks");
-        assert_eq!(envelope.inputs.agent_task_text_specs[2].value, ArgValue::Stdin);
+        assert_eq!(
+            envelope.inputs.agent_task_text_specs[2].value,
+            ArgValue::Stdin
+        );
     }
 }

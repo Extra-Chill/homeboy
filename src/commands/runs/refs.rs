@@ -163,9 +163,10 @@ pub fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
 
 fn run_matches_filter(run: &RunRecord, filter: &RunListFilter) -> bool {
     filter.kind.as_deref().is_none_or(|kind| run.kind == kind)
-        && filter.component_id.as_deref().is_none_or(|component| {
-            run.component_id.as_deref() == Some(component)
-        })
+        && filter
+            .component_id
+            .as_deref()
+            .is_none_or(|component| run.component_id.as_deref() == Some(component))
         && filter
             .status
             .as_deref()
