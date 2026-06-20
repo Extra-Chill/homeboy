@@ -324,6 +324,12 @@ fn watch_until_reached(
         "closed" => matches!(current.state.state.as_str(), "CLOSED" | "MERGED"),
         "green" => current.state.checks.as_deref() == Some("SUCCESS"),
         "green-mergeable" => {
+            // A PR is only mergeable once its checks have reported SUCCESS on the
+            // current head. `checks` is `None` when GitHub returns an empty
+            // statusCheckRollup (e.g. the force-push window where mergeStateStatus
+            // flips to CLEAN before CI registers on the new head SHA). Requiring an
+            // explicit SUCCESS — never a bare CLEAN — keeps that race from merging
+            // untested code (#4872).
             current.item_type == "pull_request"
                 && !current.state.draft
                 && current.state.checks.as_deref() == Some("SUCCESS")
@@ -572,6 +578,30 @@ mod tests {
         assert!(watch_until_reached("green-mergeable", &item, None));
         assert!(watch_until_reached("green", &item, None));
         assert!(!watch_until_reached("merged", &item, None));
+    }
+
+    #[test]
+    fn watch_until_green_mergeable_rejects_clean_with_zero_checks() {
+        // Force-push window: mergeStateStatus flips to CLEAN before CI registers on
+        // the new head, so statusCheckRollup is empty and `checks` is None (#4872).
+        // A bare CLEAN must not satisfy green-mergeable.
+        let item = TriageWatchItem {
+            item_type: "pull_request".to_string(),
+            state: TriageWatchItemState {
+                state: "OPEN".to_string(),
+                title: None,
+                url: None,
+                checks: None,
+                review_decision: Some("APPROVED".to_string()),
+                merge_state: Some("CLEAN".to_string()),
+                head_sha: Some("abc123".to_string()),
+                merged_at: None,
+                draft: false,
+            },
+        };
+
+        assert!(!watch_until_reached("green-mergeable", &item, None));
+        assert!(!watch_until_reached("green", &item, None));
     }
 
     #[test]
