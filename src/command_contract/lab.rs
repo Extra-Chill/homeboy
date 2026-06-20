@@ -263,123 +263,60 @@ fn human_join(labels: &[&str]) -> String {
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
-        let contract = match self {
-            Commands::AgentTask(args)
-                if matches!(
-                    args.command,
+        let mut contract = match self {
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Cook(_)
-                        | agent_task::AgentTaskCommand::Dispatch(_)
-                        | agent_task::AgentTaskCommand::Loop(_)
-                        | agent_task::AgentTaskCommand::RunPlan(_)
-                        | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs {
-                            run: true,
-                            ..
-                        })
-                ) =>
-            {
-                let mut contract = LabCommandContract::portable(
-                    AGENT_TASK_RUN_LAB_LABEL,
-                    None,
-                    true,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                if agent_task_provider_requires_cwd_git_checkout(&args.command) {
-                    contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
-                }
-                contract
-            }
-            Commands::AgentTask(args)
-                if matches!(args.command, agent_task::AgentTaskCommand::Providers(_)) =>
-            {
-                LabCommandContract::explicit_runner(
-                    AGENT_TASK_PROVIDERS_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                )
-            }
-            Commands::AgentTask(args)
-                if matches!(
-                    args.command,
+                    | agent_task::AgentTaskCommand::Dispatch(_)
+                    | agent_task::AgentTaskCommand::Loop(_)
+                    | agent_task::AgentTaskCommand::RunPlan(_)
+                    | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs { run: true, .. }),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_RUN_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Providers(_),
+            }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-                        command: agent_task::AgentTaskControllerCommand::FromSpec(
-                            agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
-                        ) | agent_task::AgentTaskControllerCommand::Materialize(_),
-                    },)
-                ) =>
-            {
-                let mut contract = LabCommandContract::explicit_runner(
-                    AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                if agent_task_provider_requires_cwd_git_checkout(&args.command) {
-                    contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
-                }
-                contract
-            }
-            Commands::AgentTask(args)
-                if matches!(
-                    args.command,
+                        command:
+                            agent_task::AgentTaskControllerCommand::FromSpec(
+                                agent_task::AgentTaskControllerFromSpecArgs {
+                                    resume: true, ..
+                                },
+                            )
+                            | agent_task::AgentTaskControllerCommand::Materialize(_),
+                    }),
+            }) => LabCommandContract::explicit_runner_simple(
+                AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
                         command: agent_task::AgentTaskControllerCommand::Resume(_),
-                    },)
-                ) =>
-            {
-                let mut contract = LabCommandContract::explicit_runner(
-                    AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                contract.source_path_mode = LabSourcePathMode::RunnerResident;
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
-                contract
-            }
-            Commands::AgentTask(args)
-                if matches!(
-                    args.command,
+                    }),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Status(_)
-                        | agent_task::AgentTaskCommand::Logs(_)
-                        | agent_task::AgentTaskCommand::Artifacts(_)
-                        | agent_task::AgentTaskCommand::Review(_)
-                ) =>
-            {
-                let mut contract = LabCommandContract::explicit_runner(
-                    AGENT_TASK_STATUS_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                contract.source_path_mode = LabSourcePathMode::RunnerResident;
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
-                contract
-            }
-            Commands::AgentTask(args)
-                if matches!(
-                    args.command,
+                    | agent_task::AgentTaskCommand::Logs(_)
+                    | agent_task::AgentTaskCommand::Artifacts(_)
+                    | agent_task::AgentTaskCommand::Review(_),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
                     agent_task::AgentTaskCommand::Auth(agent_task::AgentTaskAuthArgs {
                         command: agent_task::AgentTaskAuthCommand::Status(_),
-                    })
-                ) =>
-            {
-                LabCommandContract::explicit_runner(
-                    AGENT_TASK_AUTH_STATUS_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                )
-            }
+                    }),
+            }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_AUTH_STATUS_LAB_LABEL),
             Commands::Audit(args) => args.lab_contract()?,
             Commands::Bench(args) => args.lab_contract()?,
             Commands::Extension(args) if args.is_update_command() => {
-                LabCommandContract::explicit_runner(
-                    "extension update",
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                )
+                LabCommandContract::explicit_runner_simple("extension update")
             }
             Commands::Fleet(args) => args.lab_contract()?,
             Commands::Lint(args) => args.lab_contract()?,
@@ -417,37 +354,28 @@ impl Commands {
                 contract
             }
             Commands::Tunnel(args) if args.is_preview_consumer_run() => {
-                LabCommandContract::explicit_runner(
-                    TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                )
+                LabCommandContract::explicit_runner_simple(TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL)
             }
             Commands::Tunnel(args) if args.is_service_start() => {
-                let mut contract = LabCommandContract::explicit_runner(
-                    TUNNEL_SERVICE_START_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                contract.source_path_mode = LabSourcePathMode::RunnerResident;
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
-                contract
+                LabCommandContract::runner_resident(TUNNEL_SERVICE_START_LAB_LABEL)
             }
             Commands::Tunnel(args) if args.is_service_expose() => {
-                let mut contract = LabCommandContract::explicit_runner(
-                    TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                );
-                contract.source_path_mode = LabSourcePathMode::RunnerResident;
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
-                contract
+                LabCommandContract::runner_resident(TUNNEL_SERVICE_EXPOSE_LAB_LABEL)
             }
             _ => return None,
         };
+
+        // Agent-task commands whose provider needs a real git checkout of the
+        // cwd workspace upgrade to the GitCheckoutRequired policy. This applies
+        // uniformly to every resolved agent-task contract; the predicate only
+        // returns true for the run/from-spec commands that own a portable or
+        // explicit-runner base, so the other arms (which set their own
+        // runner-resident policy) are left untouched.
+        if let Commands::AgentTask(args) = self {
+            if agent_task_provider_requires_cwd_git_checkout(&args.command) {
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+            }
+        }
 
         Some(contract)
     }
@@ -579,6 +507,28 @@ impl LabCommandContract {
                 ..base.routing_policy
             },
             ..base
+        }
+    }
+
+    /// Explicit-runner contract for the common case of a command that takes no
+    /// mutation flag, requires no extension parity, and pulls in no extra tools.
+    /// Collapses the repeated `explicit_runner(label, None, false,
+    /// LAB_NO_EXTRA_TOOLS)` call shape that several agent-task and tunnel arms
+    /// share down to a single label argument.
+    pub(crate) fn explicit_runner_simple(hot_label: &'static str) -> Self {
+        Self::explicit_runner(hot_label, None, false, LAB_NO_EXTRA_TOOLS)
+    }
+
+    /// Explicit-runner contract pinned to a runner-resident workspace: the
+    /// command operates against state that already lives on the runner, so both
+    /// the source-path and workspace-mode policies are runner-resident. Used by
+    /// the agent-task status/resume and tunnel service-lifecycle commands, none
+    /// of which take a mutation flag, extension parity, or extra tools.
+    pub(crate) fn runner_resident(hot_label: &'static str) -> Self {
+        Self {
+            source_path_mode: LabSourcePathMode::RunnerResident,
+            workspace_mode_policy: LabWorkspaceModePolicy::RunnerResident,
+            ..Self::explicit_runner_simple(hot_label)
         }
     }
 
