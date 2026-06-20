@@ -330,6 +330,180 @@ fn non_empty(value: String) -> Option<String> {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Authoritative runtime view (#4861)
+// ----------------------------------------------------------------------------
+
+/// One controller-side input describing the binary that is actually executing
+/// the current `homeboy` invocation. Kept free of probes so the assembler is a
+/// pure function over already-collected facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerRuntimeInput {
+    pub binary_path: Option<String>,
+    pub version: String,
+    pub build_identity: BuildIdentity,
+    pub install_method: InstallMethod,
+    /// Optional source checkout backing the active binary (debug builds).
+    pub source_checkout: Option<SourceCheckoutStatus>,
+}
+
+/// One runner-side input describing a configured runner and, when connected,
+/// the binary identity of its active daemon. All fields are pre-resolved facts
+/// so the assembler stays deterministic and unit-testable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerRuntimeInput {
+    pub runner_id: String,
+    pub kind: String,
+    #[allow(clippy::struct_field_names)]
+    pub server_id: Option<String>,
+    /// Configured runner executable path (`settings.homeboy_path`).
+    pub configured_binary_path: Option<String>,
+    pub connected: bool,
+    /// Version reported by the active daemon session, when connected.
+    pub daemon_version: Option<String>,
+    /// Build identity reported by the active daemon session, when connected.
+    pub daemon_build_identity: Option<String>,
+    /// True when the active daemon was started by a build that differs from the
+    /// configured runner executable (existing stale-daemon drift signal).
+    pub daemon_drift: bool,
+}
+
+/// Authoritative identity of a single runtime participant (controller or
+/// runner) collapsed to the fields operators reason about when deciding which
+/// binary to use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeParticipant {
+    /// `controller` or `runner`.
+    pub role: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    /// Authoritative version string for this participant, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Authoritative build-identity display string, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<String>,
+    /// The binary path operators should treat as authoritative for this
+    /// participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_method: Option<InstallMethod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_checkout: Option<SourceCheckoutStatus>,
+    pub connected: bool,
+    /// Relation of this participant's version to the controller's version.
+    pub relation_to_controller: VersionRelation,
+    /// True when this participant's active runtime disagrees with its own
+    /// configured/authoritative binary (e.g. a stale daemon).
+    pub internal_drift: bool,
+}
+
+/// One authoritative runtime view spanning the controller and every configured
+/// runner, plus the drift signals an operator needs to decide whether a single
+/// repair is required.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeView {
+    pub command: String,
+    /// The controller is always the authoritative reference point.
+    pub controller: RuntimeParticipant,
+    pub runners: Vec<RuntimeParticipant>,
+    /// True when any participant disagrees with the controller version or has
+    /// internal drift. When false, operators can trust a single binary view.
+    pub agrees: bool,
+    /// Human-facing, deterministic notes describing each disagreement.
+    pub drift_notes: Vec<String>,
+}
+
+/// Pure assembler: collapse already-collected controller and runner inputs into
+/// one authoritative runtime view. Deterministic and side-effect free so it can
+/// be unit tested without touching the registry, SSH, or daemons.
+pub fn build_runtime_view(
+    controller: ControllerRuntimeInput,
+    runners: Vec<RunnerRuntimeInput>,
+) -> RuntimeView {
+    let controller_version = controller.version.clone();
+
+    let controller_participant = RuntimeParticipant {
+        role: "controller".to_string(),
+        id: "controller".to_string(),
+        kind: None,
+        server_id: None,
+        version: Some(controller.version.clone()),
+        build_identity: Some(controller.build_identity.display.clone()),
+        binary_path: controller.binary_path.clone(),
+        install_method: Some(controller.install_method.clone()),
+        source_checkout: controller.source_checkout.clone(),
+        connected: true,
+        relation_to_controller: VersionRelation::Current,
+        internal_drift: false,
+    };
+
+    let mut drift_notes = Vec::new();
+    let mut runner_participants = Vec::with_capacity(runners.len());
+
+    for runner in runners {
+        let relation = match runner.daemon_version.as_deref() {
+            Some(version) => relation_to_latest(version, Some(&controller_version)),
+            None => VersionRelation::Unknown,
+        };
+
+        if runner.connected {
+            if let Some(version) = runner.daemon_version.as_deref() {
+                if relation != VersionRelation::Current {
+                    drift_notes.push(format!(
+                        "runner `{}` active daemon is {version} ({}) but controller is {controller_version}",
+                        runner.runner_id,
+                        relation_label(&relation),
+                    ));
+                }
+            }
+        }
+
+        if runner.daemon_drift {
+            drift_notes.push(format!(
+                "runner `{}` active daemon was started by a different build than its configured executable",
+                runner.runner_id
+            ));
+        }
+
+        runner_participants.push(RuntimeParticipant {
+            role: "runner".to_string(),
+            id: runner.runner_id,
+            kind: Some(runner.kind),
+            server_id: runner.server_id,
+            version: runner.daemon_version,
+            build_identity: runner.daemon_build_identity,
+            binary_path: runner.configured_binary_path,
+            install_method: None,
+            source_checkout: None,
+            connected: runner.connected,
+            relation_to_controller: relation,
+            internal_drift: runner.daemon_drift,
+        });
+    }
+
+    RuntimeView {
+        command: "self doctor".to_string(),
+        controller: controller_participant,
+        runners: runner_participants,
+        agrees: drift_notes.is_empty(),
+        drift_notes,
+    }
+}
+
+fn relation_label(relation: &VersionRelation) -> &'static str {
+    match relation {
+        VersionRelation::Current => "current",
+        VersionRelation::Behind => "behind",
+        VersionRelation::Ahead => "ahead",
+        VersionRelation::Unknown => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +643,148 @@ mod tests {
         assert_eq!(status.active_version, upgrade::current_version());
         assert_eq!(status.install_method, InstallMethod::Unknown);
         assert_eq!(status.version_relation, VersionRelation::Current);
+    }
+
+    fn identity(version: &str) -> BuildIdentity {
+        BuildIdentity {
+            version: version.to_string(),
+            git_commit: None,
+            git_dirty: None,
+            display: format!("homeboy {version}"),
+        }
+    }
+
+    fn controller_input(version: &str) -> ControllerRuntimeInput {
+        ControllerRuntimeInput {
+            binary_path: Some("/opt/homebrew/bin/homeboy".to_string()),
+            version: version.to_string(),
+            build_identity: identity(version),
+            install_method: InstallMethod::Homebrew,
+            source_checkout: None,
+        }
+    }
+
+    #[test]
+    fn runtime_view_agrees_when_runners_match_controller() {
+        let view = build_runtime_view(
+            controller_input("0.235.0"),
+            vec![RunnerRuntimeInput {
+                runner_id: "lab".to_string(),
+                kind: "ssh".to_string(),
+                server_id: Some("lab-host".to_string()),
+                configured_binary_path: Some("/home/runner/target/release/homeboy".to_string()),
+                connected: true,
+                daemon_version: Some("0.235.0".to_string()),
+                daemon_build_identity: Some("homeboy 0.235.0".to_string()),
+                daemon_drift: false,
+            }],
+        );
+
+        assert_eq!(view.command, "self doctor");
+        assert_eq!(view.controller.role, "controller");
+        assert_eq!(view.controller.version.as_deref(), Some("0.235.0"));
+        assert_eq!(
+            view.controller.relation_to_controller,
+            VersionRelation::Current
+        );
+        assert_eq!(view.runners.len(), 1);
+        let runner = &view.runners[0];
+        assert_eq!(runner.role, "runner");
+        assert_eq!(runner.id, "lab");
+        assert_eq!(runner.relation_to_controller, VersionRelation::Current);
+        assert!(runner.connected);
+        assert!(view.agrees);
+        assert!(view.drift_notes.is_empty());
+    }
+
+    #[test]
+    fn runtime_view_flags_runner_version_skew() {
+        let view = build_runtime_view(
+            controller_input("0.235.0"),
+            vec![RunnerRuntimeInput {
+                runner_id: "lab".to_string(),
+                kind: "ssh".to_string(),
+                server_id: Some("lab-host".to_string()),
+                configured_binary_path: None,
+                connected: true,
+                daemon_version: Some("0.229.11".to_string()),
+                daemon_build_identity: Some("homeboy 0.229.11".to_string()),
+                daemon_drift: false,
+            }],
+        );
+
+        assert!(!view.agrees);
+        assert_eq!(
+            view.runners[0].relation_to_controller,
+            VersionRelation::Behind
+        );
+        assert_eq!(view.drift_notes.len(), 1);
+        assert!(view.drift_notes[0].contains("lab"));
+        assert!(view.drift_notes[0].contains("0.229.11"));
+        assert!(view.drift_notes[0].contains("0.235.0"));
+    }
+
+    #[test]
+    fn runtime_view_reports_internal_daemon_drift() {
+        let view = build_runtime_view(
+            controller_input("0.235.0"),
+            vec![RunnerRuntimeInput {
+                runner_id: "lab".to_string(),
+                kind: "ssh".to_string(),
+                server_id: None,
+                configured_binary_path: Some("/srv/homeboy".to_string()),
+                connected: true,
+                daemon_version: Some("0.235.0".to_string()),
+                daemon_build_identity: Some("homeboy 0.235.0+deadbeef".to_string()),
+                daemon_drift: true,
+            }],
+        );
+
+        assert!(!view.agrees);
+        assert!(view.runners[0].internal_drift);
+        assert_eq!(
+            view.runners[0].relation_to_controller,
+            VersionRelation::Current
+        );
+        assert_eq!(view.drift_notes.len(), 1);
+        assert!(view.drift_notes[0].contains("different build"));
+    }
+
+    #[test]
+    fn runtime_view_disconnected_runner_is_unknown_not_drift() {
+        let view = build_runtime_view(
+            controller_input("0.235.0"),
+            vec![RunnerRuntimeInput {
+                runner_id: "lab".to_string(),
+                kind: "ssh".to_string(),
+                server_id: None,
+                configured_binary_path: Some("/srv/homeboy".to_string()),
+                connected: false,
+                daemon_version: None,
+                daemon_build_identity: None,
+                daemon_drift: false,
+            }],
+        );
+
+        assert!(view.agrees);
+        assert!(view.drift_notes.is_empty());
+        assert!(!view.runners[0].connected);
+        assert_eq!(
+            view.runners[0].relation_to_controller,
+            VersionRelation::Unknown
+        );
+    }
+
+    #[test]
+    fn runtime_view_json_shape_is_stable() {
+        let view = build_runtime_view(controller_input("0.235.0"), Vec::new());
+        let json = serde_json::to_value(view).unwrap();
+
+        assert_eq!(json["command"], "self doctor");
+        assert_eq!(json["controller"]["role"], "controller");
+        assert_eq!(json["controller"]["version"], "0.235.0");
+        assert_eq!(json["controller"]["connected"], true);
+        assert_eq!(json["agrees"], true);
+        assert!(json["runners"].as_array().unwrap().is_empty());
     }
 }

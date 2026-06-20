@@ -333,6 +333,7 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
 
     let self_docs = include_str!("../docs/commands/self.md");
     assert!(self_docs.contains("`identity`"));
+    assert!(self_docs.contains("`doctor`"));
     assert!(self_docs.contains("`cleanup-runtime-tmp`"));
     assert!(self_docs.contains("--older-than-days"));
     assert!(self_docs.contains("--apply"));
@@ -365,6 +366,7 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
         ["homeboy", "auth", "profile", "set-basic", "dev"].as_slice(),
         ["homeboy", "auth", "profile", "set-bearer", "dev"].as_slice(),
         ["homeboy", "self", "identity"].as_slice(),
+        ["homeboy", "self", "doctor"].as_slice(),
         [
             "homeboy",
             "self",
