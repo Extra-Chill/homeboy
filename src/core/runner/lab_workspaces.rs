@@ -893,11 +893,12 @@ fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
 }
 
 /// Capability-parity contract for the runner-side source-CLI dependency
-/// bootstrap. The `npm ci` install is executed by the runner's Node toolchain,
-/// so the runner must expose the `node` and `npm` tools. `exec` short-circuits
-/// this preflight for local runners and for SSH runners that already advertise
-/// the tools, so it is behavior-preserving on a provisioned runner and fails
-/// loudly before a remote run that would otherwise error mid-dispatch (#5422).
+/// bootstrap. The clean dependency install is executed by the runner's
+/// JavaScript package-manager toolchain, so the runner must expose the
+/// corresponding runtime and package-manager tools. `exec` short-circuits this
+/// preflight for local runners and for SSH runners that already advertise the
+/// tools, so it is behavior-preserving on a provisioned runner and fails loudly
+/// before a remote run that would otherwise error mid-dispatch (#5422).
 fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
         command: "lab.source_cli_bootstrap".to_string(),
@@ -947,10 +948,10 @@ fn bootstrap_source_cli_node_dependencies(
             raw_exec: true,
             source_snapshot: None,
             // Validate remote capability parity before dispatch: the bootstrap is
-            // executed by the runner-side `npm`/`node` toolchain, so require those
-            // tools on the runner. `exec` no-ops this gate for local and
-            // already-capable SSH runners, so behavior is unchanged on a correctly
-            // provisioned runner and fails early otherwise (#5422).
+            // executed by the runner-side JavaScript package-manager toolchain, so
+            // require those tools on the runner. `exec` no-ops this gate for local
+            // and already-capable SSH runners, so behavior is unchanged on a
+            // correctly provisioned runner and fails early otherwise (#5422).
             capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),

@@ -239,14 +239,15 @@ fn publish_output_auth_required_reason(response: &serde_json::Value) -> Option<S
     }
 
     Some(
-        "npm authentication required (ENEEDAUTH). Run `npm login` for the target registry, then retry the registry publish."
+        "registry authentication required (ENEEDAUTH). Log in to the target registry, then retry the registry publish."
             .to_string(),
     )
 }
 
-/// Detect npm's EPRIVATE rejection, emitted when a package marked `"private": true`
-/// is published. Such packages must never reach a public registry, so this is treated
-/// as an intentional skip rather than a release failure.
+/// Detect the registry's EPRIVATE rejection, emitted when a package marked
+/// `"private": true` is published. Such packages must never reach a public
+/// registry, so this is treated as an intentional skip rather than a release
+/// failure.
 fn publish_output_private_package_reason(response: &serde_json::Value) -> Option<String> {
     let output = publish_response_output(response);
     let marked_private =
@@ -256,7 +257,7 @@ fn publish_output_private_package_reason(response: &serde_json::Value) -> Option
     }
 
     Some(
-        "package marked private (\"private\": true); npm publish skipped. The build artifact is the deliverable."
+        "package marked private (\"private\": true); registry publish skipped. The build artifact is the deliverable."
             .to_string(),
     )
 }
