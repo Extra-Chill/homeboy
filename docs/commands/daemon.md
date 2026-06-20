@@ -92,6 +92,8 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /runs?kind=bench|audit&component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /runs/:id`
 - `GET /runs/:id/artifacts`
+- `GET /runs/:id/artifacts/sync`
+- `GET /runs/:id/artifacts/:artifact_id`
 - `GET /runs/:id/artifacts/:artifact_id/content`
 - `GET /runs/:id/findings?tool=<tool>&file=<path>&fingerprint=<id>&limit=<n>`
 - `GET /audit/runs?component=<id>&rig=<id>&status=<status>&limit=<n>`
@@ -113,6 +115,15 @@ The run readers expose persisted observation-store evidence from previous
 analysis runs. They do not start audit, lint, test, bench, rig, or stack work.
 Run summaries include `status_note` when a running record appears stale or
 cannot be verified with owner metadata, matching the CLI run-history output.
+
+Artifact list/sync responses include a byte-retrieval contract for each record:
+`content_available`, `content_url`, `fetch_command`, and `retrieval.mode`.
+`retrieval.mode: direct_download` means the daemon route can serve bytes and the
+CLI command can fetch them. `retrieval.mode: metadata_only` means orchestrators
+must treat the record as evidence metadata only; no byte endpoint is expected to
+work for that artifact. Daemon artifact byte routes stream the file response;
+the transport-free API handler reports inline byte payloads as
+`retrieval.mode: inline_base64` with `content_field: content_base64`.
 
 `homeboy runs compare --format=json` remains CLI-only for now. A daemon compare
 endpoint should reuse that implementation rather than duplicating comparison

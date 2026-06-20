@@ -483,6 +483,9 @@ fn artifact_content_serves_encoded_artifact_store_locator() {
         assert_eq!(response.body["filename"], "blueprint.after.json");
         assert_eq!(response.body["mime"], "application/json");
         assert_eq!(response.body["size_bytes"], 12);
+        assert_eq!(response.body["content_available"], true);
+        assert_eq!(response.body["retrieval"]["mode"], "inline_base64");
+        assert_eq!(response.body["retrieval"]["content_field"], "content_base64");
         assert_eq!(
             response.body["content_base64"].as_str(),
             Some("eyJzdGVwcyI6W119")
@@ -538,6 +541,8 @@ fn artifact_content_serves_percent_encoded_stored_artifact_ids() {
 
         assert_eq!(response.endpoint, "runs.artifact.content");
         assert_eq!(response.body["artifact_id"], artifact.id);
+        assert_eq!(response.body["content_available"], true);
+        assert_eq!(response.body["retrieval"]["mode"], "inline_base64");
         assert_eq!(response.body["filename"], "summary.json");
     });
 }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore};
-use crate::core::observation::{NewRunRecord, ObservationStore};
+use crate::core::observation::{ArtifactRecord, NewRunRecord, ObservationStore};
 use crate::test_support::HomeGuard;
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
@@ -251,6 +251,25 @@ fn routes_registered_artifact_downloads_and_sync_manifest() {
     let artifact = store
         .record_artifact(&run.id, "bench_results", &artifact_path)
         .expect("record artifact");
+    let metadata_only = ArtifactRecord {
+        id: "exported-summary".to_string(),
+        run_id: run.id.clone(),
+        kind: "summary".to_string(),
+        artifact_type: "metadata-only".to_string(),
+        path: "metadata-only:exported-summary".to_string(),
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: None,
+        size_bytes: Some(11),
+        mime: Some("application/json".to_string()),
+        metadata_json: serde_json::json!({}),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    store
+        .import_artifact(&metadata_only)
+        .expect("metadata-only artifact");
 
     let download = route(
         "GET",
@@ -259,17 +278,41 @@ fn routes_registered_artifact_downloads_and_sync_manifest() {
     assert_eq!(download.status_code, 200);
     assert!(download.artifact.is_some());
     assert_eq!(download.body["artifact"]["id"], artifact.id);
+    assert_eq!(download.body["content_available"], true);
+    assert_eq!(download.body["retrieval"]["mode"], "direct_download");
+    assert_eq!(
+        download.body["content_url"],
+        format!("/runs/{}/artifacts/{}/content", run.id, artifact.id)
+    );
     assert_eq!(download.body["size_bytes"], 11);
+
+    let content_alias = route(
+        "GET",
+        &format!("/runs/{}/artifacts/{}/content", run.id, artifact.id),
+    );
+    assert_eq!(content_alias.status_code, 200);
+    assert!(content_alias.artifact.is_some());
 
     let sync = route("GET", &format!("/runs/{}/artifacts/sync", run.id));
     assert_eq!(sync.status_code, 200);
     assert!(sync.artifact.is_none());
     assert_eq!(sync.body["command"], "api.runs.artifacts.sync");
     assert_eq!(sync.body["artifacts"][0]["id"], artifact.id);
+    assert_eq!(sync.body["artifacts"][0]["content_available"], true);
+    assert_eq!(sync.body["artifacts"][0]["retrieval"]["mode"], "direct_download");
     assert_eq!(
         sync.body["artifacts"][0]["download_path"],
         format!("/runs/{}/artifacts/{}", run.id, artifact.id)
     );
+    let metadata_artifact = sync.body["artifacts"]
+        .as_array()
+        .expect("artifact array")
+        .iter()
+        .find(|artifact| artifact["id"] == "exported-summary")
+        .expect("metadata-only artifact");
+    assert_eq!(metadata_artifact["content_available"], false);
+    assert_eq!(metadata_artifact["content_url"], serde_json::Value::Null);
+    assert_eq!(metadata_artifact["retrieval"]["mode"], "metadata_only");
 
     let raw_path = route(
         "GET",

@@ -93,6 +93,7 @@ A useful headless UI can be built from this read/query surface:
 - `GET /stacks`, `GET /stacks/:id`, and `POST /stacks/:id/status` for stacked
   branch inspection
 - `GET /runs`, `GET /runs/:id`, `GET /runs/:id/artifacts`,
+  `GET /runs/:id/artifacts/sync`, `GET /runs/:id/artifacts/:artifact_id`,
   `GET /runs/:id/artifacts/:artifact_id/content`, and `GET /runs/:id/findings`
   for persisted evidence
 - `GET /audit/runs` and `GET /bench/runs` for analysis-specific run history
@@ -104,6 +105,15 @@ A useful headless UI can be built from this read/query surface:
 This is enough for a dashboard that lists components, shows selected checkout
 state, displays rigs/stacks, starts analysis jobs, streams progress, and renders
 structured final results.
+
+Artifact evidence is intentionally explicit about byte availability. Artifact
+metadata and sync payloads expose `content_available`, `content_url`,
+`fetch_command`, and `retrieval.mode`. Consumers fetch bytes only when
+`content_available` is `true`; `metadata_only` records are evidence pointers and
+must not trigger guessed runner paths or private filesystem probing. The
+transport-free API handler returns JSON with `retrieval.mode: inline_base64` and
+the bytes in `content_base64`; daemon artifact byte routes stream the file
+response directly when serving artifact responses.
 
 ## Job/Event Contract
 

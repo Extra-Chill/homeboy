@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::core::artifact_links::{public_artifact_url, viewer_links};
 use crate::core::error::{Error, Result};
-use crate::core::execution_contract::decode_uri_component;
+use crate::core::execution_contract::{decode_uri_component, encode_uri_component};
 use crate::core::observation::{ArtifactRecord, ObservationStore};
 use crate::core::paths;
 use crate::core::runner;
@@ -34,6 +34,9 @@ pub(crate) fn route(path: &str) -> Option<HttpResponse> {
         ["artifacts", artifact_token] => resolve_artifact_download(None, artifact_token),
         ["runs", run_id, "artifacts", "sync"] => artifact_sync_manifest(run_id),
         ["runs", run_id, "artifacts", artifact_token] => {
+            resolve_artifact_download(Some(run_id), artifact_token)
+        }
+        ["runs", run_id, "artifacts", artifact_token, "content"] => {
             resolve_artifact_download(Some(run_id), artifact_token)
         }
         _ => return None,
@@ -308,13 +311,22 @@ fn artifact_sync_manifest(run_id: &str) -> Result<ResolvedArtifactResponse> {
         .map(|artifact| {
             let public_url = public_artifact_url(&artifact);
             let viewer_links = viewer_links(&artifact, public_url.as_deref());
+            let retrieval = artifact_retrieval_contract(&artifact, Some(run_id));
             json!({
                 "id": artifact.id,
                 "path_token": artifact.id,
                 "run_id": artifact.run_id,
                 "kind": artifact.kind,
                 "type": artifact.artifact_type,
-                "download_path": format!("/runs/{}/artifacts/{}", run_id, artifact.id),
+                "content_available": retrieval["content_available"],
+                "content_url": retrieval["content_url"],
+                "fetch_command": retrieval["fetch_command"],
+                "retrieval": retrieval,
+                "download_path": format!(
+                    "/runs/{}/artifacts/{}",
+                    encode_uri_component(run_id),
+                    encode_uri_component(&artifact.id)
+                ),
                 "public_url": public_url,
                 "viewer_links": viewer_links,
                 "sha256": artifact.sha256,
@@ -340,12 +352,70 @@ fn artifact_metadata_body(
         "command": "api.runs.artifact.download",
         "artifact": artifact,
         "path_token": artifact.id,
+        "content_available": true,
+        "content_url": format!(
+            "/runs/{}/artifacts/{}/content",
+            encode_uri_component(&artifact.run_id),
+            encode_uri_component(&artifact.id)
+        ),
+        "fetch_command": format!(
+            "homeboy runs artifact get {} {} -o <path>",
+            shell_token(&artifact.run_id),
+            shell_token(&artifact.id)
+        ),
+        "retrieval": artifact_retrieval_contract(artifact, Some(&artifact.run_id)),
         "content_type": download.map(|download| download.content_type.clone()).or_else(|| artifact.mime.clone()),
         "size_bytes": download
             .and_then(|download| i64::try_from(download.size_bytes).ok())
             .or(artifact.size_bytes),
         "sha256": artifact.sha256,
     })
+}
+
+fn artifact_retrieval_contract(
+    artifact: &ArtifactRecord,
+    route_run_id: Option<&str>,
+) -> serde_json::Value {
+    let content_available = artifact.artifact_type == "file"
+        || artifact.artifact_type == "remote_file"
+        || runner::is_remote_runner_artifact_path(&artifact.path);
+    let run_id = route_run_id.unwrap_or(&artifact.run_id);
+    if content_available {
+        let content_url = format!(
+            "/runs/{}/artifacts/{}/content",
+            encode_uri_component(run_id),
+            encode_uri_component(&artifact.id)
+        );
+        json!({
+            "mode": "direct_download",
+            "content_available": true,
+            "content_url": content_url,
+            "fetch_command": format!(
+                "homeboy runs artifact get {} {} -o <path>",
+                shell_token(run_id),
+                shell_token(&artifact.id)
+            ),
+        })
+    } else {
+        json!({
+            "mode": "metadata_only",
+            "content_available": false,
+            "content_url": null,
+            "fetch_command": null,
+            "hint": "Artifact bytes are not available from this record; use artifact metadata only.",
+        })
+    }
+}
+
+fn shell_token(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn sanitize_header_value(value: &str) -> String {
