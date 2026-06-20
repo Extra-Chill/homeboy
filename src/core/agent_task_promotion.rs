@@ -106,6 +106,28 @@ pub enum AgentTaskPromotionStatus {
     GateFailed,
 }
 
+impl AgentTaskPromotionStatus {
+    /// Whether a patch was actually promoted into the target worktree for this
+    /// status (true for both clean applies and gate-failed applies).
+    pub fn patch_promoted(self) -> bool {
+        matches!(self, Self::Applied | Self::GateFailed)
+    }
+
+    /// Whether deterministic gates failed after the patch was promoted.
+    pub fn gate_failed(self) -> bool {
+        matches!(self, Self::GateFailed)
+    }
+
+    /// Stable handoff boundary identifier for this promotion status.
+    pub fn handoff_boundary(self) -> &'static str {
+        match self {
+            Self::Applied => "patch_promoted_no_pr",
+            Self::GateFailed => "patch_promoted_gates_failed",
+            Self::DryRun => "patch_not_promoted_dry_run",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionSource {
     pub kind: String,

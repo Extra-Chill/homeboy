@@ -436,17 +436,14 @@ fn review_next_actions(
 }
 
 fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Value {
-    let patch_promoted = matches!(
-        report.status,
-        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    );
+    let patch_promoted = report.status.patch_promoted();
     let finalize_path = report
         .provenance
         .get("worktree_path")
         .and_then(Value::as_str)
         .unwrap_or(to_worktree);
     let mut next_actions = Vec::new();
-    if report.status == AgentTaskPromotionStatus::GateFailed {
+    if report.status.gate_failed() {
         next_actions.push(
             "patch promoted but deterministic gates failed; use gate feedback before finalizing"
                 .to_string(),
@@ -467,11 +464,7 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, to_worktree: &str) -> Va
             "patch_promoted": patch_promoted,
             "pr_opened": false
         },
-        "boundary": match report.status {
-            AgentTaskPromotionStatus::Applied => "patch_promoted_no_pr",
-            AgentTaskPromotionStatus::GateFailed => "patch_promoted_gates_failed",
-            AgentTaskPromotionStatus::DryRun => "patch_not_promoted_dry_run",
-        },
+        "boundary": report.status.handoff_boundary(),
         "finalize_command": format!(
             "homeboy agent-task finalize-pr --run-id <run-id> --path {finalize_path} --title <title> --commit-message <message>"
         ),
