@@ -156,7 +156,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     let options = ReleaseOptions {
         bump_type: bump_type.clone(),
         dry_run: input.dry_run,
-        path_override: input.path_override,
+        path_override: input.path_override.clone(),
         skip_checks: input.skip_checks,
         skip_checks_granular: input.skip_checks_granular.clone(),
         pipeline: input.pipeline.clone(),
