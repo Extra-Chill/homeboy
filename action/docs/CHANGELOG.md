@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.7.13] - 2026-06-20
+
+### Fixed
+- pass --apply on real CI releases that use --skip-checks
+- clarify missing build-artifact errors and autofix push visibility
+
 ## [2.7.12] - 2026-06-18
 
 ### Fixed
