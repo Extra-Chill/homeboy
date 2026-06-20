@@ -495,7 +495,9 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
             let backend = dispatch_backend.clone().or_else(default_backend);
             backend.as_ref().is_some_and(|backend| {
                 provider_requires_cwd_git_checkout(backend, dispatch_selector.as_deref())
-            })
+            }) || dispatch_backend
+                .as_ref()
+                .is_some_and(|backend| !backend.trim().is_empty())
         }
         _ => false,
     }
@@ -1362,6 +1364,36 @@ mod tests {
             || None,
             |backend, selector| backend == "patch-provider" && selector == Some("selected"),
         ));
+    }
+
+    #[test]
+    fn agent_task_git_checkout_policy_requires_git_for_explicit_controller_backend() {
+        let command = parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "controller",
+            "from-spec",
+            "loop.json",
+            "--resume",
+            "--dispatch-backend",
+            "extension-provider",
+        ]);
+        let Commands::AgentTask(ref args) = command else {
+            panic!("expected agent-task command");
+        };
+
+        assert!(agent_task_provider_requires_cwd_git_checkout_with(
+            &args.command,
+            || None,
+            |_, _| false,
+        ));
+        assert_eq!(
+            command
+                .lab_contract()
+                .expect("agent-task controller contract")
+                .workspace_mode_policy,
+            LabWorkspaceModePolicy::GitCheckoutRequired
+        );
     }
 
     #[test]
