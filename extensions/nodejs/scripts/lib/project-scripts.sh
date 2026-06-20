@@ -18,6 +18,18 @@ homeboy_project_find_file_upward() {
     return 1
 }
 
+homeboy_project_find_pnpm_root_upward() {
+    local _dir="$1"
+    while [ "$_dir" != "/" ] && [ "$_dir" != "." ]; do
+        if [ -f "$_dir/pnpm-workspace.yaml" ] || [ -f "$_dir/pnpm-lock.yaml" ]; then
+            printf '%s\n' "$_dir"
+            return 0
+        fi
+        _dir="$(dirname "$_dir")"
+    done
+    return 1
+}
+
 homeboy_project_init() {
     local _ecosystem=""
     local _dir="${PROJECT_PATH:-.}"
@@ -57,6 +69,7 @@ homeboy_project_init() {
 homeboy_project_init_node() {
     local _dir="$1"
     local _root
+    local _pnpm_root
 
     if ! _root="$(homeboy_project_find_file_upward "$_dir" "package.json")"; then
         echo "Error: No package.json found at or above ${_dir}" >&2
@@ -66,9 +79,11 @@ homeboy_project_init_node() {
 
     HOMEBOY_PROJECT_ECOSYSTEM="node"
     HOMEBOY_PROJECT_ROOT="$_root"
+    HOMEBOY_PROJECT_DEPENDENCY_ROOT="$_root"
     HOMEBOY_PROJECT_SCRIPT_FILE="${_root}/package.json"
 
-    if [ -f "$_root/pnpm-lock.yaml" ]; then
+    if _pnpm_root="$(homeboy_project_find_pnpm_root_upward "$_root")"; then
+        HOMEBOY_PROJECT_DEPENDENCY_ROOT="$_pnpm_root"
         HOMEBOY_PROJECT_PACKAGE_MANAGER="pnpm"
         HOMEBOY_PROJECT_RUN_CMD="pnpm run"
         HOMEBOY_PROJECT_EXEC_CMD="pnpm exec"
@@ -85,6 +100,7 @@ homeboy_project_init_node() {
     if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
         echo "DEBUG: Project ecosystem: $HOMEBOY_PROJECT_ECOSYSTEM" >&2
         echo "DEBUG: Project root: $HOMEBOY_PROJECT_ROOT" >&2
+        echo "DEBUG: Dependency root: $HOMEBOY_PROJECT_DEPENDENCY_ROOT" >&2
         echo "DEBUG: Package manager: $HOMEBOY_PROJECT_PACKAGE_MANAGER" >&2
     fi
 }
@@ -162,7 +178,7 @@ homeboy_project_ensure_dependencies() {
         return 1
     fi
 
-    local _dir="${HOMEBOY_PROJECT_ROOT:-}"
+    local _dir="${HOMEBOY_PROJECT_DEPENDENCY_ROOT:-${HOMEBOY_PROJECT_ROOT:-}}"
     if [ -z "$_dir" ]; then
         echo "Error: homeboy_project_init must be called before dependency helpers" >&2
         return 1
