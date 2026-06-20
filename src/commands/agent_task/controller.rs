@@ -210,13 +210,21 @@ fn dispatch_root_for_spec(
     spec_arg: &str,
     current_dir: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
+    let current_dir = current_dir();
     let Some(spec_path) = spec_file_path(spec_arg) else {
-        return current_dir().and_then(|path| git_root_for_path(&path));
+        return current_dir.and_then(|path| dispatch_root_for_current_dir(&path));
     };
     if let Some(root) = git_root_for_spec(&spec_path) {
         return Some(root);
     }
-    current_dir().and_then(|path| git_root_for_path(&path))
+    current_dir.and_then(|path| dispatch_root_for_current_dir(&path))
+}
+
+fn dispatch_root_for_current_dir(path: &Path) -> Option<PathBuf> {
+    git_root_for_path(path).or_else(|| {
+        path.is_dir()
+            .then(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    })
 }
 
 fn apply_dispatch_defaults_for_root(spec: &mut AgentTaskRepoLoopSpec, root: PathBuf) {
