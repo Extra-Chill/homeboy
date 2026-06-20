@@ -10,7 +10,11 @@ use crate::core::error::{Error, Result};
 use super::super::types::ReleaseStepResult;
 use super::{step_failed, step_success};
 
-pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<ReleaseStepResult> {
+pub(crate) fn run_git_push(
+    component: &Component,
+    component_id: &str,
+    release_tag: Option<&str>,
+) -> Result<ReleaseStepResult> {
     let branch = crate::core::git::current_branch(std::path::Path::new(&component.local_path))
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -36,7 +40,7 @@ pub(crate) fn run_git_push(component: &Component, component_id: &str) -> Result<
     // behind. Attempt a clean, non-force recovery: fetch, rebase the release
     // commit onto the advanced remote head, and re-push the branch.
     if is_non_fast_forward_rejection(&output.stderr) {
-        match recover_advanced_remote_push(component, component_id, &branch) {
+        match recover_advanced_remote_push(component, component_id, &branch, release_tag) {
             Ok(Some(recovered)) => {
                 let recovered_data = serde_json::to_value(&recovered).map_err(|e| {
                     Error::internal_json(e.to_string(), Some("git push output".to_string()))
@@ -110,12 +114,24 @@ fn git_push_release_branch(
 }
 
 /// Recover from a non-fast-forward branch rejection caused by the remote
-/// advancing after the release commit/tag were created (issue #3611).
+/// advancing after the release commit/tag were created (issue #3611, #5502).
 ///
 /// Fetches `origin`, confirms the local branch is strictly ahead of a common
 /// ancestor (so a rebase is the right reconciliation, not a force-push over
 /// divergent history), rebases HEAD onto the advanced remote head, and re-pushes
-/// the branch. The already-pushed tag is left untouched. Returns:
+/// the branch.
+///
+/// Rebasing replays the release commit onto the new remote head, producing a
+/// *new* release commit object. The annotated release tag was created in the
+/// earlier `git.tag` step pointing at the original (pre-rebase) release commit,
+/// which is now orphaned off the branch line. If left untouched, the tag points
+/// at a commit that is NOT an ancestor of the pushed branch, and the next
+/// release sees a stranded duplicate-version commit (issue #5502). So after a
+/// successful rebase this re-creates the tag at the new HEAD and force-pushes
+/// it, keeping exactly one release commit on the branch and the tag always an
+/// ancestor of the pushed branch.
+///
+/// Returns:
 /// - `Ok(Some(push_output))` when the rebase + re-push succeeded,
 /// - `Ok(None)` when automatic recovery is unsafe (e.g. rebase conflict, or the
 ///   remote branch is unexpectedly gone) — the caller emits manual guidance,
@@ -124,6 +140,7 @@ fn recover_advanced_remote_push(
     component: &Component,
     component_id: &str,
     branch: &str,
+    release_tag: Option<&str>,
 ) -> Result<Option<crate::core::git::GitOutput>> {
     let path = &component.local_path;
     crate::core::git::fetch_origin(path)?;
@@ -177,7 +194,100 @@ fn recover_advanced_remote_push(
         return Ok(None);
     }
 
+    // The rebase moved the release commit to a new SHA on the branch line. Move
+    // the release tag onto the rebased release commit so it stays an ancestor of
+    // the pushed branch (issue #5502). Do this BEFORE pushing the branch so a
+    // successful branch push is never left with a stranded, off-branch tag.
+    if let Some(tag_name) = release_tag {
+        retag_rebased_release(component, component_id, branch, tag_name)?;
+    }
+
     git_push_release_branch(component, component_id, branch).map(Some)
+}
+
+/// Re-point the release tag at the post-rebase HEAD (the release commit that is
+/// now on the branch line) and force-push the tag.
+///
+/// After [`recover_advanced_remote_push`] rebases the release commit onto the
+/// advanced remote head, the original tagged commit is orphaned off-branch. This
+/// deletes the stale local tag, recreates the annotated tag at HEAD, and
+/// force-pushes only the tag ref — guaranteeing the tag is an ancestor of the
+/// pushed branch and that no second release commit with the same version is left
+/// stranded (issue #5502). The branch itself is never force-pushed.
+fn retag_rebased_release(
+    component: &Component,
+    component_id: &str,
+    branch: &str,
+    tag_name: &str,
+) -> Result<()> {
+    let path = &component.local_path;
+    let head_commit = crate::core::git::get_head_commit(path)?;
+
+    // If the tag already points at the rebased HEAD there is nothing to move.
+    if crate::core::git::tag_exists_locally(path, tag_name).unwrap_or(false) {
+        let current = crate::core::git::get_tag_commit(path, tag_name)?;
+        if current == head_commit {
+            return Ok(());
+        }
+        crate::core::git::delete_local_tag(path, tag_name)?;
+    }
+
+    log_status!(
+        "release",
+        "Moving release tag {} onto the rebased release commit on {} ({})...",
+        tag_name,
+        branch,
+        &head_commit[..head_commit.len().min(8)]
+    );
+
+    let message = format!("Release {}", tag_name);
+    let tag_output = crate::core::git::tag_at(
+        Some(component_id),
+        Some(tag_name),
+        Some(&message),
+        Some(path),
+    )?;
+    if !tag_output.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to recreate release tag {} at the rebased HEAD: {}",
+            tag_name,
+            tag_output.stderr.trim()
+        )));
+    }
+
+    // Re-publish the tag ref only (never the branch). If the orphaned tag was
+    // already pushed (the initial `--follow-tags` push lands the tag even when
+    // the branch is rejected), delete it on the remote first so the fresh tag
+    // publishes as a clean, non-forced update. Tags are deliberately moved here:
+    // the rebased commit supersedes the orphaned one within the same release.
+    if crate::core::git::tag_exists_on_remote(path, tag_name).unwrap_or(false) {
+        let delete = crate::core::git::delete_remote_tag(path, tag_name)?;
+        if !delete.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to delete the orphaned remote release tag {} before retagging: {}",
+                tag_name,
+                delete.stderr.trim()
+            )));
+        }
+    }
+
+    let push = crate::core::git::push_at(
+        Some(component_id),
+        crate::core::git::PushOptions {
+            refspec: Some(format!("refs/tags/{tag_name}:refs/tags/{tag_name}")),
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    if !push.success {
+        return Err(Error::git_command_failed(format!(
+            "Failed to push the moved release tag {}: {}",
+            tag_name,
+            push.stderr.trim()
+        )));
+    }
+
+    Ok(())
 }
 
 /// True when git's stderr indicates a non-fast-forward / stale-remote branch
@@ -268,7 +378,8 @@ mod tests {
             ..Component::default()
         };
 
-        let result = run_git_push(&component, "fixture").expect("push step should return result");
+        let result =
+            run_git_push(&component, "fixture", None).expect("push step should return result");
 
         assert_eq!(result.status, ReleaseStepStatus::Failed);
         assert!(!result.error.unwrap().trim().is_empty());
@@ -325,7 +436,8 @@ mod tests {
             ..Component::default()
         };
 
-        let result = run_git_push(&component, "fixture").expect("push step should return result");
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"))
+            .expect("push step should return result");
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         git(remote.path(), &["show-ref", "--verify", "refs/heads/main"]);
@@ -407,7 +519,8 @@ mod tests {
             ..Component::default()
         };
 
-        let result = run_git_push(&component, "fixture").expect("push step returns a result");
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"))
+            .expect("push step returns a result");
 
         assert_eq!(
             result.status,
@@ -444,5 +557,58 @@ mod tests {
             "remote main must retain the advance commit (no force-push), got: {}",
             subjects
         );
+
+        // Issue #5502: the tag must follow the rebased release commit so it is an
+        // ancestor of the pushed branch — not stranded on the orphaned original.
+        let head = rev(local.path(), "origin/main");
+        let tag_commit = rev(local.path(), "v1.0.0^{commit}");
+        assert_eq!(
+            tag_commit, head,
+            "tag v1.0.0 must point at the rebased release commit on origin/main"
+        );
+        // And the same on the remote itself (the moved tag was force-pushed).
+        let remote_tag = rev(remote.path(), "v1.0.0^{commit}");
+        let remote_head = rev(remote.path(), "main");
+        assert_eq!(
+            remote_tag, remote_head,
+            "remote tag v1.0.0 must point at remote main's HEAD (the release commit)"
+        );
+
+        // The ancestry invariant deploy relies on must hold.
+        let is_ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", "v1.0.0", "origin/main"])
+            .current_dir(local.path())
+            .status()
+            .expect("merge-base");
+        assert!(
+            is_ancestor.success(),
+            "tag v1.0.0 must be an ancestor of origin/main (deploy ancestry invariant)"
+        );
+
+        // Exactly one release commit exists on the branch line (no duplicate).
+        let release_commits = subjects
+            .lines()
+            .filter(|s| s.trim() == "release: v1.0.0")
+            .count();
+        assert_eq!(
+            release_commits, 1,
+            "exactly one release commit must exist on the branch, got: {}",
+            subjects
+        );
+    }
+
+    fn rev(dir: &std::path::Path, refname: &str) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", refname])
+            .current_dir(dir)
+            .output()
+            .expect("git rev-parse");
+        assert!(
+            output.status.success(),
+            "git rev-parse {} failed: {}",
+            refname,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }
