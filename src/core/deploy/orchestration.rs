@@ -11,6 +11,7 @@ use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
 use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
+use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status_with_git_cache, calculate_release_state, load_project_components,
@@ -20,6 +21,9 @@ use super::types::{
     ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
+
+#[cfg(test)]
+use super::orchestration_tag_checkout::{deploy_tag_for_version, TagCheckout};
 
 /// Main deploy orchestration entry point.
 /// Handles component selection, building, and deployment.
@@ -217,7 +221,7 @@ pub(super) fn deploy_components(
             .iter()
             .find(|c| c.component_id == component.id)
         {
-            result = result.with_deployed_ref(checkout.tag.clone());
+            result = result.with_deployed_ref(checkout.provenance_ref());
         } else if config.head {
             // Deploying from HEAD — record the current branch
             if let Some(branch) = crate::core::engine::command::run_in_optional(
@@ -242,6 +246,28 @@ pub(super) fn deploy_components(
         restore_branches(&tag_checkouts);
     }
 
+    // Post-deploy front-end smoke check (opt-in, project-scoped). Runs only when
+    // something actually deployed — a runtime-fataling release that returns 500
+    // to fresh visitors should fail the deploy here so it gets rolled back
+    // instead of sitting live. Catches runtime errors that `php -l`/syntax-only
+    // preflight structurally cannot. See homeboy#5471.
+    if succeeded > 0 {
+        if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {
+            if smoke {
+                // Smoke failed and was not warn-only: flip every just-deployed
+                // component to failed so the overall deploy exit code is non-zero
+                // and the operator/automation treats it as a rollback candidate.
+                for result in results.iter_mut() {
+                    if result.status == "deployed" {
+                        result.status = "failed".to_string();
+                    }
+                }
+                failed += succeeded;
+                succeeded = 0;
+            }
+        }
+    }
+
     Ok(DeployOrchestrationResult {
         results,
         summary: DeploySummary {
@@ -251,6 +277,54 @@ pub(super) fn deploy_components(
             skipped: 0,
         },
     })
+}
+
+/// Run the project's post-deploy smoke check, recording the outcome on the
+/// deploy results.
+///
+/// Returns:
+/// - `None` when no smoke check is configured/enabled,
+/// - `Some(true)` when the smoke FAILED and should fail the deploy,
+/// - `Some(false)` when the smoke passed or only warned.
+///
+/// Warnings/errors are appended to the first deployed component result so they
+/// surface in CLI/JSON output alongside the deploy that triggered them.
+fn run_post_deploy_smoke(project: &Project, results: &mut [ComponentDeployResult]) -> Option<bool> {
+    let config = project.smoke_check.as_ref()?;
+    let outcome = super::smoke::run_smoke_check(config)?;
+
+    if outcome.is_ok() {
+        log_status!(
+            "deploy",
+            "Post-deploy smoke check passed for '{}' ({})",
+            project.id,
+            config.url
+        );
+        return Some(false);
+    }
+
+    let detail = outcome
+        .failure_detail()
+        .unwrap_or("post-deploy smoke check failed")
+        .to_string();
+
+    if config.warn_only {
+        log_status!("deploy", "Warning: {} (warn_only)", detail);
+        if let Some(first) = results.iter_mut().find(|r| r.status == "deployed") {
+            first.warnings.push(format!("{} (warn_only)", detail));
+        }
+        return Some(false);
+    }
+
+    log_status!(
+        "deploy",
+        "{} — failing deploy; roll back the release",
+        detail
+    );
+    if let Some(first) = results.iter_mut().find(|r| r.status == "deployed") {
+        first.error = Some(detail);
+    }
+    Some(true)
 }
 
 fn validate_supported_build_configs(components: &[Component]) -> Result<()> {
@@ -634,214 +708,6 @@ fn auto_pull_version_drift_message(
         before.unwrap_or("unknown"),
         after.unwrap_or("unknown")
     ))
-}
-
-/// Record of a tag checkout for later branch restoration.
-struct TagCheckout {
-    component_id: String,
-    tag: String,
-    original_ref: String,
-    local_path: String,
-}
-
-/// Checkout the latest version tag for each component before building.
-///
-/// For each component, finds the latest semver tag, saves the current
-/// branch/ref, and checks out the tag. Returns a list of checkouts
-/// so branches can be restored after deployment.
-///
-/// Components without tags are skipped with a warning — they deploy
-/// from HEAD as before (the pre-tag-checkout behavior).
-fn checkout_deploy_tags(
-    components: &[Component],
-    expected_version: Option<&str>,
-) -> Result<Vec<TagCheckout>> {
-    let mut checkouts = Vec::new();
-
-    for component in components {
-        // File components don't have tags — skip
-        if component.is_file_component() {
-            continue;
-        }
-
-        let path = &component.local_path;
-
-        let tag = match expected_version {
-            Some(version) => deploy_tag_for_version(component, version),
-            None => match git::get_latest_tag(path) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    log_status!(
-                        "deploy",
-                        "Warning: '{}' has no version tags — deploying from HEAD (use --head to suppress this warning)",
-                        component.id
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    log_status!(
-                        "deploy",
-                        "Warning: could not read tags for '{}' — deploying from HEAD",
-                        component.id
-                    );
-                    continue;
-                }
-            },
-        };
-
-        // Save the current branch name. Use symbolic-ref which returns the
-        // actual branch name and fails cleanly on detached HEAD (unlike
-        // --abbrev-ref which returns the literal "HEAD" string). If HEAD is
-        // already detached, save the commit hash so we can at least restore
-        // to the same commit afterward.
-        let original_ref = crate::core::engine::command::run_in_optional(
-            path,
-            "git",
-            &["symbolic-ref", "--short", "HEAD"],
-        )
-        .or_else(|| {
-            // Detached HEAD — save the commit hash as fallback
-            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"])
-        })
-        .unwrap_or_else(|| "main".to_string());
-
-        // If already on this tag's commit, skip checkout
-        let tag_commit =
-            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", &tag]);
-        let head_commit =
-            crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
-        if tag_commit.is_some() && tag_commit == head_commit {
-            log_status!(
-                "deploy",
-                "'{}' is already at tag {} — no checkout needed",
-                component.id,
-                tag
-            );
-            checkouts.push(TagCheckout {
-                component_id: component.id.clone(),
-                tag: tag.clone(),
-                original_ref,
-                local_path: path.clone(),
-            });
-            continue;
-        }
-
-        // Checkout the tag
-        log_status!(
-            "deploy",
-            "'{}' checking out tag {} for deploy...",
-            component.id,
-            tag
-        );
-        match crate::core::engine::command::run_in(
-            path,
-            "git",
-            &["checkout", &tag],
-            "git checkout tag",
-        ) {
-            Ok(_) => {
-                checkouts.push(TagCheckout {
-                    component_id: component.id.clone(),
-                    tag: tag.clone(),
-                    original_ref,
-                    local_path: path.clone(),
-                });
-            }
-            Err(e) => {
-                if !checkouts.is_empty() {
-                    restore_branches(&checkouts);
-                }
-                return Err(Error::git_command_failed(format!(
-                    "Failed to checkout tag {} for '{}': {}",
-                    tag, component.id, e
-                )));
-            }
-        }
-    }
-
-    Ok(checkouts)
-}
-
-fn deploy_tag_for_version(component: &Component, version: &str) -> String {
-    let version = version.trim_start_matches('v');
-    match git::MonorepoContext::detect(&component.local_path, &component.id) {
-        Some(context) => context.format_tag(version),
-        None => format!("v{}", version),
-    }
-}
-
-/// Restore original branches after deployment.
-///
-/// Best-effort: logs warnings on failure but does not abort.
-/// The deployment already completed — failing to restore a branch
-/// is inconvenient but not destructive.
-fn restore_branches(checkouts: &[TagCheckout]) {
-    for checkout in checkouts {
-        let restore = crate::core::engine::command::run_in(
-            &checkout.local_path,
-            "git",
-            &["checkout", &checkout.original_ref],
-            "git checkout restore",
-        );
-        match restore {
-            Ok(_) => {
-                log_status!(
-                    "deploy",
-                    "'{}' restored to {}",
-                    checkout.component_id,
-                    checkout.original_ref
-                );
-            }
-            Err(e) => {
-                let current_ref = current_checkout_ref(&checkout.local_path);
-                let dirty_files = dirty_checkout_files(&checkout.local_path);
-                let dirty_summary = if dirty_files.is_empty() {
-                    "none".to_string()
-                } else {
-                    dirty_files.join(", ")
-                };
-                let recovery_command = format!(
-                    "git -C {:?} checkout {:?}",
-                    checkout.local_path, checkout.original_ref
-                );
-                log_status!(
-                    "deploy",
-                    "Warning: could not restore '{}' after tagged deploy. starting_ref={}, current_ref={}, dirty_files=[{}], recovery_command=`{}`. Error: {}",
-                    checkout.component_id,
-                    checkout.original_ref,
-                    current_ref,
-                    dirty_summary,
-                    recovery_command,
-                    e
-                );
-            }
-        }
-    }
-}
-
-fn current_checkout_ref(path: &str) -> String {
-    crate::core::engine::command::run_in_optional(path, "git", &["symbolic-ref", "--short", "HEAD"])
-        .or_else(|| {
-            crate::core::engine::command::run_in_optional(
-                path,
-                "git",
-                &["rev-parse", "--short", "HEAD"],
-            )
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn dirty_checkout_files(path: &str) -> Vec<String> {
-    crate::core::engine::command::run_in_optional(path, "git", &["status", "--porcelain"])
-        .map(|status| {
-            status
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Check for unreleased commits ahead of the latest tag.
@@ -1463,6 +1329,74 @@ mod tests {
     }
 
     #[test]
+    fn provenance_ref_reports_tag_and_sha_without_gap() {
+        let checkout = TagCheckout {
+            component_id: "demo".to_string(),
+            tag: "v1.0.0".to_string(),
+            original_ref: "main".to_string(),
+            local_path: "/tmp/demo".to_string(),
+            tag_sha: Some("abc1234".to_string()),
+            head_ahead: 0,
+        };
+
+        assert_eq!(checkout.provenance_ref(), "v1.0.0 (abc1234)");
+    }
+
+    #[test]
+    fn provenance_ref_flags_stale_tag_when_head_was_ahead() {
+        let checkout = TagCheckout {
+            component_id: "demo".to_string(),
+            tag: "v1.0.0".to_string(),
+            original_ref: "release/main".to_string(),
+            local_path: "/tmp/demo".to_string(),
+            tag_sha: Some("abc1234".to_string()),
+            head_ahead: 2,
+        };
+
+        let label = checkout.provenance_ref();
+        assert!(
+            label.starts_with("v1.0.0 (abc1234)"),
+            "stale ref must still name the exact tag and sha: {label}"
+        );
+        assert!(
+            label.contains("HEAD was 2 commit(s) ahead, not deployed"),
+            "stale ref must disclose the undeployed HEAD commits: {label}"
+        );
+    }
+
+    #[test]
+    fn checkout_deploy_tags_records_head_ahead_for_stale_tag() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+
+        let component = make_component("demo", &dir.path().to_string_lossy());
+        let checkouts =
+            checkout_deploy_tags(&[component], None).expect("stale-tag checkout should succeed");
+
+        assert_eq!(checkouts.len(), 1, "one component should be checked out");
+        let checkout = &checkouts[0];
+        assert_eq!(checkout.tag, "v1.0.0");
+        assert_eq!(
+            checkout.head_ahead, 1,
+            "HEAD was one commit ahead of the deployed tag"
+        );
+        assert!(
+            checkout.tag_sha.is_some(),
+            "deployed tag sha should be resolved for provenance"
+        );
+        assert!(
+            checkout
+                .provenance_ref()
+                .contains("HEAD was 1 commit(s) ahead, not deployed"),
+            "provenance must disclose the stale-tag gap: {}",
+            checkout.provenance_ref()
+        );
+
+        // checkout_deploy_tags leaves the repo on the tag; restore for cleanliness.
+        restore_branches(&checkouts);
+    }
+
+    #[test]
     fn expected_version_rejects_stale_component_worktree() {
         let dir = TempDir::new().expect("temp dir");
         let package_json = dir.path().join("package.json");
@@ -1534,6 +1468,89 @@ mod tests {
                 .contains("missing.zip"),
             "unexpected error: {:?}",
             failures[0].error
+        );
+    }
+
+    fn deployed_result(id: &str) -> ComponentDeployResult {
+        let component = make_component(id, "/tmp/does-not-matter");
+        ComponentDeployResult::new(&component, "/srv/site").with_status("deployed")
+    }
+
+    #[test]
+    fn post_deploy_smoke_is_noop_without_config() {
+        let project = Project {
+            id: "site".to_string(),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+        assert_eq!(results[0].status, "deployed");
+    }
+
+    #[test]
+    fn post_deploy_smoke_noop_when_disabled() {
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(crate::core::project::SmokeCheckConfig {
+                enabled: false,
+                url: "https://example.test/".to_string(),
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+    }
+
+    #[test]
+    fn post_deploy_smoke_failure_records_error_and_fails() {
+        // enabled smoke against an unreachable URL fails the deploy and records
+        // the error on the deployed component.
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(crate::core::project::SmokeCheckConfig {
+                enabled: true,
+                // Reserved TEST-NET address (RFC 5737) so the request fails fast.
+                url: "http://192.0.2.1:9/".to_string(),
+                timeout_secs: 1,
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(true));
+        assert!(
+            results[0].error.is_some(),
+            "failed smoke must record an error on the deployed component"
+        );
+    }
+
+    #[test]
+    fn post_deploy_smoke_warn_only_does_not_fail() {
+        let project = Project {
+            id: "site".to_string(),
+            smoke_check: Some(crate::core::project::SmokeCheckConfig {
+                enabled: true,
+                url: "http://192.0.2.1:9/".to_string(),
+                timeout_secs: 1,
+                warn_only: true,
+                ..Default::default()
+            }),
+            ..Project::default()
+        };
+        let mut results = vec![deployed_result("plugin")];
+
+        assert_eq!(run_post_deploy_smoke(&project, &mut results), Some(false));
+        assert_eq!(
+            results[0].status, "deployed",
+            "warn_only smoke must not fail the deploy"
+        );
+        assert!(
+            results[0].warnings.iter().any(|w| w.contains("warn_only")),
+            "warn_only smoke failure should be surfaced as a warning"
         );
     }
 

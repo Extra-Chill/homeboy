@@ -1,8 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use crate::core::engine::command;
 use crate::core::error::{Error, GitCommandFailedDetails, Result};
+
+use super::primitives_query::current_branch;
 
 fn git_command_display(args: &[&str]) -> String {
     if args.is_empty() {
@@ -136,68 +138,6 @@ pub fn run_git_output(
         })
 }
 
-/// Resolve a git revision to its commit/object id, returning None when the ref
-/// cannot be resolved.
-pub fn rev_parse(git_root: &Path, git_ref: &str) -> Option<String> {
-    output_optional(git_root, &["rev-parse", git_ref])
-}
-
-/// Run a git command and return stdout bytes when the command succeeds.
-pub fn output_optional_bytes(git_root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(git_root)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    output.status.success().then_some(output.stdout)
-}
-
-/// Run a git command and return trimmed stdout when the command succeeds and is non-empty.
-pub fn output_optional(git_root: &Path, args: &[&str]) -> Option<String> {
-    let output = output_optional_bytes(git_root, args)?;
-    let value = String::from_utf8_lossy(&output).trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-/// Get the full HEAD commit SHA from a git directory.
-pub fn head_sha(git_root: &Path) -> Option<String> {
-    output_optional(git_root, &["rev-parse", "HEAD"])
-}
-
-/// Get the short HEAD commit SHA from a git directory.
-pub fn head_sha_short(git_root: &Path) -> Option<String> {
-    output_optional(git_root, &["rev-parse", "--short", "HEAD"])
-}
-
-/// Get porcelain status bytes from a git directory.
-pub fn status_porcelain_bytes(git_root: &Path) -> Option<Vec<u8>> {
-    output_optional_bytes(git_root, &["status", "--porcelain=v1", "-z"])
-}
-
-/// Get porcelain status text from a git directory.
-pub fn status_porcelain(git_root: &Path) -> Option<String> {
-    output_optional_bytes(git_root, &["status", "--porcelain=v1"])
-        .map(|output| String::from_utf8_lossy(&output).to_string())
-}
-
-/// Get a remote URL from a git directory.
-pub fn remote_url(git_root: &Path, remote: &str) -> Option<String> {
-    output_optional(git_root, &["remote", "get-url", remote])
-}
-
-/// Get the git repository root directory from any path within the repo.
-pub fn toplevel(git_root: &Path) -> Option<String> {
-    output_optional(git_root, &["rev-parse", "--show-toplevel"])
-}
-
-/// Get the git repository root directory from any path within the repo.
-pub fn repo_root(path: &Path) -> Option<PathBuf> {
-    toplevel(path).map(PathBuf::from)
-}
-
 /// Stage all changes in a repository.
 pub fn stage_all(git_root: &Path) -> Result<()> {
     run_git(git_root, &["add", "-A"], "git add -A")?;
@@ -218,14 +158,6 @@ pub fn commit_staged_with_author(git_root: &Path, message: &str, author: &str) -
         "git commit",
     )?;
     Ok(())
-}
-
-pub fn current_branch(git_root: &Path) -> Option<String> {
-    output_optional(git_root, &["branch", "--show-current"])
-}
-
-pub fn remote_origin_url(git_root: &Path) -> Option<String> {
-    remote_url(git_root, "origin")
 }
 
 fn default_remote_branch(git_root: &Path) -> Option<String> {
@@ -286,11 +218,6 @@ pub fn update_to_remote_default_branch(git_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Get the short HEAD revision from a git directory.
-pub fn short_head_revision(dir: &Path) -> Option<String> {
-    head_sha_short(dir)
-}
-
 /// List all git-tracked markdown files in a directory.
 /// Uses `git ls-files` to respect .gitignore and only include tracked/staged files.
 /// Returns relative paths from the repository root.
@@ -316,6 +243,20 @@ pub(crate) fn list_tracked_markdown_files(path: &Path) -> Result<Vec<String>> {
 
 pub(crate) fn is_git_repo(path: &str) -> bool {
     command::succeeded_in(path, "git", &["rev-parse", "--git-dir"])
+}
+
+/// Report whether `relative` (a repo-relative path) is committed/tracked in the
+/// git repository rooted at (or containing) `repo_dir`.
+///
+/// Returns `false` when the path is gitignored, untracked, or the directory is
+/// not a git repository. Uses `git ls-files --error-unmatch`, which only
+/// succeeds for paths recorded in the index.
+pub(crate) fn is_tracked_path(repo_dir: &Path, relative: &str) -> bool {
+    command::succeeded_in(
+        &repo_dir.to_string_lossy(),
+        "git",
+        &["ls-files", "--error-unmatch", "--", relative],
+    )
 }
 
 /// Get the git repository root directory from any path within the repo.
@@ -347,7 +288,7 @@ pub fn git_probe_path(path: &Path) -> std::path::PathBuf {
 /// Compute the relative path prefix of a component within a monorepo.
 ///
 /// If `local_path` is a subdirectory of the git root, returns the relative path
-/// (e.g. "wordpress" for `/repo/wordpress`). Returns None if local_path IS the
+/// (e.g. "frontend" for `/repo/frontend`). Returns None if local_path IS the
 /// git root (not a monorepo component).
 pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
     let git_root = get_git_root(local_path).ok()?;
@@ -416,47 +357,5 @@ mod tests {
         assert!(err.details["io_error"].as_str().is_some());
         assert_eq!(err.details["stdout"], "");
         assert_eq!(err.details["stderr"], "");
-    }
-
-    #[test]
-    fn optional_helpers_return_head_remote_toplevel_and_clean_status() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        git(dir.path(), &["init", "--quiet"]);
-        git(
-            dir.path(),
-            &["remote", "add", "origin", "https://example.test/repo.git"],
-        );
-        std::fs::write(dir.path().join("README.md"), "hello\n").expect("write fixture file");
-        git(dir.path(), &["add", "README.md"]);
-        git(
-            dir.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        assert_eq!(
-            Path::new(&toplevel(dir.path()).expect("git toplevel"))
-                .canonicalize()
-                .expect("canonical git toplevel"),
-            dir.path().canonicalize().expect("canonical fixture dir")
-        );
-        assert_eq!(
-            remote_url(dir.path(), "origin").as_deref(),
-            Some("https://example.test/repo.git")
-        );
-        assert!(head_sha(dir.path()).is_some());
-        assert!(head_sha_short(dir.path()).is_some());
-        assert_eq!(status_porcelain(dir.path()).as_deref(), Some(""));
-        assert_eq!(
-            status_porcelain_bytes(dir.path()).as_deref(),
-            Some(&b""[..])
-        );
     }
 }

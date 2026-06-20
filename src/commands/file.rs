@@ -9,6 +9,13 @@ use homeboy::core::{join_remote_path, project};
 
 use super::CmdResult;
 
+/// Inspect and modify remote project files.
+///
+/// Path resolution mirrors deploy so inspection agrees with the deployed path:
+/// absolute paths are used verbatim; relative paths matching a managed prefix
+/// declared by a linked extension (e.g. `wp-content/...`) resolve through the
+/// project's configured `path_roots` (the same root deploy writes active
+/// components to); everything else joins against the project `base_path`.
 #[derive(Args)]
 pub struct FileArgs {
     #[command(subcommand)]

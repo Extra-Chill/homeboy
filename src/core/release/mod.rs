@@ -21,6 +21,7 @@ mod types;
 mod utils;
 pub mod version;
 mod workflow;
+mod workflow_recover;
 
 pub use pipeline::run;
 pub use planner::plan;

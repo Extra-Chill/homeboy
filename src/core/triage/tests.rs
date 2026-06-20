@@ -473,6 +473,39 @@ mod pull_requests {
     }
 
     #[test]
+    fn parse_prs_flags_clean_with_zero_checks_as_not_reported() {
+        // Reproduces the #4872 force-push window: GitHub reports mergeStateStatus
+        // CLEAN with an empty statusCheckRollup before CI registers on the new head.
+        // This must surface a distinct "checks not reported" action rather than
+        // silently reading as clean_and_ready (which would let merge automation
+        // merge a commit whose CI has never run).
+        let raw = r#"[
+            {
+              "number": 1,
+              "title": "Just force-pushed",
+              "url": "https://github.com/o/r/pull/1",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "APPROVED",
+              "mergeStateStatus": "CLEAN",
+              "statusCheckRollup": [],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"example-org"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            }
+        ]"#;
+
+        let items = parse_prs(raw, None, false).unwrap();
+        assert_eq!(
+            items[0].signals.next_action.as_deref(),
+            Some("clean_but_checks_not_reported")
+        );
+        // The zero-check rollup must never be summarized as a successful state.
+        assert!(items[0].signals.checks.is_none());
+    }
+
+    #[test]
     fn parse_prs_marks_behind_and_dirty_as_needs_rebase() {
         let raw = r#"[
             {

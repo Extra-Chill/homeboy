@@ -338,6 +338,8 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: ControllerDispatchHook,
 {
+    let request = request_with_required_workflow_artifacts(record, request);
+    let request = &request;
     let mode = request
         .get("mode")
         .and_then(Value::as_str)
@@ -369,12 +371,15 @@ where
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
-                serde_json::json!({
-                    "mode": mode,
-                    "run_id": submitted.run_id,
-                    "submitted": submitted,
-                    "aggregate": aggregate_value,
-                }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({
+                        "mode": mode,
+                        "run_id": submitted.run_id,
+                        "submitted": submitted,
+                        "aggregate": aggregate_value,
+                    }),
+                    request,
+                ),
                 run_result.exit_code,
             ))
         }
@@ -391,11 +396,14 @@ where
                 request,
             )?;
             Ok((
-                serde_json::json!({
-                    "mode": mode,
-                    "run_id": submitted.run_id,
-                    "submitted": submitted,
-                }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({
+                        "mode": mode,
+                        "run_id": submitted.run_id,
+                        "submitted": submitted,
+                    }),
+                    request,
+                ),
                 0,
             ))
         }
@@ -407,7 +415,10 @@ where
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
-                serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
+                    request,
+                ),
                 run_result.exit_code,
             ))
         }
@@ -419,7 +430,10 @@ where
             let aggregate_value = serde_json::to_value(&run_result.value)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             Ok((
-                serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({ "mode": mode, "run_id": run_id, "aggregate": aggregate_value }),
+                    request,
+                ),
                 run_result.exit_code,
             ))
         }
@@ -434,7 +448,10 @@ where
                 record_controller_spawn(record, action, dedupe_key, entity_id, run_id, request)?;
             }
             Ok((
-                serde_json::json!({ "mode": mode, "result": value }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({ "mode": mode, "result": value }),
+                    request,
+                ),
                 run_result.exit_code,
             ))
         }
@@ -445,7 +462,10 @@ where
                 record_controller_result_evidence(record, entity_id, run_id, &value)?;
             }
             Ok((
-                serde_json::json!({ "mode": mode, "result": value }),
+                execution_with_request_workflow_artifacts(
+                    serde_json::json!({ "mode": mode, "result": value }),
+                    request,
+                ),
                 exit_code,
             ))
         }

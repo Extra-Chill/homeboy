@@ -168,7 +168,7 @@ pub(super) fn collect_required_artifacts_from_declarations(
         };
         let Some(kind) = first_non_empty_str(
             declaration,
-            &[&["kind"], &["artifact_type"], &["data", "kind"]],
+            &[&["kind"], &["artifact_type"], &["type"], &["data", "kind"]],
         ) else {
             continue;
         };
@@ -192,11 +192,13 @@ pub(super) fn execution_contains_artifact(value: &Value, artifact_id: &str, kind
             let id_matches = object
                 .get("id")
                 .or_else(|| object.get("artifact_id"))
+                .or_else(|| object.get("name"))
                 .and_then(Value::as_str)
                 == Some(artifact_id);
             let kind_matches = object
                 .get("kind")
                 .or_else(|| object.get("artifact_type"))
+                .or_else(|| object.get("type"))
                 .and_then(Value::as_str)
                 == Some(kind);
             (id_matches && kind_matches)
@@ -208,6 +210,86 @@ pub(super) fn execution_contains_artifact(value: &Value, artifact_id: &str, kind
             .iter()
             .any(|value| execution_contains_artifact(value, artifact_id, kind)),
         _ => false,
+    }
+}
+
+pub(super) fn request_with_required_workflow_artifacts(
+    record: &AgentTaskLoopControllerRecord,
+    request: &Value,
+) -> Value {
+    let workflow_artifacts = matching_completed_workflow_artifacts(record, request);
+    if workflow_artifacts.is_empty() {
+        return request.clone();
+    }
+
+    let mut request = request.as_object().cloned().unwrap_or_default();
+    merge_workflow_artifacts(&mut request, &workflow_artifacts);
+    if let Some(dispatch) = request.get_mut("dispatch").and_then(Value::as_object_mut) {
+        merge_workflow_artifacts(dispatch, &workflow_artifacts);
+    }
+    Value::Object(request)
+}
+
+pub(super) fn execution_with_request_workflow_artifacts(
+    execution: Value,
+    request: &Value,
+) -> Value {
+    let Some(workflow_artifacts) = request
+        .get("workflow_artifacts")
+        .and_then(Value::as_array)
+        .filter(|artifacts| !artifacts.is_empty())
+    else {
+        return execution;
+    };
+    let mut execution = execution.as_object().cloned().unwrap_or_default();
+    merge_workflow_artifacts(&mut execution, workflow_artifacts);
+    Value::Object(execution)
+}
+
+fn matching_completed_workflow_artifacts(
+    record: &AgentTaskLoopControllerRecord,
+    request: &Value,
+) -> Vec<Value> {
+    let required = required_workflow_artifacts(request);
+    if required.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    for lineage in &record.task_lineage {
+        let Some(entries) = lineage.outputs["evidence_index"]["entries"].as_array() else {
+            continue;
+        };
+        for artifact in entries
+            .iter()
+            .flat_map(|entry| entry["typed_artifacts"].as_array().into_iter().flatten())
+        {
+            if required.iter().any(|required| {
+                execution_contains_artifact(artifact, &required.artifact_id, &required.kind)
+            }) && !matches.iter().any(|existing| existing == artifact)
+            {
+                matches.push(artifact.clone());
+            }
+        }
+    }
+    matches
+}
+
+fn merge_workflow_artifacts(
+    object: &mut serde_json::Map<String, Value>,
+    workflow_artifacts: &[Value],
+) {
+    let entry = object
+        .entry("workflow_artifacts".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !entry.is_array() {
+        *entry = serde_json::json!([]);
+    }
+    let target = entry.as_array_mut().expect("workflow artifacts array");
+    for artifact in workflow_artifacts {
+        if !target.iter().any(|existing| existing == artifact) {
+            target.push(artifact.clone());
+        }
     }
 }
 

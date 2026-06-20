@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub mod component;
 pub mod files;
 pub mod logs;
+mod path_resolution;
 pub mod pins;
 mod readiness;
 pub mod report;
@@ -28,6 +29,7 @@ pub use component::{
 };
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
+pub use path_resolution::resolve_project_remote_path;
 pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
     ProjectPinListItem, ProjectPinOutput,
@@ -115,6 +117,15 @@ pub struct Project {
     /// These are checked via `systemctl is-active <name>` on the remote server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<String>,
+
+    /// Post-deploy front-end smoke check (opt-in, config-driven).
+    ///
+    /// When enabled, homeboy fetches the configured URL as a fresh visitor after
+    /// a successful real deploy and fails the deploy if it does not return the
+    /// expected status (and optional content). Catches runtime-fataling releases
+    /// that `php -l`/syntax-only checks structurally cannot. See homeboy#5471.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoke_check: Option<SmokeCheckConfig>,
 }
 
 impl ConfigEntity for Project {

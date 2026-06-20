@@ -269,6 +269,16 @@ pub struct ReleaseOptions {
     /// other checks active. Honored independently of `skip_checks`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks_granular: Vec<String>,
+    /// Bypass the package/build-structure validation that runs inside the
+    /// `preflight.package` and `package` steps, while still running the build
+    /// itself. The flag is forwarded to the packaging extension as a generic
+    /// `skip_build_validation` config signal; the extension decides which
+    /// structure assertions it represents. A build that fails to produce an
+    /// artifact still blocks the release — only structure assertions are
+    /// bypassed. Use when an operator knows a structure assertion is a false
+    /// positive (see issue #5425).
+    #[serde(default)]
+    pub skip_build_validation: bool,
     #[serde(default, flatten)]
     pub pipeline: ReleasePipelineOptions,
     /// Skip the GitHub Release creation step (tag + notes on github.com).
@@ -324,6 +334,10 @@ pub struct ReleaseCommandInput {
     /// preflight quality checks while leaving the other gates active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks_granular: Vec<String>,
+    /// Bypass the package/build-structure validation while still running the
+    /// build (see [`ReleaseOptions::skip_build_validation`] and issue #5425).
+    #[serde(default)]
+    pub skip_build_validation: bool,
     /// Explicit bump override: "major", "minor", "patch", or a version string like "2.0.0".
     /// When set, overrides auto-detection from commit history.
     #[serde(skip_serializing_if = "Option::is_none")]

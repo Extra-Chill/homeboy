@@ -32,6 +32,35 @@ pub(crate) fn get_status(url: &str, timeout: Duration) -> std::result::Result<u1
     Ok(response.status().as_u16())
 }
 
+/// Fetch a URL and return both the status code and the response body.
+///
+/// Used by call sites that need to assert on body content as well as status
+/// (e.g. the post-deploy smoke check verifying a real page rendered). The
+/// blocking reqwest client has no cookie store, so each call is a fresh,
+/// cookie-less request — matching a first-time visitor.
+pub(crate) fn get_status_and_body(
+    url: &str,
+    timeout: Duration,
+) -> std::result::Result<(u16, String), HttpProbeError> {
+    let client = blocking_client(timeout).map_err(|e| HttpProbeError {
+        message: Error::internal_unexpected(format!("build http client: {}", e)).message,
+        is_connect: false,
+    })?;
+
+    let response = client.get(url).send().map_err(|e| HttpProbeError {
+        message: format!("HTTP GET {} failed: {}", url, e),
+        is_connect: e.is_connect(),
+    })?;
+
+    let status = response.status().as_u16();
+    let body = response.text().map_err(|e| HttpProbeError {
+        message: format!("reading response body from {} failed: {}", url, e),
+        is_connect: false,
+    })?;
+
+    Ok((status, body))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};

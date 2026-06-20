@@ -12,7 +12,7 @@ use crate::core::engine::executor::execute_for_project;
 use crate::core::engine::text;
 use crate::core::engine::{command, shell};
 use crate::core::error::{Error, Result};
-use crate::core::paths::{self as base_path, resolve_path_string};
+use crate::core::paths::resolve_path_string;
 use crate::core::project;
 
 use std::path::Path;
@@ -164,11 +164,25 @@ pub fn read_stdin() -> Result<String> {
     Ok(content)
 }
 
+/// Resolve a remote file path against a project, honoring managed path_roots.
+///
+/// Relative paths matching an extension-declared managed prefix (e.g.
+/// `wp-content`) resolve through the project's `path_roots` exactly like
+/// deploy, so file inspection agrees with the deployed path even when the
+/// active component directory lives outside `base_path` (e.g. WP Cloud). (#5456)
+fn resolve_remote_path(
+    project: &project::Project,
+    base_path_value: &str,
+    path: &str,
+) -> Result<String> {
+    super::resolve_project_remote_path(project, base_path_value, path)
+}
+
 /// List directory contents.
 pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
     command::require_success(output.success, &output.stderr, "LIST")?;
@@ -186,7 +200,7 @@ pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
 pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
     command::require_success(output.success, &output.stderr, "READ")?;
@@ -215,7 +229,7 @@ fn generate_unique_delimiter(content: &str) -> String {
 pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let delimiter = generate_unique_delimiter(content);
     let command = format!(
         "cat > {} << '{}'\n{}\n{}",
@@ -238,7 +252,7 @@ pub fn write(project_id: &str, path: &str, content: &str) -> Result<WriteResult>
 pub fn delete(project_id: &str, path: &str, recursive: bool) -> Result<DeleteResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let flags = if recursive { "-rf" } else { "-f" };
     let command = format!("rm {} {}", flags, shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
@@ -255,8 +269,8 @@ pub fn delete(project_id: &str, path: &str, recursive: bool) -> Result<DeleteRes
 pub fn rename(project_id: &str, old_path: &str, new_path: &str) -> Result<RenameResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_old = base_path::join_remote_path(Some(&project_base_path), old_path)?;
-    let full_new = base_path::join_remote_path(Some(&project_base_path), new_path)?;
+    let full_old = resolve_remote_path(&project, &project_base_path, old_path)?;
+    let full_new = resolve_remote_path(&project, &project_base_path, new_path)?;
     let command = format!(
         "mv {} {}",
         shell::quote_path(&full_old),
@@ -338,7 +352,7 @@ pub fn find(
 ) -> Result<FindResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
 
     let mut cmd = format!("find {}", shell::quote_path(&full_path));
 
@@ -391,7 +405,7 @@ pub fn grep(
 ) -> Result<GrepResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path = resolve_remote_path(&project, &project_base_path, path)?;
 
     if pattern.trim().is_empty() {
         return Err(Error::validation_missing_argument(vec![
@@ -479,7 +493,7 @@ pub fn download(
     recursive: bool,
 ) -> Result<DownloadResult> {
     let (ctx, project_base_path) = resolve_project_ssh_with_base_path(project_id)?;
-    let full_remote_path = base_path::join_remote_path(Some(&project_base_path), remote_path)?;
+    let full_remote_path = resolve_remote_path(&ctx.project, &project_base_path, remote_path)?;
 
     // Create local parent directories if needed
     let local = Path::new(local_path);

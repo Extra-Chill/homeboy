@@ -207,6 +207,14 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a code finding in this change. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -246,6 +254,14 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a lint finding in this change. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -281,6 +297,14 @@ jobs:
         with:
           name: homeboy-binary
           path: .homeboy-bin
+
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a test finding in this change. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
 
       - name: Generate GitHub App token
         id: app-token
@@ -323,8 +347,13 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
-      - name: Prepare binary
-        run: chmod +x .homeboy-bin/homeboy
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not an autofix finding. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
 
       # Rust toolchain needed for cargo fmt (called by lint fixer in autofix)
       - name: Install Rust toolchain

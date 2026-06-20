@@ -9,8 +9,10 @@ mod operations;
 mod operations_changes;
 mod operations_commit;
 mod operations_push;
+mod operations_tags;
 mod pr_policy;
 mod primitives;
+mod primitives_query;
 
 #[cfg(test)]
 mod operation_tests;
@@ -37,12 +39,9 @@ pub use github::{
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use operation_output::GitOutput;
 pub use operations::{
-    cherry_pick, cherry_pick_at, delete_local_tag, delete_remote_tag, execute_git_for_release,
-    fetch_and_fast_forward, fetch_and_get_behind_count, fetch_origin, get_head_commit,
-    get_repo_snapshot, get_tag_commit, is_ancestor, pull, pull_at, pull_bulk, rebase, rebase_at,
-    remote_branch_commit, remote_tag_commit, short_head_revision_at, status, status_at,
-    status_bulk, tag, tag_at, tag_exists_locally, tag_exists_on_remote, CherryPickOptions,
-    RebaseOptions, RepoSnapshot,
+    cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
+    fetch_and_get_behind_count, get_repo_snapshot, pull, pull_at, pull_bulk, rebase, rebase_at,
+    status, status_at, status_bulk, CherryPickOptions, RebaseOptions, RepoSnapshot,
 };
 pub use operations_changes::{
     build_repo_baseline_snapshot, changes, changes_at, changes_bulk, changes_project,
@@ -52,19 +51,26 @@ pub use operations_changes::{
 };
 pub use operations_commit::{commit, commit_at, commit_from_json, CommitJsonOutput, CommitOptions};
 pub use operations_push::{push, push_at, push_bulk, PushOptions};
+pub use operations_tags::{
+    delete_local_tag, delete_remote_tag, fetch_origin, get_head_commit, get_tag_commit,
+    is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
+    tag_exists_locally, tag_exists_on_remote,
+};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
 };
 pub use primitives::{
-    clone_repo, clone_repo_at_ref, commit_staged_with_author, current_branch,
-    get_component_path_prefix, get_git_root, git_probe_path, has_staged_changes, head_sha,
-    head_sha_short, is_workdir_clean_or_not_git, output_optional, output_optional_bytes, pull_repo,
-    remote_origin_url, remote_url, repo_root, rev_parse, run_git, run_git_output,
-    short_head_revision, stage_all, status_porcelain, status_porcelain_bytes, toplevel,
-    update_to_remote_default_branch,
+    clone_repo, clone_repo_at_ref, commit_staged_with_author, get_component_path_prefix,
+    get_git_root, git_probe_path, has_staged_changes, is_workdir_clean_or_not_git, pull_repo,
+    run_git, run_git_output, stage_all, update_to_remote_default_branch,
 };
-pub(crate) use primitives::{is_git_repo, list_tracked_markdown_files};
+pub(crate) use primitives::{is_git_repo, is_tracked_path, list_tracked_markdown_files};
+pub use primitives_query::{
+    current_branch, head_sha, head_sha_short, output_optional, output_optional_bytes,
+    remote_origin_url, remote_url, repo_root, rev_parse, short_head_revision, status_porcelain,
+    status_porcelain_bytes, toplevel,
+};
 
 use std::path::Path;
 use std::process::Command;

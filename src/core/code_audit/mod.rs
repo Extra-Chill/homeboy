@@ -12,6 +12,7 @@
 //! 6. Analyzing structural complexity (god files, high item counts)
 
 pub mod baseline;
+pub mod baseline_merge;
 mod checks;
 pub mod codebase_map;
 mod comment_blocks;
@@ -61,6 +62,7 @@ use self::detectors::{
 };
 use descriptor_runtime::{run_descriptor_detectors, DetectorRunContext};
 
+pub use baseline_merge::{merge_baseline_only_conflict, BaselineMergeError, BaselineMergeResult};
 pub use checks::{CheckResult, CheckStatus};
 pub use compare::{
     finding_fingerprint, score_delta, weighted_finding_score_with, AuditConvergenceScoring,
@@ -130,6 +132,14 @@ pub(crate) struct AuditWithAnalysis {
     pub timing: AuditTiming,
 }
 
+/// Audit phase timing — a thin command-specific view over the generic core
+/// [`PhaseTimer`](crate::core::phase_timing::PhaseTimer) primitive.
+///
+/// Core owns the timing *contract*; audit supplies the phase vocabulary
+/// (`source_snapshot`, `discovery_fingerprinting`, `detectors`,
+/// `detector.<name>`, `baseline_comparison`, `report_assembly`). The serialized
+/// shape (`spans[].{id,status,duration_ms}`) is preserved for the observation
+/// metadata consumers in `commands/audit.rs`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct AuditTiming {
     pub spans: Vec<AuditTimingSpan>,
@@ -142,21 +152,50 @@ pub struct AuditTimingSpan {
     pub duration_ms: Option<f64>,
 }
 
+impl From<crate::core::phase_timing::PhaseSpan> for AuditTimingSpan {
+    fn from(span: crate::core::phase_timing::PhaseSpan) -> Self {
+        AuditTimingSpan {
+            id: span.id,
+            status: span.status.as_str().to_string(),
+            duration_ms: span.duration_ms,
+        }
+    }
+}
+
 impl AuditTiming {
+    /// Time a phase around a closure, recording its duration in the audit
+    /// timing report. Used by the workflow layer to capture coarse phases
+    /// (baseline comparison, report assembly) that sit outside the detector
+    /// loop. Generic timing semantics are owned by
+    /// [`PhaseTimer`](crate::core::phase_timing::PhaseTimer).
+    pub(crate) fn time_phase<T>(&mut self, id: impl Into<String>, run: impl FnOnce() -> T) -> T {
+        let mut timer = crate::core::phase_timing::PhaseTimer::new();
+        let value = timer.time_ok(id, run);
+        self.extend_from_timer(timer);
+        value
+    }
+
     fn push_ok(&mut self, id: impl Into<String>, duration: Duration) {
-        self.spans.push(AuditTimingSpan {
-            id: id.into(),
-            status: "ok".to_string(),
-            duration_ms: Some(duration.as_secs_f64() * 1000.0),
-        });
+        let mut timer = crate::core::phase_timing::PhaseTimer::new();
+        timer.record_ok(id, duration);
+        self.extend_from_timer(timer);
     }
 
     fn push_skipped(&mut self, id: impl Into<String>) {
-        self.spans.push(AuditTimingSpan {
-            id: id.into(),
-            status: "skipped".to_string(),
-            duration_ms: None,
-        });
+        let mut timer = crate::core::phase_timing::PhaseTimer::new();
+        timer.record_skipped(id);
+        self.extend_from_timer(timer);
+    }
+
+    /// Drain a generic phase timer into the audit-facing span list.
+    fn extend_from_timer(&mut self, timer: crate::core::phase_timing::PhaseTimer) {
+        self.spans.extend(
+            timer
+                .into_report()
+                .spans
+                .into_iter()
+                .map(AuditTimingSpan::from),
+        );
     }
 }
 

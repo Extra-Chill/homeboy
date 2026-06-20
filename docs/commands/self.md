@@ -12,6 +12,7 @@ homeboy self <COMMAND>
 
 - `status` — report the active binary, version, and install/update signals
 - `identity` — report the active binary build identity without external probes
+- `doctor` — report one authoritative binary/runtime view across the controller and every configured runner
 - `cleanup-runtime-tmp` — plan or delete orphaned Homeboy runtime temp entries
 
 ### `status`
@@ -32,6 +33,25 @@ homeboy self identity
 Returns the current binary build identity directly from the running executable.
 Use this when a runner or daemon freshness check needs a cheap local identity
 without probing surrounding install state.
+
+### `doctor`
+
+```sh
+homeboy self doctor
+```
+
+Reports one authoritative runtime view spanning the controller and every
+configured runner so operators never have to manually reason about which
+Homeboy binary is in effect. The controller is the authoritative reference
+point; each runner row reports its configured executable path, the version and
+build identity of its active daemon (when connected), and how that compares to
+the controller.
+
+When every participant agrees with the controller, `agrees` is `true` and the
+command exits `0`. When any runner reports a different version or a stale daemon
+(a daemon started by a different build than the configured runner executable),
+`agrees` is `false`, the disagreement is described in `drift_notes`, and the
+command exits non-zero so cook loops can detect binary-identity drift.
 
 ### `cleanup-runtime-tmp`
 

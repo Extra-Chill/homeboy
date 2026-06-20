@@ -183,7 +183,8 @@
           "src/core/runner/tool_registry.rs",
           "src/core/cleanup.rs",
           "src/core/cleanup/self_artifacts.rs",
-          "src/core/runner/lab_args/tests.rs"
+          "src/core/runner/lab_args/tests.rs",
+          "src/core/release/executor/lockfile_guard.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
@@ -400,23 +401,48 @@
         "type": "forbidden_terms"
       }
     ],
+    "test_wiring": {
+      "policies": [
+        {
+          "auto_discovered_test_path_globs": [
+            "tests/*_test.rs"
+          ],
+          "convention": "test_wiring",
+          "description": "Nested test file `{test_path}` is not wired into the configured test harness",
+          "explicit_wiring_marker_patterns": [
+            "{test_path}"
+          ],
+          "id": "nested-test-harness-wiring",
+          "require_explicit_wiring": true,
+          "severity": "warning",
+          "source_path_globs": [
+            "src/**/*.rs"
+          ],
+          "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path.",
+          "support_test_path_globs": [],
+          "test_path_globs": [
+            "tests/**/*_test.rs"
+          ]
+        }
+      ]
+    },
     "thin_command_adapter": {
-      "include_path_contains": [
-        "src/commands/"
+      "allow_line_contains": [
+        "homeboy-audit: allow-thin-command-adapter"
       ],
       "file_extensions": [
         "rs"
       ],
-      "allow_line_contains": [
-        "homeboy-audit: allow-thin-command-adapter"
+      "ignore_after_line_equals": [
+        "#[cfg(test)]"
       ],
       "ignore_line_prefixes": [
         "//",
         "///",
         "//!"
       ],
-      "ignore_after_line_equals": [
-        "#[cfg(test)]"
+      "include_path_contains": [
+        "src/commands/"
       ],
       "max_orchestration_weight": 3,
       "orchestration_markers": [
@@ -452,31 +478,6 @@
           ]
         }
       ]
-    },
-    "test_wiring": {
-      "policies": [
-        {
-          "auto_discovered_test_path_globs": [
-            "tests/*_test.rs"
-          ],
-          "convention": "test_wiring",
-          "description": "Nested test file `{test_path}` is not wired into the configured test harness",
-          "explicit_wiring_marker_patterns": [
-            "{test_path}"
-          ],
-          "id": "nested-test-harness-wiring",
-          "require_explicit_wiring": true,
-          "severity": "warning",
-          "source_path_globs": [
-            "src/**/*.rs"
-          ],
-          "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path.",
-          "support_test_path_globs": [],
-          "test_path_globs": [
-            "tests/**/*_test.rs"
-          ]
-        }
-      ]
     }
   },
   "auto_cleanup": false,
@@ -491,8 +492,8 @@
   "baselines": {
     "audit": {
       "context_id": "homeboy",
-      "created_at": "2026-06-19T16:45:00Z",
-      "item_count": 407,
+      "created_at": "2026-06-20T15:43:14Z",
+      "item_count": 403,
       "known_fingerprints": [
         "compiler::src/core/deploy/planning.rs::CompilerWarning",
         "compiler::src/core/extension/test/run.rs::CompilerWarning",
@@ -600,7 +601,6 @@
         "core_boundary_leak:core-agnostic-source::src/core/extension/test/report.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/git/commits.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `detect`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/git/commits.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/git/primitives.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `git_probe_path`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/refactor/auto/contracts.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/refactor/auto/contracts.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/refactor/decompose.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `build_plan`::CoreBoundaryLeak",
@@ -649,8 +649,6 @@
         "core_boundary_leak:core-agnostic-source::src/core/refactor/plan/sources.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `normalize_sources`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/refactor/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `propagate`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/refactor/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/release/executor/publish.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `publish_output_auth_required_reason`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/release/executor/publish.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `publish_output_private_package_reason`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/release/planning_quality.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `is_runner_infrastructure_failure`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Cargo.lock` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Cargo.toml` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
@@ -669,7 +667,9 @@
         "core_boundary_leak:core-agnostic-source::src/core/runner/lab_capabilities.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `lab_runner_capability_contract`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/runner/lab_capabilities.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `lab_runner_capability_contract`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/runner/lab_command.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `required_tools_for_command_prefix`::CoreBoundaryLeak",
-        "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `bootstrap_source_cli_node_dependencies`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `bootstrap_source_cli_node_dependencies`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `source_cli_bootstrap_capability_preflight`::CoreBoundaryLeak",
+        "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `source_cli_workspace_has_package_lock`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `component_target_threads_registered_triage_remote_override`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `fetch_component_report_surfaces_source_repo_when_triage_differs`::CoreBoundaryLeak",
         "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `parse_github_parent_repo_returns_parent_for_fork`::CoreBoundaryLeak",
@@ -683,6 +683,7 @@
         "dead_code::src/core/artifact_manifest.rs::UnreferencedExport",
         "dead_code::src/core/change_artifact.rs::UnreferencedExport",
         "dead_code::src/core/lab_routing.rs::UnreferencedExport",
+        "dead_code::src/core/phase_timing.rs::UnreferencedExport",
         "dead_code::src/core/preview_client.rs::UnreferencedExport",
         "dead_code::src/core/preview_ingress.rs::UnreferencedExport",
         "dead_code::src/core/process.rs::UnreferencedExport",
@@ -705,8 +706,10 @@
         "field_patterns::src/core/agent_task_provider.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_schedule.rs::RepeatedFieldPattern",
         "field_patterns::src/core/agent_task_service.rs::RepeatedFieldPattern",
+        "field_patterns::src/core/agent_tool_control_plane.rs::RepeatedFieldPattern",
         "field_patterns::src/core/code_audit/detectors/field_patterns.rs::RepeatedFieldPattern",
         "field_patterns::src/core/daemon/broker_config.rs::RepeatedFieldPattern",
+        "field_patterns::src/core/deploy/execution.rs::RepeatedFieldPattern",
         "field_patterns::src/core/engine/resource.rs::RepeatedFieldPattern",
         "field_patterns::src/core/engine/temp.rs::RepeatedFieldPattern",
         "field_patterns::src/core/extension/bench/artifact.rs::RepeatedFieldPattern",
@@ -722,12 +725,14 @@
         "field_patterns::src/core/preview_ingress.rs::RepeatedFieldPattern",
         "field_patterns::src/core/refactor/plan/sources.rs::RepeatedFieldPattern",
         "field_patterns::src/core/rig/spec.rs::RepeatedFieldPattern",
+        "field_patterns::src/core/runner/execution.rs::RepeatedFieldPattern",
         "field_patterns::src/core/runner/git_dependency_materialization.rs::RepeatedFieldPattern",
         "field_patterns::src/core/runner/mod.rs::RepeatedFieldPattern",
         "field_patterns::src/core/runner/workspace.rs::RepeatedFieldPattern",
         "field_patterns::src/core/server/mod.rs::RepeatedFieldPattern",
         "intra-method-duplication::src/cli_runtime.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/command_contract/lab.rs::IntraMethodDuplicate",
+        "intra-method-duplication::src/commands/api.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/commands/bench/observation.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/commands/build.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/commands/runs.rs::IntraMethodDuplicate",
@@ -749,14 +754,16 @@
         "intra-method-duplication::src/core/quality.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/release/executor/github_release.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/release/planning_quality.rs::IntraMethodDuplicate",
-        "intra-method-duplication::src/core/release/workflow.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/rig/pipeline.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/execution/extension_parity.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/git_dependency_materialization.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/rig_materialization.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/validation_dependencies.rs::IntraMethodDuplicate",
+        "intra-method-duplication::src/core/runner/worker.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/runner/workspace.rs::IntraMethodDuplicate",
         "intra-method-duplication::src/core/upgrade/runners.rs::IntraMethodDuplicate",
+        "near-duplication::src/core/agent_task_promotion.rs::NearDuplicate",
+        "near-duplication::src/core/agent_tool_control_plane.rs::NearDuplicate",
         "near-duplication::src/core/runner/connection.rs::NearDuplicate",
         "near-duplication::src/core/runner/connection_daemon.rs::NearDuplicate",
         "output_capture::src/core/agent_tool_control_plane.rs::UnboundedOutputCapture",
@@ -765,10 +772,13 @@
         "output_capture::tests/agent_tool_dispatch.rs::UnboundedOutputCapture",
         "parallel-implementation::src/commands/report/browser_evidence_compare.rs::ParallelImplementation",
         "parallel-implementation::src/core/artifact_links.rs::ParallelImplementation",
+        "parallel-implementation::src/core/component/inventory.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/run.rs::ParallelImplementation",
+        "parallel-implementation::src/core/git/operations.rs::ParallelImplementation",
+        "parallel-implementation::src/core/git/operations_tags.rs::ParallelImplementation",
+        "parallel-implementation::src/core/release/changelog/guard.rs::ParallelImplementation",
         "parallel-implementation::src/core/release/executor/publish.rs::ParallelImplementation",
         "remote_execution_preflight::src/core/runner/execution/policy.rs::RemoteExecutionPreflight",
-        "remote_execution_preflight::src/core/runner/lab_workspaces.rs::RemoteExecutionPreflight",
         "remote_execution_preflight::src/core/runner/rig_materialization.rs::RemoteExecutionPreflight",
         "src/commands/adapter.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
         "src/commands/agent_task/controller.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: runner execution orchestration",
@@ -785,7 +795,6 @@
         "src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
         "src/commands/trace/bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
         "src/commands/trace/compare_bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
-        "src/commands/trace/compare_targets.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, run artifact persistence, runner execution orchestration",
         "src/commands/trace/compare_variant.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
         "src/commands/trace/matrix.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, runner execution orchestration",
         "src/commands/trace/observation_lifecycle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
@@ -795,10 +804,11 @@
         "structural::src/commands/agent_task_summary.rs::HighItemCount",
         "structural::src/commands/bench.rs::HighItemCount",
         "structural::src/commands/bench/observation.rs::GodFile",
+        "structural::src/commands/bench/observation.rs::HighItemCount",
         "structural::src/commands/bench/tests.rs::GodFile",
         "structural::src/commands/bench/tests.rs::HighItemCount",
-        "structural::src/commands/component.rs::GodFile",
         "structural::src/commands/doctor/resources.rs::HighItemCount",
+        "structural::src/commands/file.rs::HighItemCount",
         "structural::src/commands/report/browser_evidence_compare.rs::GodFile",
         "structural::src/commands/report/failure_digest.rs::HighItemCount",
         "structural::src/commands/runner.rs::GodFile",
@@ -835,7 +845,6 @@
         "structural::src/core/component/inventory.rs::HighItemCount",
         "structural::src/core/defaults.rs::HighItemCount",
         "structural::src/core/deploy/execution.rs::GodFile",
-        "structural::src/core/deploy/orchestration.rs::GodFile",
         "structural::src/core/engine/invocation.rs::HighItemCount",
         "structural::src/core/extension/bench/parsing.rs::GodFile",
         "structural::src/core/extension/bench/run.rs::GodFile",
@@ -850,8 +859,6 @@
         "structural::src/core/extension/manifest_config.rs::HighItemCount",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
         "structural::src/core/extension/trace/run.rs::GodFile",
-        "structural::src/core/git/operations.rs::HighItemCount",
-        "structural::src/core/git/primitives.rs::HighItemCount",
         "structural::src/core/http_api.rs::HighItemCount",
         "structural::src/core/observation/runs_service.rs::HighItemCount",
         "structural::src/core/paths.rs::HighItemCount",
@@ -860,11 +867,7 @@
         "structural::src/core/proof.rs::HighItemCount",
         "structural::src/core/refactor/plan/sources.rs::GodFile",
         "structural::src/core/refactor/rename/mod.rs::GodFile",
-        "structural::src/core/release/executor.rs::GodFile",
-        "structural::src/core/release/executor.rs::HighItemCount",
         "structural::src/core/release/plan_steps.rs::GodFile",
-        "structural::src/core/release/workflow.rs::GodFile",
-        "structural::src/core/release/workflow.rs::HighItemCount",
         "structural::src/core/review/render.rs::HighItemCount",
         "structural::src/core/rig/install.rs::HighItemCount",
         "structural::src/core/rig/pipeline.rs::GodFile",
@@ -876,7 +879,6 @@
         "structural::src/core/runner/execution.rs::GodFile",
         "structural::src/core/runner/execution.rs::HighItemCount",
         "structural::src/core/runner/lab/offload.rs::GodFile",
-        "structural::src/core/runner/lab_workspaces.rs::HighItemCount",
         "structural::src/core/runner/rig_materialization.rs::HighItemCount",
         "structural::src/core/runner/workspace.rs::GodFile",
         "structural::src/core/runner/workspace.rs::HighItemCount",
@@ -895,21 +897,19 @@
         "test_quality::src/commands/trace/rig_tests.rs::VacuousTest"
       ],
       "metadata": {
-        "alignment_score": 0.8817204236984253,
+        "alignment_score": 0.9042553305625916,
         "known_outliers": [
-          "src/commands/output_runtime.rs",
-          "src/commands/agent_task_summary.rs",
-          "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_status.rs",
+          "src/core/observation/records/triage_items.rs",
           "src/core/observation/records/run_builder.rs",
           "src/commands/report/bench_coverage.rs",
           "src/commands/report/failure_digest.rs",
           "src/commands/report/performance_digest.rs",
           "src/core/engine/undo/rollback.rs",
-          "src/core/engine/undo/snapshot.rs",
-          "src/core/engine/undo/entry.rs"
+          "src/core/engine/undo/entry.rs",
+          "src/core/engine/undo/snapshot.rs"
         ],
-        "outliers_count": 11,
+        "outliers_count": 9,
         "policy_sections": [
           {
             "audit_policy": "core_boundary_leak:core-agnostic-source",
@@ -1020,7 +1020,6 @@
               "core_boundary_leak:core-agnostic-source::src/core/extension/test/report.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/git/commits.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `detect`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/git/commits.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-              "core_boundary_leak:core-agnostic-source::src/core/git/primitives.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `git_probe_path`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/refactor/auto/contracts.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/refactor/auto/contracts.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/refactor/decompose.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `build_plan`::CoreBoundaryLeak",
@@ -1069,8 +1068,6 @@
               "core_boundary_leak:core-agnostic-source::src/core/refactor/plan/sources.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `normalize_sources`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/refactor/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `propagate`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/refactor/propagate.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `rust` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",
-              "core_boundary_leak:core-agnostic-source::src/core/release/executor/publish.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `publish_output_auth_required_reason`::CoreBoundaryLeak",
-              "core_boundary_leak:core-agnostic-source::src/core/release/executor/publish.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `publish_output_private_package_reason`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/release/planning_quality.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `is_runner_infrastructure_failure`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Cargo.lock` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/release/planning_worktree.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `Cargo.toml` appears at line <line> in behavioral context `derived_release_lockfiles`::CoreBoundaryLeak",
@@ -1089,7 +1086,9 @@
               "core_boundary_leak:core-agnostic-source::src/core/runner/lab_capabilities.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `lab_runner_capability_contract`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/runner/lab_capabilities.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `php` appears at line <line> in behavioral context `lab_runner_capability_contract`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/runner/lab_command.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `cargo` appears at line <line> in behavioral context `required_tools_for_command_prefix`::CoreBoundaryLeak",
-              "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `bootstrap_source_cli_node_dependencies`::CoreBoundaryLeak",
+              "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `bootstrap_source_cli_node_dependencies`::CoreBoundaryLeak",
+              "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `source_cli_bootstrap_capability_preflight`::CoreBoundaryLeak",
+              "core_boundary_leak:core-agnostic-source::src/core/runner/lab_workspaces_deps.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `npm` appears at line <line> in behavioral context `source_cli_workspace_has_package_lock`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `component_target_threads_registered_triage_remote_override`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `fetch_component_report_surfaces_source_repo_when_triage_differs`::CoreBoundaryLeak",
               "core_boundary_leak:core-agnostic-source::src/core/triage/tests.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `wordpress` appears at line <line> in behavioral context `parse_github_parent_repo_returns_parent_for_fork`::CoreBoundaryLeak",

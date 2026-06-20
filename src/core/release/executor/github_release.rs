@@ -98,23 +98,24 @@ pub(crate) fn run_github_release(
         .map(|artifact| artifact.path.clone())
         .collect();
     let has_artifacts = !artifact_paths.is_empty();
-    // Repair commands available before the exact body is built/persisted (gh
-    // missing / unauthenticated / upload paths). These regenerate notes since
-    // no persisted exact-body file exists yet. The create path below rebuilds a
-    // persisted-aware closure once the body is written to disk (issue #3508).
-    let repair_commands = |notes_start_tag: Option<&str>| {
+    // Single repair-command builder for every failure path. The persisted
+    // exact-body file only exists after `persist_release_body` runs below, so
+    // early paths (gh missing / unauthenticated / upload) pass `None` and
+    // regenerate notes, while the create path passes the persisted path so the
+    // repair `--notes-file` reproduces the body byte-for-byte (issue #3508).
+    let repair_commands = |notes_start_tag: Option<&str>, persisted_notes: Option<&str>| {
         github_release_repair_commands(
             &tag,
             &github,
             &component.github,
             &artifact_paths,
             notes_start_tag,
-            None,
+            persisted_notes,
         )
     };
 
     if !gh_is_available() {
-        let repair = repair_commands(None);
+        let repair = repair_commands(None, None);
         log_status!(
             "release",
             "✗ `gh` CLI not found on PATH — GitHub Release was NOT created"
@@ -130,7 +131,7 @@ pub(crate) fn run_github_release(
     }
 
     if !gh_is_authenticated(&github, &component.github) {
-        let repair = repair_commands(None);
+        let repair = repair_commands(None, None);
         log_status!(
             "release",
             "✗ `gh` is not authenticated — GitHub Release was NOT created"
@@ -194,7 +195,7 @@ pub(crate) fn run_github_release(
         if !upload_output.status.success() {
             let stderr = String::from_utf8_lossy(&upload_output.stderr).to_string();
             let stdout = String::from_utf8_lossy(&upload_output.stdout).to_string();
-            let repair = repair_commands(None);
+            let repair = repair_commands(None, None);
             log_status!("release", "✗ `gh release upload` failed: {}", stderr.trim());
             log_repair_commands(&repair);
             return Ok(upload_failed_result(
@@ -233,16 +234,6 @@ pub(crate) fn run_github_release(
     // repair `--notes-file` reproduces it byte-for-byte. A failure to write the
     // artifact is non-fatal: fall back to commands that regenerate notes.
     let persisted_notes_path = persist_release_body(component, &tag, &release_notes);
-    let repair_commands = |notes_start_tag: Option<&str>| {
-        github_release_repair_commands(
-            &tag,
-            &github,
-            &component.github,
-            &artifact_paths,
-            notes_start_tag,
-            persisted_notes_path.as_deref(),
-        )
-    };
 
     log_status!(
         "release",
@@ -290,7 +281,7 @@ pub(crate) fn run_github_release(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let repair = repair_commands(notes_start_tag.as_deref());
+        let repair = repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref());
         // Distinguish the path that brought us here so operators (and tests)
         // can see whether the fallback-after-generated-notes-failure also
         // failed, versus a plain create failure with working notes.

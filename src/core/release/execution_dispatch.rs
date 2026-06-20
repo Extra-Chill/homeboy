@@ -43,6 +43,7 @@ pub(super) fn execute_release_plan_step(
                 context.extensions,
                 context.component_id,
                 &context.component.local_path,
+                context.options.skip_build_validation,
             )
             .unwrap_or_else(|err| failed_result("preflight.package", "preflight.package", err)),
         )),
@@ -100,6 +101,7 @@ pub(super) fn execute_release_plan_step(
                 &mut context.state,
                 context.component_id,
                 &context.component.local_path,
+                context.options.skip_build_validation,
             )
             .unwrap_or_else(|err| failed_result("package", "package", err)),
         )),
@@ -131,7 +133,19 @@ pub(super) fn execute_release_plan_step(
             )
             .map(Some)
         }
-        "git.push" => executor::run_git_push(context.component, context.component_id).map(Some),
+        "git.push" => {
+            let release_tag = context
+                .state
+                .tag
+                .clone()
+                .or_else(|| context.state.version.as_deref().map(|v| format!("v{v}")));
+            executor::run_git_push(
+                context.component,
+                context.component_id,
+                release_tag.as_deref(),
+            )
+            .map(Some)
+        }
         "github.release" => Ok(Some(
             executor::run_github_release(context.component, &context.state)
                 .unwrap_or_else(|err| failed_result("github.release", "github.release", err)),

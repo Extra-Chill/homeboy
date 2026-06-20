@@ -25,6 +25,12 @@ the underlying commands, which already share a common `--changed-since` plumbing
 the order **audit → lint → test**, matching the canonical verification order.
 Output is deterministic and matches each command's per-stage output.
 
+`homeboy review --changed-since=<base>` is the **canonical release-gate proof
+command** for agents. Run it through normal/Lab routing — never with
+`--force-hot`/`--allow-local-hot` or a source/`cargo` invocation, which are
+debugging aids, not proof. See
+[Release-gate proof: canonical non-local command path](../operators/release-gate-proof-path.md).
+
 ## Arguments
 
 - `[component]`: Component ID. Optional — auto-discovered from the current

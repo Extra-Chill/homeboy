@@ -251,40 +251,63 @@ fn controller_materialize_projects_policy_results_with_provenance() {
     )
     .expect("write second policy result");
 
-    let (value, status) = controller_materialize(AgentTaskControllerMaterializeArgs {
-        spec: format!("@{}", spec_path.display()),
-        inputs: None,
-        policy_results: vec![
-            format!("@{}", policy_path.display()),
-            format!("@{}", second_policy_path.display()),
-        ],
-    })
-    .expect("materialize spec");
+    let (value, status) =
+        super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
+            spec: format!("@{}", spec_path.display()),
+            inputs: None,
+            policy_results: vec![
+                format!("@{}", policy_path.display()),
+                format!("@{}", second_policy_path.display()),
+            ],
+        })
+        .expect("materialize spec");
 
     assert_eq!(status, 0);
+    assert_eq!(
+        value["schema"],
+        "homeboy/agent-task-loop-spec-materialization/v1"
+    );
     assert_eq!(
         value["spec"]["workflows"][0]["inputs"]["policy_inputs"]["example-policy"]
             ["requested_tier"],
         "foundation"
     );
+    // The second workflow declared no `inputs` block of its own; materialization
+    // must synthesize one and project every policy's results into it.
     assert_eq!(
         value["spec"]["workflows"][1]["inputs"]["policy_results"]["example-policy"]["decision"],
         "hold"
     );
     assert_eq!(
+        value["spec"]["workflows"][1]["inputs"]["policy_results"]["example-policy"]
+            ["selected_tier"],
+        "foundation"
+    );
+    assert_eq!(
         value["spec"]["workflows"][1]["inputs"]["policy_results"]["second-policy"]["enabled"],
         true
     );
+    // Provenance for each policy is recorded under spec metadata keyed by policy id.
     assert_eq!(
         value["spec"]["metadata"]["policy_materialization"]["example-policy"]["provenance"]
             ["source"],
         "fixture"
     );
     assert_eq!(
+        value["spec"]["metadata"]["policy_materialization"]["example-policy"]["provenance"]
+            ["sha256"],
+        "abc123"
+    );
+    assert_eq!(
         value["spec"]["metadata"]["policy_materialization"]["second-policy"]["provenance"]
             ["source"],
         "second-fixture"
     );
+    // Policies without `policy_inputs` must not leak an `example-policy`-style block
+    // onto the first workflow for the second policy id.
+    assert!(value["spec"]["workflows"][0]["inputs"]["policy_inputs"]
+        .get("second-policy")
+        .is_none());
 }
 
 #[test]
@@ -311,7 +334,7 @@ fn controller_materialize_rejects_non_object_policy_result_fields() {
     )
     .expect("write policy result");
 
-    let error = controller_materialize(AgentTaskControllerMaterializeArgs {
+    let error = super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
         spec: format!("@{}", spec_path.display()),
         inputs: None,
         policy_results: vec![format!("@{}", policy_path.display())],
@@ -319,6 +342,11 @@ fn controller_materialize_rejects_non_object_policy_result_fields() {
     .expect_err("policy result fields are validated");
 
     assert!(error.message.contains("policy materialization fields"));
+    // The validation must reject the non-object field as an invalid-argument error
+    // scoped to the `policy_results` field and attribute it to the offending policy id.
+    assert_eq!(error.details["field"], "policy-result.policy_results");
+    assert_eq!(error.details["id"], "example-policy");
+    assert!(error.message.contains("must be JSON objects when present"));
 }
 
 #[test]

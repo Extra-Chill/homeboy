@@ -4,7 +4,6 @@ use crate::core::context::require_project_base_path;
 use crate::core::engine::executor::execute_for_project;
 use crate::core::engine::{command, shell};
 use crate::core::error::{Error, Result};
-use crate::core::paths as base_path;
 use crate::core::project;
 
 use super::{read, write};
@@ -36,7 +35,8 @@ pub fn edit_replace_line(
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -88,7 +88,8 @@ pub fn edit_insert_after_line(
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -138,7 +139,8 @@ pub fn edit_insert_before_line(
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -183,7 +185,8 @@ pub fn edit_insert_before_line(
 pub fn edit_delete_line(project_id: &str, path: &str, line_num: usize) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -233,7 +236,8 @@ pub fn edit_delete_lines(
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -296,7 +300,8 @@ pub fn edit_replace_pattern(
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -343,7 +348,8 @@ pub fn edit_replace_pattern(
 pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -383,7 +389,8 @@ pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Resul
 pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
@@ -421,7 +428,8 @@ pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditRe
 pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
-    let full_path = base_path::join_remote_path(Some(&project_base_path), path)?;
+    let full_path =
+        crate::core::project::resolve_project_remote_path(&project, &project_base_path, path)?;
 
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
