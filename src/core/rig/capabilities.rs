@@ -209,7 +209,7 @@ fn find_executable(candidate: &str) -> Option<PathBuf> {
         return is_executable_file(path).then(|| path.to_path_buf());
     }
 
-    let path_var = std::env::var_os("PATH").map(OsString::from)?;
+    let path_var = std::env::var_os("PATH")?;
 
     std::env::split_paths(&path_var)
         .map(|dir| dir.join(candidate))
