@@ -162,18 +162,19 @@ pub fn runs_refs(args: RunsRefsArgs) -> CmdResult<RunsOutput> {
 }
 
 fn run_matches_filter(run: &RunRecord, filter: &RunListFilter) -> bool {
-    filter.kind.as_deref().map_or(true, |kind| run.kind == kind)
-        && filter.component_id.as_deref().map_or(true, |component| {
-            run.component_id.as_deref() == Some(component)
-        })
+    filter.kind.as_deref().is_none_or(|kind| run.kind == kind)
+        && filter
+            .component_id
+            .as_deref()
+            .is_none_or(|component| run.component_id.as_deref() == Some(component))
         && filter
             .status
             .as_deref()
-            .map_or(true, |status| run.status == status)
+            .is_none_or(|status| run.status == status)
         && filter
             .rig_id
             .as_deref()
-            .map_or(true, |rig| run.rig_id.as_deref() == Some(rig))
+            .is_none_or(|rig| run.rig_id.as_deref() == Some(rig))
 }
 
 fn run_ref(run: &RunRecord) -> RunRef {

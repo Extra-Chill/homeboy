@@ -140,10 +140,11 @@ Summary includes counts for quick overview.
 ### `exec`
 
 ```sh
-homeboy fleet exec <id> -- <command>
+homeboy fleet exec <id> --check -- <command>
+homeboy fleet exec <id> --apply -- <command>
 ```
 
-Runs a command across projects in the fleet via each project's configured SSH connection. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it is intentionally local-only for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
+Plans or runs a command across projects in the fleet via each project's configured SSH connection. Real remote execution requires `--apply`; use `--check` to preview the per-project plan without opening SSH command sessions. `fleet exec` participates in resource-policy warnings because it can create heavy remote work, but it is intentionally local-only for Lab offload: the command depends on local fleet, project, and server configuration before opening those SSH sessions, and runner-side config parity is not guaranteed.
 
 ## Fleet Deployment
 

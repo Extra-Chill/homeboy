@@ -22,6 +22,7 @@ Works with registered components (by ID) or raw filesystem paths.
 - `--extension <ID>`: One-shot extension override for the current invocation; repeat to layer multiple extension hints
 - `--only <kind>`: Restrict findings to one or more finding kinds; repeat for multiple kinds
 - `--exclude <kind>`: Exclude one or more finding kinds; repeat for multiple kinds
+- `--profile <PROFILE>`: Detector profile to run (`full`, `pr`, or `architecture`); defaults to `full`. `full` runs the complete audit, `pr` runs cheap root-level blockers for changed-file review, and `architecture` runs architecture-focused detectors
 - `--baseline`: Save current audit state as baseline for future comparisons
 - `--ignore-baseline`: Skip baseline comparison even if a baseline exists
 - `--ratchet`: Auto-update the baseline when the current run improves on it

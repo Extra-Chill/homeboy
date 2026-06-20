@@ -144,6 +144,54 @@ fn from_spec_dispatch_defaults_fall_back_to_current_git_checkout() {
 }
 
 #[test]
+fn from_spec_dispatch_defaults_replace_stale_workspace_cwd() {
+    let repo = tempfile::tempdir().expect("repo dir");
+    let git_status = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .arg("init")
+        .status()
+        .expect("git init runs");
+    assert!(git_status.success());
+    let mut spec = AgentTaskRepoLoopSpec {
+        schema: None,
+        loop_id: "repo-loop-stale-cwd-defaults".to_string(),
+        phase: "init".to_string(),
+        config_version: "v1".to_string(),
+        metadata: json!({
+            "dispatch_defaults": {
+                "cwd": "/path/that/does/not/exist",
+                "repo": "stale-repo"
+            }
+        }),
+        entities: Vec::new(),
+        agents: Vec::new(),
+        tools: Vec::new(),
+        abilities: Vec::new(),
+        workflows: Vec::new(),
+        artifacts: Vec::new(),
+        artifact_graph: Vec::new(),
+        dependencies: Vec::new(),
+        gates: Vec::new(),
+        metrics: Vec::new(),
+        gate_bundles: Vec::new(),
+        policy: None,
+        phases: Vec::new(),
+        actions: Vec::new(),
+        initial_event: None,
+    };
+
+    apply_from_spec_dispatch_defaults_with_cwd(&mut spec, "-", || Some(repo.path().to_path_buf()));
+    let expected_root = std::fs::canonicalize(repo.path()).expect("canonical repo path");
+
+    assert_eq!(
+        spec.metadata["dispatch_defaults"]["cwd"],
+        expected_root.display().to_string()
+    );
+    assert_eq!(spec.metadata["dispatch_defaults"]["repo"], "stale-repo");
+}
+
+#[test]
 fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
     let repo = tempfile::tempdir().expect("repo dir");
     let repo_path = repo.path().display().to_string();

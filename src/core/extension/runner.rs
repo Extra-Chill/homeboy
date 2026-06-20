@@ -256,7 +256,7 @@ impl ExtensionRunner {
             child_resource: output.child_resource,
             extension_phase_timings: self
                 .run_dir_path
-                .as_ref()
+                .as_deref()
                 .map(read_extension_phase_timings)
                 .transpose()?
                 .unwrap_or_default(),
@@ -316,9 +316,9 @@ impl ExtensionRunner {
 }
 
 pub(crate) fn read_extension_phase_timings(
-    run_dir_path: &PathBuf,
+    run_dir_path: &Path,
 ) -> Result<Vec<ExtensionPhaseTiming>> {
-    let run_dir = RunDir::from_existing(run_dir_path.clone())?;
+    let run_dir = RunDir::from_existing(run_dir_path.to_path_buf())?;
     let Some(value) = run_dir.read_step_output(run_dir::files::PHASE_TIMINGS) else {
         return Ok(Vec::new());
     };

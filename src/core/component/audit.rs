@@ -439,8 +439,8 @@ fn default_remote_execution_preflight_convention() -> String {
     "remote_execution_preflight".to_string()
 }
 
-fn is_default_remote_execution_preflight_convention(value: &String) -> bool {
-    value.as_str() == default_remote_execution_preflight_convention()
+fn is_default_remote_execution_preflight_convention(value: &str) -> bool {
+    value == default_remote_execution_preflight_convention()
 }
 
 impl Default for RemoteExecutionSafetyConfig {
@@ -653,8 +653,8 @@ fn default_thin_command_adapter_convention() -> String {
     "thin_command_adapter".to_string()
 }
 
-fn is_default_thin_command_adapter_convention(value: &String) -> bool {
-    value.as_str() == default_thin_command_adapter_convention()
+fn is_default_thin_command_adapter_convention(value: &str) -> bool {
+    value == default_thin_command_adapter_convention()
 }
 
 fn default_thin_command_adapter_threshold() -> u32 {

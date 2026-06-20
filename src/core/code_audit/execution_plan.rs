@@ -476,6 +476,7 @@ impl AuditExecutionPlan {
         Self::from_profile_and_filters(AuditProfile::Full, &[], &[])
     }
 
+    #[cfg(test)]
     pub(crate) fn from_filters(only: &[AuditFinding], exclude: &[AuditFinding]) -> Self {
         Self::from_profile_and_filters(AuditProfile::Full, only, exclude)
     }

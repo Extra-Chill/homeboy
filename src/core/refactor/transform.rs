@@ -747,14 +747,7 @@ fn apply_hoist_static_context(
                 .replace("$1", &screaming)
                 .replace("$2", init_expr.as_deref().unwrap_or(""))
                 .split('\n')
-                .enumerate()
-                .map(|(j, part)| {
-                    if j == 0 {
-                        format!("{}{}", indent, part)
-                    } else {
-                        format!("{}{}", indent, part)
-                    }
-                })
+                .map(|part| format!("{}{}", indent, part))
                 .collect::<Vec<_>>()
                 .join("\n");
 

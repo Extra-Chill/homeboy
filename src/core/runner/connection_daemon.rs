@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -20,7 +20,7 @@ pub(super) fn connect_remote_daemon(
     expected_version: &str,
     expected_identity: &str,
     runner_id: &str,
-    session_path: &PathBuf,
+    session_path: &Path,
 ) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
     let failed_after_tunnel = |tunnel_pid: Option<u32>, message: String| {
         if let Some(pid) = tunnel_pid {
@@ -28,7 +28,7 @@ pub(super) fn connect_remote_daemon(
         }
         failed_connect(
             runner_id,
-            session_path.clone(),
+            session_path.to_path_buf(),
             RunnerFailureKind::DaemonStartupFailure,
             message,
         )
@@ -44,7 +44,7 @@ pub(super) fn connect_remote_daemon(
             if let Err(message) = remote_daemon_stop(client, homeboy) {
                 return Err(failed_connect(
                     runner_id,
-                    session_path.clone(),
+                    session_path.to_path_buf(),
                     RunnerFailureKind::DaemonStartupFailure,
                     message,
                 ));
@@ -54,7 +54,7 @@ pub(super) fn connect_remote_daemon(
                 Err(message) => {
                     return Err(failed_connect(
                         runner_id,
-                        session_path.clone(),
+                        session_path.to_path_buf(),
                         RunnerFailureKind::DaemonStartupFailure,
                         message,
                     ));
@@ -86,12 +86,12 @@ fn open_daemon_tunnel(
     server: &Server,
     daemon: &RemoteDaemon,
     runner_id: &str,
-    session_path: &PathBuf,
+    session_path: &Path,
 ) -> std::result::Result<(u16, Option<u32>, String), (RunnerConnectReport, i32)> {
     let Ok(remote_addr) = parse_loopback_daemon_addr(&daemon.address) else {
         return Err(failed_connect(
             runner_id,
-            session_path.clone(),
+            session_path.to_path_buf(),
             RunnerFailureKind::DaemonStartupFailure,
             "remote daemon did not report a loopback address".to_string(),
         ));
@@ -100,7 +100,7 @@ fn open_daemon_tunnel(
     let local_port = reserve_loopback_port().map_err(|err| {
         failed_connect(
             runner_id,
-            session_path.clone(),
+            session_path.to_path_buf(),
             RunnerFailureKind::TunnelFailure,
             err.to_string(),
         )
@@ -114,7 +114,7 @@ fn open_daemon_tunnel(
     if !tunnel.success {
         return Err(failed_connect(
             runner_id,
-            session_path.clone(),
+            session_path.to_path_buf(),
             RunnerFailureKind::TunnelFailure,
             format!("SSH tunnel setup failed: {}", tunnel.stderr.trim()),
         ));
@@ -126,7 +126,7 @@ fn open_daemon_tunnel(
         }
         return Err(failed_connect(
             runner_id,
-            session_path.clone(),
+            session_path.to_path_buf(),
             RunnerFailureKind::TunnelFailure,
             format!(
                 "local tunnel 127.0.0.1:{} did not become reachable",

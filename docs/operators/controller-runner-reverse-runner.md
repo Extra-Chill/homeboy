@@ -248,6 +248,14 @@ The controller broker API wraps every successful response as
 responses without `data.body` as malformed instead of falling back to direct
 `data` payload parsing.
 
+Reverse-broker artifact lookup is metadata-only in the current contract. Broker
+artifact metadata includes `retrieval.mode: metadata_only`,
+`content_available: false`, and no `content_url` or `fetch_command`. When those
+artifacts are mirrored into persisted run evidence, orchestrators should use the
+same fields to avoid guessing runner-local paths. Byte retrieval is available
+only from run artifact routes or CLI outputs that report `content_available` set
+to `true` with `retrieval.mode` set to `direct_download` or `inline_base64`.
+
 ## Troubleshooting
 
 | Symptom | Check | Likely fix |

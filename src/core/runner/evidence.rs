@@ -528,9 +528,12 @@ fn reverse_broker_artifact_record(
                 job.id,
                 encode_uri_component(&artifact.id)
             ),
+            "content_available": false,
             "broker_artifact_retrieval": {
                 "mode": "metadata_only",
                 "content_available": false,
+                "content_url": null,
+                "fetch_command": null,
                 "hint": "Reverse broker artifact mirroring preserves metadata only; broker byte retrieval is a future content-proxy slice."
             },
             "metadata": artifact.metadata.clone(),

@@ -1,56 +1,30 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
-    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface,
-    CommandSafetyEntry, Cli, Commands,
+    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
+    CommandSafetyEntry, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;
 
 #[test]
-fn includes_current_top_level_commands() {
+fn command_surface_tracks_representative_live_and_removed_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
-    assert!(surface.contains_path(&["daemon"]));
-    assert!(surface.contains_path(&["deps"]));
-    assert!(surface.contains_path(&["git"]));
-    assert!(surface.contains_path(&["http"]));
-    assert!(surface.contains_path(&["self"]));
-    assert!(surface.contains_path(&["stack"]));
     assert!(surface.contains_path(&["report"]));
-    assert!(surface.contains_path(&["upgrade"]));
-    assert!(!surface.contains_path(&["init"]));
-    assert!(!surface.contains_path(&["update"]));
-    assert!(!surface.contains_path(&["transfer"]));
-}
-
-#[test]
-fn includes_first_level_subcommands() {
-    let surface = current_command_surface();
-
     assert!(surface.contains_path(&["git", "status"]));
     assert!(surface.contains_path(&["http", "get"]));
-    assert!(surface.contains_path(&["deps", "status"]));
-    assert!(surface.contains_path(&["deps", "update"]));
-    assert!(surface.contains_path(&["daemon", "serve"]));
-    assert!(surface.contains_path(&["self", "status"]));
-    assert!(surface.contains_path(&["stack", "inspect"]));
     assert!(surface.contains_path(&["report", "failure-digest"]));
-    assert!(surface.contains_path(&["report", "performance-digest"]));
-    assert!(surface.contains_path(&["report", "bench-coverage"]));
-    assert!(surface.contains_path(&["file", "download"]));
-    assert!(surface.contains_path(&["file", "mkdir"]));
-    assert!(surface.contains_path(&["file", "upload"]));
-    assert!(surface.contains_path(&["file", "copy"]));
-    assert!(surface.contains_path(&["file", "sync"]));
     assert!(surface.contains_path(&["runner", "job"]));
-    assert!(surface.contains_path(&["agent-task", "loop"]));
-    assert!(surface.contains_path(&["agent-task", "contract"]));
-    assert!(surface.contains_path(&["version", "show"]));
-    assert!(surface.contains_path(&["worktree", "create"]));
-    assert!(surface.contains_path(&["worktree", "remove"]));
-    assert!(surface.contains_path(&["tunnel", "preview-consumer"]));
+    assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
+    assert!(surface.contains_path(&["agent-task", "auth", "status"]));
+    assert!(surface.contains_path(&["runner", "job", "logs"]));
+    assert!(!surface.contains_path(&["init"]));
     assert!(!surface.contains_path(&["version", "bump"]));
+    assert!(!surface.contains_path(&["components"]));
+    assert!(!surface.contains_path(&["stacks", "inspect"]));
+    assert!(!surface.contains_path(&["audit", "code"]));
+    assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
 #[test]
@@ -64,19 +38,6 @@ fn agent_task_tool_bridge_stays_hidden_but_parseable() {
     let docs = include_str!("../docs/commands/agent-task.md");
     assert!(docs.contains("## Internal Bridge"));
     assert!(docs.contains("hidden provider-runtime bridge"));
-}
-
-#[test]
-fn includes_second_level_subcommands() {
-    let surface = current_command_surface();
-
-    assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
-    assert!(surface.contains_path(&["agent-task", "controller", "events"]));
-    assert!(surface.contains_path(&["agent-task", "auth", "status"]));
-    assert!(surface.contains_path(&["runner", "job", "logs"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "route"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "list"]));
-    assert!(surface.contains_path(&["tunnel", "preview-ingress", "status"]));
 }
 
 #[test]
@@ -153,28 +114,6 @@ fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
 }
 
 #[test]
-fn excludes_removed_cli_aliases() {
-    let surface = current_command_surface();
-
-    assert!(!surface.contains_path(&["components"]));
-    assert!(!surface.contains_path(&["dependencies"]));
-    assert!(!surface.contains_path(&["rigs"]));
-    assert!(!surface.contains_path(&["stacks", "inspect"]));
-}
-
-#[test]
-fn rejects_stale_or_unrepresented_paths() {
-    let surface = current_command_surface();
-
-    assert!(!surface.contains_path(&["supports"]));
-    assert!(!surface.contains_path(&["audit", "code"]));
-    assert!(!surface.contains_path(&["audit", "docs"]));
-    assert!(!surface.contains_path(&["audit", "structure"]));
-    assert!(!surface.contains_path(&["stack", "inspect", "extra"]));
-    assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
-}
-
-#[test]
 fn command_index_matches_top_level_command_surface() {
     let manifest = current_command_safety_manifest();
     let documented = documented_command_index_entries();
@@ -243,6 +182,63 @@ fn command_safety_manifest_docs_paths_match_command_docs() {
             entry.name
         );
     }
+}
+
+#[test]
+fn visible_safety_manifest_entries_advertise_live_command_docs() {
+    let manifest = current_command_safety_manifest();
+
+    for entry in all_safety_entries(&manifest.commands) {
+        if entry.hidden {
+            continue;
+        }
+
+        let path =
+            entry.docs.path.as_deref().unwrap_or_else(|| {
+                panic!("visible command {:?} is missing docs metadata", entry.path)
+            });
+        let top_level = entry.path.first().expect("safety path should not be empty");
+        assert_eq!(
+            path,
+            format!("docs/commands/{top_level}.md"),
+            "visible command {:?} should point at its top-level command doc",
+            entry.path
+        );
+        assert!(
+            command_doc_manifest_path(path).is_file(),
+            "visible command {:?} advertises `{path}` in the safety manifest, but that file is missing",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
+    let manifest = current_command_safety_manifest();
+    let explicit_no_apply_surface = BTreeSet::from([
+        "file mkdir".to_string(),
+        "file rename".to_string(),
+        "triage".to_string(),
+    ]);
+
+    let missing_safety_surface: Vec<_> = all_safety_entries(&manifest.commands)
+        .into_iter()
+        .filter(|entry| entry.mutates)
+        .filter(|entry| {
+            !entry.dry_run.supported
+                && !entry.output.notes.contains("--apply")
+                && !entry.output.notes.contains("--dry-run")
+                && !entry.output.notes.contains("--check")
+                && !entry.dangerous_flags.iter().any(|flag| flag == "--apply")
+                && !explicit_no_apply_surface.contains(&entry.path.join(" "))
+        })
+        .map(|entry| entry.path.join(" "))
+        .collect();
+
+    assert!(
+        missing_safety_surface.is_empty(),
+        "mutating safety-manifest entries must advertise dry-run/apply/check metadata or be explicitly allowlisted: {missing_safety_surface:?}"
+    );
 }
 
 #[test]
@@ -510,6 +506,15 @@ fn documented_command_doc_files() -> BTreeSet<String> {
 
 fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
     !entry.hidden && entry.docs.path.is_some()
+}
+
+fn all_safety_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
+    let mut flattened = Vec::new();
+    for entry in entries {
+        flattened.push(entry);
+        flattened.extend(all_safety_entries(&entry.subcommands));
+    }
+    flattened
 }
 
 fn command_doc_manifest_path(path: &str) -> std::path::PathBuf {

@@ -207,7 +207,7 @@ pub(crate) fn materialize_rig_spec(
     source_root: &Path,
 ) -> Result<Option<serde_json::Value>> {
     let value = read_json_value(path)?;
-    if !value.get(EXTENDS_FIELD).is_some() {
+    if value.get(EXTENDS_FIELD).is_none() {
         return Ok(None);
     }
     materialize_rig_spec_value(path, source_root, value, &mut Vec::new()).map(Some)

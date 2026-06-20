@@ -119,6 +119,8 @@
     },
     "convention_exception_globs": [
       "src/commands/adapter.rs",
+      "src/commands/agent_task_summary.rs",
+      "src/commands/output_runtime.rs",
       "src/core/code_audit/detectors/test_coverage.rs",
       "src/core/code_audit/detectors/test_vacuity.rs",
       "src/core/code_audit/detectors/upstream_workaround.rs"
@@ -490,10 +492,8 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-06-19T16:45:00Z",
-      "item_count": 409,
+      "item_count": 407,
       "known_fingerprints": [
-        "Commands::src/commands/agent_task_summary.rs::NamingMismatch",
-        "Commands::src/commands/output_runtime.rs::NamingMismatch",
         "compiler::src/core/deploy/planning.rs::CompilerWarning",
         "compiler::src/core/extension/test/run.rs::CompilerWarning",
         "core_boundary_leak:core-agnostic-source::src/core/code_audit/codebase_map.rs::Core boundary leak (core-agnostic-source) configured ecosystem term `WooCommerce` appears at line <line> in behavioral context `top-level`::CoreBoundaryLeak",

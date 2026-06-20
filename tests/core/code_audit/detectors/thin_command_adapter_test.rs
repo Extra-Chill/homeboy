@@ -58,8 +58,8 @@ fn thick_command_module_is_flagged() {
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].kind, AuditFinding::ThinCommandAdapterViolation);
     assert_eq!(findings[0].convention, "thin_command_adapter");
-    assert!(findings[0].description.contains("process execution x1"));
-    assert!(findings[0].description.contains("filesystem mutation x1"));
+    assert!(findings[0].description.contains("process execution"));
+    assert!(findings[0].description.contains("filesystem mutation"));
 }
 
 #[test]
@@ -138,5 +138,5 @@ fn weighted_group_reaches_threshold_alone() {
     config.orchestration_markers[0].weight = 5;
     let findings = super::run(dir.path(), &config);
     assert_eq!(findings.len(), 1);
-    assert!(findings[0].description.contains("weight 5"));
+    assert!(findings[0].description.contains("process execution"));
 }

@@ -378,10 +378,13 @@ homeboy logs show production --follow
 homeboy db query production "select 1"
 homeboy file read production /path/to/file
 homeboy file copy production:/path/to/file staging:/path/to/file
+homeboy fleet exec production --check -- wp plugin list
+homeboy fleet exec production --apply -- wp plugin list
 ```
 
 These commands are valuable for configured projects and server fleets. They are
-not required for the local/CI/agent quality loop.
+not required for the local/CI/agent quality loop. `fleet exec` requires
+`--apply` for real SSH fan-out; `--check` keeps the operation in plan mode.
 
 ## Extensions
 

@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::cli_surface::current_command_surface;
+use homeboy::command_contract::{
+    registered_command_json_family, CommandJsonFamily, PUBLIC_OUTPUT_VARIANT_CONTRACTS,
+};
 use homeboy::commands::bench::BenchOutput;
 use homeboy::commands::extension::{ExtensionDetail, ExtensionOutput};
 use homeboy::commands::rig::RigCommandOutput;
@@ -33,6 +36,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const REQUIRED_QUALITY_COMMAND_FIXTURES: &[&str] = &["audit", "lint", "review", "test"];
+const REQUIRED_OPS_VARIANT_COMMANDS: &[&str] = &["db", "deploy"];
 
 struct OutputContractScenario {
     command: &'static str,
@@ -62,6 +66,31 @@ fn visible_quality_commands_have_declared_golden_json_contract_fixtures() {
         assert!(
             covered.contains(command),
             "missing golden JSON output contract fixture for visible quality command: {command}"
+        );
+    }
+}
+
+#[test]
+fn public_output_variant_contracts_cover_known_ops_command_families() {
+    let surface = current_command_surface();
+    let covered: BTreeSet<_> = PUBLIC_OUTPUT_VARIANT_CONTRACTS
+        .iter()
+        .map(|contract| contract.command)
+        .collect();
+
+    for command in REQUIRED_OPS_VARIANT_COMMANDS {
+        assert!(
+            surface.contains_path(&[*command]),
+            "required ops output variant command is not visible in the CLI surface: {command}"
+        );
+        assert_eq!(
+            registered_command_json_family(command),
+            Some(CommandJsonFamily::Ops),
+            "required output variant command should stay routed through the ops JSON family: {command}"
+        );
+        assert!(
+            covered.contains(command),
+            "missing public output variant contract for ops command family: {command}"
         );
     }
 }

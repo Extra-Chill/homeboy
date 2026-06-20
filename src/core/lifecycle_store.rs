@@ -75,9 +75,11 @@ pub(super) fn record_exists(run_id: &str) -> Result<bool> {
 
 pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     let store = ObservationStore::open_initialized()?;
-    let mut filter = RunListFilter::default();
-    filter.kind = Some("agent-task".to_string());
-    filter.limit = Some(1000);
+    let filter = RunListFilter {
+        kind: Some("agent-task".to_string()),
+        limit: Some(1000),
+        ..Default::default()
+    };
     let mut records = Vec::new();
     for run in store.list_runs(filter)? {
         match record_from_run(&run) {

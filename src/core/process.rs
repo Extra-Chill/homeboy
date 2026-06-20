@@ -36,7 +36,7 @@ impl ProcessStep {
 /// When a step omits a working directory, the normalized root becomes the
 /// effective working directory. This gives local commands, extensions, and rigs
 /// one reusable path policy without requiring filesystem canonicalization.
-pub fn prepare_contained_process_step(
+pub(crate) fn prepare_contained_process_step(
     root: impl AsRef<Path>,
     step: ProcessStep,
 ) -> Result<ProcessStep> {

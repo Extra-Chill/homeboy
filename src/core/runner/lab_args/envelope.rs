@@ -14,6 +14,7 @@ pub(in crate::core::runner) struct ExecutionEnvelope {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::core::runner) struct LabCommandInputs {
     pub provider_configs: Vec<ArgRef>,
+    pub agent_task_text_specs: Vec<ArgRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,22 @@ impl ExecutionEnvelope {
                     flag: "--provider-config",
                     value: provider_config_value(spec),
                 });
+                continue;
+            }
+            if let Some(flag) = agent_task_text_flag(arg) {
+                inputs.agent_task_text_specs.push(ArgRef {
+                    flag,
+                    value: iter
+                        .next()
+                        .map_or(ArgValue::Missing, |spec| agent_task_text_value(spec)),
+                });
+                continue;
+            }
+            if let Some((flag, spec)) = agent_task_text_inline_arg(arg) {
+                inputs.agent_task_text_specs.push(ArgRef {
+                    flag,
+                    value: agent_task_text_value(spec),
+                });
             }
         }
 
@@ -98,6 +115,39 @@ impl ExecutionEnvelope {
         }
         out
     }
+
+    pub fn rewrite_agent_task_text_values(
+        &self,
+        mut rewrite: impl FnMut(&str, &str) -> crate::core::Result<String>,
+    ) -> crate::core::Result<Vec<String>> {
+        let mut out = Vec::with_capacity(self.argv.len());
+        let mut iter = self.argv.iter().peekable();
+        let mut passthrough = false;
+        while let Some(arg) = iter.next() {
+            if passthrough {
+                out.push(arg.clone());
+                continue;
+            }
+            if arg == "--" {
+                passthrough = true;
+                out.push(arg.clone());
+                continue;
+            }
+            if let Some(flag) = agent_task_text_flag(arg) {
+                out.push(arg.clone());
+                if let Some(spec) = iter.next() {
+                    out.push(rewrite(spec, flag)?);
+                }
+                continue;
+            }
+            if let Some((flag, spec)) = agent_task_text_inline_arg(arg) {
+                out.push(format!("{}={}", flag, rewrite(spec, flag)?));
+                continue;
+            }
+            out.push(arg.clone());
+        }
+        Ok(out)
+    }
 }
 
 fn provider_config_value(spec: &str) -> ArgValue {
@@ -109,6 +159,38 @@ fn provider_config_value(spec: &str) -> ArgValue {
     } else {
         ArgValue::InlineText(spec.to_string())
     }
+}
+
+fn agent_task_text_value(spec: &str) -> ArgValue {
+    let trimmed = spec.trim();
+    if trimmed == "-" {
+        ArgValue::Stdin
+    } else if let Some(path) = trimmed.strip_prefix('@') {
+        ArgValue::PathRef(path.to_string())
+    } else {
+        ArgValue::InlineText(spec.to_string())
+    }
+}
+
+fn agent_task_text_flag(arg: &str) -> Option<&'static str> {
+    match arg {
+        "--prompt" => Some("--prompt"),
+        "--task" => Some("--task"),
+        "--tasks" => Some("--tasks"),
+        _ => None,
+    }
+}
+
+fn agent_task_text_inline_arg(arg: &str) -> Option<(&'static str, &str)> {
+    for flag in ["--prompt", "--task", "--tasks"] {
+        if let Some(value) = arg
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            return Some((flag, value));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -161,5 +243,40 @@ mod tests {
 
         assert_eq!(envelope.inputs.provider_configs.len(), 1);
         assert_eq!(envelope.inputs.provider_configs[0].value, ArgValue::Missing);
+    }
+
+    #[test]
+    fn envelope_captures_agent_task_text_refs_before_passthrough() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "@prompt.md".to_string(),
+            "--task=Fix it".to_string(),
+            "--tasks=-".to_string(),
+            "--".to_string(),
+            "--prompt".to_string(),
+            "@ignored.md".to_string(),
+        ];
+
+        let envelope = ExecutionEnvelope::from_args(&args);
+
+        assert_eq!(envelope.inputs.agent_task_text_specs.len(), 3);
+        assert_eq!(envelope.inputs.agent_task_text_specs[0].flag, "--prompt");
+        assert_eq!(
+            envelope.inputs.agent_task_text_specs[0].value,
+            ArgValue::PathRef("prompt.md".to_string())
+        );
+        assert_eq!(envelope.inputs.agent_task_text_specs[1].flag, "--task");
+        assert_eq!(
+            envelope.inputs.agent_task_text_specs[1].value,
+            ArgValue::InlineText("Fix it".to_string())
+        );
+        assert_eq!(envelope.inputs.agent_task_text_specs[2].flag, "--tasks");
+        assert_eq!(
+            envelope.inputs.agent_task_text_specs[2].value,
+            ArgValue::Stdin
+        );
     }
 }

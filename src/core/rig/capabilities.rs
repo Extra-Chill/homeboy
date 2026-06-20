@@ -1,15 +1,12 @@
 //! Generic declarative rig requirements and capability checks.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use super::expand::expand_vars;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
-use super::spec::{
-    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, RigSpec,
-};
+use super::spec::{ExecutableRequirementSpec, FilesystemAssertionSpec, RigSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RigRequirementCheckPlan {
@@ -159,19 +156,13 @@ fn evaluate_filesystem_assertion(
     }
 
     let resolved = resolve_filesystem_assertion_path(rig, assertion);
-    let exists = match assertion.kind {
-        FilesystemAssertionKind::Path => resolved.exists(),
-        FilesystemAssertionKind::File => resolved.is_file(),
-        FilesystemAssertionKind::Dir => resolved.is_dir(),
-    };
-
-    if exists {
+    if assertion.kind.matches_path(&resolved) {
         return Ok(());
     }
 
     let mut message = format!(
         "{} assertion failed: {} (declared: {})",
-        filesystem_kind_label(assertion.kind),
+        assertion.kind.label(),
         resolved.display(),
         assertion.path
     );
@@ -205,21 +196,10 @@ fn executable_label(requirement: &ExecutableRequirementSpec) -> String {
 }
 
 fn filesystem_label(assertion: &FilesystemAssertionSpec) -> String {
-    assertion.label.clone().unwrap_or_else(|| {
-        format!(
-            "require {} {}",
-            filesystem_kind_label(assertion.kind),
-            assertion.path
-        )
-    })
-}
-
-fn filesystem_kind_label(kind: FilesystemAssertionKind) -> &'static str {
-    match kind {
-        FilesystemAssertionKind::Path => "path",
-        FilesystemAssertionKind::File => "file",
-        FilesystemAssertionKind::Dir => "dir",
-    }
+    assertion
+        .label
+        .clone()
+        .unwrap_or_else(|| format!("require {} {}", assertion.kind.label(), assertion.path))
 }
 
 fn find_executable(candidate: &str) -> Option<PathBuf> {
@@ -228,7 +208,7 @@ fn find_executable(candidate: &str) -> Option<PathBuf> {
         return is_executable_file(path).then(|| path.to_path_buf());
     }
 
-    let path_var = std::env::var_os("PATH").map(OsString::from)?;
+    let path_var = std::env::var_os("PATH")?;
 
     std::env::split_paths(&path_var)
         .map(|dir| dir.join(candidate))
@@ -258,7 +238,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::core::rig::spec::{RigRequirementsSpec, RigSpec};
+    use crate::core::rig::spec::{FilesystemAssertionKind, RigRequirementsSpec, RigSpec};
 
     #[test]
     fn plans_executable_and_filesystem_requirements() {

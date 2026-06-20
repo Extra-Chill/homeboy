@@ -498,9 +498,7 @@ fn parse_type_before_name_field(line: &str) -> Option<FieldSignature> {
         content = stripped.trim_start();
     }
 
-    let Some(dollar_pos) = content.find('$') else {
-        return None;
-    };
+    let dollar_pos = content.find('$')?;
 
     let field_type = content[..dollar_pos].trim();
     let after_dollar = &content[dollar_pos + 1..];

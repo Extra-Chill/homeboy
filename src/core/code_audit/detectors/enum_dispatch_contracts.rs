@@ -264,9 +264,7 @@ impl SourceFile {
             if arm.is_empty() {
                 continue;
             }
-            let Some(arrow) = Self::find_top_level_arrow(arm.as_bytes()) else {
-                return None;
-            };
+            let arrow = Self::find_top_level_arrow(arm.as_bytes())?;
             let pattern = arm[..arrow].trim();
             let expression = arm[arrow + 2..].trim();
             let (arm_enum, variant) = Self::parse_enum_variant_pattern(pattern)?;

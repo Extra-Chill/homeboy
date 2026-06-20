@@ -152,17 +152,8 @@ fn missing_roundtrip_sides(key: &str, key_sets: &ConfigRoundtripKeySets) -> Vec<
     let copied = key_sets.copied.contains_key(key);
     let mut missing = Vec::new();
 
-    if behavior_bearing {
-        if !exported {
-            missing.push("export");
-        }
-        if !imported {
-            missing.push("import");
-        }
-        if key_sets.copy_enabled && !copied {
-            missing.push("copy");
-        }
-    } else if exported != imported
+    if behavior_bearing
+        || exported != imported
         || (key_sets.copy_enabled && (copied != exported || copied != imported))
     {
         if !exported {

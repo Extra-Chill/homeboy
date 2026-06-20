@@ -153,6 +153,8 @@ fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Res
         "retrieval": {
             "mode": "metadata_only",
             "content_available": false,
+            "content_url": null,
+            "fetch_command": null,
             "metadata_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
             "future_content_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
             "hint": "Reverse broker artifacts currently retain metadata only. Use runner-side artifact commands for bytes until broker content proxying lands."

@@ -122,7 +122,7 @@ impl ChangeArtifact {
     /// The projection is intentionally lossy: source snapshot, schema, and
     /// digest remain in metadata while the lifecycle artifact carries the
     /// review-facing id/type/files/diff/provenance fields.
-    pub fn to_execution_change_artifact(
+    pub(crate) fn to_execution_change_artifact(
         &self,
         fallback_id: impl Into<String>,
         artifact_type: impl Into<String>,

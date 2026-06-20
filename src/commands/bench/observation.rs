@@ -518,9 +518,7 @@ fn persist_bench_artifact(
         };
     }
 
-    let Some(original_path) = artifact.path.clone() else {
-        return None;
-    };
+    let original_path = artifact.path.clone()?;
     if bench_artifact_path_is_blocked(&original_path) {
         return Some(bench_artifact_diagnostic(
             scenario_id,
@@ -591,15 +589,11 @@ fn apply_recorded_bench_artifact_links(
     record: &ArtifactRecord,
 ) -> Option<BenchDiagnostic> {
     artifact.observation_artifact_id = Some(record.id.clone());
-    let Some(public_url) = artifact_links::public_artifact_url(record) else {
-        return None;
-    };
+    let public_url = artifact_links::public_artifact_url(record)?;
     artifact.public_url = Some(public_url.clone());
     artifact.viewer_links = artifact_links::cached_validated_viewer_links(record, &public_url);
     artifact.viewer_url = artifact.viewer_links.first().map(|link| link.url.clone());
-    let Some(validation) = record.metadata_json.get("public_url_validation") else {
-        return None;
-    };
+    let validation = record.metadata_json.get("public_url_validation")?;
     let reachable = validation
         .get("reachable")
         .and_then(serde_json::Value::as_bool)
