@@ -134,7 +134,10 @@ const artifact = buildRestRouteMatrixArtifact({
 		{ method: 'POST', route: '/wc/store/v1/cart', status: 500, durationMs: 80, queryCount: 2 },
 	],
 	dbProfiles: [
-		{ method: 'GET', route: '/wc/store/v1/cart', queryCount: 14, queryTimeMs: 22.5, totalQueries: 40 },
+		{ method: 'GET', route: '/wc/store/v1/cart', queryCount: 14, queryTimeMs: 22.5, totalQueries: 40, top_query_shapes: [
+			{ sql: 'SELECT * FROM wp_posts WHERE ID = ?', count: 3, time_ms: 12.25 },
+			{ sql: 'SELECT * FROM wp_postmeta WHERE post_id IN (?)', count: 7, time_ms: 8.5 },
+		] },
 		{ method: 'GET', route: '/demo/v1/private', query_count: 1, query_time_ms: 1.25 },
 	],
 	budgets: {
@@ -159,6 +162,10 @@ assert.deepEqual(artifact.routes.find((row) => row.id === 'rest:get:wc-store-v1-
 	queryCount: 14,
 	queryTimeMs: 22.5,
 	totalQueries: 40,
+	topQueryShapes: [
+		{ sql: 'SELECT * FROM wp_posts WHERE ID = ?', count: 3, timeMs: 12.25 },
+		{ sql: 'SELECT * FROM wp_postmeta WHERE post_id IN (?)', count: 7, timeMs: 8.5 },
+	],
 });
 assert.equal(artifact.coverage.byNamespace['wc/store/v1'].total, 2);
 assert.equal(artifact.coverage.byNamespace['wc/store/v1'].covered, 2);
@@ -199,6 +206,8 @@ assert.match(markdown, /\| wc\/store\/v1 \| 2 \| 2 \| 0 \|/);
 assert.match(markdown, /## Slowest routes by duration/);
 assert.match(markdown, /`GET \/wc\/store\/v1\/cart` \| 200 \| 95 \| 14/);
 assert.match(markdown, /## Slowest routes by query time/);
+assert.match(markdown, /## Top DB query shapes by REST case/);
+assert.match(markdown, /SELECT \* FROM wp_posts WHERE ID = \?/);
 assert.match(markdown, /## Missing or uncovered routes/);
 assert.match(markdown, /`GET \/wp\/v2\/posts\/\{id\}`/);
 assert.match(markdown, /## Budget findings/);
@@ -214,6 +223,7 @@ assert.deepEqual(normalizeRestDbProfile({ method: 'get', route: '/wp-json/wp/v2/
 	queryCount: undefined,
 	queryTimeMs: 3.5,
 	totalQueries: undefined,
+	topQueryShapes: [],
 });
 
 const budgetManifest = normalizeRestRouteMatrixBudgetManifest({
