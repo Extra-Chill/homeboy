@@ -41,9 +41,10 @@ pub fn collect_exec(
     fleet_id: &str,
     command: Vec<String>,
     check: bool,
+    apply: bool,
     user_override: Option<String>,
 ) -> crate::core::Result<(Vec<FleetExecProjectResult>, FleetExecSummary, i32)> {
-    let run = collect_exec_run(fleet_id, command, check, user_override)?;
+    let run = collect_exec_run(fleet_id, command, check, apply, user_override)?;
     Ok((run.results, run.summary, run.exit_code))
 }
 
@@ -51,13 +52,26 @@ pub fn collect_exec_run(
     fleet_id: &str,
     command: Vec<String>,
     check: bool,
+    apply: bool,
     user_override: Option<String>,
 ) -> crate::core::Result<FleetExecRun> {
     if command.is_empty() {
         return Err(
             crate::core::Error::validation_missing_argument(vec!["command".to_string()])
-                .with_hint("Usage: homeboy fleet exec <fleet> -- <command>".to_string()),
+                .with_hint(
+                    "Usage: homeboy fleet exec <fleet> --check -- <command> or homeboy fleet exec <fleet> --apply -- <command>"
+                        .to_string(),
+                ),
         );
+    }
+
+    if !check && !apply {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "apply",
+            "fleet exec sends commands over SSH to every project in the fleet and requires explicit --apply. Use --check to preview or re-run with --apply to execute.",
+            None,
+            Some(vec!["homeboy fleet exec <fleet> --apply -- <command>".to_string()]),
+        ));
     }
 
     let command_string = if command.len() == 1 {
@@ -335,5 +349,19 @@ mod tests {
 
         assert_eq!("fleet.exec.alpha", step.id);
         assert_eq!(ExecutionStatus::Skipped, step.status);
+    }
+
+    #[test]
+    fn real_fleet_exec_requires_apply_before_loading_fleet() {
+        let error = collect_exec_run(
+            "missing-fleet",
+            vec!["wp".to_string(), "plugin".to_string(), "list".to_string()],
+            false,
+            false,
+            None,
+        )
+        .expect_err("real fleet exec should require --apply");
+
+        assert!(error.message.contains("requires explicit --apply"));
     }
 }

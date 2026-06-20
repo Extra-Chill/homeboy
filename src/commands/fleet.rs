@@ -26,7 +26,14 @@ impl FleetArgs {
     }
 
     pub fn is_hot_resource_command(&self) -> bool {
-        matches!(self.command, FleetCommand::Exec { check: false, .. })
+        matches!(
+            self.command,
+            FleetCommand::Exec {
+                check: false,
+                apply: true,
+                ..
+            }
+        )
     }
 }
 
@@ -125,6 +132,10 @@ enum FleetCommand {
         #[arg(long)]
         check: bool,
 
+        /// Confirm the command should execute over SSH on every project in the fleet
+        #[arg(long)]
+        apply: bool,
+
         /// Override the SSH user for this execution (instead of each server's configured user)
         #[arg(long)]
         user: Option<String>,
@@ -181,8 +192,9 @@ pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutpu
             id,
             command,
             check,
+            apply,
             user,
-        } => exec(&id, command, check, user),
+        } => exec(&id, command, check, apply, user),
     }
 }
 
@@ -512,9 +524,11 @@ fn exec(
     id: &str,
     command: Vec<String>,
     check: bool,
+    apply: bool,
     user: Option<String>,
 ) -> CmdResult<FleetOutput> {
-    let run = fleet::collect_exec_run(id, command, check, user)?;
+    validate_exec_apply_boundary(id, &command, check, apply)?;
+    let run = fleet::collect_exec_run(id, command, check, apply, user)?;
 
     Ok((
         FleetOutput {
@@ -532,3 +546,31 @@ fn exec(
         run.exit_code,
     ))
 }
+
+fn validate_exec_apply_boundary(
+    id: &str,
+    command: &[String],
+    check: bool,
+    apply: bool,
+) -> homeboy::core::Result<()> {
+    if check || apply || command.is_empty() {
+        return Ok(());
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "fleet exec sends commands over SSH to every project in the fleet and requires explicit --apply. Use --check to preview or re-run with --apply to execute. Suggested command: homeboy fleet exec {id} --apply -- {}",
+            command.join(" ")
+        ),
+        None,
+        Some(vec![format!(
+            "homeboy fleet exec {id} --apply -- {}",
+            command.join(" ")
+        )]),
+    ))
+}
+
+#[cfg(test)]
+#[path = "../../tests/commands/fleet_test.rs"]
+mod fleet_test;
