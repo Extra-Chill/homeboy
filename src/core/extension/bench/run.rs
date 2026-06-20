@@ -245,10 +245,9 @@ fn bench_list_result(
     results_file: PathBuf,
     scenario_ids: &[String],
 ) -> Result<BenchListWorkflowResult> {
-    let parsed = apply_scenario_filter(
-        parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?,
-        scenario_ids,
-    )?;
+    let mut parsed = parsing::parse_bench_results_file_with_artifact_context(&results_file, None)?;
+    normalize_workload_json_scenario_ids(&mut parsed);
+    let parsed = apply_scenario_filter(parsed, scenario_ids)?;
     let count = parsed.scenarios.len();
 
     Ok(BenchListWorkflowResult {
@@ -257,6 +256,23 @@ fn bench_list_result(
         scenarios: parsed.scenarios,
         count,
     })
+}
+
+fn normalize_workload_json_scenario_ids(results: &mut BenchResults) {
+    for scenario in &mut results.scenarios {
+        let Some(file) = scenario.file.as_deref() else {
+            continue;
+        };
+        let path = std::path::Path::new(file);
+        let Some(file_stem) = path.file_stem().map(|stem| stem.to_string_lossy()) else {
+            continue;
+        };
+        if !file_stem.contains(".workload") || scenario.id != file_stem {
+            continue;
+        }
+
+        scenario.id = scenario_id_for_workload_path(path);
+    }
 }
 
 fn apply_scenario_filter(
@@ -305,6 +321,7 @@ fn scenario_id_for_workload_path(path: &std::path::Path) -> String {
     let name = basename
         .split_once(".bench.")
         .map(|(stem, _)| stem)
+        .or_else(|| basename.split_once(".workload.").map(|(stem, _)| stem))
         .unwrap_or_else(|| {
             basename
                 .rsplit_once('.')
@@ -362,24 +379,42 @@ fn parse_execution_results_file(
     }
 
     if runner_success {
-        return Ok(Some(apply_scenario_filter(
-            parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
-                results_file,
-                rig_id,
-                scenario_ids,
-            )?,
-            scenario_ids,
-        )?));
-    }
-
-    Ok(
-        parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
+        let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
             results_file,
             rig_id,
             scenario_ids,
-        )
-        .ok(),
+        )?;
+        normalize_workload_json_scenario_ids(&mut results);
+        return Ok(Some(apply_scenario_filter(results, scenario_ids)?));
+    }
+
+    let mut results = parsing::parse_bench_results_file_with_artifact_context_and_scenarios(
+        results_file,
+        rig_id,
+        scenario_ids,
     )
+    .ok();
+    if let Some(results) = &mut results {
+        normalize_workload_json_scenario_ids(results);
+        if is_unmeasured_inventory_results(results) {
+            return Ok(None);
+        }
+    }
+    Ok(results)
+}
+
+fn is_unmeasured_inventory_results(results: &BenchResults) -> bool {
+    results.iterations == 0
+        && !results.scenarios.is_empty()
+        && results.scenarios.iter().all(|scenario| {
+            scenario.iterations == 0
+                && scenario.metrics.values.is_empty()
+                && scenario.metrics.distributions.is_empty()
+                && scenario.metric_groups.is_empty()
+                && scenario.memory.is_none()
+                && scenario.artifacts.is_empty()
+                && scenario.runs.is_none()
+        })
 }
 
 fn failure_scenario_id(scenario_ids: &[String]) -> Option<String> {
@@ -1410,6 +1445,9 @@ fn run_concurrent_instances(
         .and_then(|results| apply_scenario_filter(results, &args.scenario_ids))
         {
             Ok(mut p) => {
+                if is_unmeasured_inventory_results(&p) {
+                    continue;
+                }
                 attach_memory_timeline_artifacts(
                     &mut p,
                     child_resource,
@@ -1883,6 +1921,9 @@ mod tests {
         ChildProcessIdentity, ExtensionChildProcessSample, ExtensionChildResourceSample,
         ExtensionChildResourceSummary,
     };
+    use crate::core::extension::bench::test_support::{
+        results_with_scenarios, scenario_with_iterations,
+    };
     use crate::core::extension::path_list_env_value;
     use std::collections::BTreeMap;
 
@@ -1912,6 +1953,7 @@ mod tests {
             PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
             PathBuf::from("/tmp/bench/studio-bfb-write-path.bench.js"),
             PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+            PathBuf::from("/tmp/bench/generated-rest-request-cases.workload.json"),
         ];
 
         let filtered = filter_extra_workloads_by_scenario_ids(
@@ -1919,6 +1961,7 @@ mod tests {
             &[
                 "studio-agent-runtime".to_string(),
                 "wp-admin-load".to_string(),
+                "generated-rest-request-cases".to_string(),
             ],
         );
 
@@ -1927,6 +1970,34 @@ mod tests {
             vec![
                 PathBuf::from("/tmp/bench/studio-agent-runtime.bench.mjs"),
                 PathBuf::from("/tmp/bench/WpAdminLoad.php"),
+                PathBuf::from("/tmp/bench/generated-rest-request-cases.workload.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_workload_json_scenario_ids_updates_legacy_filename_ids_only() {
+        let mut legacy = scenario_with_iterations("generated-rest-request-cases.workload", &[], 0);
+        legacy.file = Some("tests/bench/generated-rest-request-cases.workload.json".to_string());
+        let mut explicit = scenario_with_iterations("custom-declared-id", &[], 0);
+        explicit.file = Some("tests/bench/custom-source.workload.json".to_string());
+        let mut plain = scenario_with_iterations("plain-workload", &[], 0);
+        plain.file = Some("tests/bench/plain-workload.php".to_string());
+        let mut results = results_with_scenarios("woocommerce", 0, vec![legacy, explicit, plain]);
+
+        normalize_workload_json_scenario_ids(&mut results);
+
+        let ids: Vec<&str> = results
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "generated-rest-request-cases",
+                "custom-declared-id",
+                "plain-workload",
             ]
         );
     }
@@ -2137,6 +2208,89 @@ mod tests {
 
         assert_eq!(parsed.scenarios.len(), 1);
         assert_eq!(parsed.scenarios[0].id, "rest-product-batch-import");
+    }
+
+    #[test]
+    fn failed_execution_parse_discards_inventory_only_results() {
+        let run_dir = RunDir::create().expect("run dir");
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        fs::write(
+            &results_file,
+            r#"{
+                "component_id": "woocommerce",
+                "iterations": 0,
+                "scenarios": [
+                    {
+                        "id": "cart-session-overwrite-race",
+                        "file": "tests/bench/cart-session-overwrite-race.php",
+                        "source": "rig",
+                        "default_iterations": 1,
+                        "iterations": 0,
+                        "metrics": {}
+                    },
+                    {
+                        "id": "generated-rest-request-cases.workload",
+                        "file": "tests/bench/generated-rest-request-cases.workload.json",
+                        "source": "rig",
+                        "default_iterations": 1,
+                        "iterations": 0,
+                        "metrics": {}
+                    }
+                ]
+            }"#,
+        )
+        .expect("write results file");
+
+        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+            .expect("failed inventory parse should succeed");
+
+        assert!(
+            parsed.is_none(),
+            "inventory-only failed payload must not be surfaced as measured bench results"
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn failed_execution_parse_keeps_measured_failure_results() {
+        let run_dir = RunDir::create().expect("run dir");
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        fs::write(
+            &results_file,
+            r#"{
+                "component_id": "woocommerce",
+                "iterations": 1,
+                "failure_classification": {
+                    "kind": "assertion_failure",
+                    "phase": "bench",
+                    "status": "failed"
+                },
+                "scenarios": [
+                    {
+                        "id": "checkout-concurrent-create-order",
+                        "file": "tests/bench/checkout-concurrent-create-order.php",
+                        "iterations": 1,
+                        "metrics": { "failed_count": 1 }
+                    }
+                ]
+            }"#,
+        )
+        .expect("write results file");
+
+        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+            .expect("failed measured parse should succeed")
+            .expect("measured results");
+
+        assert_eq!(parsed.iterations, 1);
+        assert_eq!(parsed.scenarios[0].metrics.get("failed_count"), Some(1.0));
+        assert_eq!(
+            parsed
+                .failure_classification
+                .as_ref()
+                .map(|value| value.kind.as_str()),
+            Some("assertion_failure")
+        );
+        run_dir.cleanup();
     }
 
     #[test]

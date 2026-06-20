@@ -185,7 +185,11 @@ impl CommandSurface {
             return false;
         };
 
-        let Some(entry) = self.commands.iter().find(|entry| entry.matches(first)) else {
+        let Some(entry) = self
+            .commands
+            .iter()
+            .find(|entry| !entry.hidden && entry.matches(first))
+        else {
             return false;
         };
 
@@ -281,7 +285,7 @@ impl CommandSurfaceEntry {
 
         self.subcommands
             .iter()
-            .find(|entry| entry.matches(first))
+            .find(|entry| !entry.hidden && entry.matches(first))
             .is_some_and(|entry| entry.contains_rest(rest))
     }
 }

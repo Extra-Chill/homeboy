@@ -27,7 +27,6 @@
 - [http](http.md) — generic proxied authenticated HTTP requests
 - [issues](issues.md) — reconcile findings against issue trackers
 - [lab](lab.md) — remote Lab runner status and benchmark routing helpers
-- [list](list.md)
 - [lint](lint.md)
 - [logs](logs.md)
 - [observe](observe.md) — passive live observation into trace timeline evidence
