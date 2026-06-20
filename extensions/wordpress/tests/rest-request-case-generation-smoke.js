@@ -40,7 +40,7 @@ const restIndex = {
 		},
 		'/example/v1/items/(?P<id>[\\d]+)': {
 			namespace: 'example/v1',
-			methods: ['GET'],
+			methods: ['GET', 'HEAD', 'OPTIONS'],
 			endpoints: [
 				{
 					methods: ['GET'],
@@ -84,6 +84,15 @@ assert.deepEqual(pageCase.request, {
 
 const itemBaseline = getCases.find((requestCase) => requestCase.matrixId === 'rest:get:example-v1-items-id');
 assert.equal(itemBaseline.request.path, '/example/v1/items/1');
+
+const safeDefaultCases = generateWordPressRestRequestCases(restIndex, { seed: 'alpha', maxCases: 30 });
+const safeDefaultMethods = new Set(safeDefaultCases.map((requestCase) => requestCase.method));
+assert.deepEqual([...safeDefaultMethods].sort(), ['GET', 'HEAD', 'OPTIONS']);
+assert.equal(safeDefaultCases.some((requestCase) => requestCase.method === 'POST'), false);
+assert.deepEqual(safeDefaultCases.find((requestCase) => requestCase.method === 'HEAD').request, {
+	method: 'HEAD',
+	path: '/example/v1/items/1',
+});
 
 const plannedKinds = new Set(getCases[0].metadata.plannedCases.map((requestCase) => requestCase.kind));
 assert.equal(plannedKinds.has('invalid-enum'), true);
