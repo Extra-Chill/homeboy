@@ -952,6 +952,13 @@ fn is_contract_type_hint(type_hint: &str, grammar: &Grammar) -> bool {
 
 /// Extract dead code suppression markers.
 fn extract_dead_code_markers(symbols: &[Symbol], lines: &[&str]) -> Vec<DeadCodeMarker> {
+    static ITEM_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:static\s+)?(?:fn|struct|enum|type|trait|const|static|mod)\s+(\w+)",
+        )
+        .unwrap()
+    });
+
     let mut markers = Vec::new();
 
     // Look for dead_code_marker pattern matches
@@ -968,11 +975,7 @@ fn extract_dead_code_markers(symbols: &[Symbol], lines: &[&str]) -> Vec<DeadCode
                 continue;
             }
             // Try to find a declaration
-            let item_re = regex::Regex::new(
-                r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:static\s+)?(?:fn|struct|enum|type|trait|const|static|mod)\s+(\w+)",
-            )
-            .unwrap();
-            if let Some(caps) = item_re.captures(line) {
+            if let Some(caps) = ITEM_RE.captures(line) {
                 markers.push(DeadCodeMarker {
                     item: caps[1].to_string(),
                     line: s.line,

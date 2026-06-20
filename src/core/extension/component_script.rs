@@ -154,8 +154,7 @@ pub(crate) fn run_component_scripts_with_run_dir(
         &env,
         script_args,
     )?;
-    output.extension_phase_timings =
-        super::runner::read_extension_phase_timings(&run_dir.path().to_path_buf())?;
+    output.extension_phase_timings = super::runner::read_extension_phase_timings(run_dir.path())?;
     Ok(output)
 }
 

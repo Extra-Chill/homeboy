@@ -299,9 +299,7 @@ pub fn run_main_test_workflow(
         require_phpunit_tests,
     );
 
-    let coverage = coverage_file
-        .as_ref()
-        .and_then(|file| parse_coverage_file(file).ok());
+    let coverage = coverage_file.as_deref().and_then(parse_coverage_file);
 
     let failure_analysis_input = parse_failures_file(&failures_file);
     let findings = failure_analysis_input

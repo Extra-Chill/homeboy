@@ -297,9 +297,10 @@ fn count_body_lines(fp: &FileFingerprint, method_name: &str) -> usize {
                 brace_depth += 1;
             } else if ch == '}' {
                 brace_depth -= 1;
-                if open_line.is_some() && brace_depth == 0 {
-                    let open = open_line.unwrap();
-                    return line_idx.saturating_sub(open).saturating_sub(1);
+                if let Some(open) = open_line {
+                    if brace_depth == 0 {
+                        return line_idx.saturating_sub(open).saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1080,6 +1081,7 @@ fn lcs_ratio(a: &[String], b: &[String]) -> f64 {
 /// - Methods with fewer than MIN_CALL_COUNT calls
 /// - Pairs already caught by exact or near-duplicate detection
 /// - Pairs below both similarity thresholds
+///
 /// Detect parallel implementations — methods with similar call patterns across files.
 ///
 /// `convention_methods` contains method names that are expected by discovered conventions.

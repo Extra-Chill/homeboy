@@ -1,6 +1,5 @@
 //! Generic declarative rig requirements and capability checks.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;

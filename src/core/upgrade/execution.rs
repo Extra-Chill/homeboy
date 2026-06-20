@@ -209,9 +209,8 @@ where
             .as_ref()
             .and_then(|info| info.version.as_deref())
             .is_some()
+            || last_seen.is_none()
         {
-            last_seen = active_binary;
-        } else if last_seen.is_none() {
             last_seen = active_binary;
         }
 

@@ -243,16 +243,14 @@ impl Default for FilesystemAssertionSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum FilesystemAssertionKind {
     #[default]
     Path,
     File,
     Dir,
 }
-
 
 impl FilesystemAssertionKind {
     pub fn is_path(&self) -> bool {

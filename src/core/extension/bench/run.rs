@@ -558,7 +558,7 @@ fn require_positive(name: &str, value: u64) -> Result<()> {
 /// averaging.
 pub fn run_main_bench_workflow(
     component: &Component,
-    source_path: &PathBuf,
+    source_path: &Path,
     args: BenchRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> Result<BenchRunWorkflowResult> {
