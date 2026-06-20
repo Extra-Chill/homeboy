@@ -223,9 +223,9 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
         for point in slowest {
             lines.push(format!(
                 "    {} {}={}",
-                point.scenario_id,
-                point.metric,
-                format_metric(point.value)
+                point.0,
+                point.1,
+                format_metric(point.2)
             ));
         }
     }
@@ -234,30 +234,16 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
         for family in families {
             lines.push(format!(
                 "    {} total={} metrics={}",
-                family.family,
-                format_metric(family.total),
-                family.metric_count
+                family.0,
+                format_metric(family.1),
+                family.2
             ));
         }
     }
     lines
 }
 
-#[derive(Debug, Clone)]
-struct BenchMetricPointArgs {
-    scenario_id: String,
-    metric: String,
-    value: f64,
-}
-
-#[derive(Debug, Clone)]
-struct MetricFamilyTotalArgs {
-    family: String,
-    total: f64,
-    metric_count: usize,
-}
-
-fn collect_bench_metric_points(output: &Value) -> Vec<BenchMetricPointArgs> {
+fn collect_bench_metric_points(output: &Value) -> Vec<(String, String, f64)> {
     let scenarios = value_at(output, &["results", "scenarios"])
         .and_then(Value::as_array)
         .or_else(|| value_at(output, &["scenario_metrics"]).and_then(Value::as_array));
@@ -286,7 +272,7 @@ fn collect_numeric_metric_points(
     scenario_id: &str,
     group: Option<&str>,
     value: &Value,
-    points: &mut Vec<BenchMetricPointArgs>,
+    points: &mut Vec<(String, String, f64)>,
 ) {
     let Some(object) = value.as_object() else {
         return;
@@ -299,60 +285,52 @@ fn collect_numeric_metric_points(
             Some(group) => format!("{group}.{name}"),
             None => name.clone(),
         };
-        points.push(BenchMetricPointArgs {
-            scenario_id: scenario_id.to_string(),
-            metric,
-            value: number,
-        });
+        points.push((scenario_id.to_string(), metric, number));
     }
 }
 
 fn top_slowest_metrics(
-    points: &[BenchMetricPointArgs],
+    points: &[(String, String, f64)],
     limit: usize,
-) -> Vec<BenchMetricPointArgs> {
+) -> Vec<(String, String, f64)> {
     let mut timing = points
         .iter()
-        .filter(|point| is_timing_metric(&point.metric))
+        .filter(|point| is_timing_metric(&point.1))
         .cloned()
         .collect::<Vec<_>>();
     timing.sort_by(|a, b| {
-        b.value
-            .total_cmp(&a.value)
-            .then_with(|| a.scenario_id.cmp(&b.scenario_id))
-            .then_with(|| a.metric.cmp(&b.metric))
+        b.2.total_cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
     });
     timing.truncate(limit);
     timing
 }
 
 fn top_metric_families(
-    points: &[BenchMetricPointArgs],
+    points: &[(String, String, f64)],
     limit: usize,
-) -> Vec<MetricFamilyTotalArgs> {
+) -> Vec<(String, f64, usize)> {
     let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     let mut metric_counts: HashMap<String, usize> = HashMap::new();
-    for point in points
-        .iter()
-        .filter(|point| is_family_metric(&point.metric))
-    {
-        let family = metric_family(&point.metric);
-        *totals.entry(family.clone()).or_default() += point.value;
+    for point in points.iter().filter(|point| is_family_metric(&point.1)) {
+        let family = metric_family(&point.1);
+        *totals.entry(family.clone()).or_default() += point.2;
         *metric_counts.entry(family).or_default() += 1;
     }
 
     let mut families = totals
         .into_iter()
-        .map(|(family, total)| MetricFamilyTotalArgs {
-            metric_count: metric_counts.get(&family).copied().unwrap_or(0),
-            family,
-            total,
+        .map(|(family, total)| {
+            (
+                family.clone(),
+                total,
+                metric_counts.get(&family).copied().unwrap_or(0),
+            )
         })
         .collect::<Vec<_>>();
     families.sort_by(|a, b| {
-        b.total
-            .total_cmp(&a.total)
-            .then_with(|| a.family.cmp(&b.family))
+        b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
     });
     families.truncate(limit);
     families
