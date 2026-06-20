@@ -916,6 +916,14 @@ fn derive_pr_next_action(pr: &TriagePrItem) -> Option<String> {
     if review == Some("APPROVED") && is_dirty_merge_state(merge) {
         return Some("approved_but_dirty".to_string());
     }
+    // GitHub reports mergeStateStatus=CLEAN with an empty statusCheckRollup during
+    // the force-push/rebase window before CI registers on the new head SHA. A CLEAN
+    // PR whose required checks have not reported yet is NOT mergeable — gating merge
+    // automation on CLEAN alone would merge a commit whose CI has never run (#4872).
+    // Surface this race explicitly so the silent neutral state never reads as ready.
+    if merge == Some("CLEAN") && checks.is_none() {
+        return Some("clean_but_checks_not_reported".to_string());
+    }
     if review == Some("APPROVED") && merge == Some("CLEAN") && checks == Some("PENDING") {
         return Some("approved_but_pending_checks".to_string());
     }
@@ -1115,6 +1123,7 @@ const PR_ACTION_PRIORITY: &[&str] = &[
     "approved_but_dirty",
     "needs_rebase",
     "review_required",
+    "clean_but_checks_not_reported",
     "approved_but_pending_checks",
     "clean_and_ready",
     "stale_pr",
@@ -1123,9 +1132,11 @@ const PR_ACTION_PRIORITY: &[&str] = &[
 fn pr_action_severity(kind: &str) -> &'static str {
     match kind {
         "draft_with_failing_checks" | "checks_failed" | "approved_but_dirty" => "high",
-        "needs_rebase" | "review_required" | "approved_but_pending_checks" | "clean_and_ready" => {
-            "medium"
-        }
+        "needs_rebase"
+        | "review_required"
+        | "clean_but_checks_not_reported"
+        | "approved_but_pending_checks"
+        | "clean_and_ready" => "medium",
         _ => "low",
     }
 }
@@ -1141,6 +1152,11 @@ fn pr_action_label(kind: &str, count: usize) -> String {
         "approved_but_dirty" => pluralize(count, "approved PR is dirty", "approved PRs are dirty"),
         "needs_rebase" => pluralize(count, "PR needs rebase", "PRs need rebase"),
         "review_required" => pluralize(count, "PR needs review", "PRs need review"),
+        "clean_but_checks_not_reported" => pluralize(
+            count,
+            "PR is CLEAN but checks have not reported yet",
+            "PRs are CLEAN but checks have not reported yet",
+        ),
         "approved_but_pending_checks" => pluralize(
             count,
             "approved PR is waiting on checks",
