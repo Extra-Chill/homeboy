@@ -361,7 +361,7 @@ pub fn git_probe_path(path: &Path) -> std::path::PathBuf {
 /// Compute the relative path prefix of a component within a monorepo.
 ///
 /// If `local_path` is a subdirectory of the git root, returns the relative path
-/// (e.g. "wordpress" for `/repo/wordpress`). Returns None if local_path IS the
+/// (e.g. "frontend" for `/repo/frontend`). Returns None if local_path IS the
 /// git root (not a monorepo component).
 pub fn get_component_path_prefix(local_path: &str) -> Option<String> {
     let git_root = get_git_root(local_path).ok()?;
