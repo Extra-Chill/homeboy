@@ -8,13 +8,41 @@
 //! output.
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::tunnel;
+
+/// Execution mode for a preview consumer run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewConsumerRunMode {
+    /// Run the command to completion and record output after it exits.
+    Blocking,
+    /// Start the command under supervision and return as soon as the preview is
+    /// ready (or the readiness wait elapses), leaving the command running.
+    NonBlocking,
+}
+
+impl Default for PreviewConsumerRunMode {
+    fn default() -> Self {
+        Self::Blocking
+    }
+}
+
+/// Lifecycle status reported by a preview consumer run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewConsumerStatus {
+    /// The command ran to completion (blocking mode).
+    Completed,
+    /// The command is still running under supervision (non-blocking mode).
+    Running,
+}
 
 /// Arguments needed to run a preview consumer, parsed from CLI input.
 pub struct PreviewConsumerRunRequest {
@@ -22,6 +50,11 @@ pub struct PreviewConsumerRunRequest {
     pub service_id: Option<String>,
     pub preview_public_url: Option<String>,
     pub artifacts_dir_override: Option<PathBuf>,
+    /// Execution mode. Defaults to blocking for simple one-shot consumers.
+    pub mode: PreviewConsumerRunMode,
+    /// How long to wait for the preview to report ready in non-blocking mode
+    /// before returning anyway. Ignored in blocking mode.
+    pub ready_timeout: Option<Duration>,
 }
 
 /// Structured result of a preview-consumer run, suitable for serialization into
@@ -34,11 +67,29 @@ pub struct PreviewConsumerRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
     pub artifacts_dir: String,
+    /// Lifecycle status: `completed` for blocking runs, `running` for
+    /// non-blocking supervised runs.
+    pub status: PreviewConsumerStatus,
+    /// Whether a ready preview URL/artifact was detected.
+    pub preview_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_result_url: Option<String>,
-    pub exit_code: i32,
+    /// Process id of the supervised command in non-blocking mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// Exit code in blocking mode; `None` while still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Captured stdout in blocking mode; empty while streaming to log files.
     pub stdout: String,
+    /// Captured stderr in blocking mode; empty while streaming to log files.
     pub stderr: String,
+    /// Path to the streamed stdout log file in non-blocking mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_log_path: Option<String>,
+    /// Path to the streamed stderr log file in non-blocking mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_log_path: Option<String>,
     pub artifact_path: String,
 }
 
@@ -75,9 +126,20 @@ struct PreviewConsumerOutputConfig {
     pub public_result_stdout_prefix: Option<String>,
 }
 
+/// Default time to wait for a non-blocking consumer to report a ready preview
+/// before returning while leaving the command running.
+const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Run a configured preview consumer end to end: resolve the public URL, ensure
 /// the artifacts directory exists, execute the consumer process, and persist a
 /// run artifact. Returns the structured result and the process exit code.
+///
+/// In [`PreviewConsumerRunMode::Blocking`] the command runs to completion and
+/// the artifact captures its full output and exit code. In
+/// [`PreviewConsumerRunMode::NonBlocking`] the command is started under
+/// supervision with stdout/stderr streamed to log files, and the function
+/// returns as soon as a ready preview URL is detected (or the readiness wait
+/// elapses) while leaving the command running for held preview workflows.
 pub fn run(
     request: PreviewConsumerRunRequest,
 ) -> crate::core::Result<(PreviewConsumerRunResult, i32)> {
@@ -88,6 +150,7 @@ pub fn run(
     )?;
     let artifacts_dir = request
         .artifacts_dir_override
+        .clone()
         .or_else(|| config.command.artifacts_dir.clone())
         .unwrap_or_else(|| {
             crate::core::artifacts::root()
@@ -117,6 +180,23 @@ pub fn run(
         command.current_dir(cwd);
     }
 
+    match request.mode {
+        PreviewConsumerRunMode::Blocking => {
+            run_blocking(request, config, command, public_url, artifacts_dir)
+        }
+        PreviewConsumerRunMode::NonBlocking => {
+            run_non_blocking(request, config, command, public_url, artifacts_dir)
+        }
+    }
+}
+
+fn run_blocking(
+    request: PreviewConsumerRunRequest,
+    config: PreviewConsumerConfig,
+    mut command: Command,
+    public_url: String,
+    artifacts_dir: PathBuf,
+) -> crate::core::Result<(PreviewConsumerRunResult, i32)> {
     let output = command.output().map_err(|err| {
         crate::core::Error::internal_io(
             err.to_string(),
@@ -128,24 +208,129 @@ pub fn run(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     let public_result_url = extract_public_result_url(&config.output, &artifacts_dir, &stdout);
-    let artifact_file = config
-        .artifact_file
-        .as_deref()
-        .unwrap_or("homeboy-preview-consumer.json");
     let result = PreviewConsumerRunResult {
         schema: "homeboy/preview-consumer-run/v1".to_string(),
         consumer_id: config.id.clone(),
         preview_public_url: public_url,
         service_id: request.service_id,
         artifacts_dir: artifacts_dir.display().to_string(),
+        status: PreviewConsumerStatus::Completed,
+        preview_ready: public_result_url.is_some(),
         public_result_url,
-        exit_code,
+        pid: None,
+        exit_code: Some(exit_code),
         stdout,
         stderr,
-        artifact_path: artifacts_dir.join(artifact_file).display().to_string(),
+        stdout_log_path: None,
+        stderr_log_path: None,
+        artifact_path: artifact_path(&config, &artifacts_dir),
     };
 
-    let artifact_json = serde_json::to_string_pretty(&result).map_err(|err| {
+    write_artifact(&result)?;
+    Ok((result, exit_code))
+}
+
+fn run_non_blocking(
+    request: PreviewConsumerRunRequest,
+    config: PreviewConsumerConfig,
+    mut command: Command,
+    public_url: String,
+    artifacts_dir: PathBuf,
+) -> crate::core::Result<(PreviewConsumerRunResult, i32)> {
+    let stdout_log_path = artifacts_dir.join("homeboy-preview-consumer.stdout.log");
+    let stderr_log_path = artifacts_dir.join("homeboy-preview-consumer.stderr.log");
+
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|err| {
+        crate::core::Error::internal_io(
+            err.to_string(),
+            Some(format!("spawn preview consumer {}", config.id)),
+        )
+    })?;
+    let pid = child.id();
+
+    // Stream stderr to its log file on a background thread so a chatty child
+    // cannot block readiness detection on stdout.
+    let stderr_reader = child.stderr.take();
+    let stderr_log_for_thread = stderr_log_path.clone();
+    let stderr_thread = stderr_reader.map(|stderr| {
+        std::thread::spawn(move || {
+            stream_to_file(stderr, &stderr_log_for_thread);
+        })
+    });
+
+    // Read stdout line by line, tee it to the stdout log, and watch for a ready
+    // preview URL while the child keeps running.
+    let ready_timeout = request.ready_timeout.unwrap_or(DEFAULT_READY_TIMEOUT);
+    let started = Instant::now();
+    let mut public_result_url: Option<String> = None;
+
+    if let Some(stdout) = child.stdout.take() {
+        let mut writer = open_log_writer(&stdout_log_path);
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if let Some(writer) = writer.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(writer, "{line}");
+                let _ = writer.flush();
+            }
+            if public_result_url.is_none() {
+                public_result_url = detect_ready_url(&config.output, &line);
+                if public_result_url.is_some() {
+                    break;
+                }
+            }
+            if started.elapsed() >= ready_timeout {
+                break;
+            }
+        }
+    }
+
+    // A ready preview may also be signalled purely via a result file the child
+    // writes; check that path even if no stdout prefix matched.
+    if public_result_url.is_none() {
+        public_result_url = extract_public_result_url(&config.output, &artifacts_dir, "");
+    }
+
+    drop(stderr_thread);
+
+    let result = PreviewConsumerRunResult {
+        schema: "homeboy/preview-consumer-run/v1".to_string(),
+        consumer_id: config.id.clone(),
+        preview_public_url: public_url,
+        service_id: request.service_id,
+        artifacts_dir: artifacts_dir.display().to_string(),
+        status: PreviewConsumerStatus::Running,
+        preview_ready: public_result_url.is_some(),
+        public_result_url,
+        pid: Some(pid),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_log_path: Some(stdout_log_path.display().to_string()),
+        stderr_log_path: Some(stderr_log_path.display().to_string()),
+        artifact_path: artifact_path(&config, &artifacts_dir),
+    };
+
+    write_artifact(&result)?;
+    // Non-blocking runs intentionally leave the command alive; report success so
+    // callers can surface the live preview URL. Final exit status is reconciled
+    // when the hold ends or the service is stopped.
+    Ok((result, 0))
+}
+
+fn artifact_path(config: &PreviewConsumerConfig, artifacts_dir: &Path) -> String {
+    let artifact_file = config
+        .artifact_file
+        .as_deref()
+        .unwrap_or("homeboy-preview-consumer.json");
+    artifacts_dir.join(artifact_file).display().to_string()
+}
+
+fn write_artifact(result: &PreviewConsumerRunResult) -> crate::core::Result<()> {
+    let artifact_json = serde_json::to_string_pretty(result).map_err(|err| {
         crate::core::Error::internal_json(
             err.to_string(),
             Some("serialize preview consumer run artifact".to_string()),
@@ -156,9 +341,34 @@ pub fn run(
             err.to_string(),
             Some(format!("write {}", result.artifact_path)),
         )
-    })?;
+    })
+}
 
-    Ok((result, exit_code))
+fn open_log_writer(path: &Path) -> Option<std::fs::File> {
+    std::fs::File::create(path).ok()
+}
+
+fn stream_to_file<R: std::io::Read>(reader: R, path: &Path) {
+    use std::io::Write;
+    let mut writer = match std::fs::File::create(path) {
+        Ok(file) => file,
+        Err(_) => return,
+    };
+    let reader = BufReader::new(reader);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let _ = writeln!(writer, "{line}");
+    }
+    let _ = writer.flush();
+}
+
+/// Detect a ready preview URL from a single streamed stdout line using the
+/// configured stdout prefix.
+fn detect_ready_url(config: &PreviewConsumerOutputConfig, line: &str) -> Option<String> {
+    config
+        .public_result_stdout_prefix
+        .as_deref()
+        .and_then(|prefix| parse_prefixed_line(line, prefix))
 }
 
 fn read_config(path: &Path) -> crate::core::Result<PreviewConsumerConfig> {
