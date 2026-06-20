@@ -788,7 +788,6 @@
         "src/commands/runs/loop_sync.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",
         "src/commands/trace/bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
         "src/commands/trace/compare_bundle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
-        "src/commands/trace/compare_targets.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, run artifact persistence, runner execution orchestration",
         "src/commands/trace/compare_variant.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation",
         "src/commands/trace/matrix.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: direct filesystem mutation, runner execution orchestration",
         "src/commands/trace/observation_lifecycle.rs::ThinCommandAdapterViolation::thin_command_adapter::Command module accumulates orchestration that belongs in a core service: run artifact persistence",

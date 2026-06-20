@@ -112,6 +112,7 @@ pub mod source_snapshot;
 pub mod stack;
 pub mod structured_sidecar;
 pub mod top_n;
+pub mod trace_compare;
 pub mod trace_experiment;
 pub mod trace_secrets;
 pub mod triage;

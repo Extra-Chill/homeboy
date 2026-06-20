@@ -5,12 +5,13 @@ use homeboy::core::component;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::extension::trace::{TraceCheckoutProvenance, TraceCommandOutput};
 use homeboy::core::git;
-use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::observation::{NewRunRecord, RunStatus};
+use homeboy::core::trace_compare::{self, CompareArtifactSet, CompareObservation};
 
 use super::aggregate::{
     aggregate_metric, aggregate_span, TraceAggregateMetricSample, TraceAggregateSpanSample,
 };
-use super::matrix::{aggregate_to_compare_input, write_json_artifact};
+use super::matrix::aggregate_to_compare_input;
 use super::output::compare_trace_aggregates_with_focus;
 use super::{
     apply_resolved_trace_secret_env, attach_span_metadata, classification_summaries,
@@ -67,16 +68,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             ))
     });
-    std::fs::create_dir_all(&output_dir).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to create trace compare output dir {}: {}",
-                output_dir.display(),
-                err
-            ),
-            Some("trace.compare.output_dir".to_string()),
-        )
-    })?;
+    trace_compare::prepare_output_dir(&output_dir)?;
 
     let observation = start_compare_observation(&args, &component_id, &scenario_id, &output_dir);
 
@@ -100,10 +92,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
 
     let baseline_path = output_dir.join("baseline.aggregate.json");
     let candidate_path = output_dir.join("candidate.aggregate.json");
-    let compare_path = output_dir.join("compare.json");
     let summary_path = output_dir.join("summary.md");
-    write_json_artifact(&baseline_path, &baseline_aggregate)?;
-    write_json_artifact(&candidate_path, &candidate_aggregate)?;
 
     let mut compare = compare_trace_aggregates_with_focus(
         &baseline_path,
@@ -135,21 +124,17 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         &output_dir,
         &args,
     )?;
-    write_json_artifact(&compare_path, &compare)?;
-    std::fs::write(
-        &summary_path,
-        super::output::render_compare_markdown(&compare),
-    )
-    .map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!(
-                "Failed to write trace compare summary {}: {}",
-                summary_path.display(),
-                err
-            ),
-            Some("trace.compare.summary".to_string()),
-        )
-    })?;
+
+    let summary_markdown = super::output::render_compare_markdown(&compare);
+    let artifact_paths = trace_compare::persist_compare_artifacts(
+        &output_dir,
+        CompareArtifactSet {
+            baseline_aggregate: &baseline_aggregate,
+            candidate_aggregate: &candidate_aggregate,
+            compare: &compare,
+            summary_markdown: &summary_markdown,
+        },
+    )?;
 
     let failed = !baseline_aggregate.passed
         || !candidate_aggregate.passed
@@ -163,12 +148,7 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         } else {
             RunStatus::Pass
         },
-        CompareArtifactPaths {
-            baseline: &baseline_path,
-            candidate: &candidate_path,
-            compare: &compare_path,
-            summary: &summary_path,
-        },
+        &artifact_paths,
         serde_json::json!({
             "scenario_id": scenario_id,
             "trace_mode": "compare_targets",
@@ -194,60 +174,41 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     ))
 }
 
-struct CompareArtifactPaths<'a> {
-    baseline: &'a Path,
-    candidate: &'a Path,
-    compare: &'a Path,
-    summary: &'a Path,
-}
-
 fn start_compare_observation(
     args: &TraceArgs,
     component_id: &str,
     scenario_id: &str,
     output_dir: &Path,
-) -> Option<(ObservationStore, String)> {
-    let store = ObservationStore::open_initialized().ok()?;
+) -> Option<CompareObservation> {
     let cwd = std::env::current_dir().ok();
-    let run = store
-        .start_run(
-            NewRunRecord::builder("trace")
-                .component_id(component_id.to_string())
-                .command(std::env::args().collect::<Vec<_>>().join(" "))
-                .optional_cwd_path(cwd.as_deref())
-                .current_homeboy_version()
-                .optional_rig_id(args.rig.clone())
-                .metadata(serde_json::json!({
-                    "scenario_id": scenario_id,
-                    "trace_mode": "compare_targets",
-                    "baseline_target": args.baseline_target.as_deref(),
-                    "candidate_target": args.candidate.as_deref(),
-                    "output_dir": output_dir.display().to_string(),
-                }))
-                .build(),
-        )
-        .ok()?;
-    Some((store, run.id))
+    CompareObservation::start(
+        NewRunRecord::builder("trace")
+            .component_id(component_id.to_string())
+            .command(std::env::args().collect::<Vec<_>>().join(" "))
+            .optional_cwd_path(cwd.as_deref())
+            .current_homeboy_version()
+            .optional_rig_id(args.rig.clone())
+            .metadata(serde_json::json!({
+                "scenario_id": scenario_id,
+                "trace_mode": "compare_targets",
+                "baseline_target": args.baseline_target.as_deref(),
+                "candidate_target": args.candidate.as_deref(),
+                "output_dir": output_dir.display().to_string(),
+            }))
+            .build(),
+    )
 }
 
 fn finish_compare_observation(
-    observation: Option<(ObservationStore, String)>,
+    observation: Option<CompareObservation>,
     status: RunStatus,
-    paths: CompareArtifactPaths<'_>,
+    paths: &homeboy::core::trace_compare::CompareArtifactPaths,
     metadata: serde_json::Value,
 ) {
-    let Some((store, run_id)) = observation else {
+    let Some(observation) = observation else {
         return;
     };
-    let _ = store.record_artifact(&run_id, "trace-compare-baseline-aggregate", paths.baseline);
-    let _ = store.record_artifact(
-        &run_id,
-        "trace-compare-candidate-aggregate",
-        paths.candidate,
-    );
-    let _ = store.record_artifact(&run_id, "trace-compare-json", paths.compare);
-    let _ = store.record_artifact(&run_id, "trace-compare-summary", paths.summary);
-    let _ = store.finish_run(&run_id, status, Some(metadata));
+    observation.finish(status, paths, metadata);
 }
 
 fn compare_target_component(
@@ -871,6 +832,7 @@ mod tests {
     use super::*;
     use crate::commands::utils::args::{BaselineArgs, SettingArgs};
     use homeboy::core::component::ScopedExtensionConfig;
+    use homeboy::core::observation::ObservationStore;
 
     fn set_trace_rig_resources(rig_id: &str, resources: serde_json::Value) {
         let rig_path = homeboy::core::paths::rigs()
