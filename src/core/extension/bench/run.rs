@@ -396,8 +396,25 @@ fn parse_execution_results_file(
     .ok();
     if let Some(results) = &mut results {
         normalize_workload_json_scenario_ids(results);
+        if is_unmeasured_inventory_results(results) {
+            return Ok(None);
+        }
     }
     Ok(results)
+}
+
+fn is_unmeasured_inventory_results(results: &BenchResults) -> bool {
+    results.iterations == 0
+        && !results.scenarios.is_empty()
+        && results.scenarios.iter().all(|scenario| {
+            scenario.iterations == 0
+                && scenario.metrics.values.is_empty()
+                && scenario.metrics.distributions.is_empty()
+                && scenario.metric_groups.is_empty()
+                && scenario.memory.is_none()
+                && scenario.artifacts.is_empty()
+                && scenario.runs.is_none()
+        })
 }
 
 fn failure_scenario_id(scenario_ids: &[String]) -> Option<String> {
@@ -1428,6 +1445,9 @@ fn run_concurrent_instances(
         .and_then(|results| apply_scenario_filter(results, &args.scenario_ids))
         {
             Ok(mut p) => {
+                if is_unmeasured_inventory_results(&p) {
+                    continue;
+                }
                 attach_memory_timeline_artifacts(
                     &mut p,
                     child_resource,
@@ -2188,6 +2208,89 @@ mod tests {
 
         assert_eq!(parsed.scenarios.len(), 1);
         assert_eq!(parsed.scenarios[0].id, "rest-product-batch-import");
+    }
+
+    #[test]
+    fn failed_execution_parse_discards_inventory_only_results() {
+        let run_dir = RunDir::create().expect("run dir");
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        fs::write(
+            &results_file,
+            r#"{
+                "component_id": "woocommerce",
+                "iterations": 0,
+                "scenarios": [
+                    {
+                        "id": "cart-session-overwrite-race",
+                        "file": "tests/bench/cart-session-overwrite-race.php",
+                        "source": "rig",
+                        "default_iterations": 1,
+                        "iterations": 0,
+                        "metrics": {}
+                    },
+                    {
+                        "id": "generated-rest-request-cases.workload",
+                        "file": "tests/bench/generated-rest-request-cases.workload.json",
+                        "source": "rig",
+                        "default_iterations": 1,
+                        "iterations": 0,
+                        "metrics": {}
+                    }
+                ]
+            }"#,
+        )
+        .expect("write results file");
+
+        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+            .expect("failed inventory parse should succeed");
+
+        assert!(
+            parsed.is_none(),
+            "inventory-only failed payload must not be surfaced as measured bench results"
+        );
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn failed_execution_parse_keeps_measured_failure_results() {
+        let run_dir = RunDir::create().expect("run dir");
+        let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
+        fs::write(
+            &results_file,
+            r#"{
+                "component_id": "woocommerce",
+                "iterations": 1,
+                "failure_classification": {
+                    "kind": "assertion_failure",
+                    "phase": "bench",
+                    "status": "failed"
+                },
+                "scenarios": [
+                    {
+                        "id": "checkout-concurrent-create-order",
+                        "file": "tests/bench/checkout-concurrent-create-order.php",
+                        "iterations": 1,
+                        "metrics": { "failed_count": 1 }
+                    }
+                ]
+            }"#,
+        )
+        .expect("write results file");
+
+        let parsed = parse_execution_results_file(&results_file, &[], false, None)
+            .expect("failed measured parse should succeed")
+            .expect("measured results");
+
+        assert_eq!(parsed.iterations, 1);
+        assert_eq!(parsed.scenarios[0].metrics.get("failed_count"), Some(1.0));
+        assert_eq!(
+            parsed
+                .failure_classification
+                .as_ref()
+                .map(|value| value.kind.as_str()),
+            Some("assertion_failure")
+        );
+        run_dir.cleanup();
     }
 
     #[test]
