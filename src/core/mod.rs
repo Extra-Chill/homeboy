@@ -84,6 +84,7 @@ pub mod lab_routing;
 pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
+pub mod phase_timing;
 pub mod plan;
 pub mod preview_client;
 pub mod preview_consumer;

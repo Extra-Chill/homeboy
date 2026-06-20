@@ -304,7 +304,7 @@ fn run_comparison_workflow(
     result: CodeAuditResult,
     analysis: &code_audit::AuditAnalysisContext,
     args: &AuditRunWorkflowArgs,
-    timing: AuditTiming,
+    mut timing: AuditTiming,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
@@ -335,8 +335,11 @@ fn run_comparison_workflow(
 
     if args.json_summary {
         let findings = result.findings.clone();
-        let mut summary = report::build_audit_summary(&result, exit_code);
-        summary.fixability = compute_fixability_if_requested(&result, analysis, args);
+        let summary = timing.time_phase("report_assembly", || {
+            let mut summary = report::build_audit_summary(&result, exit_code);
+            summary.fixability = compute_fixability_if_requested(&result, analysis, args);
+            summary
+        });
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
@@ -344,7 +347,9 @@ fn run_comparison_workflow(
             timing,
         })
     } else {
-        let fixability = compute_fixability_if_requested(&result, analysis, args);
+        let fixability = timing.time_phase("report_assembly", || {
+            compute_fixability_if_requested(&result, analysis, args)
+        });
         let findings = result.findings.clone();
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Full {
@@ -366,9 +371,11 @@ fn build_comparison_output(
     analysis: &code_audit::AuditAnalysisContext,
     existing_baseline: baseline::AuditBaseline,
     args: &AuditRunWorkflowArgs,
-    timing: AuditTiming,
+    mut timing: AuditTiming,
 ) -> crate::core::Result<AuditRunWorkflowResult> {
-    let mut comparison = baseline::compare(&result, &existing_baseline);
+    let mut comparison = timing.time_phase("baseline_comparison", || {
+        baseline::compare(&result, &existing_baseline)
+    });
     if let Some(ref git_ref) = args.changed_since {
         let changed = changed_files_for_scope(args, git_ref).unwrap_or_else(|_| {
             result
@@ -425,15 +432,18 @@ fn build_comparison_output(
 
     if args.json_summary {
         let findings = result.findings.clone();
-        let mut summary = report::build_audit_summary(&result, exit_code);
-        summary.fixability = compute_fixability_if_requested(&result, analysis, args);
-        summary.changed_since = changed_since_summary;
-        summary.baseline_filtering = Some(report::build_baseline_filtering_summary(
-            &result,
-            &comparison,
-            &existing_baseline,
-        ));
-        summary.unbaselined_findings = report::build_unbaselined_finding_summary(&comparison);
+        let summary = timing.time_phase("report_assembly", || {
+            let mut summary = report::build_audit_summary(&result, exit_code);
+            summary.fixability = compute_fixability_if_requested(&result, analysis, args);
+            summary.changed_since = changed_since_summary;
+            summary.baseline_filtering = Some(report::build_baseline_filtering_summary(
+                &result,
+                &comparison,
+                &existing_baseline,
+            ));
+            summary.unbaselined_findings = report::build_unbaselined_finding_summary(&comparison);
+            summary
+        });
         Ok(AuditRunWorkflowResult {
             output: AuditCommandOutput::Summary(summary),
             exit_code,
@@ -441,7 +451,9 @@ fn build_comparison_output(
             timing,
         })
     } else {
-        let fixability = compute_fixability_if_requested(&result, analysis, args);
+        let fixability = timing.time_phase("report_assembly", || {
+            compute_fixability_if_requested(&result, analysis, args)
+        });
         let findings = result.findings.clone();
 
         Ok(AuditRunWorkflowResult {
