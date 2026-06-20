@@ -14,6 +14,7 @@ DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/v
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
 WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 BENCH_RECIPE_BUILDER="${SCRIPT_DIR}/build-wp-codebox-bench-recipe.mjs"
+BENCH_PRIMITIVE_CHECKER="${SCRIPT_DIR}/check-wp-codebox-bench-primitive.mjs"
 
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
@@ -456,6 +457,8 @@ homeboy_wp_codebox_workload_scenario_id() {
     local scenario_id
     if [[ "$workload_name" == *.bench.* ]]; then
         scenario_id="${workload_name%%.bench.*}"
+    elif [[ "$workload_name" == *.workload.* ]]; then
+        scenario_id="${workload_name%%.workload.*}"
     else
         scenario_id="${workload_name%.*}"
     fi
@@ -561,11 +564,18 @@ homeboy_wp_codebox_append_extra_bench_workloads_configured_json() {
         [ -n "$workload_path" ] || continue
         workload_name="$(basename "$workload_path")"
         scenario_id="$(homeboy_wp_codebox_workload_scenario_id "$workload_name")"
-        WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
-            --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
-            --arg id "$scenario_id" \
-            --arg file ".homeboy/bench-rig/${workload_name}" \
-            '$workloads + [{id: $id, source: "rig", overridesDiscovered: true, run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
+        if [[ "$workload_name" == *.workload.json ]]; then
+            WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
+                --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+                --slurpfile workload "$workload_path" \
+                '$workloads + [($workload[0] + {source: "rig", overridesDiscovered: true, metadata: (($workload[0].metadata // {}) + {homeboy_bench_workload_source: "rig"})})]')
+        else
+            WP_CODEBOX_WORKLOADS_JSON=$(jq -nc \
+                --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+                --arg id "$scenario_id" \
+                --arg file ".homeboy/bench-rig/${workload_name}" \
+                '$workloads + [{id: $id, source: "rig", overridesDiscovered: true, run: [{type: "php", file: $file}], metadata: {homeboy_bench_workload_source: "rig"}}]')
+        fi
     done
 }
 
@@ -590,6 +600,52 @@ homeboy_wp_codebox_extra_workload_scenarios_json() {
             '$scenarios + [{id: $id, file: $file, source: "rig", iterations: 0, metrics: {}}]')
     done
     printf '%s\n' "$scenarios"
+}
+
+homeboy_wp_codebox_workloads_need_primitive() {
+    local primitive="$1"
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local workload_path workload_name
+
+    if printf '%s' "$WP_CODEBOX_WORKLOADS_JSON" | jq -e --arg primitive "$primitive" '
+        def walk(f):
+            . as $in
+            | if type == "object" then reduce keys[] as $key ({}; . + {($key): ($in[$key] | walk(f))}) | f
+              elif type == "array" then map(walk(f)) | f
+              else f
+              end;
+        walk(.) | any(.. | objects; .type? == $primitive)
+    ' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    [ -n "$workloads_value" ] || return 1
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        if [[ "$workload_name" == *"$primitive"* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+homeboy_wp_codebox_require_bench_primitive() {
+    local primitive="$1"
+
+    if ! homeboy_wp_codebox_workloads_need_primitive "$primitive"; then
+        return 0
+    fi
+    if [ ! -f "$BENCH_PRIMITIVE_CHECKER" ]; then
+        return 0
+    fi
+
+    if ! node "$BENCH_PRIMITIVE_CHECKER" "$primitive" "$WP_CODEBOX_RESOLVED_BIN"; then
+        FAILED_STEP="WP Codebox bench primitive preflight"
+        exit 1
+    fi
 }
 
 homeboy_wp_codebox_component_workload_scenarios_json() {
@@ -902,6 +958,7 @@ if [ "$settings_json" != "{}" ]; then
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 homeboy_wp_codebox_append_extra_bench_workloads_configured_json
+homeboy_wp_codebox_require_bench_primitive "external-http-guardrail"
 
 MOUNTS_JSON="[]"
 COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$WP_CODEBOX_PLUGIN_SOURCE_PATH" || true)"
@@ -1149,6 +1206,139 @@ homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     echo "  Raw output: $output_artifact" >&2
 }
 
+homeboy_wp_codebox_persist_child_bench_results() {
+    local output_file="$1"
+
+    if ! jq -e '(.benchResults | type) == "object"' "$output_file" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$RESULTS_FILE")"
+    jq '.benchResults | del(.warmup_iterations)' "$output_file" > "$RESULTS_FILE"
+}
+
+homeboy_wp_codebox_attach_failure_artifacts_to_results() {
+    local diagnostics_file="$1"
+    local output_artifact="$2"
+    local exit_artifact="$3"
+    local enriched_results_file
+
+    [ -s "$RESULTS_FILE" ] || return 0
+    if ! jq -e '(.scenarios | type) == "array" and (.scenarios | length) > 0' "$RESULTS_FILE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    enriched_results_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-failure-artifacts.XXXXXX")
+    if jq \
+        --arg diagnosticsFile "$diagnostics_file" \
+        --arg outputArtifact "$output_artifact" \
+        --arg exitArtifact "$exit_artifact" \
+        '.scenarios[0].artifacts = ((.scenarios[0].artifacts // {}) + {
+            wp_codebox_run_diagnostics: {
+                path: $diagnosticsFile,
+                kind: "wp-codebox-bench-run-diagnostics",
+                label: "WP Codebox bench run diagnostics"
+            },
+            wp_codebox_raw_output: {
+                path: $outputArtifact,
+                kind: "wp-codebox-output",
+                label: "WP Codebox raw output"
+            },
+            wp_codebox_exit_code: {
+                path: $exitArtifact,
+                kind: "wp-codebox-exit-code",
+                label: "WP Codebox exit code"
+            }
+        })' "$RESULTS_FILE" > "$enriched_results_file"; then
+        mv "$enriched_results_file" "$RESULTS_FILE"
+    else
+        rm -f "$enriched_results_file"
+        echo "Warning: failed to attach WP Codebox failure artifacts to preserved bench results." >&2
+    fi
+}
+
+homeboy_wp_codebox_emit_run_failure_diagnostic() {
+    local output_file="$1"
+    local exit_code="$2"
+    local phase="$3"
+    local message="$4"
+    local persisted_results="$5"
+    local diagnostics_file="${ARTIFACTS_DIR}/wp-codebox-bench-run-diagnostics.json"
+    local output_artifact="${ARTIFACTS_DIR}/wp-codebox-output.txt"
+    local exit_artifact="${ARTIFACTS_DIR}/wp-codebox-exit-code.txt"
+    local response_json="{}"
+    local response_status=""
+    local failure_classification=""
+    local failure_message=""
+
+    mkdir -p "$ARTIFACTS_DIR"
+    cp "$output_file" "$output_artifact"
+    printf '%s\n' "$exit_code" > "$exit_artifact"
+
+    if jq -e 'type == "object"' "$output_file" >/dev/null 2>&1; then
+        response_json=$(jq -c '{success, status, failure_classification, failureClassification, error, message, summary, diagnostics, benchResults: (if (.benchResults | type) == "object" then {component_id: .benchResults.component_id, iterations: .benchResults.iterations, scenario_count: ((.benchResults.scenarios // []) | length)} else null end)}' "$output_file")
+        response_status=$(jq -r '.status // empty' "$output_file")
+        failure_classification=$(jq -r '.failure_classification // .failureClassification // empty' "$output_file")
+        failure_message=$(jq -r '[
+            (if (.error | type) == "object" then .error.message elif (.error | type) == "string" then .error else empty end),
+            .message,
+            .summary
+        ] | map(select(type == "string" and . != "")) | first // ""' "$output_file")
+    fi
+
+    jq -n \
+        --arg schema "homeboy/wordpress-bench-diagnostic/v1" \
+        --arg code "wp-codebox-bench-run-failed" \
+        --arg phase "$phase" \
+        --arg message "$message" \
+        --argjson exitCode "$exit_code" \
+        --arg status "$response_status" \
+        --arg failureClassification "$failure_classification" \
+        --arg failureMessage "$failure_message" \
+        --argjson persistedResults "$persisted_results" \
+        --arg resultsFile "$RESULTS_FILE" \
+        --arg artifactsDir "$ARTIFACTS_DIR" \
+        --arg outputArtifact "$output_artifact" \
+        --arg exitArtifact "$exit_artifact" \
+        --argjson response "$response_json" \
+        '{
+            schema: $schema,
+            diagnostics: [{
+                code: $code,
+                severity: "error",
+                phase: $phase,
+                message: $message,
+                exit_code: $exitCode,
+                status: (if $status == "" then null else $status end),
+                failure_classification: (if $failureClassification == "" then null else $failureClassification end),
+                failure_message: (if $failureMessage == "" then null else $failureMessage end),
+                persisted_child_bench_results: $persistedResults,
+                results_file: (if $persistedResults then $resultsFile else null end),
+                response: $response,
+                artifacts: {
+                    directory: $artifactsDir,
+                    output: $outputArtifact,
+                    exit_code: $exitArtifact
+                }
+            }]
+        }' > "$diagnostics_file"
+
+    if [ "$persisted_results" = "true" ]; then
+        homeboy_wp_codebox_attach_failure_artifacts_to_results "$diagnostics_file" "$output_artifact" "$exit_artifact"
+        homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE" || true
+    fi
+
+    echo "$message" >&2
+    [ -z "$failure_classification" ] || echo "  Failure classification: $failure_classification" >&2
+    [ -z "$failure_message" ] || echo "  Failure message: $failure_message" >&2
+    echo "  Exit code: $exit_code" >&2
+    if [ "$persisted_results" = "true" ]; then
+        echo "  Preserved child bench results: $RESULTS_FILE" >&2
+    fi
+    echo "  Diagnostics: $diagnostics_file" >&2
+    echo "  Raw output: $output_artifact" >&2
+}
+
 homeboy_wp_codebox_emit_dependency_provenance() {
     local provenance_file="${ARTIFACTS_DIR%/}/bench-dependency-provenance.json"
     local declared_dependency_paths_json
@@ -1249,12 +1439,22 @@ if [ $wp_codebox_exit -ne 0 ]; then
     if fatal_line=$(grep -E '^(PHP Fatal error: |Fatal error: )?Allowed memory size of [0-9]+ bytes exhausted|^(PHP Fatal error: |Fatal error: ).*Allowed memory size of [0-9]+ bytes exhausted' "$WP_CODEBOX_TMPFILE" | head -1); then
         homeboy_wp_codebox_emit_memory_fatal_diagnostic "$WP_CODEBOX_TMPFILE" "$wp_codebox_exit" "$fatal_line"
     fi
+    persisted_results=false
+    if homeboy_wp_codebox_persist_child_bench_results "$WP_CODEBOX_TMPFILE"; then
+        persisted_results=true
+    fi
+    homeboy_wp_codebox_emit_run_failure_diagnostic "$WP_CODEBOX_TMPFILE" "$wp_codebox_exit" "run" "WP Codebox wordpress.bench failed before reporting success." "$persisted_results"
     FAILED_STEP="WP Codebox bench run"
     exit $wp_codebox_exit
 fi
 
 if ! jq -e '.success == true and (.benchResults | type == "object")' "$WP_CODEBOX_TMPFILE" >/dev/null 2>&1; then
     cat "$WP_CODEBOX_TMPFILE" >&2
+    persisted_results=false
+    if homeboy_wp_codebox_persist_child_bench_results "$WP_CODEBOX_TMPFILE"; then
+        persisted_results=true
+    fi
+    homeboy_wp_codebox_emit_run_failure_diagnostic "$WP_CODEBOX_TMPFILE" "1" "results-parse" "WP Codebox wordpress.bench did not return a successful bench result envelope." "$persisted_results"
     FAILED_STEP="WP Codebox bench results parse"
     exit 1
 fi

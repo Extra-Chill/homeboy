@@ -9,6 +9,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 PLUGIN_PATH="${TMPDIR}/component"
 FAKE_WP_CODEBOX="${TMPDIR}/wp-codebox.js"
 FAKE_CORE_MODULE="${TMPDIR}/wp-codebox-core.mjs"
+FAKE_RESOLVE_CONTEXT="${TMPDIR}/resolve-context.sh"
 FAKE_PREFLIGHT="${TMPDIR}/bash-preflight.sh"
 FAKE_BENCH_HELPER="${TMPDIR}/bench-helper.sh"
 CAPTURED_RECIPE="${TMPDIR}/captured-recipe.json"
@@ -20,6 +21,12 @@ mkdir -p "${PLUGIN_PATH}/tests/bench"
 printf '<?php\nreturn array( "metrics" => array( "noop" => 1 ) );\n' > "${PLUGIN_PATH}/tests/bench/noop.php"
 cat > "$FAKE_PREFLIGHT" <<'SH'
 homeboy_require_bash_version() { :; }
+SH
+cat > "$FAKE_RESOLVE_CONTEXT" <<'SH'
+homeboy_resolve_context() {
+    PLUGIN_PATH="$HOMEBOY_COMPONENT_PATH"
+    COMPONENT_ID="$HOMEBOY_COMPONENT_ID"
+}
 SH
 cat > "$FAKE_BENCH_HELPER" <<'SH'
 homeboy_write_empty_bench_results() { :; }
@@ -55,6 +62,7 @@ output=$(CAPTURED_RECIPE="$CAPTURED_RECIPE" \
     CAPTURED_RECIPE_PATH="$CAPTURED_RECIPE_PATH" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_WP_CODEBOX" \
     HOMEBOY_WP_CODEBOX_CORE_MODULE="$FAKE_CORE_MODULE" \
+    HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$FAKE_RESOLVE_CONTEXT" \
     HOMEBOY_RUNTIME_BASH_PREFLIGHT="$FAKE_PREFLIGHT" \
     HOMEBOY_RUNTIME_BENCH_HELPER_SH="$FAKE_BENCH_HELPER" \
     HOMEBOY_BENCH_RESULTS_FILE="$RESULTS_FILE" \
