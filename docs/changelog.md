@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.247.2] - 2026-06-20
+
+### Changed
+- Surface bench coverage summaries
+
+### Fixed
+- Fix bench coverage summary checks
+
 ## [0.247.1] - 2026-06-20
 
 ### Fixed
