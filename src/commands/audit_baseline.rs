@@ -4,8 +4,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use homeboy::core::code_audit::{
-    baseline, run_main_audit_workflow, AuditCommandOutput, AuditRunWorkflowArgs,
+    baseline, merge_baseline_only_conflict, run_main_audit_workflow, AuditCommandOutput,
+    AuditRunWorkflowArgs, BaselineMergeError,
 };
+use homeboy::core::engine::command::run_in_optional;
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
@@ -21,6 +23,17 @@ pub struct AuditBaselineArgs {
 enum AuditBaselineCommand {
     /// Refresh only persisted audit baseline data for changed files
     Refresh(AuditBaselineRefreshArgs),
+    /// Auto-merge a baseline-only `homeboy.json` merge/rebase conflict
+    Merge(AuditBaselineMergeArgs),
+}
+
+#[derive(Args)]
+pub struct AuditBaselineMergeArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
 }
 
 #[derive(Args)]
@@ -55,6 +68,7 @@ pub struct AuditBaselineRefreshOutput {
 pub fn run(args: AuditBaselineArgs, global: &GlobalArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     match args.command {
         AuditBaselineCommand::Refresh(args) => refresh(args, global),
+        AuditBaselineCommand::Merge(args) => merge(args, global),
     }
 }
 
@@ -137,6 +151,171 @@ fn refresh(
     };
 
     Ok((output, workflow.exit_code))
+}
+
+fn merge(
+    args: AuditBaselineMergeArgs,
+    _global: &GlobalArgs,
+) -> CmdResult<AuditBaselineRefreshOutput> {
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &SettingArgs::default(),
+        &args.extension_override,
+        None,
+    )?;
+    let source_path = source_ctx.source_path.to_string_lossy().to_string();
+    let source = Path::new(&source_path);
+    let baseline_path = source.join("homeboy.json").to_string_lossy().to_string();
+
+    // Require an actual conflicted homeboy.json (an in-progress merge/rebase with
+    // unmerged stages for the path). Without unmerged stages there is nothing to
+    // auto-merge — point the user at refresh instead.
+    if !homeboy_json_is_conflicted(&source_path) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "homeboy.json",
+            format!(
+                "{baseline_path} has no in-progress merge conflict to resolve. If main moved, run `homeboy audit-baseline refresh {source_path} --changed-since origin/main` instead."
+            ),
+            None,
+            None,
+        ));
+    }
+
+    let ours = parse_conflict_stage(&source_path, 2, "ours")?;
+    let theirs = parse_conflict_stage(&source_path, 3, "theirs")?;
+    let base = parse_optional_conflict_stage(&source_path, 1);
+
+    let result = merge_baseline_only_conflict(base.as_ref(), &ours, &theirs)
+        .map_err(map_baseline_merge_error)?;
+
+    let merged_content = serde_json::to_string_pretty(&result.merged).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            format!("Failed to serialize merged homeboy.json: {error}"),
+            Some("audit-baseline.merge".to_string()),
+        )
+    })?;
+    std::fs::write(&baseline_path, format!("{merged_content}\n")).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            format!("Failed to write {baseline_path}: {error}"),
+            Some("audit-baseline.merge".to_string()),
+        )
+    })?;
+
+    // Mark the path resolved so the in-progress merge/rebase can continue.
+    let _ = run_in_optional(&source_path, "git", &["add", "homeboy.json"]);
+
+    eprintln!(
+        "[audit-baseline] merged baseline conflict in {}: +{} / -{} fingerprints",
+        baseline_path,
+        result.added_fingerprints.len(),
+        result.resolved_fingerprints.len()
+    );
+
+    let base_fingerprints = base
+        .as_ref()
+        .map(audit_fingerprints_from_doc)
+        .unwrap_or_default();
+    let merged_fingerprints = audit_fingerprints_from_doc(&result.merged);
+
+    let output = AuditBaselineRefreshOutput {
+        command: "audit-baseline.merge".to_string(),
+        component_id: source_ctx.component_id,
+        source_path,
+        baseline_path,
+        changed_since: "merge-conflict".to_string(),
+        previous_source: "conflict base (:1:)".to_string(),
+        previous_count: base_fingerprints.len(),
+        current_count: merged_fingerprints.len(),
+        added_count: result.added_fingerprints.len(),
+        resolved_count: result.resolved_fingerprints.len(),
+        added_fingerprints: result.added_fingerprints,
+        resolved_fingerprints: result.resolved_fingerprints,
+    };
+
+    Ok((output, 0))
+}
+
+/// True when `homeboy.json` has unmerged conflict stages recorded in the index.
+fn homeboy_json_is_conflicted(source_path: &str) -> bool {
+    run_in_optional(
+        source_path,
+        "git",
+        &["ls-files", "-u", "--", "homeboy.json"],
+    )
+    .map(|output| !output.trim().is_empty())
+    .unwrap_or(false)
+}
+
+/// Read and parse a required conflict stage (`:<stage>:homeboy.json`).
+fn parse_conflict_stage(
+    source_path: &str,
+    stage: u8,
+    label: &'static str,
+) -> homeboy::core::Result<serde_json::Value> {
+    let spec = format!(":{stage}:homeboy.json");
+    let content = run_in_optional(source_path, "git", &["show", &spec]).ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "homeboy.json",
+            format!("Could not read {label} side of the conflict ({spec})."),
+            None,
+            None,
+        )
+    })?;
+
+    serde_json::from_str(&content).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "homeboy.json",
+            format!("{label} side of homeboy.json is not valid JSON: {error}"),
+            None,
+            None,
+        )
+    })
+}
+
+/// Read and parse an optional conflict stage; absent or unparseable → `None`.
+///
+/// The merge-base stage (`:1:`) is absent for add/add conflicts, which is fine —
+/// the merge falls back to computing counts against `ours`.
+fn parse_optional_conflict_stage(source_path: &str, stage: u8) -> Option<serde_json::Value> {
+    let spec = format!(":{stage}:homeboy.json");
+    let content = run_in_optional(source_path, "git", &["show", &spec])?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Pull the flat `baselines.audit.known_fingerprints` list from a merged document.
+fn audit_fingerprints_from_doc(doc: &serde_json::Value) -> BTreeSet<String> {
+    doc.get("baselines")
+        .and_then(|baselines| baselines.get("audit"))
+        .and_then(|audit| audit.get("known_fingerprints"))
+        .and_then(|value| value.as_array())
+        .map(|array| {
+            array
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn map_baseline_merge_error(error: BaselineMergeError) -> homeboy::core::Error {
+    match &error {
+        BaselineMergeError::NonBaselineConflict { .. } => {
+            homeboy::core::Error::validation_invalid_argument(
+                "homeboy.json",
+                format!(
+                    "{error} Auto-merge only handles generated audit baseline data; resolve the listed keys by hand, then `git add homeboy.json` and continue."
+                ),
+                None,
+                None,
+            )
+        }
+        BaselineMergeError::InvalidJson { .. } => homeboy::core::Error::validation_invalid_argument(
+            "homeboy.json",
+            error.to_string(),
+            None,
+            None,
+        ),
+    }
 }
 
 fn previous_baseline_fingerprints(
