@@ -35,10 +35,36 @@ pub fn resolve_secret_env(
         }
 
         if let Some(project_id) = project_id {
-            if let Some(value) = keychain::get(project_id, &name)? {
-                resolved.push((name.clone(), value));
-                statuses.push(status(name, true, "project-keychain"));
-                continue;
+            match keychain::get(project_id, &name) {
+                Ok(Some(value)) => {
+                    resolved.push((name.clone(), value));
+                    statuses.push(status(name, true, "project-keychain"));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) if keychain::is_secure_storage_unavailable(&error) => {
+                    // The OS keychain is reachable but cannot service the read
+                    // without an interactive UI (macOS dark wake, locked login
+                    // keychain, or headless/SSH session). Surface an actionable
+                    // diagnostic that points at the env-first escape hatch
+                    // instead of failing with an opaque platform error.
+                    return Err(Error::validation_invalid_argument(
+                        "secret-env",
+                        format!(
+                            "could not read trace secret '{name}' from the project keychain: {}",
+                            error.message
+                        ),
+                        None,
+                        Some(vec![
+                            format!(
+                                "Export the value in the controller shell before running trace, for example `export {name}=...`; `--secret-env` prefers process env over the keychain."
+                            ),
+                            "This happens when the OS keychain needs UI that isn't available (macOS dark wake, a locked login keychain, or a headless/SSH session). Rerun from an unlocked, interactive user session, or use exported env values.".to_string(),
+                            "For repeatable headless runs, configure a `source: env` mapping with `homeboy agent-task auth map-env` so trace secrets resolve without keychain access.".to_string(),
+                        ]),
+                    ));
+                }
+                Err(error) => return Err(error),
             }
         }
 
