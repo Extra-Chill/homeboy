@@ -52,6 +52,11 @@ fn render_run_detail(run: &Value) -> String {
         lines.push(format!("Finished: {finished}"));
     }
 
+    if kind == "bench" {
+        if let Some(metadata) = value_at(run, &["metadata"]) {
+            lines.extend(super::bench_summary::bench_hotspot_lines(metadata));
+        }
+    }
     lines.extend(artifact_lines(run, run_id));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
@@ -182,6 +187,49 @@ mod tests {
         assert!(!summary.contains("get: homeboy runs artifact get bench-run-42 admin_url"));
         // Compact: no raw JSON braces.
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn bench_show_summary_surfaces_hotspots_from_metadata() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "bench-run-42",
+                    "kind": "bench",
+                    "status": "pass",
+                    "metadata": {
+                        "scenario_metrics": [
+                            {
+                                "scenario_id": "scenario-a",
+                                "metrics": {
+                                    "work_ms_per_item": 80.0,
+                                    "work_queries_per_item": 11.0
+                                }
+                            },
+                            {
+                                "scenario_id": "scenario-b",
+                                "metrics": {
+                                    "work_ms_per_item": 240.0,
+                                    "work_queries_per_item": 23.0
+                                }
+                            }
+                        ]
+                    },
+                    "artifacts": []
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Hotspots:\n"));
+        assert!(summary.contains("  Slowest timing metrics:\n"));
+        assert!(summary.contains("    scenario-b work_ms_per_item=240\n"));
+        assert!(summary.contains("  Hottest metric families:\n"));
+        assert!(summary.contains("    work total=34 metrics=2\n"));
+        assert!(summary.contains("Artifacts: none recorded\n"));
     }
 
     #[test]

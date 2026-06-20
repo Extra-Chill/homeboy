@@ -16,6 +16,8 @@
 //! scenario-specific artifacts) and the `homeboy runs show` follow-up
 //! command are surfaced near the top so they are easy to find (#3260).
 
+use std::collections::{BTreeMap, HashMap};
+
 use serde_json::Value;
 
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
@@ -73,6 +75,7 @@ fn render_single_summary(output: &Value) -> String {
     }
 
     lines.extend(key_metric_lines(output));
+    lines.extend(bench_hotspot_lines(output));
     lines.extend(gate_failure_lines(output));
     lines.extend(artifact_lines(output));
     lines.extend(failure_lines(output));
@@ -193,6 +196,187 @@ fn key_metric_lines(output: &Value) -> Vec<String> {
         lines.insert(0, "Key metrics:".to_string());
     }
     lines
+}
+
+/// Render generic bench hotspots from either a `BenchCommandOutput` payload
+/// (`results.scenarios`) or a persisted run metadata object
+/// (`scenario_metrics`). The extractor is intentionally schema-blind: it ranks
+/// numeric timing/query/count metrics by name patterns instead of knowing any
+/// product-specific scenario names.
+pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
+    let metrics = collect_bench_metric_points(output);
+    if metrics.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let slowest = top_slowest_metrics(&metrics, 5);
+    let families = top_metric_families(&metrics, 5);
+
+    if slowest.is_empty() && families.is_empty() {
+        return Vec::new();
+    }
+
+    lines.push("Hotspots:".to_string());
+    if !slowest.is_empty() {
+        lines.push("  Slowest timing metrics:".to_string());
+        for point in slowest {
+            lines.push(format!(
+                "    {} {}={}",
+                point.0,
+                point.1,
+                format_metric(point.2)
+            ));
+        }
+    }
+    if !families.is_empty() {
+        lines.push("  Hottest metric families:".to_string());
+        for family in families {
+            lines.push(format!(
+                "    {} total={} metrics={}",
+                family.0,
+                format_metric(family.1),
+                family.2
+            ));
+        }
+    }
+    lines
+}
+
+fn collect_bench_metric_points(output: &Value) -> Vec<(String, String, f64)> {
+    let scenarios = value_at(output, &["results", "scenarios"])
+        .and_then(Value::as_array)
+        .or_else(|| value_at(output, &["scenario_metrics"]).and_then(Value::as_array));
+    let Some(scenarios) = scenarios else {
+        return Vec::new();
+    };
+
+    let mut points = Vec::new();
+    for scenario in scenarios {
+        let Some(scenario_id) =
+            string_value(scenario, &["scenario_id"]).or_else(|| string_value(scenario, &["id"]))
+        else {
+            continue;
+        };
+        collect_numeric_metric_points(scenario_id, None, &scenario["metrics"], &mut points);
+        if let Some(groups) = scenario["metric_groups"].as_object() {
+            for (group, values) in groups {
+                collect_numeric_metric_points(scenario_id, Some(group), values, &mut points);
+            }
+        }
+    }
+    points
+}
+
+fn collect_numeric_metric_points(
+    scenario_id: &str,
+    group: Option<&str>,
+    value: &Value,
+    points: &mut Vec<(String, String, f64)>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (name, value) in object {
+        let Some(number) = value.as_f64() else {
+            continue;
+        };
+        let metric = match group {
+            Some(group) => format!("{group}.{name}"),
+            None => name.clone(),
+        };
+        points.push((scenario_id.to_string(), metric, number));
+    }
+}
+
+fn top_slowest_metrics(
+    points: &[(String, String, f64)],
+    limit: usize,
+) -> Vec<(String, String, f64)> {
+    let mut timing = points
+        .iter()
+        .filter(|point| is_timing_metric(&point.1))
+        .cloned()
+        .collect::<Vec<_>>();
+    timing.sort_by(|a, b| {
+        b.2.total_cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    timing.truncate(limit);
+    timing
+}
+
+fn top_metric_families(
+    points: &[(String, String, f64)],
+    limit: usize,
+) -> Vec<(String, f64, usize)> {
+    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
+    let mut metric_counts: HashMap<String, usize> = HashMap::new();
+    for point in points.iter().filter(|point| is_family_metric(&point.1)) {
+        let family = metric_family(&point.1);
+        *totals.entry(family.clone()).or_default() += point.2;
+        *metric_counts.entry(family).or_default() += 1;
+    }
+
+    let mut families = totals
+        .into_iter()
+        .map(|(family, total)| {
+            (
+                family.clone(),
+                total,
+                metric_counts.get(&family).copied().unwrap_or(0),
+            )
+        })
+        .collect::<Vec<_>>();
+    families.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    families.truncate(limit);
+    families
+}
+
+fn is_timing_metric(metric: &str) -> bool {
+    metric == "duration"
+        || metric == "elapsed"
+        || metric.ends_with("_duration")
+        || metric.ends_with("_elapsed")
+        || metric.ends_with("_ms")
+        || metric.contains("_ms_")
+        || metric.ends_with(".ms")
+        || metric.contains(".ms_")
+}
+
+fn is_family_metric(metric: &str) -> bool {
+    let normalized = metric.to_ascii_lowercase();
+    normalized.contains("query")
+        || normalized.contains("queries")
+        || normalized.ends_with("_count")
+        || normalized.ends_with(".count")
+}
+
+fn metric_family(metric: &str) -> String {
+    if let Some((group, _)) = metric.split_once('.') {
+        return group.to_string();
+    }
+
+    for suffix in [
+        "_queries_per_item",
+        "_queries_per_run",
+        "_queries_per_sec",
+        "_query_count",
+        "_queries",
+        "_count",
+        "_ms_per_item",
+        "_ms_per_run",
+        "_ms",
+    ] {
+        if let Some(prefix) = metric.strip_suffix(suffix) {
+            if !prefix.is_empty() {
+                return prefix.to_string();
+            }
+        }
+    }
+
+    metric.to_string()
 }
 
 fn gate_failure_lines(output: &Value) -> Vec<String> {
@@ -455,6 +639,9 @@ mod tests {
         assert!(summary.contains("Key metrics:\n"));
         assert!(summary.contains("p50_ms=12.5"));
         assert!(summary.contains("p95_ms=30"));
+        assert!(summary.contains("Hotspots:\n"));
+        assert!(summary.contains("  Slowest timing metrics:\n"));
+        assert!(summary.contains("    rtc-smoke p95_ms=30\n"));
         // Surface artifact pointers (#3260).
         assert!(summary.contains("Artifacts (2):\n"));
         assert!(summary.contains("rtc-smoke/response-rows: /tmp/shared/response-rows.json\n"));
@@ -487,6 +674,52 @@ mod tests {
         assert!(summary.contains("Failure: scenario rtc-smoke exceeded budget\n"));
         // No persisted run id: suggest --json for full output.
         assert!(summary.contains("Full output: re-run with --json\n"));
+    }
+
+    #[test]
+    fn hotspot_lines_rank_timing_metrics_and_metric_families() {
+        let payload = json!({
+            "scenario_metrics": [
+                {
+                    "scenario_id": "fast-path",
+                    "metrics": {
+                        "create_ms_per_item": 125.0,
+                        "create_queries_per_item": 9.0,
+                        "rows_count": 3.0
+                    },
+                    "metric_groups": {
+                        "query_families": {
+                            "select_count": 14.0,
+                            "insert_count": 2.0
+                        }
+                    }
+                },
+                {
+                    "scenario_id": "slow-path",
+                    "metrics": {
+                        "create_ms_per_item": 980.0,
+                        "create_queries_per_item": 27.0,
+                        "validation_ms": 40.0
+                    },
+                    "metric_groups": {
+                        "query_families": {
+                            "select_count": 44.0,
+                            "insert_count": 7.0
+                        }
+                    }
+                }
+            ]
+        });
+
+        let lines = bench_hotspot_lines(&payload).join("\n");
+
+        assert!(lines.starts_with("Hotspots:\n"));
+        assert!(lines.contains("  Slowest timing metrics:\n"));
+        assert!(lines.contains("    slow-path create_ms_per_item=980\n"));
+        assert!(lines.contains("    fast-path create_ms_per_item=125\n"));
+        assert!(lines.contains("  Hottest metric families:\n"));
+        assert!(lines.contains("    query_families total=67 metrics=4"));
+        assert!(lines.contains("    create total=36 metrics=2"));
     }
 
     #[test]
