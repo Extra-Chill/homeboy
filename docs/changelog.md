@@ -4,6 +4,154 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.246.0] - 2026-06-20
+
+### Added
+- add generic phase-level timing spans for hot commands (#3002)
+- auto-merge generated baseline-only homeboy.json conflicts (#3518)
+- feat(agent-task): add one-command cook readiness repair (#4864)
+- expose authoritative binary/runtime view across controller and runners (#4861)
+- add artifact get command
+- tag output variant
+- require apply for exec
+- enrich lifecycle inspection
+- add phase metadata
+- tag output variants
+- expose retrieval capability
+- expose reverse artifact metadata
+- require apply for risky modes
+- guard mutating api requests
+- add reverse claim reconciliation route
+- deepen command manifest metadata
+- interrupt reverse jobs on cancel
+- require apply for destructive commands
+- expose safety manifest json
+- mirror reverse broker evidence
+- propagate reverse cancellation
+- add command safety manifest
+- add thin-command-adapter enforcement detector (#4384)
+- compact default output + surface artifacts in run summaries (#3257, #3260)
+- surface reverse broker jobs
+- add lifecycle for bundled/retired components
+- feat(agent-task): surface codebox provider failure diagnostics and artifact refs
+
+### Changed
+- Allow source upgrades from detached checkouts
+- Use source checkout identity for runner upgrades
+- Apply rustfmt to pnpm provider fix
+- Use pnpm workspace roots for dependency installs
+- Preserve invalid bench artifact paths for validation
+- Require git Lab workspace for explicit controller backends
+- Hide internal commands from public surface checks
+- Require git Lab workspace for patch controller dispatch
+- Apply rustfmt after main merge
+- Ignore inline bench artifact payloads
+- Preserve explicit bench failure classifications
+- consolidate command surface checks
+- introduce execution plan
+- envelope agent task text specs
+- Apply rustfmt to current main
+- re-trigger
+- centralize enum dispatch via methods on the enum
+- remove/narrow dead code flagged by audit
+- Normalize discovered workload JSON scenario IDs
+- ratchet safety surfaces
+- harden cache invalidation
+- apply cargo fmt to unblock CI lint gate
+- Normalize workload JSON bench scenario IDs
+- Reject truncated Lab runner output
+- dedupe summary-command JSON accessors into shared helper
+- check docs manifest drift
+- cache entity suggestions
+- Format runner evidence files
+- collapse redundant audit and output checks
+- cache loaded config snapshot
+- Expand rig extension settings for bench components
+- normalize artifact refs
+- centralize support summary
+- move orchestration to core services for thin adapters
+- purge ecosystem literals from upstream_workaround detector
+- refactor(runner,release): dedupe near-duplicate + parallel-implementation helpers
+- add PR profile
+- reuse bot identity constant
+- remove dead code + unused imports flagged by audit
+- Index controller child evidence
+- avoid eager startup probes
+- add typed provider config envelope
+- reduce quality gate work
+- reuse changed file preflight
+- add transport selector
+- batch remote capability probes
+- refactor(agent-task): split runner policy module
+- cache hot git probes
+- surface active jobs in status
+- query artifact rows in sql
+- extract lab offload workspace stage
+- centralize command contract labels
+- Persist bench matrix parent runs
+- split god files + dedup + add remote-exec preflight
+- Improve Lab runner readiness selection
+
+### Fixed
+- resolve thin command adapter finding (#5493)
+- resolve failing test (#5494)
+- DRY intra-method duplication to clear findings (#5491)
+- guard against missing committed lockfile shipping stale git deps (#5426)
+- stop lint-autofix from pushing to PR branch mid-review (#3819)
+- strengthen vacuous command-surface test (#5479)
+- resolve failing test (#5477)
+- unify parallel implementations to clear findings (#5421)
+- strengthen vacuous tests to clear test_quality findings (#5423)
+- eliminate docs/changelog.md multi-PR conflict surface (#4876)
+- report accurate deployed ref when HEAD is ahead of tag (#5456)
+- reclaim target/ dirs for merged worktrees to prevent disk fill (#4875)
+- allow bypassing preflight.package build-structure validation (#5425)
+- treat CLEAN-with-zero-checks PR state as not-mergeable (#4872)
+- Fix from-spec cwd fallback in snapshot workspaces
+- Fix dispatch workspace fallback for stale cwd
+- Fix bench run artifact diagnostics
+- Fix controller dispatch cwd portability
+- ignore failed inventory-only results
+- Fix release workflow input reuse
+- remove unused daemon_api_post re-export breaking lint
+- add remote-exec path-translation + capability preflight
+- resolve command audit findings
+- Fix current-main test formatting
+- Fix audit workflow test args
+- add missing profile field to AuditRunWorkflowArgs test initializers (#5396)
+- Fix artifact reference runner token parsing
+- make status job enrichment tolerant of unreachable broker
+- bound output capture with truncation metadata
+- enforce reverse claim leases
+- satisfy transport lint
+- fix(agent-task): satisfy controller split lint
+- annotate extracted offload stages
+- satisfy contract label lint
+- satisfy artifact query lint
+- fix(api-jobs): update remote runner test claims
+- format command surface test
+- format reverse worker test
+- export cached release helper
+- keep reverse worker exec local
+- align job store tests with claim leases
+- format runner facade exports
+- export job cancel through facade
+- use runner facade for job cancel
+- include claim id in daemon lifecycle test
+- align worker test session fixture
+- restore reverse cancel test compatibility
+- materialize/resolve Codex provider plugin path for Codebox recipes
+- bound command output capture with truncation metadata
+- satisfy execution context clippy
+- complete quality check compatibility
+- unblock quality checks
+- call cancellation helper from core
+- compile cancellation command
+- enforce concurrency limit when claiming jobs
+- enforce remote job claim leases
+- execute claimed jobs worker-local
+- route job cancellation by transport
+
 ## [0.245.0] - 2026-06-19
 
 ### Added
