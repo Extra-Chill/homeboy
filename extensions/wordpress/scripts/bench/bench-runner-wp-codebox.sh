@@ -1217,6 +1217,46 @@ homeboy_wp_codebox_persist_child_bench_results() {
     jq '.benchResults | del(.warmup_iterations)' "$output_file" > "$RESULTS_FILE"
 }
 
+homeboy_wp_codebox_attach_failure_artifacts_to_results() {
+    local diagnostics_file="$1"
+    local output_artifact="$2"
+    local exit_artifact="$3"
+    local enriched_results_file
+
+    [ -s "$RESULTS_FILE" ] || return 0
+    if ! jq -e '(.scenarios | type) == "array" and (.scenarios | length) > 0' "$RESULTS_FILE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    enriched_results_file=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-codebox-failure-artifacts.XXXXXX")
+    if jq \
+        --arg diagnosticsFile "$diagnostics_file" \
+        --arg outputArtifact "$output_artifact" \
+        --arg exitArtifact "$exit_artifact" \
+        '.scenarios[0].artifacts = ((.scenarios[0].artifacts // {}) + {
+            wp_codebox_run_diagnostics: {
+                path: $diagnosticsFile,
+                kind: "wp-codebox-bench-run-diagnostics",
+                label: "WP Codebox bench run diagnostics"
+            },
+            wp_codebox_raw_output: {
+                path: $outputArtifact,
+                kind: "wp-codebox-output",
+                label: "WP Codebox raw output"
+            },
+            wp_codebox_exit_code: {
+                path: $exitArtifact,
+                kind: "wp-codebox-exit-code",
+                label: "WP Codebox exit code"
+            }
+        })' "$RESULTS_FILE" > "$enriched_results_file"; then
+        mv "$enriched_results_file" "$RESULTS_FILE"
+    else
+        rm -f "$enriched_results_file"
+        echo "Warning: failed to attach WP Codebox failure artifacts to preserved bench results." >&2
+    fi
+}
+
 homeboy_wp_codebox_emit_run_failure_diagnostic() {
     local output_file="$1"
     local exit_code="$2"
@@ -1282,6 +1322,11 @@ homeboy_wp_codebox_emit_run_failure_diagnostic() {
                 }
             }]
         }' > "$diagnostics_file"
+
+    if [ "$persisted_results" = "true" ]; then
+        homeboy_wp_codebox_attach_failure_artifacts_to_results "$diagnostics_file" "$output_artifact" "$exit_artifact"
+        homeboy_wordpress_emit_bench_results_artifacts "$RESULTS_FILE" || true
+    fi
 
     echo "$message" >&2
     [ -z "$failure_classification" ] || echo "  Failure classification: $failure_classification" >&2
