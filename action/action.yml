@@ -294,7 +294,7 @@ runs:
       run: |
         BINARY="${{ inputs.binary-path }}"
         if [ ! -f "${BINARY}" ]; then
-          echo "::error::binary-path '${BINARY}' does not exist"
+          echo "::error::Homeboy binary not found at '${BINARY}'. This is a CI build-artifact handoff problem, not a code finding — the upstream Build job may have failed, been skipped, or not uploaded the binary. Verify the Build job succeeded, the artifact was uploaded, and this workflow grants the 'actions: read' permission needed to download it."
           exit 1
         fi
         chmod +x "${BINARY}"

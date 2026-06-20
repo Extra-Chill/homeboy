@@ -360,9 +360,11 @@ if ! verify_autofix_quality_gates; then
   exit 0
 fi
 
+echo "::notice::Homeboy autofix is committing a fix for PR #${PR_NUMBER}. The bot commit will be pushed to ${TARGET_REPO}:${TARGET_BRANCH} and will supersede in-flight CI runs on the previous HEAD."
 commit_autofix_changes
 
 if push_autofix_commit; then
+  echo "::notice::Homeboy autofix pushed ${AUTOFIX_FILE_COUNT} file(s) (${AUTOFIX_FIX_TYPES}) to ${TARGET_REPO}:${TARGET_BRANCH}. The new commit supersedes in-flight CI runs — any 'cancelled' run on the previous HEAD was replaced by this push, not a failure."
   echo "committed=true" >> "${GITHUB_OUTPUT}"
   echo "status=pushed" >> "${GITHUB_OUTPUT}"
   echo "target-repo=${TARGET_REPO}" >> "${GITHUB_OUTPUT}"
