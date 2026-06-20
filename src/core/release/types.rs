@@ -339,6 +339,42 @@ pub struct ReleaseCommandInput {
     /// Git identity for release commits: "bot", "Name <email>", or None (use existing config).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_identity: Option<String>,
+    /// Internal execution contract resolved before the workflow runs.
+    #[serde(skip_serializing)]
+    pub execution: Option<ReleaseExecutionPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseExecutionPlan {
+    pub phase: ReleasePhase,
+    pub requires_apply: bool,
+    pub apply_risks: Vec<&'static str>,
+}
+
+impl ReleaseExecutionPlan {
+    pub fn new(phase: ReleasePhase, requires_apply: bool, apply_risks: Vec<&'static str>) -> Self {
+        Self {
+            phase,
+            requires_apply,
+            apply_risks,
+        }
+    }
+
+    pub fn default_for_command_input(input: &ReleaseCommandInput) -> Self {
+        let phase = if input.recover {
+            ReleasePhase::Recover
+        } else if input.dry_run {
+            ReleasePhase::Plan
+        } else if input.pipeline.deploy {
+            ReleasePhase::Deploy
+        } else if input.pipeline.skip_publish {
+            ReleasePhase::Prepare
+        } else {
+            ReleasePhase::Publish
+        };
+
+        Self::new(phase, false, Vec::new())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

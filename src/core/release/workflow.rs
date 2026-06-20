@@ -5,7 +5,7 @@ use crate::core::plan::PlanStep;
 use super::context::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
-    ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePhase, ReleasePlan,
+    ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan, ReleaseOptions, ReleasePlan,
     ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
 };
 
@@ -19,21 +19,16 @@ use super::types::{
 /// `status: "skipped"` + `skipped_reason` + an actionable force hint (issue #4316).
 pub const SKIPPED_RELEASE_EXIT_CODE: i32 = 5;
 
-fn release_phase(input: &ReleaseCommandInput) -> ReleasePhase {
-    if input.recover {
-        ReleasePhase::Recover
-    } else if input.dry_run {
-        ReleasePhase::Plan
-    } else if input.pipeline.deploy {
-        ReleasePhase::Deploy
-    } else if input.pipeline.skip_publish {
-        ReleasePhase::Prepare
-    } else {
-        ReleasePhase::Publish
-    }
+fn release_execution_plan(input: &ReleaseCommandInput) -> ReleaseExecutionPlan {
+    input
+        .execution
+        .clone()
+        .unwrap_or_else(|| ReleaseExecutionPlan::default_for_command_input(input))
 }
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+    let execution = release_execution_plan(&input);
+
     if input.recover {
         return run_recover(&input);
     }
@@ -183,7 +178,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             let release_summary = release_summary_from_run(&run);
             return Ok((
                 ReleaseCommandResult {
-                    phase: release_phase(&input),
+                    phase: execution.phase,
                     component_id: input.component_id,
                     status,
                     bump_type,
@@ -216,7 +211,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
         return Ok((
             ReleaseCommandResult {
-                phase: release_phase(&input),
+                phase: execution.phase,
                 component_id: input.component_id,
                 status: release_command_status(true, skipped_reason.as_deref(), None),
                 bump_type,
@@ -288,7 +283,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
     Ok((
         ReleaseCommandResult {
-            phase: release_phase(&input),
+            phase: execution.phase,
             component_id: input.component_id,
             status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
             bump_type,
@@ -812,7 +807,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             ReleaseCommandResult {
                 component_id: input.component_id.clone(),
                 status: "recovered".to_string(),
-                phase: release_phase(input),
+                phase: release_execution_plan(input).phase,
                 bump_type: "recover".to_string(),
                 dry_run: false,
                 releasable_commits: 0,
@@ -968,7 +963,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             } else {
                 "recovered".to_string()
             },
-            phase: release_phase(input),
+            phase: release_execution_plan(input).phase,
             bump_type: "recover".to_string(),
             dry_run: false,
             releasable_commits: 0,
@@ -1262,6 +1257,7 @@ pub fn run_batch(
             pipeline: input_template.pipeline.clone(),
             skip_github_release: input_template.skip_github_release,
             git_identity: input_template.git_identity.clone(),
+            execution: input_template.execution.clone(),
         };
 
         match run_command(input) {
@@ -1325,6 +1321,7 @@ pub fn run_batch(
 mod tests {
     use super::*;
     use crate::core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use crate::core::release::types::ReleasePhase;
     use crate::core::release::{ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus};
 
     #[test]
@@ -1724,19 +1721,19 @@ mod tests {
     #[test]
     fn release_phase_maps_current_modes() {
         let mut input = ReleaseCommandInput::default();
-        assert_eq!(release_phase(&input), ReleasePhase::Publish);
+        assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Publish);
 
         input.dry_run = true;
-        assert_eq!(release_phase(&input), ReleasePhase::Plan);
+        assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Plan);
 
         input.dry_run = false;
         input.pipeline.skip_publish = true;
-        assert_eq!(release_phase(&input), ReleasePhase::Prepare);
+        assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Prepare);
 
         input.pipeline.deploy = true;
-        assert_eq!(release_phase(&input), ReleasePhase::Deploy);
+        assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Deploy);
 
         input.recover = true;
-        assert_eq!(release_phase(&input), ReleasePhase::Recover);
+        assert_eq!(release_execution_plan(&input).phase, ReleasePhase::Recover);
     }
 }

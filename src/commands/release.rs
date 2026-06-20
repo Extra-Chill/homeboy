@@ -4,7 +4,8 @@ use serde::Serialize;
 use homeboy::core::component;
 use homeboy::core::deploy::{self, ReleaseStateStatus};
 use homeboy::core::release::{
-    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleasePipelineOptions,
+    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
+    ReleasePhase, ReleasePipelineOptions,
 };
 use homeboy::core::scope::{self, Scope};
 
@@ -128,6 +129,35 @@ impl ReleaseArgs {
         }
     }
 
+    fn execution_plan(&self, skip_checks: bool) -> ReleaseExecutionPlan {
+        let phase = if self.recover {
+            ReleasePhase::Recover
+        } else if self.dry_run_args.dry_run {
+            ReleasePhase::Plan
+        } else if self.deploy {
+            ReleasePhase::Deploy
+        } else if self.skip_publish {
+            ReleasePhase::Prepare
+        } else {
+            ReleasePhase::Publish
+        };
+
+        let apply_risks = [
+            (self.deploy, "--deploy"),
+            (self.recover, "--recover"),
+            (self.retag, "--retag"),
+            (self.head, "--head"),
+            (skip_checks, "bare --skip-checks"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, flag)| enabled.then_some(flag))
+        .collect::<Vec<_>>();
+
+        let requires_apply = !self.apply && !self.dry_run_args.dry_run && !apply_risks.is_empty();
+
+        ReleaseExecutionPlan::new(phase, requires_apply, apply_risks)
+    }
+
     /// Resolve `--skip-checks` into (skip-all, granular-check-list).
     ///
     /// - Flag absent → `(false, [])`: run every quality gate.
@@ -220,7 +250,8 @@ pub fn run(
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
     let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
-    validate_apply_boundary(&args, skip_checks)?;
+    let execution = args.execution_plan(skip_checks);
+    validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
 
@@ -240,6 +271,7 @@ pub fn run(
             pipeline: args.pipeline_options(),
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
+            execution: Some(execution.clone()),
         })?;
 
         return Ok((
@@ -303,6 +335,7 @@ pub fn run(
         },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
+        execution: Some(execution),
     };
 
     let batch_result = release::run_batch(&component_ids, &input_template);
@@ -327,25 +360,12 @@ pub fn run(
     ))
 }
 
-fn validate_apply_boundary(args: &ReleaseArgs, skip_checks: bool) -> homeboy::core::Result<()> {
-    if args.apply
-        || args.dry_run_args.dry_run
-        || (!args.deploy && !args.recover && !args.retag && !args.head && !skip_checks)
-    {
+fn validate_apply_boundary(execution: &ReleaseExecutionPlan) -> homeboy::core::Result<()> {
+    if !execution.requires_apply {
         return Ok(());
     }
 
-    let risky_flags = [
-        (args.deploy, "--deploy"),
-        (args.recover, "--recover"),
-        (args.retag, "--retag"),
-        (args.head, "--head"),
-        (skip_checks, "bare --skip-checks"),
-    ]
-    .into_iter()
-    .filter_map(|(enabled, flag)| enabled.then_some(flag))
-    .collect::<Vec<_>>()
-    .join(" and ");
+    let risky_flags = execution.apply_risks.join(" and ");
 
     Err(homeboy::core::Error::validation_invalid_argument(
         "apply",
@@ -554,7 +574,8 @@ mod tests {
         args.dry_run_args.dry_run = false;
         args.head = true;
 
-        let err = validate_apply_boundary(&args, false).expect_err("--head requires --apply");
+        let execution = args.execution_plan(false);
+        let err = validate_apply_boundary(&execution).expect_err("--head requires --apply");
 
         assert!(err
             .message
@@ -566,7 +587,8 @@ mod tests {
         let mut args = args(&["fixture"]);
         args.head = true;
 
-        validate_apply_boundary(&args, false).expect("dry-run may preview risky mode");
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("dry-run may preview risky mode");
     }
 
     #[test]
@@ -574,8 +596,9 @@ mod tests {
         let mut args = args(&["fixture"]);
         args.dry_run_args.dry_run = false;
 
+        let execution = args.execution_plan(true);
         let err =
-            validate_apply_boundary(&args, true).expect_err("bare --skip-checks requires --apply");
+            validate_apply_boundary(&execution).expect_err("bare --skip-checks requires --apply");
 
         assert!(err
             .message
@@ -587,7 +610,8 @@ mod tests {
         let mut args = args(&["fixture"]);
         args.dry_run_args.dry_run = false;
 
-        validate_apply_boundary(&args, false).expect("granular skip-checks is not guarded");
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("granular skip-checks is not guarded");
     }
 
     #[test]
@@ -598,6 +622,19 @@ mod tests {
         args.retag = true;
         args.apply = true;
 
-        validate_apply_boundary(&args, false).expect("--apply confirms risky release mode");
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
+    }
+
+    #[test]
+    fn execution_plan_resolves_phase_from_args() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.skip_publish = true;
+
+        let execution = args.execution_plan(false);
+
+        assert_eq!(execution.phase, ReleasePhase::Prepare);
+        assert!(!execution.requires_apply);
     }
 }
