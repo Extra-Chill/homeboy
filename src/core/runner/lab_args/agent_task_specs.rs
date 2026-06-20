@@ -14,63 +14,8 @@ use serde_json::Value;
 use crate::core::config::read_json_spec_to_string;
 use crate::core::{Error, Result};
 
+use super::envelope::ExecutionEnvelope;
 use super::path_remap::{remap_paths_in_value, LabPathRemap};
-
-struct ArgTransformSpec<'a, C> {
-    value_transforms: &'a [ArgValueTransform<'a, C>],
-}
-
-struct ArgValueTransform<'a, C> {
-    flag: &'a str,
-    transform: fn(&str, &C, &str) -> Result<String>,
-}
-
-impl<C> ArgTransformSpec<'_, C> {
-    fn transform_args(&self, args: &[String], context: &C) -> Result<Vec<String>> {
-        let mut out = Vec::with_capacity(args.len());
-        let mut iter = args.iter().peekable();
-        let mut passthrough = false;
-        while let Some(arg) = iter.next() {
-            if passthrough {
-                out.push(arg.clone());
-                continue;
-            }
-            if arg == "--" {
-                passthrough = true;
-                out.push(arg.clone());
-                continue;
-            }
-
-            if let Some(transform) = self.value_transforms.iter().find(|item| item.flag == arg) {
-                out.push(arg.clone());
-                if let Some(value) = iter.next() {
-                    out.push((transform.transform)(value, context, transform.flag)?);
-                }
-                continue;
-            }
-
-            let mut transformed = false;
-            for transform in self.value_transforms {
-                if let Some(value) = arg
-                    .strip_prefix(transform.flag)
-                    .and_then(|rest| rest.strip_prefix('='))
-                {
-                    out.push(format!(
-                        "{}={}",
-                        transform.flag,
-                        (transform.transform)(value, context, transform.flag)?
-                    ));
-                    transformed = true;
-                    break;
-                }
-            }
-            if !transformed {
-                out.push(arg.clone());
-            }
-        }
-        Ok(out)
-    }
-}
 
 pub(in crate::core::runner) fn remap_agent_task_plan_in_args(
     args: &[String],
@@ -121,33 +66,10 @@ pub(in crate::core::runner) fn inline_agent_task_prompt_files_in_args(
     args: &[String],
     source_path: &Path,
 ) -> Result<Vec<String>> {
-    const AGENT_TASK_TEXT_FILE_TRANSFORMS: &[ArgValueTransform<'static, PathBuf>] = &[
-        ArgValueTransform {
-            flag: "--prompt",
-            transform: inline_agent_task_text_file_arg,
-        },
-        ArgValueTransform {
-            flag: "--task",
-            transform: inline_agent_task_text_file_arg,
-        },
-        ArgValueTransform {
-            flag: "--tasks",
-            transform: inline_agent_task_text_file_arg,
-        },
-    ];
-
-    ArgTransformSpec {
-        value_transforms: AGENT_TASK_TEXT_FILE_TRANSFORMS,
-    }
-    .transform_args(args, &source_path.to_path_buf())
-}
-
-fn inline_agent_task_text_file_arg(
-    spec: &str,
-    source_path: &PathBuf,
-    flag: &str,
-) -> Result<String> {
-    read_agent_task_text_spec_to_inline(spec, source_path, flag)
+    let envelope = ExecutionEnvelope::from_args(args);
+    envelope.rewrite_agent_task_text_values(|spec, flag| {
+        read_agent_task_text_spec_to_inline(spec, source_path, flag)
+    })
 }
 
 /// Resolve an agent-task plan spec, remap every controller-local path embedded
