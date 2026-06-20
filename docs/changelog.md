@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.246.1] - 2026-06-20
+
+### Changed
+- Carry controller workflow artifacts forward
+- split god-files to clear structural findings (#5492)
+
+### Fixed
+- make release commit+tag concurrency-safe against base-branch races (#5502)
+- narrow shared scripts lifecycle install after helper migration (#4907)
+- remove core agnostic-source boundary leaks (#5504)
+- resolve main lint break (rustfmt violation in bench parsing test)
+- remove domain term from bench fixture
+- remove core agnostic-source boundary leaks (#5490)
+
 ## [0.246.0] - 2026-06-20
 
 ### Added
