@@ -306,21 +306,24 @@ fn merge_string_setting_override(
     key: &str,
     value: &str,
 ) {
-    let Some((root, child_path)) = key.split_once('.') else {
+    // Replace any existing top-level entry for `key` with the raw string value.
+    // Used for both the no-dot case and malformed dotted keys (empty segments),
+    // which are treated as opaque flat keys rather than nested paths.
+    let set_flat = |settings: &mut Vec<(String, serde_json::Value)>| {
         settings.retain(|(k, _)| k != key);
         settings.push((
             key.to_string(),
             serde_json::Value::String(value.to_string()),
         ));
+    };
+
+    let Some((root, child_path)) = key.split_once('.') else {
+        set_flat(settings);
         return;
     };
 
     if root.is_empty() || child_path.is_empty() || child_path.split('.').any(str::is_empty) {
-        settings.retain(|(k, _)| k != key);
-        settings.push((
-            key.to_string(),
-            serde_json::Value::String(value.to_string()),
-        ));
+        set_flat(settings);
         return;
     }
 
