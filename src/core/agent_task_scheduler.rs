@@ -935,6 +935,7 @@ impl AgentTaskScheduleSupport {
         if let Some(running) = running {
             Self::normalize_required_typed_artifacts(&mut outcome, &running.request);
             Self::recover_missing_typed_artifacts_wrapper_failure(&mut outcome, &running.request);
+            Self::classify_missing_required_typed_artifacts(&mut outcome, &running.request);
         }
 
         Self::classify_failed_nested_executor_status(&mut outcome);
@@ -1052,6 +1053,33 @@ impl AgentTaskScheduleSupport {
                     .map(|artifact| artifact.name.clone())
                     .collect::<Vec<_>>(),
             }),
+        });
+    }
+
+    fn classify_missing_required_typed_artifacts(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        if outcome.status != AgentTaskOutcomeStatus::Succeeded {
+            return;
+        }
+
+        let missing = missing_required_typed_artifacts(outcome, request);
+        if missing.is_empty() {
+            return;
+        }
+
+        let message = format!(
+            "agent task did not produce required typed artifacts: {}.",
+            missing.join(", ")
+        );
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        outcome.summary = Some(message.clone());
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.required_typed_artifacts_missing".to_string(),
+            message,
+            data: serde_json::json!({ "missing": missing }),
         });
     }
 
@@ -1854,10 +1882,32 @@ struct NestedFailedExecutorStatus {
 }
 
 fn nested_failed_executor_status(outcome: &AgentTaskOutcome) -> Option<NestedFailedExecutorStatus> {
-    outcome
+    if let Some(found) = outcome
         .outputs
         .get("provider_run_result")
         .and_then(|result| find_failed_status_value(result, "outputs.provider_run_result"))
+    {
+        return Some(found);
+    }
+
+    outcome
+        .typed_artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact
+                .metadata
+                .get("normalized_from")
+                .and_then(Value::as_str)
+                != Some("runtime_outcome")
+                && (artifact.name == "agent_result"
+                    || artifact.artifact_schema.as_deref() == Some(AGENT_TASK_OUTCOME_SCHEMA))
+        })
+        .find_map(|artifact| {
+            find_failed_status_value(
+                &artifact.payload,
+                &format!("typed_artifacts.{}.payload", artifact.name),
+            )
+        })
 }
 
 fn find_failed_status_value(value: &Value, path: &str) -> Option<NestedFailedExecutorStatus> {
@@ -2080,9 +2130,9 @@ fn event(
 mod tests {
     use super::*;
     use crate::core::agent_task::{
-        expand_agent_task_matrix, AgentTaskArtifact, AgentTaskExecutor, AgentTaskLimits,
-        AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskPolicy, AgentTaskWorkspace,
-        AGENT_TASK_ARTIFACT_SCHEMA,
+        expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
+        AgentTaskPolicy, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2224,6 +2274,53 @@ mod tests {
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].data["value"],
             json!("failed - completion_required_tool_unavailable")
+        );
+    }
+
+    #[test]
+    fn nested_agent_result_failure_fails_succeeded_wrapper_outcome() {
+        let scheduler = AgentTaskScheduler::new(NestedAgentResultFailedExecutor);
+
+        let aggregate = scheduler.run(plan_with_tasks(1));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.succeeded, 0);
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.nested_executor_failed_status"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["path"],
+            json!("typed_artifacts.agent_result.payload.status")
+        );
+    }
+
+    #[test]
+    fn missing_required_typed_artifacts_fails_succeeded_outcome() {
+        let scheduler = AgentTaskScheduler::new(SuccessMissingRequiredArtifactsExecutor);
+
+        let aggregate = scheduler.run(plan_with_required_artifacts(&[
+            "import_validation_result",
+            "visual_parity_artifact",
+        ]));
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(aggregate.totals.succeeded, 0);
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.required_typed_artifacts_missing"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["missing"],
+            json!(["import_validation_result", "visual_parity_artifact"])
         );
     }
 
@@ -3454,6 +3551,10 @@ mod tests {
 
     struct NestedTerminalStateFailedExecutor;
 
+    struct NestedAgentResultFailedExecutor;
+
+    struct SuccessMissingRequiredArtifactsExecutor;
+
     impl AgentTaskExecutorAdapter for RetryOnceExecutor {
         fn execute(
             &self,
@@ -3620,6 +3721,39 @@ mod tests {
         }
     }
 
+    impl AgentTaskExecutorAdapter for NestedAgentResultFailedExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            outcome.typed_artifacts.push(AgentTaskTypedArtifact {
+                name: "agent_result".to_string(),
+                artifact_type: Some("json".to_string()),
+                artifact_schema: Some(AGENT_TASK_OUTCOME_SCHEMA.to_string()),
+                payload: json!({
+                    "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                    "status": "failed",
+                    "summary": "provider run missed required typed artifacts"
+                }),
+                artifact: None,
+                metadata: Value::Null,
+            });
+            outcome
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for SuccessMissingRequiredArtifactsExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
     struct RecordingExecutor {
         statuses: HashMap<String, AgentTaskOutcomeStatus>,
         delay: Duration,
@@ -3742,6 +3876,23 @@ mod tests {
             tasks.push(request(&format!("task-{index}")));
         }
         AgentTaskPlan::new("plan-1", tasks)
+    }
+
+    fn plan_with_required_artifacts(names: &[&str]) -> AgentTaskPlan {
+        let mut task = request("task-1");
+        task.artifact_declarations = names
+            .iter()
+            .map(|name| AgentTaskArtifactDeclaration {
+                name: (*name).to_string(),
+                artifact_type: None,
+                artifact_schema: None,
+                path: None,
+                required: true,
+                description: None,
+                metadata: Value::Null,
+            })
+            .collect();
+        AgentTaskPlan::new("plan-1", vec![task])
     }
 
     fn request(task_id: &str) -> AgentTaskRequest {
