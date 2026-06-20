@@ -1516,7 +1516,7 @@ fn completed_typed_artifacts_are_carried_to_later_required_workflow_artifacts() 
             .iter()
             .all(|action| action.diagnostics.is_empty()));
         assert_eq!(
-            result.value.results[1].execution["workflow_artifacts"][0]["name"],
+            result.value.results[1]["execution"]["workflow_artifacts"][0]["name"],
             json!("static_site_candidate")
         );
 
