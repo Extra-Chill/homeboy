@@ -1121,7 +1121,9 @@ mod tests {
                     "lab": { "remote_job_id": job_id }
                 }),
             };
-            store.upsert_imported_run(&sibling_run).expect("sibling run");
+            store
+                .upsert_imported_run(&sibling_run)
+                .expect("sibling run");
             let requested_summary = home.path().join("requested-summary.json");
             std::fs::write(&requested_summary, br#"{"passed":false}"#).expect("summary");
             let requested_artifact = store
@@ -1133,8 +1135,8 @@ mod tests {
                 .record_artifact(&sibling_run.id, "bench_results", &sibling_summary)
                 .expect("sibling artifact");
 
-            let artifacts = runs_service::list_artifacts_for_run(&store, &requested_run.id)
-                .expect("artifacts");
+            let artifacts =
+                runs_service::list_artifacts_for_run(&store, &requested_run.id).expect("artifacts");
 
             assert_eq!(artifacts.len(), 1);
             assert_eq!(artifacts[0].id, requested_artifact.id);
