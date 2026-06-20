@@ -242,9 +242,14 @@ fn apply_dispatch_defaults_for_root(spec: &mut AgentTaskRepoLoopSpec, root: Path
     let Value::Object(defaults) = defaults else {
         return;
     };
-    defaults
-        .entry("cwd".to_string())
-        .or_insert_with(|| Value::String(root.display().to_string()));
+    let should_set_cwd = defaults
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(|cwd| !Path::new(cwd).is_dir())
+        .unwrap_or(true);
+    if should_set_cwd {
+        defaults.insert("cwd".to_string(), Value::String(root.display().to_string()));
+    }
     defaults
         .entry("repo".to_string())
         .or_insert_with(|| Value::String(repo));

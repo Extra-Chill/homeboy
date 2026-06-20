@@ -253,7 +253,6 @@ pub enum FilesystemAssertionKind {
     Dir,
 }
 
-
 impl FilesystemAssertionKind {
     pub fn is_path(&self) -> bool {
         matches!(self, Self::Path)
