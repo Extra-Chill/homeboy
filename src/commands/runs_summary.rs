@@ -2,7 +2,7 @@
 //!
 //! `runs show` returns a `RunDetail` that embeds full run metadata and the
 //! complete artifact list. For bench runs in particular, the useful evidence
-//! — shared-state files, WP Codebox artifact bundles, scenario-specific
+//! — shared-state files, runner artifact bundles, scenario-specific
 //! artifacts — is buried in a large JSON payload (#3260).
 //!
 //! This module renders a compact summary from the serialized `RunsOutput`
@@ -264,9 +264,9 @@ mod tests {
         let summary = render_runs_show_summary(&payload).expect("summary");
 
         assert!(summary.contains("Coverage:\n"));
-        assert!(summary.contains(
-            "  Surfaces: discovered=44 exercised=30 skipped_unsafe=8 failed=1\n"
-        ));
+        assert!(
+            summary.contains("  Surfaces: discovered=44 exercised=30 skipped_unsafe=8 failed=1\n")
+        );
         assert!(summary.contains("  Coverage gaps: 3\n"));
         assert!(summary.contains("    api: 2\n"));
         assert!(summary.contains("    cli: 1\n"));
