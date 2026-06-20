@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.247.0] - 2026-06-20
+
+### Added
+- persist trace compare pair artifacts as first-class evidence (#4233)
+- support non-blocking preview-consumer runs for held preview URLs (#4485)
+- add post-deploy front-end smoke check to catch runtime-fataling releases (#5471)
+
+### Changed
+- resolve structural findings (#5547)
+- resolve structural finding in bench/parsing (#5517)
+- Apply bench hotspot formatting
+- Avoid command helper type classification
+- Align bench hotspot helper names
+- Keep bench hotspot fixtures generic
+- Surface bench hotspots in summaries
+
+### Fixed
+- read artifact-backed metrics in browser evidence compare (#4621)
+- handle macOS dark-wake keychain failure in secret resolution (#4162)
+- align homeboy file root with deploy plugin paths (#5456)
+- resolve failing test (#5536)
+
 ## [0.246.1] - 2026-06-20
 
 ### Changed
