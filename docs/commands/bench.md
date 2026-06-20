@@ -31,7 +31,8 @@ directly include `public_url`; bundle-relative or internal artifacts include
 
 By default `homeboy bench` prints a **compact human summary** for run and
 comparison invocations: pass/fail, the persisted run ID, runner, component
-SHA, selected scenarios, key metrics, generic hotspots, and artifact pointers, followed by the
+SHA, selected scenarios, key metrics, generic hotspots, generic coverage
+summaries when present, and artifact pointers, followed by the
 `homeboy runs show <run-id>` / `homeboy runs artifacts <run-id>` commands to
 see everything. No data is dropped — the full structured payload is always
 written to `--output <file>`, and `--json` prints it to stdout instead of the
@@ -43,6 +44,14 @@ the bench payload. The extraction is schema-blind and component-agnostic: it
 uses metric names such as `duration`, `elapsed`, `*_ms`, `*_ms_per_item`,
 `*_queries_per_*`, and grouped count metrics rather than product-specific
 scenario names.
+
+When bench/fuzzer runners provide coverage metadata, the compact summary also
+renders a schema-blind coverage block. Homeboy reads generic fields such as
+`coverage_summary`, `coverage_gaps`, `surface_count`, `exercised_count`,
+`skipped_count`, and `failed_count` from result metadata or artifact records.
+It reports discovered, exercised, skipped-unsafe, and failed surface counts plus
+top uncovered groups when those fields are available; missing fields are simply
+omitted.
 
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
