@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
-    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface,
-    CommandSafetyEntry, Cli, Commands,
+    command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
+    CommandSafetyEntry, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;

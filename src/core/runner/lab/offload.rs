@@ -3578,6 +3578,7 @@ mod tests {
     #[test]
     fn lab_offload_rejects_truncated_runner_stdout() {
         let exec_output = RunnerExecOutput {
+            variant: "exec",
             command: "runner.exec",
             runner_id: "lab-default".to_string(),
             dry_run: false,
