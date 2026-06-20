@@ -249,17 +249,83 @@ fn command_docs_files_match_command_index_snapshot() {
         "commands-index".to_string(),
         "rig-spec".to_string(),
     ]);
+    // Hidden top-level commands ship a docs file for runtimes but are
+    // deliberately kept out of the human-facing command index.
+    let hidden_documented_commands = BTreeSet::from(["list".to_string()]);
     let docs_files = documented_command_doc_files();
 
-    let missing_from_index: Vec<_> = docs_files
-        .difference(&documented)
-        .filter(|entry| !companion_topics.contains(*entry))
+    // Guard against a vacuously-passing snapshot: the index and the docs
+    // directory must both be populated, otherwise the set algebra below would
+    // pass trivially against empty inputs.
+    assert!(
+        documented.len() >= 10,
+        "commands-index.md should enumerate the real command surface, found only {} entries: {documented:?}",
+        documented.len()
+    );
+    assert!(
+        docs_files.len() > documented.len(),
+        "docs/commands/ should contain one file per indexed command plus companion topics, found {} docs vs {} indexed",
+        docs_files.len(),
+        documented.len()
+    );
+
+    // Tie the snapshot to the live product command surface: every visible
+    // top-level command exposed by the safety manifest must be both indexed and
+    // backed by a docs file. This anchors the assertion to real product
+    // behavior rather than to fixture-only set arithmetic.
+    let manifest = current_command_safety_manifest();
+    let live_top_level: BTreeSet<String> = manifest
+        .commands
+        .iter()
+        .filter(|entry| visible_manifest_entry_with_docs_path(entry))
+        .map(|entry| entry.name.clone())
+        .collect();
+    assert!(
+        live_top_level.contains("audit") && live_top_level.contains("report"),
+        "expected representative live commands `audit` and `report` in the safety manifest: {live_top_level:?}"
+    );
+
+    let live_missing_from_index: Vec<_> = live_top_level.difference(&documented).cloned().collect();
+    assert!(
+        live_missing_from_index.is_empty(),
+        "commands-index.md is missing live top-level commands from the safety manifest: {live_missing_from_index:?}"
+    );
+
+    let live_missing_docs: Vec<_> = live_top_level
+        .iter()
+        .filter(|command| !docs_files.contains(*command))
         .cloned()
         .collect();
+    assert!(
+        live_missing_docs.is_empty(),
+        "live top-level commands are missing docs/commands/<command>.md files: {live_missing_docs:?}"
+    );
 
+    // Every command doc file must either be an indexed command or a known
+    // companion topic — no orphaned docs allowed.
+    let missing_from_index: Vec<_> = docs_files
+        .difference(&documented)
+        .filter(|entry| {
+            !companion_topics.contains(*entry) && !hidden_documented_commands.contains(*entry)
+        })
+        .cloned()
+        .collect();
     assert!(
         missing_from_index.is_empty(),
         "docs/commands/*.md contains command docs that are not listed in commands-index.md: {missing_from_index:?}"
+    );
+
+    // Companion topics are documentation-only — they must ship a doc file and
+    // must never leak into the command index.
+    for topic in &companion_topics {
+        assert!(
+            docs_files.contains(topic),
+            "expected companion topic `{topic}` to have a docs/commands/{topic}.md file"
+        );
+    }
+    assert!(
+        documented.contains("audit") && documented.contains("report"),
+        "commands-index.md should document representative commands `audit` and `report`: {documented:?}"
     );
 }
 
