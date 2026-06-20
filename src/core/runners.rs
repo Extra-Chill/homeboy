@@ -62,7 +62,7 @@ pub use super::runner::{
 // `pub use runner::*`. Keep them available so existing in-tree callers
 // (currently `commands::runs::remote`) compile, but do not expose them as
 // public API.
-pub(crate) use super::runner::{daemon_api_get, daemon_api_post};
+pub(crate) use super::runner::daemon_api_get;
 
 // ----------------------------------------------------------------------------
 // Explicit API groups
