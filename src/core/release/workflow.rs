@@ -5,8 +5,8 @@ use crate::core::plan::PlanStep;
 use super::context::load_component;
 use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
-    ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePlan, ReleaseRun,
-    ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseCommandInput, ReleaseCommandResult, ReleaseOptions, ReleasePhase, ReleasePlan,
+    ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
 };
 
 /// Process exit code returned when a release is intentionally skipped (no tag,
@@ -18,6 +18,20 @@ use super::types::{
 /// release reports `success: false` while the data payload still carries
 /// `status: "skipped"` + `skipped_reason` + an actionable force hint (issue #4316).
 pub const SKIPPED_RELEASE_EXIT_CODE: i32 = 5;
+
+fn release_phase(input: &ReleaseCommandInput) -> ReleasePhase {
+    if input.recover {
+        ReleasePhase::Recover
+    } else if input.dry_run {
+        ReleasePhase::Plan
+    } else if input.pipeline.deploy {
+        ReleasePhase::Deploy
+    } else if input.pipeline.skip_publish {
+        ReleasePhase::Prepare
+    } else {
+        ReleasePhase::Publish
+    }
+}
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
     if input.recover {
@@ -169,6 +183,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             let release_summary = release_summary_from_run(&run);
             return Ok((
                 ReleaseCommandResult {
+                    phase: release_phase(&input),
                     component_id: input.component_id,
                     status,
                     bump_type,
@@ -201,6 +216,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
         return Ok((
             ReleaseCommandResult {
+                phase: release_phase(&input),
                 component_id: input.component_id,
                 status: release_command_status(true, skipped_reason.as_deref(), None),
                 bump_type,
@@ -272,6 +288,7 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
 
     Ok((
         ReleaseCommandResult {
+            phase: release_phase(&input),
             component_id: input.component_id,
             status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
             bump_type,
@@ -795,6 +812,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             ReleaseCommandResult {
                 component_id: input.component_id.clone(),
                 status: "recovered".to_string(),
+                phase: release_phase(input),
                 bump_type: "recover".to_string(),
                 dry_run: false,
                 releasable_commits: 0,
@@ -950,6 +968,7 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             } else {
                 "recovered".to_string()
             },
+            phase: release_phase(input),
             bump_type: "recover".to_string(),
             dry_run: false,
             releasable_commits: 0,
@@ -1700,5 +1719,24 @@ mod tests {
         run_in(dir, &["git", "tag", "v0.7.4"]);
 
         assert!(diagnose_orphan_tag(&dir.to_string_lossy(), "v0.7.4").is_none());
+    }
+
+    #[test]
+    fn release_phase_maps_current_modes() {
+        let mut input = ReleaseCommandInput::default();
+        assert_eq!(release_phase(&input), ReleasePhase::Publish);
+
+        input.dry_run = true;
+        assert_eq!(release_phase(&input), ReleasePhase::Plan);
+
+        input.dry_run = false;
+        input.pipeline.skip_publish = true;
+        assert_eq!(release_phase(&input), ReleasePhase::Prepare);
+
+        input.pipeline.deploy = true;
+        assert_eq!(release_phase(&input), ReleasePhase::Deploy);
+
+        input.recover = true;
+        assert_eq!(release_phase(&input), ReleasePhase::Recover);
     }
 }

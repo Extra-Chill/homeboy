@@ -27,9 +27,9 @@ pub use planner::plan;
 pub use types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseArtifact,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-    ReleaseOptions, ReleasePipelineOptions, ReleasePlan, ReleaseProjectDeployResult, ReleaseRun,
-    ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit, ReleaseSemverRecommendation,
-    ReleaseStepResult, ReleaseStepStatus,
+    ReleaseOptions, ReleasePhase, ReleasePipelineOptions, ReleasePlan, ReleaseProjectDeployResult,
+    ReleaseRun, ReleaseRunResult, ReleaseRunSummary, ReleaseSemverCommit,
+    ReleaseSemverRecommendation, ReleaseStepResult, ReleaseStepStatus,
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{run_batch, run_command, SKIPPED_RELEASE_EXIT_CODE};
