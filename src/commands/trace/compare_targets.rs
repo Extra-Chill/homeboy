@@ -89,6 +89,8 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
     )?;
     let baseline_aggregate = proof.baseline;
     let candidate_aggregate = proof.candidate;
+    let baseline_run_ids = proof.baseline_run_ids;
+    let candidate_run_ids = proof.candidate_run_ids;
 
     let baseline_path = output_dir.join("baseline.aggregate.json");
     let candidate_path = output_dir.join("candidate.aggregate.json");
@@ -141,6 +143,38 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
         || compare.focus_status.as_deref() == Some("fail")
         || compare.guardrail_status.as_deref() == Some("fail")
         || compare.metric_guardrail_status.as_deref() == Some("fail");
+    let compare_status = if failed { "fail" } else { "pass" };
+
+    let pair_artifact = build_compare_pair_artifact(
+        &component_id,
+        &scenario_id,
+        compare_status,
+        &output_dir,
+        &artifact_paths,
+        &compare,
+        ComparePairSideInputs {
+            target: Some(baseline_target.input.clone()),
+            git_sha: compare.before_git_sha.clone(),
+            status: compare.before_status.clone(),
+            run_ids: baseline_run_ids,
+            aggregate: &baseline_aggregate,
+        },
+        ComparePairSideInputs {
+            target: Some(candidate_target.input.clone()),
+            git_sha: compare.after_git_sha.clone(),
+            status: compare.after_status.clone(),
+            run_ids: candidate_run_ids,
+            aggregate: &candidate_aggregate,
+        },
+    );
+    trace_compare::persist_compare_pair_artifact(&artifact_paths.pair, &pair_artifact)?;
+    let pair_json = serde_json::to_value(&pair_artifact).map_err(|err| {
+        homeboy::core::Error::internal_json(
+            err.to_string(),
+            Some("trace.compare.pair.serialize".to_string()),
+        )
+    })?;
+
     finish_compare_observation(
         observation,
         if failed {
@@ -165,13 +199,83 @@ pub(super) fn run_compare_targets(args: TraceArgs) -> CmdResult<TraceCommandOutp
                 "focus_status": compare.focus_status.as_deref(),
                 "guardrail_status": compare.guardrail_status.as_deref(),
                 "metric_guardrail_status": compare.metric_guardrail_status.as_deref(),
-            }
+            },
+            "compare_pair": pair_json,
         }),
     );
     Ok((
         TraceCommandOutput::Compare(compare),
         if failed { 1 } else { 0 },
     ))
+}
+
+/// Inputs for one side of the compare pair artifact, assembled from the proof
+/// matrix output and the resolved target.
+struct ComparePairSideInputs<'a> {
+    target: Option<String>,
+    git_sha: Option<String>,
+    status: Option<String>,
+    run_ids: Vec<String>,
+    aggregate: &'a extension_trace::TraceAggregateOutput,
+}
+
+/// Assemble the first-class, provider-agnostic compare pair artifact linking the
+/// compare command, child baseline/candidate run ids, the report path, and the
+/// persisted artifact bundle directories.
+#[allow(clippy::too_many_arguments)]
+fn build_compare_pair_artifact(
+    component_id: &str,
+    scenario_id: &str,
+    status: &str,
+    output_dir: &Path,
+    artifact_paths: &trace_compare::CompareArtifactPaths,
+    compare: &extension_trace::TraceCompareOutput,
+    baseline: ComparePairSideInputs<'_>,
+    candidate: ComparePairSideInputs<'_>,
+) -> trace_compare::ComparePairArtifact {
+    let post_compare_artifacts = compare
+        .browser_proof
+        .as_ref()
+        .map(|proof| {
+            proof
+                .baseline_dirs
+                .iter()
+                .chain(proof.candidate_dirs.iter())
+                .map(|dir| trace_compare::ComparePairLinkedArtifact {
+                    kind: "browser-proof-dir".to_string(),
+                    path: dir.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    trace_compare::ComparePairArtifact {
+        kind: "trace-compare-pair",
+        command: "trace.compare".to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        component: component_id.to_string(),
+        scenario_id: scenario_id.to_string(),
+        status: status.to_string(),
+        baseline: compare_pair_side(baseline),
+        candidate: compare_pair_side(candidate),
+        output_dir: output_dir.to_string_lossy().to_string(),
+        compare_json: artifact_paths.compare.to_string_lossy().to_string(),
+        summary_path: artifact_paths.summary.to_string_lossy().to_string(),
+        post_compare_artifacts,
+    }
+}
+
+fn compare_pair_side(inputs: ComparePairSideInputs<'_>) -> trace_compare::ComparePairSide {
+    let artifact_dirs = run_artifact_dirs(inputs.aggregate)
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    trace_compare::ComparePairSide::new(
+        inputs.target,
+        inputs.git_sha,
+        inputs.status,
+        inputs.run_ids,
+        artifact_dirs,
+    )
 }
 
 fn start_compare_observation(
@@ -243,6 +347,8 @@ struct TargetProofMatrix {
     baseline: extension_trace::TraceAggregateOutput,
     candidate: extension_trace::TraceAggregateOutput,
     run_order: Vec<extension_trace::TraceCompareRunOrderOutput>,
+    baseline_run_ids: Vec<String>,
+    candidate_run_ids: Vec<String>,
 }
 
 fn run_target_proof_matrix(
@@ -299,10 +405,14 @@ fn run_target_proof_matrix(
         });
     }
 
+    let baseline_run_ids = baseline.run_ids().to_vec();
+    let candidate_run_ids = candidate.run_ids().to_vec();
     Ok(TargetProofMatrix {
         baseline: baseline.finish(args, span_metadata.clone())?,
         candidate: candidate.finish(args, span_metadata)?,
         run_order: proof_run_order,
+        baseline_run_ids,
+        candidate_run_ids,
     })
 }
 
@@ -350,6 +460,7 @@ struct TargetAggregateBuilder {
     failure_count: usize,
     rig_state: Option<homeboy::core::rig::RigStateSnapshot>,
     overlays: Vec<extension_trace::TraceOverlay>,
+    run_ids: Vec<String>,
 }
 
 impl TargetAggregateBuilder {
@@ -374,7 +485,15 @@ impl TargetAggregateBuilder {
             failure_count: 0,
             rig_state: None,
             overlays: Vec::new(),
+            run_ids: Vec::new(),
         }
+    }
+
+    /// Observation run ids of the child runs recorded for this group, in the
+    /// order they executed. Used to link child baseline/candidate run records
+    /// into the first-class compare pair artifact.
+    fn run_ids(&self) -> &[String] {
+        &self.run_ids
     }
 
     fn record(
@@ -395,6 +514,9 @@ impl TargetAggregateBuilder {
     ) -> RecordedProofRun {
         if self.rig_state.is_none() {
             self.rig_state = execution.rig_state.clone();
+        }
+        if let Some(run_id) = execution.run_id.as_ref() {
+            self.run_ids.push(run_id.clone());
         }
         if self.overlays.is_empty() && !execution.workflow.overlays.is_empty() {
             self.overlays = execution.workflow.overlays.clone();
@@ -1042,6 +1164,67 @@ mod tests {
             assert!(artifact_kinds.contains("trace-compare-candidate-aggregate"));
             assert!(artifact_kinds.contains("trace-compare-json"));
             assert!(artifact_kinds.contains("trace-compare-summary"));
+            assert!(
+                artifact_kinds.contains("trace-compare-pair"),
+                "compare pair artifact recorded as first-class evidence"
+            );
+
+            // The pair artifact is the canonical evidence index: it must link
+            // the child baseline/candidate observation run ids and be addressable
+            // from the compare run metadata so reporting never spelunks temp paths.
+            let pair_artifact = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "trace-compare-pair")
+                .expect("pair artifact present");
+            let pair_path = std::path::Path::new(&pair_artifact.path);
+            assert!(pair_path.exists(), "pair artifact persisted to disk");
+            let pair: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(pair_path).expect("read pair"))
+                    .expect("parse pair");
+            assert_eq!(pair["kind"], "trace-compare-pair");
+            assert_eq!(pair["command"], "trace.compare");
+            assert_eq!(pair["component"], "studio");
+            assert_eq!(pair["status"], "pass");
+            let baseline_run_ids = pair["baseline"]["run_ids"]
+                .as_array()
+                .expect("baseline run ids array");
+            let candidate_run_ids = pair["candidate"]["run_ids"]
+                .as_array()
+                .expect("candidate run ids array");
+            assert!(
+                !baseline_run_ids.is_empty(),
+                "at least one baseline child run id linked"
+            );
+            assert!(
+                !candidate_run_ids.is_empty(),
+                "at least one candidate child run id linked"
+            );
+            // Linked child run ids must resolve to real persisted run records.
+            for run_id in baseline_run_ids.iter().chain(candidate_run_ids.iter()) {
+                let run_id = run_id.as_str().expect("run id string");
+                assert!(
+                    store.get_run(run_id).expect("lookup child run").is_some(),
+                    "child run {run_id} persisted in observation store"
+                );
+            }
+            assert_eq!(
+                pair["baseline"]["run_evidence"][0]["evidence_command"],
+                format!(
+                    "homeboy runs evidence {}",
+                    baseline_run_ids[0].as_str().unwrap()
+                )
+            );
+
+            // The compare run metadata embeds the same pair index so consumers can
+            // address compare-level evidence directly from the run record.
+            assert_eq!(
+                compare_run.metadata_json["compare_pair"]["kind"],
+                "trace-compare-pair"
+            );
+            assert_eq!(
+                compare_run.metadata_json["compare_pair"]["baseline"]["run_ids"],
+                pair["baseline"]["run_ids"]
+            );
         });
     }
 

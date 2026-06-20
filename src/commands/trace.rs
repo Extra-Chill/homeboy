@@ -712,10 +712,15 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
         persist_trace_workflow_result(observation, &run_dir, &workflow, rig_state.as_ref());
     }
 
+    let run_id = observation
+        .as_ref()
+        .map(|observation| observation.run_id.clone());
+
     Ok(TraceRunExecution {
         workflow,
         run_dir,
         rig_state,
+        run_id,
     })
 }
 
