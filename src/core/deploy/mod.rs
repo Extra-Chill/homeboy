@@ -2,6 +2,7 @@ mod effect;
 mod execution;
 mod generated_artifacts;
 mod orchestration;
+mod orchestration_tag_checkout;
 mod path_roots;
 pub(crate) mod permissions;
 mod planning;
