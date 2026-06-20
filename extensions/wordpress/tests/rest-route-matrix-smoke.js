@@ -71,7 +71,7 @@ const restIndex = {
 		},
 		'/demo/v1/private': {
 			namespace: 'demo/v1',
-			methods: ['GET'],
+			methods: ['GET', 'OPTIONS'],
 			endpoints: [{ methods: ['GET'], args: {} }],
 		},
 	},
@@ -108,6 +108,10 @@ assert.deepEqual(coreGetCases[0].schemaSummary.properties.map((property) => prop
 assert.equal(coreGetCases[1].path, '/wp/v2/posts/{id}');
 assert.equal(coreGetCases[1].classification.hasPathParams, true);
 
+const allDiscoveredCases = normalizeWordPressRestRouteMatrix(restIndex);
+assert.equal(allDiscoveredCases.length, 10);
+assert.equal(allDiscoveredCases.some((entry) => entry.id === 'rest:options:demo-v1-private'), true);
+
 const nonCorePostCases = normalizeWordPressRestRouteMatrix(restIndex.routes, {
 	excludeNamespaces: ['wp/v2', 'demo/v1'],
 	method: 'POST',
@@ -129,9 +133,9 @@ assert.deepEqual(schemaSummary.properties, [{ name: 'items', type: 'array' }]);
 const artifact = buildRestRouteMatrixArtifact({
 	routes: restIndex,
 	caseResults: [
-		{ method: 'GET', route: '/wp/v2/posts', status: 200, durationMs: 40, queryCount: 3 },
+		{ method: 'GET', route: '/wp/v2/posts', status: 200, durationMs: 40, queryCount: 3, authenticated: false },
 		{ method: 'GET', route: '/wc/store/v1/cart', status: 200, durationMs: 95 },
-		{ method: 'POST', route: '/wc/store/v1/cart', status: 500, durationMs: 80, queryCount: 2 },
+		{ method: 'POST', route: '/wc/store/v1/cart', status: 500, durationMs: 80, queryCount: 2, authenticated: true },
 	],
 	dbProfiles: [
 		{ method: 'GET', route: '/wc/store/v1/cart', queryCount: 14, queryTimeMs: 22.5, totalQueries: 40, top_query_shapes: [
@@ -173,6 +177,31 @@ assert.equal(artifact.coverage.byMethod.GET.total, 4);
 assert.equal(artifact.coverage.byMethod.GET.uncovered, 1);
 assert.equal(artifact.coverage.byStatus['200'].covered, 2);
 assert.equal(artifact.coverage.byStatus['500'].covered, 1);
+assert.equal(artifact.coverage.byAuth.anonymous.covered, 1);
+assert.equal(artifact.coverage.byAuth.authenticated.covered, 1);
+assert.equal(artifact.coverage.byRoute['/wc/store/v1/cart'].covered, 2);
+assert.deepEqual(artifact.coverage.byRouteDetails['/wc/store/v1/cart'], {
+	total: 2,
+	covered: 2,
+	uncovered: 0,
+	methods: {
+		GET: { total: 1, covered: 1, uncovered: 0 },
+		POST: { total: 1, covered: 1, uncovered: 0 },
+	},
+	statuses: {
+		200: { total: 1, covered: 1, uncovered: 0 },
+		500: { total: 1, covered: 1, uncovered: 0 },
+	},
+	auth: {
+		authenticated: { total: 1, covered: 1, uncovered: 0 },
+		unknown: { total: 1, covered: 1, uncovered: 0 },
+	},
+});
+assert.deepEqual(artifact.coverageGaps.map((gap) => gap.id), [
+	'rest:get:wp-v2-posts-id',
+	'rest:post:wp-v2-posts',
+]);
+assert.equal(artifact.topQueryShapesByRoute[0].id, 'rest:get:wc-store-v1-cart');
 assert.deepEqual(artifact.slowestByDuration.map((row) => row.id), [
 	'rest:get:wc-store-v1-cart',
 	'rest:post:wc-store-v1-cart',
@@ -203,11 +232,13 @@ assert.match(markdown, /## WordPress REST route matrix/);
 assert.match(markdown, /Routes: 6; results: 3; covered: 4; uncovered: 2; budget findings: 3/);
 assert.match(markdown, /## Coverage by namespace/);
 assert.match(markdown, /\| wc\/store\/v1 \| 2 \| 2 \| 0 \|/);
+assert.match(markdown, /## Coverage by auth/);
 assert.match(markdown, /## Slowest routes by duration/);
 assert.match(markdown, /`GET \/wc\/store\/v1\/cart` \| 200 \| 95 \| 14/);
 assert.match(markdown, /## Slowest routes by query time/);
 assert.match(markdown, /## Top DB query shapes by REST case/);
 assert.match(markdown, /SELECT \* FROM wp_posts WHERE ID = \?/);
+assert.match(markdown, /## Coverage gaps/);
 assert.match(markdown, /## Missing or uncovered routes/);
 assert.match(markdown, /`GET \/wp\/v2\/posts\/\{id\}`/);
 assert.match(markdown, /## Budget findings/);
@@ -223,6 +254,7 @@ assert.deepEqual(normalizeRestDbProfile({ method: 'get', route: '/wp-json/wp/v2/
 	queryCount: undefined,
 	queryTimeMs: 3.5,
 	totalQueries: undefined,
+	authCoverage: 'unknown',
 	topQueryShapes: [],
 });
 

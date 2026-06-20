@@ -5,7 +5,7 @@
  */
 const { isPlainObject } = require('./shared');
 
-const DEFAULT_METHODS = Object.freeze(['GET']);
+const SAFE_REST_REQUEST_METHODS = Object.freeze(['GET', 'HEAD', 'OPTIONS']);
 const DEFAULT_ARG_LIMIT = 12;
 const DEFAULT_SCHEMA_PROPERTY_LIMIT = 12;
 const DEFAULT_REST_REQUEST_CASE_LIMIT = 24;
@@ -28,8 +28,19 @@ function normalizeStringList(value) {
 }
 
 function normalizeMethodFilter(value) {
-	const methods = normalizeStringList(value === undefined ? DEFAULT_METHODS : value).map(normalizeRestRouteMethod);
-	return new Set(methods.length > 0 ? methods : DEFAULT_METHODS);
+	if (value === undefined || value === null || value === '') {
+		return null;
+	}
+	const methods = normalizeStringList(value).map(normalizeRestRouteMethod);
+	return new Set(methods);
+}
+
+function normalizeRequestMethodFilter(options = {}) {
+	if (options.methods !== undefined || options.method !== undefined) {
+		const methods = normalizeMethodFilter(options.methods ?? options.method);
+		return methods ? [...methods] : [...SAFE_REST_REQUEST_METHODS];
+	}
+	return [...SAFE_REST_REQUEST_METHODS];
 }
 
 function routeNamespace(routeKey, route = {}) {
@@ -117,6 +128,17 @@ function statusKey(status) {
 	return status === undefined || status === null || status === '' ? 'unknown' : String(status);
 }
 
+function authCoverageKey(entry = {}) {
+	const value = entry.authCoverage ?? entry.auth_coverage ?? entry.auth ?? entry.authenticated ?? entry.isAuthenticated ?? entry.is_authenticated;
+	if (value === undefined || value === null || value === '') {
+		return 'unknown';
+	}
+	if (typeof value === 'boolean') {
+		return value ? 'authenticated' : 'anonymous';
+	}
+	return String(value).trim() || 'unknown';
+}
+
 function stripRestBase(value) {
 	let raw = String(value || '').trim();
 	if (!raw) {
@@ -199,6 +221,7 @@ function normalizeRestMatrixResult(entry = {}) {
 		queryCount,
 		queryTimeMs,
 		responseBytes,
+		authCoverage: authCoverageKey(entry),
 		covered,
 		findings: Array.isArray(entry.findings) ? entry.findings : [],
 	};
@@ -223,6 +246,7 @@ function normalizeRestDbProfile(entry = {}) {
 		queryCount: maybeNumericValue(entry.queryCount ?? entry.query_count ?? entry.dbQueryCount ?? entry.db_query_count),
 		queryTimeMs: maybeNumericValue(entry.queryTimeMs ?? entry.query_time_ms ?? entry.dbQueryTimeMs ?? entry.db_query_time_ms),
 		totalQueries: maybeNumericValue(entry.totalQueries ?? entry.total_queries),
+		authCoverage: authCoverageKey(entry),
 		topQueryShapes,
 	};
 }
@@ -265,6 +289,7 @@ function mergeRestDbProfile(row, profile) {
 		durationMs: row.durationMs ?? profile.durationMs,
 		queryCount: row.queryCount ?? profile.queryCount,
 		queryTimeMs: row.queryTimeMs ?? profile.queryTimeMs,
+		authCoverage: !row.authCoverage || row.authCoverage === 'unknown' ? profile.authCoverage : row.authCoverage,
 		topQueryShapes: row.topQueryShapes?.length ? row.topQueryShapes : profile.topQueryShapes,
 		dbProfile: {
 			queryCount: profile.queryCount,
@@ -291,6 +316,28 @@ function incrementCoverage(group, name, covered) {
 
 function sortedCoverageObject(group) {
 	return Object.fromEntries(Object.entries(group).sort(([a], [b]) => sortText(a, b)));
+}
+
+function sortedNestedCoverageObject(group) {
+	return Object.fromEntries(Object.entries(group).sort(([a], [b]) => sortText(a, b)).map(([key, row]) => [
+		key,
+		{
+			total: row.total,
+			covered: row.covered,
+			uncovered: row.uncovered,
+			methods: sortedCoverageObject(row.methods),
+			statuses: sortedCoverageObject(row.statuses),
+			auth: sortedCoverageObject(row.auth),
+		},
+	]));
+}
+
+function ensureRouteCoverage(group, name) {
+	const key = name || 'unknown';
+	if (!group[key]) {
+		group[key] = { total: 0, covered: 0, uncovered: 0, methods: {}, statuses: {}, auth: {} };
+	}
+	return group[key];
 }
 
 function normalizeAllowedStatuses(value) {
@@ -501,24 +548,62 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 	const byNamespace = {};
 	const byMethod = {};
 	const byStatus = {};
+	const byAuth = {};
+	const byRoute = {};
+	const byRouteDetails = {};
 	const budgetFindings = [];
 	const missingRoutes = [];
 	const uncoveredRoutes = [];
+	const coverageGaps = [];
 
 	for (const row of rows) {
 		incrementCoverage(byNamespace, row.namespace, row.covered);
 		incrementCoverage(byMethod, row.method, row.covered);
+		incrementCoverage(byRoute, row.path || row.route || row.id, row.covered);
+		incrementCoverage(byAuth, row.authCoverage, row.covered);
+		const routeCoverage = ensureRouteCoverage(byRouteDetails, row.path || row.route || row.id);
+		routeCoverage.total += 1;
+		if (row.covered) {
+			routeCoverage.covered += 1;
+		} else {
+			routeCoverage.uncovered += 1;
+		}
+		incrementCoverage(routeCoverage.methods, row.method, row.covered);
+		incrementCoverage(routeCoverage.auth, row.authCoverage, row.covered);
 		if (row.covered) {
 			incrementCoverage(byStatus, statusKey(row.status), true);
+			incrementCoverage(routeCoverage.statuses, statusKey(row.status), true);
 		} else {
 			missingRoutes.push(row);
 			uncoveredRoutes.push(row);
+			coverageGaps.push({
+				type: 'unexercised_route_method',
+				id: row.id,
+				method: row.method,
+				path: row.path,
+				route: row.route,
+				namespace: row.namespace,
+				message: `${row.method} ${row.path || row.route || row.id} was discovered but not exercised`,
+			});
 		}
 		for (const finding of row.findings || []) {
 			budgetFindings.push({ id: row.id, method: row.method, path: row.path, namespace: row.namespace, ...finding });
 		}
 		budgetFindings.push(...restMatrixBudgetFindings(row, resolveRestRouteMatrixBudgets(row, budgetManifest)));
 	}
+
+	const topQueryShapesByRoute = rows
+		.filter((row) => Array.isArray(row.topQueryShapes) && row.topQueryShapes.length > 0)
+		.map((row) => ({
+			id: row.id,
+			method: row.method,
+			path: row.path,
+			route: row.route,
+			queryCount: row.queryCount,
+			queryTimeMs: row.queryTimeMs,
+			topQueryShapes: row.topQueryShapes,
+		}))
+		.sort((a, b) => numericValue(b.queryTimeMs) - numericValue(a.queryTimeMs) || numericValue(b.queryCount) - numericValue(a.queryCount) || sortText(a.id, b.id));
 
 	const slowestByDuration = rows
 		.filter((row) => row.durationMs !== undefined)
@@ -549,10 +634,15 @@ function buildRestRouteMatrixArtifact(input = {}, options = {}) {
 			byNamespace: sortedCoverageObject(byNamespace),
 			byMethod: sortedCoverageObject(byMethod),
 			byStatus: sortedCoverageObject(byStatus),
+			byAuth: sortedCoverageObject(byAuth),
+			byRoute: sortedCoverageObject(byRoute),
+			byRouteDetails: sortedNestedCoverageObject(byRouteDetails),
 		},
+		topQueryShapesByRoute,
 		slowestByDuration,
 		slowestByQueryCount,
 		slowestByQueryTime,
+		coverageGaps: coverageGaps.sort((a, b) => sortText(a.id, b.id)),
 		missingRoutes: missingRoutes.sort((a, b) => sortText(a.id, b.id)),
 		uncoveredRoutes: uncoveredRoutes.sort((a, b) => sortText(a.id, b.id)),
 		budgetFindings: budgetFindings.sort((a, b) => sortText(a.id, b.id) || sortText(a.type, b.type)),
@@ -621,6 +711,10 @@ function formatRestRouteMatrixMarkdownReport(input = {}, options = {}) {
 		'## Coverage by status',
 		'',
 		...formatCoverageTable(artifact.coverage.byStatus, 'Status'),
+		'',
+		'## Coverage by auth',
+		'',
+		...formatCoverageTable(artifact.coverage.byAuth, 'Auth'),
 	];
 
 	if (artifact.slowestByDuration.length > 0) {
@@ -632,8 +726,11 @@ function formatRestRouteMatrixMarkdownReport(input = {}, options = {}) {
 	if (artifact.slowestByQueryTime.length > 0) {
 		lines.push('', '## Slowest routes by query time', '', ...formatRouteRows(artifact.slowestByQueryTime, { limit }));
 	}
-	if (artifact.routes.some((row) => Array.isArray(row.topQueryShapes) && row.topQueryShapes.length > 0)) {
-		lines.push('', '## Top DB query shapes by REST case', '', ...formatQueryShapeRows(artifact.slowestByQueryTime, { limit }));
+	if (artifact.topQueryShapesByRoute?.length > 0) {
+		lines.push('', '## Top DB query shapes by REST case', '', ...formatQueryShapeRows(artifact.topQueryShapesByRoute, { limit }));
+	}
+	if (artifact.coverageGaps?.length > 0) {
+		lines.push('', '## Coverage gaps', '', ...formatRouteRows(artifact.coverageGaps, { limit }));
 	}
 	if (artifact.uncoveredRoutes.length > 0) {
 		lines.push('', '## Missing or uncovered routes', '', ...formatRouteRows(artifact.uncoveredRoutes, { limit }));
@@ -784,6 +881,13 @@ function routeArgsForMethod(route = {}, method) {
 			argsByName.set(name, arg);
 		}
 	}
+	if (argsByName.size === 0 && SAFE_REST_REQUEST_METHODS.includes(normalizeRestRouteMethod(method))) {
+		for (const endpoint of route.endpoints || []) {
+			for (const [name, arg] of Object.entries(endpoint?.args || {})) {
+				argsByName.set(name, arg);
+			}
+		}
+	}
 	return [...argsByName.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
@@ -868,8 +972,9 @@ function splitArgsByLocation(routeKey, args) {
 function buildRequestCase(matrixEntry, variant, values = {}, metadata = {}) {
 	const path = applyPathParams(matrixEntry.path, values.pathParams);
 	const method = normalizeRestRouteMethod(matrixEntry.method);
-	const query = method === 'GET' || method === 'DELETE' ? values.args || {} : {};
-	const body = method === 'GET' || method === 'DELETE' ? undefined : values.args || {};
+	const usesQuery = SAFE_REST_REQUEST_METHODS.includes(method) || method === 'DELETE';
+	const query = usesQuery ? values.args || {} : {};
+	const body = usesQuery ? undefined : values.args || {};
 	const { parts, ...caseMetadata } = metadata;
 	return {
 		id: caseKey(matrixEntry.id, variant, parts || []),
@@ -996,7 +1101,10 @@ function generateWordPressRestRequestCasesForEntry(matrixEntry, route = {}, opti
 
 function generateWordPressRestRequestCases(input, options = {}) {
 	const routes = extractRestRoutes(input);
-	const matrix = normalizeWordPressRestRouteMatrix(input, options);
+	const matrix = normalizeWordPressRestRouteMatrix(input, {
+		...options,
+		methods: normalizeRequestMethodFilter(options),
+	});
 	const maxCases = normalizeCaseLimit(options.maxCases);
 	const cases = [];
 
@@ -1034,7 +1142,7 @@ function normalizeWordPressRestRouteMatrix(input, options = {}) {
 			continue;
 		}
 		const classification = classifyRestRoute(normalizedRoute, route);
-		const routeMethods = normalizeRouteMethods(route).filter((method) => methodFilter.has(method));
+		const routeMethods = normalizeRouteMethods(route).filter((method) => !methodFilter || methodFilter.has(method));
 		for (const method of routeMethods) {
 			const id = restRouteMatrixKey({ method, route: normalizedRoute });
 			cases.push({
