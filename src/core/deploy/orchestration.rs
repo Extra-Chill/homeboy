@@ -217,7 +217,7 @@ pub(super) fn deploy_components(
             .iter()
             .find(|c| c.component_id == component.id)
         {
-            result = result.with_deployed_ref(checkout.tag.clone());
+            result = result.with_deployed_ref(checkout.provenance_ref());
         } else if config.head {
             // Deploying from HEAD — record the current branch
             if let Some(branch) = crate::core::engine::command::run_in_optional(
@@ -642,6 +642,35 @@ struct TagCheckout {
     tag: String,
     original_ref: String,
     local_path: String,
+    /// Resolved commit sha of the deployed tag (short form), if known.
+    tag_sha: Option<String>,
+    /// Number of commits the original HEAD was ahead of this tag, if any.
+    /// Non-zero means a stale tag was deployed (e.g. via `--force`) and these
+    /// HEAD-only commits were NOT shipped — recorded so provenance can say so.
+    head_ahead: u32,
+}
+
+impl TagCheckout {
+    /// Build the human-readable provenance ref for this deployed tag.
+    ///
+    /// Always resolves to the exact tag and (when known) its commit sha so the
+    /// reported ref is unambiguous. When the original HEAD was ahead of the
+    /// deployed tag, the annotation makes explicit that those HEAD-only commits
+    /// were not deployed — preventing the misleading impression that HEAD
+    /// content shipped (e.g. after a `--force` deploy of a stale tag).
+    fn provenance_ref(&self) -> String {
+        let mut label = match &self.tag_sha {
+            Some(sha) => format!("{} ({})", self.tag, sha),
+            None => self.tag.clone(),
+        };
+        if self.head_ahead > 0 {
+            label.push_str(&format!(
+                " [stale tag: HEAD was {} commit(s) ahead, not deployed]",
+                self.head_ahead
+            ));
+        }
+        label
+    }
 }
 
 /// Checkout the latest version tag for each component before building.
@@ -710,6 +739,25 @@ fn checkout_deploy_tags(
             crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", &tag]);
         let head_commit =
             crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "HEAD"]);
+
+        // Short sha of the tag being deployed, for unambiguous provenance.
+        let tag_sha = crate::core::engine::command::run_in_optional(
+            path,
+            "git",
+            &["rev-parse", "--short", &tag],
+        );
+
+        // How many commits the (pre-checkout) HEAD was ahead of this tag.
+        // Non-zero means a stale tag is being deployed and those HEAD-only
+        // commits are NOT shipped — recorded so provenance can say so.
+        let head_ahead = crate::core::engine::command::run_in_optional(
+            path,
+            "git",
+            &["rev-list", "--count", &format!("{}..HEAD", tag)],
+        )
+        .and_then(|out| out.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+
         if tag_commit.is_some() && tag_commit == head_commit {
             log_status!(
                 "deploy",
@@ -722,6 +770,8 @@ fn checkout_deploy_tags(
                 tag: tag.clone(),
                 original_ref,
                 local_path: path.clone(),
+                tag_sha,
+                head_ahead,
             });
             continue;
         }
@@ -745,6 +795,8 @@ fn checkout_deploy_tags(
                     tag: tag.clone(),
                     original_ref,
                     local_path: path.clone(),
+                    tag_sha,
+                    head_ahead,
                 });
             }
             Err(e) => {
@@ -1460,6 +1512,74 @@ mod tests {
             starting_head,
             "first component should be restored to its starting commit"
         );
+    }
+
+    #[test]
+    fn provenance_ref_reports_tag_and_sha_without_gap() {
+        let checkout = TagCheckout {
+            component_id: "demo".to_string(),
+            tag: "v1.0.0".to_string(),
+            original_ref: "main".to_string(),
+            local_path: "/tmp/demo".to_string(),
+            tag_sha: Some("abc1234".to_string()),
+            head_ahead: 0,
+        };
+
+        assert_eq!(checkout.provenance_ref(), "v1.0.0 (abc1234)");
+    }
+
+    #[test]
+    fn provenance_ref_flags_stale_tag_when_head_was_ahead() {
+        let checkout = TagCheckout {
+            component_id: "demo".to_string(),
+            tag: "v1.0.0".to_string(),
+            original_ref: "release/main".to_string(),
+            local_path: "/tmp/demo".to_string(),
+            tag_sha: Some("abc1234".to_string()),
+            head_ahead: 2,
+        };
+
+        let label = checkout.provenance_ref();
+        assert!(
+            label.starts_with("v1.0.0 (abc1234)"),
+            "stale ref must still name the exact tag and sha: {label}"
+        );
+        assert!(
+            label.contains("HEAD was 2 commit(s) ahead, not deployed"),
+            "stale ref must disclose the undeployed HEAD commits: {label}"
+        );
+    }
+
+    #[test]
+    fn checkout_deploy_tags_records_head_ahead_for_stale_tag() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+
+        let component = make_component("demo", &dir.path().to_string_lossy());
+        let checkouts =
+            checkout_deploy_tags(&[component], None).expect("stale-tag checkout should succeed");
+
+        assert_eq!(checkouts.len(), 1, "one component should be checked out");
+        let checkout = &checkouts[0];
+        assert_eq!(checkout.tag, "v1.0.0");
+        assert_eq!(
+            checkout.head_ahead, 1,
+            "HEAD was one commit ahead of the deployed tag"
+        );
+        assert!(
+            checkout.tag_sha.is_some(),
+            "deployed tag sha should be resolved for provenance"
+        );
+        assert!(
+            checkout
+                .provenance_ref()
+                .contains("HEAD was 1 commit(s) ahead, not deployed"),
+            "provenance must disclose the stale-tag gap: {}",
+            checkout.provenance_ref()
+        );
+
+        // checkout_deploy_tags leaves the repo on the tag; restore for cleanliness.
+        restore_branches(&checkouts);
     }
 
     #[test]
