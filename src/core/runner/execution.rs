@@ -41,7 +41,7 @@ pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 mod extension_parity;
 mod policy;
 use extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
-use policy::{validate_runner_policy, RunnerPolicyRequest};
+use policy::{remote_execution_preflight, validate_runner_policy, RunnerPolicyRequest};
 
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
@@ -183,12 +183,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
+    // Remote capability-parity preflight: derive the contract from the command's
+    // top-level executable when the caller did not supply an explicit one, so
+    // remote dispatch always validates that the runner can satisfy the command
+    // before starting execution instead of failing mid-run (#5093, #5422).
+    let capability_preflight =
+        remote_execution_preflight(&options.command, options.capability_preflight.as_ref());
     let run_capability_preflight = |runner: &Runner| -> Result<()> {
-        preflight_runner_capability_plan(
-            runner,
-            options.capability_preflight.as_ref(),
-            &request_env,
-        )
+        preflight_runner_capability_plan(runner, capability_preflight.as_ref(), &request_env)
     };
 
     if should_force_diagnostic_ssh(&runner, &options) {
