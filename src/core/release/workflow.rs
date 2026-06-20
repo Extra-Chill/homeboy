@@ -637,6 +637,44 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
     let current_version = &version_info.version;
     let tag_name = format_tag(current_version, monorepo.as_ref());
 
+    // Create the annotated release tag, surfacing `err_label` on failure. Shared
+    // by the retag-to-HEAD and first-time create paths below, which issue the
+    // identical `git tag` and differ only in the error wording.
+    let create_tag = |err_label: &str| -> Result<()> {
+        let tag_result = git::tag(
+            Some(&input.component_id),
+            Some(&tag_name),
+            Some(&format!("Release {}", tag_name)),
+        )?;
+        if !tag_result.success {
+            return Err(Error::git_command_failed(format!(
+                "{}: {}",
+                err_label, tag_result.stderr
+            )));
+        }
+        Ok(())
+    };
+
+    // Push commits and tags to origin, surfacing `err_label` on failure. Shared
+    // by the retag and first-time push paths below, which issue the identical
+    // tags-included push and differ only in the error wording.
+    let push_tags = |err_label: &str| -> Result<()> {
+        let push_result = git::push(
+            Some(&input.component_id),
+            git::PushOptions {
+                tags: true,
+                ..Default::default()
+            },
+        )?;
+        if !push_result.success {
+            return Err(Error::git_command_failed(format!(
+                "{}: {}",
+                err_label, push_result.stderr
+            )));
+        }
+        Ok(())
+    };
+
     // Surface the orphan-tag pattern from issue #2234. When the latest release
     // tag points at a commit whose subject is *not* `release: vX.Y.Z`, the
     // previous release was botched (tag without bump). Recover should warn
@@ -771,31 +809,9 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
             git::delete_remote_tag(&component.local_path, &tag_name)?;
         }
 
-        let tag_result = git::tag(
-            Some(&input.component_id),
-            Some(&tag_name),
-            Some(&format!("Release {}", tag_name)),
-        )?;
-        if !tag_result.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to re-create tag at HEAD: {}",
-                tag_result.stderr
-            )));
-        }
+        create_tag("Failed to re-create tag at HEAD")?;
 
-        let push_result = git::push(
-            Some(&input.component_id),
-            git::PushOptions {
-                tags: true,
-                ..Default::default()
-            },
-        )?;
-        if !push_result.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to push retagged {}: {}",
-                tag_name, push_result.stderr
-            )));
-        }
+        push_tags(&format!("Failed to push retagged {}", tag_name))?;
 
         let actions = vec![format!("retagged {} to HEAD", tag_name)];
         log_status!(
@@ -897,36 +913,13 @@ fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32
 
     if !tag_exists_local {
         log_status!("recover", "Creating tag {}...", tag_name);
-        let tag_result = git::tag(
-            Some(&input.component_id),
-            Some(&tag_name),
-            Some(&format!("Release {}", tag_name)),
-        )?;
-        if !tag_result.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to create tag: {}",
-                tag_result.stderr
-            )));
-        }
+        create_tag("Failed to create tag")?;
         actions.push(format!("created tag {}", tag_name));
     }
 
     if !tag_exists_remote {
         log_status!("recover", "Pushing to remote...");
-        let push_result = git::push(
-            Some(&input.component_id),
-            git::PushOptions {
-                tags: true,
-                force_with_lease: false,
-                ..Default::default()
-            },
-        )?;
-        if !push_result.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to push: {}",
-                push_result.stderr
-            )));
-        }
+        push_tags("Failed to push")?;
         actions.push("pushed commits and tags".to_string());
     }
 
@@ -1023,6 +1016,28 @@ fn reconcile_release_branch(
     };
     let head_commit = git::get_head_commit(path)?;
 
+    // Push HEAD to the branch (tags included), surfacing `err_label` on failure.
+    // Shared by the fast-forward and post-rebase paths below, which push the
+    // identical refspec and differ only in the error wording.
+    let push_branch = |err_label: &str| -> Result<()> {
+        let push = git::push_at(
+            Some(component_id),
+            git::PushOptions {
+                tags: true,
+                refspec: Some(format!("HEAD:refs/heads/{branch}")),
+                ..Default::default()
+            },
+            Some(path),
+        )?;
+        if !push.success {
+            return Err(Error::git_command_failed(format!(
+                "Failed to push {} branch {}: {}",
+                err_label, branch, push.stderr
+            )));
+        }
+        Ok(())
+    };
+
     // The release commit is already on the remote branch — nothing to do.
     if git::is_ancestor(path, &head_commit, &remote_commit)? {
         return Ok(None);
@@ -1035,21 +1050,7 @@ fn reconcile_release_branch(
             "Pushing release commit to remote {} (remote did not advance)...",
             branch
         );
-        let push = git::push_at(
-            Some(component_id),
-            git::PushOptions {
-                tags: true,
-                refspec: Some(format!("HEAD:refs/heads/{branch}")),
-                ..Default::default()
-            },
-            Some(path),
-        )?;
-        if !push.success {
-            return Err(Error::git_command_failed(format!(
-                "Failed to push release branch {}: {}",
-                branch, push.stderr
-            )));
-        }
+        push_branch("release")?;
         return Ok(Some(format!("pushed release commit to {}", branch)));
     }
 
@@ -1093,21 +1094,7 @@ fn reconcile_release_branch(
         ));
     }
 
-    let push = git::push_at(
-        Some(component_id),
-        git::PushOptions {
-            tags: true,
-            refspec: Some(format!("HEAD:refs/heads/{branch}")),
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    if !push.success {
-        return Err(Error::git_command_failed(format!(
-            "Failed to push rebased release branch {}: {}",
-            branch, push.stderr
-        )));
-    }
+    push_branch("rebased release")?;
 
     Ok(Some(format!(
         "rebased release commit onto advanced remote and pushed {}",
