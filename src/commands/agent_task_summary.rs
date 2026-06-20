@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::agent_task::{AgentTaskArgs, AgentTaskCommand};
+use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTaskSummaryKind {
@@ -204,30 +205,6 @@ fn first_diagnostic_message<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a
         })
 }
 
-fn value_at<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = payload;
-    for segment in path {
-        if let Ok(index) = segment.parse::<usize>() {
-            current = current.as_array()?.get(index)?;
-        } else {
-            current = current.get(*segment)?;
-        }
-    }
-    Some(current)
-}
-
-fn string_value<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
-    value_at(payload, path)?.as_str()
-}
-
-fn usize_value(payload: &Value, path: &[&str]) -> Option<usize> {
-    value_at(payload, path)?.as_u64()?.try_into().ok()
-}
-
-fn array_len(payload: &Value, path: &[&str]) -> Option<usize> {
-    Some(value_at(payload, path)?.as_array()?.len())
-}
-
 fn aggregate_outcome_count(payload: &Value) -> Option<usize> {
     array_len(payload, &["aggregate", "outcomes"])
 }
@@ -412,10 +389,6 @@ fn metadata_changed_files(artifact: &Value) -> usize {
         .and_then(Value::as_u64)
         .map(|count| count as usize)
         .unwrap_or(0)
-}
-
-fn u64_value(payload: &Value, path: &[&str]) -> Option<u64> {
-    value_at(payload, path)?.as_u64()
 }
 
 /// A run whose lifecycle state is `succeeded` but that produced zero promotion

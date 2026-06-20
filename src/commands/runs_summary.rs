@@ -13,6 +13,8 @@
 
 use serde_json::Value;
 
+use super::summary_json::{string_value, value_at};
+
 /// Render a compact summary for a serialized `RunsOutput` value. Returns
 /// `None` for any variant other than `show`, leaving other `runs`
 /// subcommands with their existing full-JSON presentation.
@@ -108,22 +110,6 @@ fn finish(lines: Vec<String>) -> String {
     let mut output = lines.join("\n");
     output.push('\n');
     output
-}
-
-fn value_at<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = payload;
-    for segment in path {
-        if let Ok(index) = segment.parse::<usize>() {
-            current = current.as_array()?.get(index)?;
-        } else {
-            current = current.get(*segment)?;
-        }
-    }
-    Some(current)
-}
-
-fn string_value<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
-    value_at(payload, path)?.as_str()
 }
 
 #[cfg(test)]

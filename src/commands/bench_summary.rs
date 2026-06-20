@@ -18,6 +18,8 @@
 
 use serde_json::Value;
 
+use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
+
 /// Render a compact summary for a serialized `BenchOutput` value. Returns
 /// `None` for variants where the full JSON is the better default (lists,
 /// embedded `runs` observation output, matrix fan-out), so those paths keep
@@ -376,34 +378,6 @@ fn finish(lines: Vec<String>) -> String {
     let mut output = lines.join("\n");
     output.push('\n');
     output
-}
-
-fn value_at<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = payload;
-    for segment in path {
-        if let Ok(index) = segment.parse::<usize>() {
-            current = current.as_array()?.get(index)?;
-        } else {
-            current = current.get(*segment)?;
-        }
-    }
-    Some(current)
-}
-
-fn string_value<'a>(payload: &'a Value, path: &[&str]) -> Option<&'a str> {
-    value_at(payload, path)?.as_str()
-}
-
-fn u64_value(payload: &Value, path: &[&str]) -> Option<u64> {
-    value_at(payload, path)?.as_u64()
-}
-
-fn usize_value(payload: &Value, path: &[&str]) -> Option<usize> {
-    value_at(payload, path)?.as_u64()?.try_into().ok()
-}
-
-fn array_len(payload: &Value, path: &[&str]) -> Option<usize> {
-    Some(value_at(payload, path)?.as_array()?.len())
 }
 
 #[cfg(test)]

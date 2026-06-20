@@ -658,6 +658,67 @@ mod tests {
     }
 
     #[test]
+    fn load_config_cache_refreshes_after_save_config() {
+        with_isolated_home(|_| {
+            let cached_default = load_config();
+            assert!(!cached_default.settings.contains_key("cache_marker"));
+
+            save_config(&HomeboyConfig {
+                settings: HashMap::from([("cache_marker".to_string(), serde_json::json!("saved"))]),
+                ..HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let loaded = load_config();
+            assert_eq!(loaded.settings["cache_marker"], "saved");
+        });
+    }
+
+    #[test]
+    fn reset_config_clears_cached_config() {
+        with_isolated_home(|_| {
+            save_config(&HomeboyConfig {
+                settings: HashMap::from([(
+                    "cache_marker".to_string(),
+                    serde_json::json!("before-reset"),
+                )]),
+                ..HomeboyConfig::default()
+            })
+            .expect("save config");
+
+            let cached = load_config();
+            assert_eq!(cached.settings["cache_marker"], "before-reset");
+
+            assert!(reset_config().expect("reset config"));
+
+            let loaded = load_config();
+            assert!(!loaded.settings.contains_key("cache_marker"));
+        });
+    }
+
+    #[test]
+    fn isolated_home_guard_resets_config_cache_between_homes() {
+        with_isolated_home(|_| {
+            save_config(&HomeboyConfig {
+                settings: HashMap::from([(
+                    "cache_marker".to_string(),
+                    serde_json::json!("first-home"),
+                )]),
+                ..HomeboyConfig::default()
+            })
+            .expect("save first home config");
+
+            let loaded = load_config();
+            assert_eq!(loaded.settings["cache_marker"], "first-home");
+        });
+
+        with_isolated_home(|_| {
+            let loaded = load_config();
+            assert!(!loaded.settings.contains_key("cache_marker"));
+        });
+    }
+
+    #[test]
     fn homeboy_config_leaves_triage_priority_labels_unset_by_default() {
         let config = HomeboyConfig::default();
 

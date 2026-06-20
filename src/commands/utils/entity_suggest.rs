@@ -2,7 +2,7 @@
 
 use homeboy::core::engine::text::levenshtein;
 use homeboy::core::{component, extension, project, server};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityType {
@@ -36,33 +36,59 @@ struct EntityIdList {
     ids: Vec<String>,
 }
 
-static ENTITY_SUGGESTION_SNAPSHOT: OnceLock<Vec<EntityIdList>> = OnceLock::new();
+static ENTITY_SUGGESTION_SNAPSHOT: OnceLock<RwLock<Option<Vec<EntityIdList>>>> = OnceLock::new();
 
-fn entity_suggestion_snapshot() -> &'static [EntityIdList] {
-    ENTITY_SUGGESTION_SNAPSHOT.get_or_init(|| {
-        vec![
-            EntityIdList {
-                entity_type: EntityType::Component,
-                ids: component::list_ids().unwrap_or_default(),
-            },
-            EntityIdList {
-                entity_type: EntityType::Project,
-                ids: project::list_ids().unwrap_or_default(),
-            },
-            EntityIdList {
-                entity_type: EntityType::Server,
-                ids: server::list()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|server| server.id)
-                    .collect(),
-            },
-            EntityIdList {
-                entity_type: EntityType::Extension,
-                ids: extension::available_extension_ids(),
-            },
-        ]
-    })
+fn entity_suggestion_cache() -> &'static RwLock<Option<Vec<EntityIdList>>> {
+    ENTITY_SUGGESTION_SNAPSHOT.get_or_init(|| RwLock::new(None))
+}
+
+fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {
+    vec![
+        EntityIdList {
+            entity_type: EntityType::Component,
+            ids: component::list_ids().unwrap_or_default(),
+        },
+        EntityIdList {
+            entity_type: EntityType::Project,
+            ids: project::list_ids().unwrap_or_default(),
+        },
+        EntityIdList {
+            entity_type: EntityType::Server,
+            ids: server::list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|server| server.id)
+                .collect(),
+        },
+        EntityIdList {
+            entity_type: EntityType::Extension,
+            ids: extension::available_extension_ids(),
+        },
+    ]
+}
+
+fn entity_suggestion_snapshot() -> Vec<EntityIdList> {
+    if let Some(snapshot) = match entity_suggestion_cache().read() {
+        Ok(slot) => slot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    } {
+        return snapshot;
+    }
+
+    let snapshot = load_entity_suggestion_snapshot();
+    match entity_suggestion_cache().write() {
+        Ok(mut slot) => *slot = Some(snapshot.clone()),
+        Err(poisoned) => *poisoned.into_inner() = Some(snapshot.clone()),
+    }
+    snapshot
+}
+
+#[cfg(test)]
+pub(crate) fn reset_entity_suggestion_cache_for_test() {
+    match entity_suggestion_cache().write() {
+        Ok(mut slot) => *slot = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
 }
 
 pub fn find_entity_match(input: &str) -> Option<EntityMatch> {
@@ -155,4 +181,30 @@ pub fn generate_entity_hints(
     }
 
     hints
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::with_isolated_home;
+    use homeboy::core::project::{self, Project};
+
+    #[test]
+    fn isolated_home_guard_resets_entity_suggestion_cache_between_homes() {
+        with_isolated_home(|_| {
+            project::save(&Project {
+                id: "cached-project".to_string(),
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let matched = find_entity_match("cached-project").expect("project match");
+            assert_eq!(matched.entity_type, EntityType::Project);
+            assert_eq!(matched.entity_id, "cached-project");
+        });
+
+        with_isolated_home(|_| {
+            assert!(find_entity_match("cached-project").is_none());
+        });
+    }
 }

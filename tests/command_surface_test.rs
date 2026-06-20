@@ -246,6 +246,64 @@ fn command_safety_manifest_docs_paths_match_command_docs() {
 }
 
 #[test]
+fn visible_safety_manifest_entries_advertise_live_command_docs() {
+    let manifest = current_command_safety_manifest();
+
+    for entry in all_safety_entries(&manifest.commands) {
+        if entry.hidden {
+            continue;
+        }
+
+        let path = entry
+            .docs
+            .path
+            .as_deref()
+            .unwrap_or_else(|| panic!("visible command {:?} is missing docs metadata", entry.path));
+        let top_level = entry.path.first().expect("safety path should not be empty");
+        assert_eq!(
+            path,
+            format!("docs/commands/{top_level}.md"),
+            "visible command {:?} should point at its top-level command doc",
+            entry.path
+        );
+        assert!(
+            command_doc_manifest_path(path).is_file(),
+            "visible command {:?} advertises `{path}` in the safety manifest, but that file is missing",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
+    let manifest = current_command_safety_manifest();
+    let explicit_no_apply_surface = BTreeSet::from([
+        "file mkdir".to_string(),
+        "file rename".to_string(),
+        "triage".to_string(),
+    ]);
+
+    let missing_safety_surface: Vec<_> = all_safety_entries(&manifest.commands)
+        .into_iter()
+        .filter(|entry| entry.mutates)
+        .filter(|entry| {
+            !entry.dry_run.supported
+                && !entry.output.notes.contains("--apply")
+                && !entry.output.notes.contains("--dry-run")
+                && !entry.output.notes.contains("--check")
+                && !entry.dangerous_flags.iter().any(|flag| flag == "--apply")
+                && !explicit_no_apply_surface.contains(&entry.path.join(" "))
+        })
+        .map(|entry| entry.path.join(" "))
+        .collect();
+
+    assert!(
+        missing_safety_surface.is_empty(),
+        "mutating safety-manifest entries must advertise dry-run/apply/check metadata or be explicitly allowlisted: {missing_safety_surface:?}"
+    );
+}
+
+#[test]
 fn command_docs_files_match_command_index_snapshot() {
     let documented = documented_command_index_entries();
     let companion_topics = BTreeSet::from([
@@ -510,6 +568,15 @@ fn documented_command_doc_files() -> BTreeSet<String> {
 
 fn visible_manifest_entry_with_docs_path(entry: &CommandSafetyEntry) -> bool {
     !entry.hidden && entry.docs.path.is_some()
+}
+
+fn all_safety_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
+    let mut flattened = Vec::new();
+    for entry in entries {
+        flattened.push(entry);
+        flattened.extend(all_safety_entries(&entry.subcommands));
+    }
+    flattened
 }
 
 fn command_doc_manifest_path(path: &str) -> std::path::PathBuf {

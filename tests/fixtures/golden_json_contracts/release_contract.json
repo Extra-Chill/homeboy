@@ -10,6 +10,7 @@
             "component_id": "homeboy",
             "dry_run": true,
             "new_version": "0.198.0",
+            "phase": "plan",
             "plan": {
               "component_id": "homeboy",
               "enabled": true,
@@ -92,6 +93,7 @@
                   "component_id": "homeboy",
                   "dry_run": true,
                   "new_version": "0.198.0",
+                  "phase": "plan",
                   "plan": {
                     "component_id": "homeboy",
                     "enabled": true,

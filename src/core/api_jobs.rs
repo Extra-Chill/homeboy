@@ -113,7 +113,21 @@ pub struct ActiveRunnerJobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     pub started_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
     pub elapsed_ms: u64,
+    #[serde(default)]
+    pub heartbeat_age_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by_runner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_in_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,7 +520,16 @@ fn active_runner_job_summary(
         command: request.command.join(" "),
         cwd: request.cwd.clone(),
         started_at_ms,
+        updated_at_ms: job.updated_at_ms,
         elapsed_ms: now_ms.saturating_sub(started_at_ms),
+        heartbeat_age_ms: now_ms.saturating_sub(job.updated_at_ms),
+        claim_id: job.claim_id.clone(),
+        claimed_by_runner_id: job.claimed_by_runner_id.clone(),
+        claimed_at_ms: job.claimed_at_ms,
+        claim_expires_at_ms: job.claim_expires_at_ms,
+        claim_expires_in_ms: job
+            .claim_expires_at_ms
+            .map(|expires_at| expires_at.saturating_sub(now_ms)),
         durable_run_id: request_metadata_string(request, "durable_run_id")
             .or_else(|| request_metadata_string(request, "run_id"))
             .or_else(|| request_metadata_string(request, "record_run_id")),
@@ -1413,6 +1436,17 @@ mod tests {
             store.get(second.id).expect("second job").status,
             JobStatus::Queued
         );
+        let active_jobs = store.active_runner_jobs();
+        let active = active_jobs
+            .iter()
+            .find(|job| job.job_id == first.id.to_string())
+            .expect("claimed job is active");
+        assert_eq!(active.claimed_by_runner_id.as_deref(), Some("homeboy-lab"));
+        assert_eq!(active.claim_id, claim.job.claim_id);
+        assert_eq!(active.claimed_at_ms, claim.job.claimed_at_ms);
+        assert_eq!(active.claim_expires_at_ms, claim.job.claim_expires_at_ms);
+        assert!(active.claim_expires_in_ms.is_some());
+        assert!(active.heartbeat_age_ms <= active.elapsed_ms);
     }
 
     #[test]
