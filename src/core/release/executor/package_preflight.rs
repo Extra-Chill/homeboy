@@ -12,6 +12,7 @@ pub(crate) fn run_package_preflight(
     extensions: &[ExtensionManifest],
     component_id: &str,
     component_local_path: &str,
+    skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
     let temp = create_release_preflight_tempdir()?;
     let temp_component_path = temp.join("component");
@@ -23,6 +24,7 @@ pub(crate) fn run_package_preflight(
         &mut state,
         component_id,
         &temp_component_path.to_string_lossy(),
+        skip_build_validation,
     );
 
     let _ = std::fs::remove_dir_all(&temp);

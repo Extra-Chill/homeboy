@@ -72,6 +72,17 @@ pub struct ReleaseArgs {
     #[arg(long, num_args = 0.., value_name = "CHECK", value_delimiter = ',')]
     skip_checks: Option<Vec<String>>,
 
+    /// Bypass the package/build-structure validation while still running the build.
+    ///
+    /// `--skip-checks` only covers audit/lint/test; it does NOT cover the
+    /// build-structure validation that the packaging extension runs inside the
+    /// `preflight.package`/`package` steps. Use this flag when an operator knows
+    /// a build-structure assertion is a false positive and wants to ship anyway.
+    /// A build that fails to produce an artifact still blocks the release —
+    /// only structure assertions are bypassed (issue #5425).
+    #[arg(long)]
+    skip_build_validation: bool,
+
     /// Force a specific version bump: major, minor, patch, or an explicit version (e.g. 2.0.0).
     /// Overrides auto-detection from commit history.
     #[arg(long)]
@@ -236,6 +247,7 @@ impl ReleaseArgs {
             head,
             from_artifacts,
             skip_checks: if skip_checks { Some(Vec::new()) } else { None },
+            skip_build_validation: false,
             bump,
             force_lower_bump: false,
             skip_publish,
@@ -266,6 +278,7 @@ pub fn run(
             retag: args.retag,
             skip_checks,
             skip_checks_granular: skip_checks_granular.clone(),
+            skip_build_validation: args.skip_build_validation,
             bump_override: bump_override.clone(),
             force_lower_bump: args.force_lower_bump,
             pipeline: args.pipeline_options(),
@@ -325,6 +338,7 @@ pub fn run(
         retag: false,
         skip_checks,
         skip_checks_granular,
+        skip_build_validation: args.skip_build_validation,
         bump_override,
         force_lower_bump: args.force_lower_bump,
         pipeline: ReleasePipelineOptions {
@@ -526,6 +540,7 @@ mod tests {
             from_artifacts: None,
             skip_checks: skip_checks
                 .map(|values| values.iter().map(|value| value.to_string()).collect()),
+            skip_build_validation: false,
             bump: None,
             force_lower_bump: false,
             skip_publish: false,
