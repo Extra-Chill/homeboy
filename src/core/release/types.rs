@@ -353,6 +353,16 @@ pub struct ReleaseDeploymentSummary {
     pub planned: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleasePhase {
+    Plan,
+    Prepare,
+    Publish,
+    Recover,
+    Deploy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseProjectDeployResult {
     pub project_id: String,
@@ -373,6 +383,7 @@ pub struct ReleaseDeploymentResult {
 pub struct ReleaseCommandResult {
     pub component_id: String,
     pub status: String,
+    pub phase: ReleasePhase,
     pub bump_type: String,
     pub dry_run: bool,
     pub releasable_commits: usize,
