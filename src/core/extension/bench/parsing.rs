@@ -192,10 +192,10 @@ fn normalize_artifact_map(value: Option<&mut serde_json::Value>) {
         return;
     };
 
-    artifacts.retain(|_, artifact| artifact_has_pointer(artifact));
+    artifacts.retain(|_, artifact| artifact_has_pointer_field(artifact));
 }
 
-fn artifact_has_pointer(artifact: &serde_json::Value) -> bool {
+fn artifact_has_pointer_field(artifact: &serde_json::Value) -> bool {
     let Some(object) = artifact.as_object() else {
         return false;
     };
@@ -209,12 +209,7 @@ fn artifact_has_pointer(artifact: &serde_json::Value) -> bool {
         "observation_artifact_id",
     ]
     .iter()
-    .any(|field| {
-        object
-            .get(*field)
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
-    })
+    .any(|field| object.contains_key(*field))
 }
 
 fn normalize_diagnostic_producer_sources(value: &mut serde_json::Value) {
