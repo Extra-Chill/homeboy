@@ -75,7 +75,7 @@ fn subcommand_index_before_passthrough(args: &[String], subcommand: &str) -> Opt
 fn option_value<'a>(args: &'a [String], start_index: usize, flag: &str) -> Option<&'a str> {
     let flag_eq = format!("{flag}=");
     let mut iter = args.iter().enumerate().skip(start_index);
-    while let Some((index, arg)) = iter.next() {
+    for (index, arg) in iter {
         if arg == "--" {
             return None;
         }

@@ -3,11 +3,12 @@
 //!
 //! - **A (Warning):** marker keyword (`workaround`, `polyfill`, `shim`,
 //!   `// Hack`, `until merged`, `legacy fallback`, …) AND a concrete tracker
-//!   reference (`github.com/.../issues|pull/N`, `core.trac.wordpress.org/ticket/N`,
-//!   or `@see <url>`) co-located in the same contiguous comment block. Bare
-//!   `#NNN` does not qualify on its own.
+//!   reference (an issue/PR/ticket URL, or `@see <url>`) co-located in the
+//!   same contiguous comment block. Bare `#NNN` does not qualify on its own.
+//!   The concrete tracker URL shapes are configured ecosystem defaults, not
+//!   hardcoded here.
 //! - **B (Info):** `version_compare(<KNOWN_CONSTANT>, '<X>', '<' | '<=')`
-//!   guards against a known plugin/PHP/WP constant.
+//!   guards against a known version constant for an opted-in ecosystem.
 //!
 //! Per the fix-upstream-first rule (RULES.md): every workaround should be
 //! tracked debt with a known upstream cause. Today nothing flags them and
@@ -25,7 +26,7 @@
 use regex::Regex;
 
 use super::comment_blocks;
-use super::conventions::{AuditFinding, Language};
+use super::conventions::{builtin_tracker_reference_regexes, AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use crate::core::component::DetectorProfileConfig;
@@ -75,14 +76,11 @@ const DEFAULT_MARKER_REGEXES: &[&str] = &[
     r"until\s+\S+\s+(?:merged|landed|shipped|fixed|released|patched|merges|lands|ships|fixes|releases|patches|in core)\b",
 ];
 
-/// Single alternation regex covering all tracker-reference shapes. Bare `#NNN`
-/// is intentionally NOT included — Tier A requires a marker AND a concrete
-/// URL/ticket, never a bare reference.
-const DEFAULT_TRACKER_REFERENCE_REGEXES: &[&str] = &[
-    r"https?://github\.com/[\w\-.]+/[\w\-.]+/(?:issues|pull)/\d+",
-    r"core\.trac\.wordpress\.org/ticket/\d+",
-    r"@see\s+https?://[^\s)]+",
-];
+// Tracker-reference regex shapes. Bare `#NNN` is intentionally NOT included —
+// Tier A requires a marker AND a concrete URL/ticket, never a bare reference.
+// The concrete ecosystem URL literals live in the agnostic conventions home
+// (`Language`-adjacent `builtin_tracker_reference_regexes`), not inline here,
+// so this detector stays free of hardcoded ecosystem literals.
 
 // ============================================================================
 // Tier B — version-compare guard catalogue
@@ -102,7 +100,9 @@ const DEFAULT_VERSION_GUARD_REGEXES: &[&str] = &[
     r#"version_compare\s*\(\s*([A-Z_][A-Z0-9_]*|\$wp_version|PHP_VERSION)\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]<=?['"]\s*\)"#,
 ];
 
-const DEFAULT_VERSION_GUARD_LANGUAGES: &[&str] = &["php"];
+// Version-guard language defaults live in the agnostic conventions home
+// (`builtin_version_guard_tokens`), not inline here — version-compare syntax is
+// ecosystem-specific, so the concrete token set stays out of this detector.
 const DEFAULT_VENDORED_PATH_MARKERS: &[&str] =
     &["/vendor/", "vendor/", "/node_modules/", "node_modules/"];
 
@@ -267,7 +267,7 @@ impl EffectiveDetectorProfile {
             profile.extend_literals(MARKER_LITERALS, LEADING_MARKERS, VERSION_CONSTANTS);
             profile.extend_regexes(DEFAULT_MARKER_REGEXES, DetectorRegexKind::Marker);
             profile.extend_regexes(
-                DEFAULT_TRACKER_REFERENCE_REGEXES,
+                builtin_tracker_reference_regexes(),
                 DetectorRegexKind::TrackerReference,
             );
             profile.extend_regexes(
@@ -275,7 +275,7 @@ impl EffectiveDetectorProfile {
                 DetectorRegexKind::VersionGuard,
             );
             profile.extend_strings(
-                DEFAULT_VERSION_GUARD_LANGUAGES,
+                Language::builtin_version_guard_tokens(),
                 DetectorProfileField::VersionGuardLanguage,
             );
             profile.extend_strings(

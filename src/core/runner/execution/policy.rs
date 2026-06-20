@@ -2,9 +2,45 @@ use serde_json::json;
 
 use crate::core::error::{Error, ErrorCode, Result};
 
-use crate::core::runner::{Runner, RunnerKind};
+use crate::core::runner::{Runner, RunnerCapabilityPreflight, RunnerKind};
 
 use super::{trim_trailing_slashes, RunnerExecOptions};
+
+/// Derive the remote capability-parity preflight for a runner dispatch.
+///
+/// Remote execution dispatch must validate that the runner can satisfy the
+/// command's top-level executable before starting execution, so a missing tool
+/// fails before remote dispatch instead of mid-run. When the caller has already
+/// supplied an explicit capability preflight (e.g. rig install requiring the
+/// `homeboy` tool), that contract is preserved unchanged; otherwise a contract
+/// is derived from the command's first argv element. `exec` no-ops this gate for
+/// local runners and SSH runners that already advertise the executable, so it is
+/// behavior-preserving on a provisioned runner and fails loudly otherwise
+/// (#5093, #5422).
+pub(super) fn remote_execution_preflight(
+    command: &[String],
+    explicit: Option<&RunnerCapabilityPreflight>,
+) -> Option<RunnerCapabilityPreflight> {
+    if let Some(explicit) = explicit {
+        return Some(explicit.clone());
+    }
+
+    let required_commands: Vec<String> = command
+        .first()
+        .filter(|program| !program.trim().is_empty())
+        .cloned()
+        .into_iter()
+        .collect();
+    if required_commands.is_empty() {
+        return None;
+    }
+
+    Some(RunnerCapabilityPreflight {
+        command: "runner.exec".to_string(),
+        required_commands,
+        ..Default::default()
+    })
+}
 
 pub(super) struct RunnerPolicyRequest<'a> {
     pub(super) project_id: Option<&'a str>,

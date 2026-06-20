@@ -505,7 +505,13 @@ fn json_summary_for_targeted_detector_counts_current_and_unbaselined_findings() 
 #[test]
 fn execution_plan_filters_to_requested_detector_family() {
     let cases = [
-        (AuditFinding::GodFile, "structural", "duplication", true, false),
+        (
+            AuditFinding::GodFile,
+            "structural",
+            "duplication",
+            true,
+            false,
+        ),
         (
             AuditFinding::DuplicateFunction,
             "duplication",
@@ -515,13 +521,9 @@ fn execution_plan_filters_to_requested_detector_family() {
         ),
     ];
 
-    for (
-        finding,
-        ready_detector,
-        disabled_detector,
-        structural_enabled,
-        duplication_enabled,
-    ) in cases {
+    for (finding, ready_detector, disabled_detector, structural_enabled, duplication_enabled) in
+        cases
+    {
         let plan = AuditExecutionPlan::from_filters(&[finding], &[]);
 
         assert_eq!(plan.run_structural(), structural_enabled);

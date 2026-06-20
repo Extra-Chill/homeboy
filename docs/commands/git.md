@@ -8,7 +8,9 @@ homeboy git <COMMAND>
 
 Git operations for Homeboy components, worktrees, portable checkouts, and GitHub issue / pull request workflows.
 
-Most commands emit Homeboy's structured JSON envelope when appropriate. See the [JSON output contract](../architecture/output-system.md). Some subcommands also accept `--json` for bulk input.
+Most commands emit Homeboy's structured JSON envelope when appropriate. See the [JSON output contract](../architecture/output-system.md). Git JSON output includes a top-level `variant` discriminator for the public wrapper shape: `single`, `bulk`, `issue`, `pr`, `find`, or `policy`. Some subcommands also accept `--json` for bulk input.
+
+Follow-up: git has many subcommand-specific payload shapes inside those wrappers; the current public contract tags the wrapper variants, and per-subcommand golden fixtures can be added incrementally where consumers need stricter fixtures.
 
 ## Component Resolution
 

@@ -88,6 +88,7 @@ pub(super) fn route(
             Ok(body) => daemon_endpoint_response("runner.jobs.claim", body),
             Err(err) => error_response(400, err),
         },
+        ("GET", path) if path.starts_with("/runner/jobs/") => lookup(path, job_store),
         ("POST", path) if path.starts_with("/runner/jobs/") => update(path, body, job_store),
         _ => error_response(
             404,
@@ -96,13 +97,69 @@ pub(super) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, or /runner/jobs/<job-id>/cancel."
+                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
             ),
         ),
     }
+}
+
+fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
+    let Some((job_id, artifact_id)) = job_artifact_path(path) else {
+        return error_response(
+            404,
+            Error::validation_invalid_argument(
+                "path",
+                "unknown remote runner job lookup path",
+                Some(path.to_string()),
+                Some(vec![
+                    "Use GET /runner/jobs/<job-id>/artifacts/<artifact-id> for broker-held artifact metadata.".to_string(),
+                ]),
+            ),
+        );
+    };
+
+    match lookup_artifact(job_id, &artifact_id, job_store) {
+        Ok(body) => daemon_endpoint_response("runner.jobs.artifacts.lookup", body),
+        Err(err) => error_response(404, err),
+    }
+}
+
+fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Result<Value> {
+    let job = job_store.get(job_id)?;
+    let artifact = job
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == artifact_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("remote runner artifact record not found: {artifact_id}"),
+                Some(artifact_id.to_string()),
+                Some(vec![
+                    "Reverse broker artifact lookup exposes metadata posted with the finished job; artifact bytes are not stored by the broker yet.".to_string(),
+                ]),
+            )
+        })?;
+
+    Ok(json!({
+        "command": "api.runner.jobs.artifacts.lookup",
+        "job_id": job_id.to_string(),
+        "artifact_id": artifact_id,
+        "artifact": artifact,
+        "retrieval": {
+            "mode": "metadata_only",
+            "content_available": false,
+            "content_url": null,
+            "fetch_command": null,
+            "metadata_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
+            "future_content_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
+            "hint": "Reverse broker artifacts currently retain metadata only. Use runner-side artifact commands for bytes until broker content proxying lands."
+        }
+    }))
 }
 
 fn reconcile(job_store: &JobStore) -> Result<Value> {
@@ -255,6 +312,20 @@ fn job_path(path: &str) -> Option<(Uuid, &str)> {
     let (job_id, operation) = tail.split_once('/')?;
     let job_id = Uuid::parse_str(job_id).ok()?;
     Some((job_id, operation))
+}
+
+fn job_artifact_path(path: &str) -> Option<(Uuid, String)> {
+    let tail = path.strip_prefix("/runner/jobs/")?;
+    let (job_id, tail) = tail.split_once('/')?;
+    let artifact_id = tail.strip_prefix("artifacts/")?;
+    if artifact_id.is_empty() || artifact_id.contains('/') {
+        return None;
+    }
+    let job_id = Uuid::parse_str(job_id).ok()?;
+    Some((
+        job_id,
+        crate::core::execution_contract::decode_uri_component(artifact_id),
+    ))
 }
 
 fn append_event(job_id: Uuid, body: Option<Value>, job_store: &JobStore) -> Result<Value> {

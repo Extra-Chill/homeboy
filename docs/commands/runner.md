@@ -319,6 +319,15 @@ The JSON payload uses `command: "runner.status"` and reports whether a saved
 session exists, whether the tunnel still appears live, and the recorded endpoint
 details.
 
+Status output is also the operator handoff for active runner jobs. When the
+connected daemon or reverse broker can report active work, each active job
+includes lifecycle timing fields such as `updated_at_ms`, `heartbeat_age_ms`,
+`claim_id`, `claimed_by_runner_id`, `claimed_at_ms`, `claim_expires_at_ms`, and
+`claim_expires_in_ms`. The top-level `operator_commands` array gives copyable
+next actions for the current session, including job log following, cancellation,
+broker claim reconciliation for reverse runners, and artifact lookup/fetch
+commands when the status payload has enough context.
+
 ### `disconnect`
 
 ```sh

@@ -31,7 +31,7 @@ use crate::core::extension::bench::{BenchCommandOutput, BenchListWorkflowResult}
 use crate::core::observation::ArtifactRecord;
 use crate::core::release::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseCommandResult,
-    ReleasePlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
+    ReleasePhase, ReleasePlan, ReleaseSemverCommit, ReleaseSemverRecommendation,
 };
 use crate::core::stack::{
     GitRef, InspectCommit, InspectCommitDetails, InspectOutput, InspectPr, LocalState,
@@ -199,9 +199,11 @@ fn release_command_json_contract_matches_golden_fixture() {
         json!({
             "scenarios": [
                 scenario("release dry-run single", ReleaseCommandOutput::Single(ReleaseOutput {
+                    variant: "single",
                     result: release_result("homeboy", "minor", true, Some(release_plan())),
                 })),
                 scenario("release dry-run batch", ReleaseCommandOutput::Batch(BatchReleaseOutput {
+                    variant: "batch",
                     result: BatchReleaseResult {
                         results: vec![BatchReleaseComponentResult {
                             component_id: "homeboy".to_string(),
@@ -452,6 +454,11 @@ fn release_result(
     ReleaseCommandResult {
         component_id: component_id.to_string(),
         status: if dry_run { "planned" } else { "released" }.to_string(),
+        phase: if dry_run {
+            ReleasePhase::Plan
+        } else {
+            ReleasePhase::Publish
+        },
         bump_type: bump_type.to_string(),
         dry_run,
         releasable_commits: 1,

@@ -479,16 +479,22 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.dry_run_flag = Some("--check");
+            metadata.output_notes = "default output is blocked for remote execution; pass --check to plan or --apply to execute";
+            metadata.dangerous_flags = vec!["--apply"];
             metadata.lab_notes = "local-only: depends on local fleet/project/server configuration before SSH fan-out";
         }
         ["api", "post"] | ["api", "put"] | ["api", "patch"] | ["api", "delete"] => {
             metadata.mutates = true;
             metadata.operator = true;
+            metadata.output_notes = "mutating API requests require --apply";
+            metadata.dangerous_flags = vec!["--apply"];
         }
         ["http", "request"] => {
             metadata.mutates = true;
             metadata.operator = true;
-            metadata.dangerous_flags = vec!["METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
+            metadata.output_notes = "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it";
+            metadata.dangerous_flags =
+                vec!["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
         }
         ["bench"] | ["test"] | ["lint"] | ["audit"] | ["trace"] => {
             metadata.lab_supported = true;
@@ -685,6 +691,8 @@ mod tests {
 
         let fleet_exec = manifest.find_path(&["fleet", "exec"]).unwrap();
         assert_eq!(fleet_exec.dry_run.flag.as_deref(), Some("--check"));
+        assert!(fleet_exec.output.notes.contains("--apply"));
+        assert!(fleet_exec.dangerous_flags.contains(&"--apply".to_string()));
         assert!(fleet_exec.lab.notes.contains("local-only"));
 
         let db_delete_row = manifest.find_path(&["db", "delete-row"]).unwrap();
@@ -692,6 +700,16 @@ mod tests {
 
         let file_write = manifest.find_path(&["file", "write"]).unwrap();
         assert!(file_write.output.notes.contains("--apply"));
+
+        let api_post = manifest.find_path(&["api", "post"]).unwrap();
+        assert!(api_post.output.notes.contains("--apply"));
+        assert!(api_post.dangerous_flags.contains(&"--apply".to_string()));
+
+        let http_request = manifest.find_path(&["http", "request"]).unwrap();
+        assert!(http_request.output.notes.contains("--apply"));
+        assert!(http_request
+            .dangerous_flags
+            .contains(&"METHOD!=GET".to_string()));
     }
 
     #[test]
@@ -750,6 +768,24 @@ mod tests {
             ["homeboy", "db", "drop-table", "mysite", "--apply", "wp_tmp"].as_slice(),
             ["homeboy", "file", "delete", "mysite", "tmp.txt", "--apply"].as_slice(),
             ["homeboy", "file", "write", "mysite", "tmp.txt", "--apply"].as_slice(),
+            [
+                "homeboy",
+                "api",
+                "mysite",
+                "post",
+                "/wp/v2/posts",
+                "--apply",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "http",
+                "request",
+                "POST",
+                "--apply",
+                "https://example.test/api",
+            ]
+            .as_slice(),
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|error| {
                 panic!("documented command form failed to parse: {args:?}\n{error}")

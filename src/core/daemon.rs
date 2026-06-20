@@ -303,6 +303,9 @@ where
         | ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
         | ("GET", "/runner/jobs/claim") => method_not_allowed(),
+        ("GET", path) if path.starts_with("/runner/jobs/") => {
+            remote_runner::route(method, path, body, job_store)
+        }
         ("POST", path) if path.starts_with("/runner/jobs/") => {
             remote_runner::route(method, path, body, job_store)
         }
@@ -391,6 +394,7 @@ fn enqueue_exec_job(
             let stderr = process_output.stderr.clone();
             let exit_code = process_output.exit_code;
             let metrics = process_output.metrics.clone();
+            let capture = process_output.capture.clone();
             if job.is_cancelled() {
                 let _ = job.progress(json!({
                     "phase": "cancelled",
@@ -406,6 +410,7 @@ fn enqueue_exec_job(
                     "stderr": stderr,
                     "source_snapshot": source_snapshot,
                     "metrics": metrics,
+                    "capture": capture,
                     "status": JobStatus::Cancelled,
                 }));
             }
@@ -443,6 +448,7 @@ fn enqueue_exec_job(
                 "source_snapshot": source_snapshot,
                 "patch": patch,
                 "metrics": metrics,
+                "capture": capture,
             });
             if exit_code != 0 {
                 job.result(result.clone())?;

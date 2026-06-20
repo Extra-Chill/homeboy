@@ -462,7 +462,7 @@ fn risk_flags(record: &Value) -> Value {
 
     let run_id = record.get("run_id").and_then(Value::as_str);
     let aggregate = run_id
-        .and_then(|run_id| completed_run_aggregate(run_id))
+        .and_then(completed_run_aggregate)
         .and_then(Result::ok);
 
     let mut has_patch = false;

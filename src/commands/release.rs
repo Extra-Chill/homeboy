@@ -4,7 +4,8 @@ use serde::Serialize;
 use homeboy::core::component;
 use homeboy::core::deploy::{self, ReleaseStateStatus};
 use homeboy::core::release::{
-    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleasePipelineOptions,
+    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
+    ReleasePhase, ReleasePipelineOptions,
 };
 use homeboy::core::scope::{self, Scope};
 
@@ -30,6 +31,10 @@ pub struct ReleaseArgs {
 
     #[command(flatten)]
     dry_run_args: DryRunArgs,
+
+    /// Confirm risky release execution modes.
+    #[arg(long)]
+    apply: bool,
 
     /// Deploy to all projects using this component after release
     #[arg(long)]
@@ -96,12 +101,14 @@ pub struct ReleaseArgs {
 #[derive(Serialize)]
 #[serde(tag = "command", rename = "release")]
 pub struct ReleaseOutput {
+    pub variant: &'static str,
     pub result: ReleaseCommandResult,
 }
 
 #[derive(Serialize)]
 #[serde(tag = "command", rename = "release.batch")]
 pub struct BatchReleaseOutput {
+    pub variant: &'static str,
     pub result: BatchReleaseResult,
 }
 
@@ -120,6 +127,35 @@ impl ReleaseArgs {
             head: self.head,
             from_artifacts: self.from_artifacts.clone(),
         }
+    }
+
+    fn execution_plan(&self, skip_checks: bool) -> ReleaseExecutionPlan {
+        let phase = if self.recover {
+            ReleasePhase::Recover
+        } else if self.dry_run_args.dry_run {
+            ReleasePhase::Plan
+        } else if self.deploy {
+            ReleasePhase::Deploy
+        } else if self.skip_publish {
+            ReleasePhase::Prepare
+        } else {
+            ReleasePhase::Publish
+        };
+
+        let apply_risks = [
+            (self.deploy, "--deploy"),
+            (self.recover, "--recover"),
+            (self.retag, "--retag"),
+            (self.head, "--head"),
+            (skip_checks, "bare --skip-checks"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, flag)| enabled.then_some(flag))
+        .collect::<Vec<_>>();
+
+        let requires_apply = !self.apply && !self.dry_run_args.dry_run && !apply_risks.is_empty();
+
+        ReleaseExecutionPlan::new(phase, requires_apply, apply_risks)
     }
 
     /// Resolve `--skip-checks` into (skip-all, granular-check-list).
@@ -193,6 +229,7 @@ impl ReleaseArgs {
             outdated,
             path,
             dry_run_args: DryRunArgs { dry_run },
+            apply: false,
             deploy,
             recover,
             retag: false,
@@ -212,9 +249,11 @@ pub fn run(
     args: ReleaseArgs,
     _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<ReleaseCommandOutput> {
+    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
+    let execution = args.execution_plan(skip_checks);
+    validate_apply_boundary(&execution)?;
     let component_ids = resolve_component_ids(&args, &args.components)?;
     let bump_override = args.bump.clone();
-    let (skip_checks, skip_checks_granular) = args.resolve_skip_checks()?;
 
     // Single component: use the original single-release flow
     if component_ids.len() == 1 {
@@ -232,10 +271,14 @@ pub fn run(
             pipeline: args.pipeline_options(),
             skip_github_release: args.no_github_release,
             git_identity: args.git_identity.clone(),
+            execution: Some(execution.clone()),
         })?;
 
         return Ok((
-            ReleaseCommandOutput::Single(ReleaseOutput { result }),
+            ReleaseCommandOutput::Single(ReleaseOutput {
+                variant: "single",
+                result,
+            }),
             exit_code,
         ));
     }
@@ -292,6 +335,7 @@ pub fn run(
         },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
+        execution: Some(execution),
     };
 
     let batch_result = release::run_batch(&component_ids, &input_template);
@@ -309,9 +353,27 @@ pub fn run(
 
     Ok((
         ReleaseCommandOutput::Batch(BatchReleaseOutput {
+            variant: "batch",
             result: batch_result,
         }),
         exit_code,
+    ))
+}
+
+fn validate_apply_boundary(execution: &ReleaseExecutionPlan) -> homeboy::core::Result<()> {
+    if !execution.requires_apply {
+        return Ok(());
+    }
+
+    let risky_flags = execution.apply_risks.join(" and ");
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "apply",
+        format!(
+            "Real releases with {risky_flags} require explicit --apply. Use --dry-run to preview or re-run with --apply to release."
+        ),
+        None,
+        None,
     ))
 }
 
@@ -456,6 +518,7 @@ mod tests {
             outdated: false,
             path: None,
             dry_run_args: DryRunArgs { dry_run: true },
+            apply: false,
             deploy: false,
             recover: false,
             retag: false,
@@ -503,5 +566,75 @@ mod tests {
             .expect_err("unknown check rejected");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.to_string().contains("Unknown check 'bogus'"));
+    }
+
+    #[test]
+    fn risky_real_release_requires_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.head = true;
+
+        let execution = args.execution_plan(false);
+        let err = validate_apply_boundary(&execution).expect_err("--head requires --apply");
+
+        assert!(err
+            .message
+            .contains("Real releases with --head require explicit --apply"));
+    }
+
+    #[test]
+    fn risky_dry_run_release_does_not_require_apply() {
+        let mut args = args(&["fixture"]);
+        args.head = true;
+
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("dry-run may preview risky mode");
+    }
+
+    #[test]
+    fn bare_skip_checks_real_release_requires_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+
+        let execution = args.execution_plan(true);
+        let err =
+            validate_apply_boundary(&execution).expect_err("bare --skip-checks requires --apply");
+
+        assert!(err
+            .message
+            .contains("Real releases with bare --skip-checks require explicit --apply"));
+    }
+
+    #[test]
+    fn granular_skip_checks_real_release_does_not_require_apply() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("granular skip-checks is not guarded");
+    }
+
+    #[test]
+    fn apply_confirms_risky_real_release() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.recover = true;
+        args.retag = true;
+        args.apply = true;
+
+        let execution = args.execution_plan(false);
+        validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
+    }
+
+    #[test]
+    fn execution_plan_resolves_phase_from_args() {
+        let mut args = args(&["fixture"]);
+        args.dry_run_args.dry_run = false;
+        args.skip_publish = true;
+
+        let execution = args.execution_plan(false);
+
+        assert_eq!(execution.phase, ReleasePhase::Prepare);
+        assert!(!execution.requires_apply);
     }
 }

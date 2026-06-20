@@ -245,21 +245,36 @@ impl Default for FilesystemAssertionSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum FilesystemAssertionKind {
+    #[default]
     Path,
     File,
     Dir,
 }
 
-impl Default for FilesystemAssertionKind {
-    fn default() -> Self {
-        Self::Path
-    }
-}
 
 impl FilesystemAssertionKind {
     pub fn is_path(&self) -> bool {
         matches!(self, Self::Path)
+    }
+
+    /// Human-readable label for this assertion kind.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::File => "file",
+            Self::Dir => "dir",
+        }
+    }
+
+    /// Whether the given path satisfies this assertion kind.
+    pub fn matches_path(self, path: &std::path::Path) -> bool {
+        match self {
+            Self::Path => path.exists(),
+            Self::File => path.is_file(),
+            Self::Dir => path.is_dir(),
+        }
     }
 }
 

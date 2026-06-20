@@ -853,10 +853,10 @@ mod tests {
         ])
         .supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "rig", "up", "studio"]).supports_lab_runner());
-        assert!(
-            !parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
-                .supports_lab_runner()
-        );
+        assert!(!parsed_command(&[
+            "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
+        ])
+        .supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
         assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
         assert!(
@@ -1208,9 +1208,11 @@ mod tests {
             LabCommandPortability::LocalOnly(reason) if reason.contains("single-workspace Lab snapshot")
         ));
 
-        let fleet = parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
-            .lab_contract()
-            .expect("fleet exec contract");
+        let fleet = parsed_command(&[
+            "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
+        ])
+        .lab_contract()
+        .expect("fleet exec contract");
         assert_eq!(fleet.hot_label, "fleet exec");
         assert!(matches!(
             fleet.portability,
@@ -1323,12 +1325,12 @@ mod tests {
             .lab_runner_unsupported_reason()
             .expect("rig up reason")
             .contains("single-workspace Lab snapshot"));
-        assert!(
-            parsed_command(&["homeboy", "fleet", "exec", "prod", "wp", "plugin", "list"])
-                .lab_runner_unsupported_reason()
-                .expect("fleet exec reason")
-                .contains("config parity")
-        );
+        assert!(parsed_command(&[
+            "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
+        ])
+        .lab_runner_unsupported_reason()
+        .expect("fleet exec reason")
+        .contains("config parity"));
         assert!(
             parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
                 .lab_runner_unsupported_reason()

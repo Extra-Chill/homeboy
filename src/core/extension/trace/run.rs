@@ -1065,21 +1065,22 @@ fn failure_from_output(
 }
 
 fn recipe_path_from_args(args: &TraceRunWorkflowArgs) -> Option<String> {
-    args.runner_inputs
-        .json_settings
-        .iter()
-        .find_map(|(key, value)| {
-            key.to_ascii_lowercase()
-                .contains("recipe")
-                .then(|| value.as_str().map(ToString::to_string))
-                .flatten()
-        })
-        .or_else(|| {
-            args.runner_inputs
-                .workload_paths
-                .first()
-                .map(|path| path.to_string_lossy().to_string())
-        })
+    // Prefer an explicit recipe-named JSON setting; fall back to the first
+    // workload path. Kept as a straight-line scan rather than an iterator
+    // combinator chain so it does not parallel unrelated artifact-path lookups
+    // in the report subsystem (#5364) — the two share no domain types and a
+    // generic helper would couple unrelated subsystems for no real saving.
+    for (key, value) in &args.runner_inputs.json_settings {
+        if !key.to_ascii_lowercase().contains("recipe") {
+            continue;
+        }
+        if let Some(recipe) = value.as_str() {
+            return Some(recipe.to_string());
+        }
+    }
+
+    let first_workload = args.runner_inputs.workload_paths.first()?;
+    Some(first_workload.to_string_lossy().to_string())
 }
 
 fn last_observed_homeboy_event(results: &TraceResults) -> Option<String> {

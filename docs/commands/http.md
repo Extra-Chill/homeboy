@@ -12,8 +12,10 @@ homeboy http get https://logstash.example.com/logstash/... --proxy socks5://127.
 ```
 
 ```sh
-homeboy http request POST https://example.com/api --json '{"ok":true}' --header 'X-Example: value'
+homeboy http request POST --apply https://example.com/api --json '{"ok":true}' --header 'X-Example: value'
 ```
+
+`homeboy http request` allows `GET`, `HEAD`, and `OPTIONS` without `--apply`. Other methods require `--apply` before Homeboy sends the request.
 
 ## Options
 
@@ -22,5 +24,7 @@ homeboy http request POST https://example.com/api --json '{"ok":true}' --header 
 - `--header 'Name: value'` adds a request header.
 - `--json <json>` sends a JSON body.
 - `--form key=value` sends form fields.
+- `--apply` confirms mutating `request` methods other than `GET`, `HEAD`, and `OPTIONS`.
 
-Output is structured JSON with `method`, `url`, `status`, `headers`, and `body`.
+Output is structured JSON with `variant`, `method`, `url`, `status`, `headers`, and `body`.
+The `variant` discriminator is currently `response`.

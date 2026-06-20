@@ -34,6 +34,8 @@ pub struct RunnerExtra {
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_hints: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub operator_commands: Vec<RunnerOperatorCommand>,
 }
 
 impl Default for RunnerExtra {
@@ -43,8 +45,19 @@ impl Default for RunnerExtra {
             connection: None,
             sessions: Vec::new(),
             operator_hints: Vec::new(),
+            operator_commands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerOperatorCommand {
+    pub scope: &'static str,
+    pub runner_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    pub command: String,
+    pub description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1036,6 +1049,7 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
     if let Some(id) = id {
         let report = runner::status(id)?;
         let operator_hints = runner_status_operator_hints(&report);
+        let operator_commands = runner_status_operator_commands(&report);
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
@@ -1043,6 +1057,7 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
                 extra: RunnerExtra {
                     connection: Some(RunnerConnectionOutput::Status(report)),
                     operator_hints,
+                    operator_commands,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1056,12 +1071,17 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         .iter()
         .flat_map(runner_status_operator_hints)
         .collect();
+    let operator_commands = sessions
+        .iter()
+        .flat_map(runner_status_operator_commands)
+        .collect();
     Ok((
         RunnerOutput {
             command: "runner.status".to_string(),
             extra: RunnerExtra {
                 sessions,
                 operator_hints,
+                operator_commands,
                 ..Default::default()
             },
             ..Default::default()
@@ -1107,10 +1127,83 @@ fn reverse_runner_status_hints(
     ));
     if report.active_job_count > 0 {
         hints.push(format!(
-            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if the broker rejects an already-claimed job, runner-side interrupt-on-cancel needs claim/heartbeat support rather than a local workaround.",
+            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if a claim lease expires, reconcile broker state with POST /runner/jobs/reconcile instead of mutating the job store manually.",
             report.runner_id
         ));
     }
+}
+
+fn runner_status_operator_commands(report: &RunnerStatusReport) -> Vec<RunnerOperatorCommand> {
+    let Some(session) = report.session.as_ref().filter(|_| report.connected) else {
+        return Vec::new();
+    };
+
+    let mut commands = Vec::new();
+    for job in &report.active_jobs {
+        commands.push(RunnerOperatorCommand {
+            scope: "job_logs",
+            runner_id: report.runner_id.clone(),
+            job_id: Some(job.job_id.clone()),
+            command: format!(
+                "homeboy runner job logs {} {} --follow",
+                report.runner_id, job.job_id
+            ),
+            description: "Follow the active runner job event stream.".to_string(),
+        });
+        commands.push(RunnerOperatorCommand {
+            scope: "job_cancel",
+            runner_id: report.runner_id.clone(),
+            job_id: Some(job.job_id.clone()),
+            command: format!(
+                "homeboy runner job cancel {} {}",
+                report.runner_id, job.job_id
+            ),
+            description: "Request cancellation for a queued or running runner job.".to_string(),
+        });
+        if let Some(run_id) = job.durable_run_id.as_deref() {
+            commands.push(RunnerOperatorCommand {
+                scope: "artifact_get",
+                runner_id: report.runner_id.clone(),
+                job_id: Some(job.job_id.clone()),
+                command: format!("homeboy runs artifact get {run_id} <artifact-id> -o <path>"),
+                description: "Fetch a mirrored observation artifact after the run records one."
+                    .to_string(),
+            });
+        }
+    }
+
+    if session.mode == RunnerTunnelMode::Reverse {
+        if let Some(broker_url) = session.broker_url.as_deref() {
+            commands.push(RunnerOperatorCommand {
+                scope: "broker_reconcile",
+                runner_id: report.runner_id.clone(),
+                job_id: None,
+                command: format!(
+                    "curl -fsS -X POST {}/runner/jobs/reconcile",
+                    broker_url.trim_end_matches('/')
+                ),
+                description:
+                    "Fail expired reverse-runner claims through the broker-owned lifecycle path."
+                        .to_string(),
+            });
+            for job in &report.active_jobs {
+                commands.push(RunnerOperatorCommand {
+                    scope: "broker_artifact_lookup",
+                    runner_id: report.runner_id.clone(),
+                    job_id: Some(job.job_id.clone()),
+                    command: format!(
+                        "curl -fsS {}/runner/jobs/{}/artifacts/<artifact-id>",
+                        broker_url.trim_end_matches('/'),
+                        job.job_id
+                    ),
+                    description: "Inspect broker-held reverse-runner artifact metadata."
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    commands
 }
 
 fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
@@ -1626,6 +1719,71 @@ mod tests {
         assert_eq!(value["stdout"], "hello\n");
         assert_eq!(value["stderr"], "warn\n");
         assert_eq!(value["job_id"], "job-123");
+    }
+
+    #[test]
+    fn reverse_runner_status_commands_include_lifecycle_operations() {
+        let report = RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: runner::RunnerSessionState::Connected,
+            session: Some(RunnerSession {
+                runner_id: "homeboy-lab".to_string(),
+                mode: RunnerTunnelMode::Reverse,
+                role: runner::RunnerSessionRole::Controller,
+                server_id: None,
+                controller_id: Some("controller".to_string()),
+                broker_url: Some("https://broker.example.test/".to_string()),
+                remote_daemon_address: None,
+                local_port: None,
+                local_url: None,
+                tunnel_pid: None,
+                remote_daemon_pid: None,
+                homeboy_version: "test".to_string(),
+                homeboy_build_identity: None,
+                connected_at: "2026-06-19T00:00:00Z".to_string(),
+                worker_identity: None,
+                worker_pid: None,
+                last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
+            }),
+            stale_daemon: None,
+            active_jobs: vec![homeboy::core::api_jobs::ActiveRunnerJobSummary {
+                runner_id: "homeboy-lab".to_string(),
+                job_id: "job-123".to_string(),
+                operation: "runner.exec".to_string(),
+                source: "broker".to_string(),
+                kind: "runner.exec".to_string(),
+                status: JobStatus::Running,
+                command: "true".to_string(),
+                cwd: None,
+                started_at_ms: 1000,
+                updated_at_ms: 1500,
+                elapsed_ms: 500,
+                heartbeat_age_ms: 0,
+                claim_id: Some("claim-123".to_string()),
+                claimed_by_runner_id: Some("homeboy-lab".to_string()),
+                claimed_at_ms: Some(1000),
+                claim_expires_at_ms: Some(31_000),
+                claim_expires_in_ms: Some(29_500),
+                durable_run_id: Some("run-123".to_string()),
+                active_child_count: None,
+                active_cell_count: None,
+            }],
+            active_job_count: 1,
+            session_path: "/tmp/session.json".to_string(),
+        };
+
+        let commands = runner_status_operator_commands(&report);
+        let serialized = serde_json::to_string(&commands).expect("serialize commands");
+
+        assert!(serialized.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
+        assert!(serialized.contains("homeboy runner job cancel homeboy-lab job-123"));
+        assert!(serialized.contains("homeboy runs artifact get run-123 <artifact-id> -o <path>"));
+        assert!(serialized
+            .contains("curl -fsS -X POST https://broker.example.test/runner/jobs/reconcile"));
+        assert!(serialized.contains(
+            "curl -fsS https://broker.example.test/runner/jobs/job-123/artifacts/<artifact-id>"
+        ));
     }
 
     #[test]

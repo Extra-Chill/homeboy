@@ -523,6 +523,19 @@ fn reverse_broker_artifact_record(
             "name": artifact.name.clone(),
             "remote_path": artifact.path.clone(),
             "url": artifact.url.clone(),
+            "broker_artifact_metadata_path": format!(
+                "/runner/jobs/{}/artifacts/{}",
+                job.id,
+                encode_uri_component(&artifact.id)
+            ),
+            "content_available": false,
+            "broker_artifact_retrieval": {
+                "mode": "metadata_only",
+                "content_available": false,
+                "content_url": null,
+                "fetch_command": null,
+                "hint": "Reverse broker artifact mirroring preserves metadata only; broker byte retrieval is a future content-proxy slice."
+            },
             "metadata": artifact.metadata.clone(),
         }),
         created_at: ms_to_rfc3339(job.finished_at_ms.unwrap_or(job.updated_at_ms)),

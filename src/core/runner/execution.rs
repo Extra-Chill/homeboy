@@ -21,6 +21,7 @@ use super::broker_http;
 use super::capabilities::{
     runner_capability_snapshot_for_preflight, validate_runner_capability_preflight,
 };
+use super::daemon_http_get::daemon_get;
 use super::evidence::{
     mirror_daemon_evidence, mirror_daemon_job_progress, mirror_reverse_broker_evidence,
 };
@@ -40,7 +41,7 @@ pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
 mod extension_parity;
 mod policy;
 use extension_parity::{required_extensions_for_command, validate_runner_extension_parity};
-use policy::{validate_runner_policy, RunnerPolicyRequest};
+use policy::{remote_execution_preflight, validate_runner_policy, RunnerPolicyRequest};
 
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
@@ -182,12 +183,14 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
+    // Remote capability-parity preflight: derive the contract from the command's
+    // top-level executable when the caller did not supply an explicit one, so
+    // remote dispatch always validates that the runner can satisfy the command
+    // before starting execution instead of failing mid-run (#5093, #5422).
+    let capability_preflight =
+        remote_execution_preflight(&options.command, options.capability_preflight.as_ref());
     let run_capability_preflight = |runner: &Runner| -> Result<()> {
-        preflight_runner_capability_plan(
-            runner,
-            options.capability_preflight.as_ref(),
-            &request_env,
-        )
+        preflight_runner_capability_plan(runner, capability_preflight.as_ref(), &request_env)
     };
 
     if should_force_diagnostic_ssh(&runner, &options) {
@@ -509,6 +512,7 @@ fn exec_via_reverse_broker(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     } = runner_job_result_fields(
         &events,
@@ -549,7 +553,7 @@ fn exec_via_reverse_broker(
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
-            capture: None,
+            capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -656,6 +660,7 @@ fn exec_via_daemon(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     } = runner_job_result_fields(&events, job.status, &env, &secret_env_names);
 
@@ -689,7 +694,7 @@ fn exec_via_daemon(
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
-            capture: None,
+            capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -1028,25 +1033,6 @@ pub(crate) fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Resul
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
 }
 
-fn daemon_get(client: &Client, local_url: &str, path: &str) -> Result<Value> {
-    let response = client
-        .get(format!("{}{}", local_url.trim_end_matches('/'), path))
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
-    let envelope: DaemonEnvelope = response.json().map_err(|err| {
-        Error::internal_json(err.to_string(), Some("parse daemon response".to_string()))
-    })?;
-    if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("daemon response missing data"))
-}
-
 pub(crate) fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "GET")
 }
@@ -1151,6 +1137,7 @@ struct RunnerJobResultFields {
     stdout: String,
     stderr: String,
     metrics: Option<RunnerResourceMetrics>,
+    capture: Option<CommandCaptureMetadata>,
     exit_code: i32,
 }
 
@@ -1173,6 +1160,9 @@ fn runner_job_result_fields(
     let metrics = result
         .get("metrics")
         .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let capture = result
+        .get("capture")
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
     let exit_code = result
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -1189,6 +1179,7 @@ fn runner_job_result_fields(
         stdout,
         stderr,
         metrics,
+        capture,
         exit_code,
     }
 }
