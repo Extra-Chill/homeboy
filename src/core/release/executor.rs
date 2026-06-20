@@ -818,6 +818,7 @@ pub(crate) fn run_package(
     state: &mut ReleaseState,
     component_id: &str,
     component_local_path: &str,
+    skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
     let package_extensions: Vec<&ExtensionManifest> = extensions
         .iter()
@@ -835,9 +836,15 @@ pub(crate) fn run_package(
         ));
     }
 
+    let extra_config = package_build_config(skip_build_validation);
     let mut responses = Vec::new();
     for extension in package_extensions {
-        let payload = build_release_payload(state, component_id, component_local_path, None);
+        let payload = build_release_payload(
+            state,
+            component_id,
+            component_local_path,
+            extra_config.as_ref(),
+        );
         let response = run_package_action_with_retry(&extension.id, &payload)
             .map_err(|err| package_provider_error(&extension.id, err))?;
 
@@ -1202,6 +1209,30 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 
 /// Payload passed to extension actions — mirrors the pre-refactor shape so
 /// extensions don't need to change.
+/// Build the optional `config` map forwarded to the packaging extension for
+/// `release.package`.
+///
+/// When `skip_build_validation` is set, the generic `skip_build_validation`
+/// signal is forwarded so the extension can bypass its own build-structure
+/// assertions while still producing an artifact. Core stays agnostic: it does
+/// not know which structure assertions the extension enforces — it only relays
+/// the operator's intent (issue #5425). Returns `None` when there is nothing to
+/// forward so the default payload is unchanged.
+fn package_build_config(
+    skip_build_validation: bool,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    if !skip_build_validation {
+        return None;
+    }
+
+    let mut config = std::collections::HashMap::new();
+    config.insert(
+        "skip_build_validation".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Some(config)
+}
+
 pub(crate) fn build_release_payload(
     state: &ReleaseState,
     component_id: &str,
@@ -1848,6 +1879,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                false,
             )
             .expect("package step");
 
@@ -1880,6 +1912,7 @@ mod tests {
                 &mut state,
                 "intelligence-horse-theme",
                 &component.path().to_string_lossy(),
+                false,
             )
             .expect("package step");
 
@@ -1913,6 +1946,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                false,
             )
             .expect_err("failing package provider should fail the step");
 
@@ -1948,6 +1982,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                false,
             )
             .expect_err("persistently failing package should fail after retry");
 
@@ -1997,6 +2032,7 @@ mod tests {
                 &mut state,
                 "fixture",
                 &component.path().to_string_lossy(),
+                false,
             )
             .expect("retry after transient failure should succeed");
 
