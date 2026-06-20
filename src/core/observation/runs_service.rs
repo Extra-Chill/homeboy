@@ -155,6 +155,9 @@ pub fn related_lab_artifacts_for_runner_job(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> Result<Vec<ArtifactRecord>> {
+    if run.kind != "runner-exec" {
+        return Ok(Vec::new());
+    }
     let Some((_runner_id, job_id)) = crate::core::runners::mirrored_runner_job_identity(run) else {
         return Ok(Vec::new());
     };

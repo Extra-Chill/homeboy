@@ -1078,6 +1078,71 @@ mod tests {
     }
 
     #[test]
+    fn bench_artifact_listing_does_not_include_sibling_lab_run_artifacts() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let job_id = "job-123";
+            let requested_run = RunRecord {
+                id: "bench-run-1".to_string(),
+                kind: "bench".to_string(),
+                component_id: Some("homeboy".to_string()),
+                started_at: "2026-06-12T00:00:00Z".to_string(),
+                finished_at: Some("2026-06-12T00:10:00Z".to_string()),
+                status: "fail".to_string(),
+                command: Some("homeboy bench".to_string()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({
+                    "lab": {
+                        "runner": { "id": "lab" },
+                        "remote_job_id": job_id
+                    }
+                }),
+            };
+            store
+                .upsert_imported_run(&requested_run)
+                .expect("requested run");
+            let sibling_run = RunRecord {
+                id: "bench-run-2".to_string(),
+                kind: "bench".to_string(),
+                component_id: Some("homeboy".to_string()),
+                started_at: "2026-06-12T00:00:01Z".to_string(),
+                finished_at: Some("2026-06-12T00:10:00Z".to_string()),
+                status: "pass".to_string(),
+                command: Some("homeboy bench".to_string()),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({
+                    "lab": { "remote_job_id": job_id }
+                }),
+            };
+            store.upsert_imported_run(&sibling_run).expect("sibling run");
+            let requested_summary = home.path().join("requested-summary.json");
+            std::fs::write(&requested_summary, br#"{"passed":false}"#).expect("summary");
+            let requested_artifact = store
+                .record_artifact(&requested_run.id, "bench_results", &requested_summary)
+                .expect("requested artifact");
+            let sibling_summary = home.path().join("sibling-summary.json");
+            std::fs::write(&sibling_summary, br#"{"passed":true}"#).expect("summary");
+            store
+                .record_artifact(&sibling_run.id, "bench_results", &sibling_summary)
+                .expect("sibling artifact");
+
+            let artifacts = runs_service::list_artifacts_for_run(&store, &requested_run.id)
+                .expect("artifacts");
+
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].id, requested_artifact.id);
+            assert_eq!(artifacts[0].run_id, requested_run.id);
+        });
+    }
+
+    #[test]
     fn runner_job_show_keeps_local_evidence_when_refresh_runner_is_unavailable() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();

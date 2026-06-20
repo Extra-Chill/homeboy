@@ -36,6 +36,9 @@ pub(crate) fn route(path: &str) -> Option<HttpResponse> {
         ["runs", run_id, "artifacts", artifact_token] => {
             resolve_artifact_download(Some(run_id), artifact_token)
         }
+        ["runs", run_id, "artifacts", artifact_token, "content"] => {
+            resolve_artifact_download(Some(run_id), artifact_token)
+        }
         _ => return None,
     };
 
@@ -386,6 +389,16 @@ mod tests {
         assert_eq!(response.status_code, 200);
         assert!(response.artifact.is_some());
         assert_eq!(response.body["artifact"]["id"], artifact.id);
+
+        let content_response = route(&format!(
+            "/runs/{}/artifacts/{}/content",
+            run.id, artifact.id
+        ))
+        .expect("artifact content route");
+
+        assert_eq!(content_response.status_code, 200);
+        assert!(content_response.artifact.is_some());
+        assert_eq!(content_response.body["artifact"]["id"], artifact.id);
     }
 
     #[test]
