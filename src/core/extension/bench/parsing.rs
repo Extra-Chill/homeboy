@@ -1492,7 +1492,7 @@ mod tests {
                         "query-profile": {
                             "schema": "example/query-profile/v1",
                             "summary": { "query_count": 1 },
-                            "cases": [ { "case_id": "products", "samples": [] } ]
+                            "cases": [ { "case_id": "sample-a", "samples": [] } ]
                         },
                         "diagnostics": {
                             "path": "bench/diagnostics.json",
@@ -1505,9 +1505,7 @@ mod tests {
 
         let parsed = parse_bench_results_str(raw).unwrap();
 
-        assert!(!parsed.scenarios[0]
-            .artifacts
-            .contains_key("query-profile"));
+        assert!(!parsed.scenarios[0].artifacts.contains_key("query-profile"));
         assert!(parsed.scenarios[0].artifacts.contains_key("diagnostics"));
     }
 
