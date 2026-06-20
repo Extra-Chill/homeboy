@@ -14,6 +14,8 @@ In JSON output mode, the default `show` output is returned as JSON (with a `cont
 
 > **Note:** Homeboy generates changelog entries automatically from conventional-prefixed commits (`feat:` / `fix:` / etc.) at release time. There is no `changelog add` command — users don't hand-curate changelog bullets. See `homeboy release` and the commits since the last tag.
 
+> **Do not hand-edit the changelog in feature PRs.** The release pipeline rewrites the changelog's next section from commits during `homeboy release`, so per-PR edits are overwritten — and because every PR would touch the same shared file, hand-edits make the changelog a guaranteed multi-PR merge-conflict surface (#4876). `homeboy review` enforces this: when a scoped review changeset (`--changed-since` / `--changed-only`) modifies the component's configured `changelog_target`, review surfaces a steering hint pointing you back to conventional commits. Describe the change in the commit message instead.
+
 ## Subcommands
 
 ### Default

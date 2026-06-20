@@ -1,9 +1,11 @@
 mod bulk;
+mod guard;
 mod io;
 mod sections;
 mod settings;
 
 pub use bulk::{show, ShowOutput};
+pub use guard::{detect_changelog_edit, ChangelogGuardViolation};
 pub use io::{
     discover_changelog_relative_path, read_component_snapshots, resolve_changelog_path,
     ChangelogSnapshotData, FinalizedReleaseSnapshot, CHANGELOG_CANDIDATES,

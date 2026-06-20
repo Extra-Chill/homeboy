@@ -21,6 +21,7 @@ use homeboy::core::extension::test::TestCommandOutput;
 use homeboy::core::git;
 use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
+use homeboy::core::release::changelog;
 use homeboy::core::review::{
     self, ReviewArtifactFindings, ReviewCommandOutput, ReviewOutputInput, ReviewService,
     ReviewStage, ReviewStages,
@@ -264,6 +265,21 @@ pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutp
     });
 
     let mut top_hints: Vec<String> = Vec::new();
+
+    // Changelog-edit guard (#4876): homeboy regenerates the changelog from
+    // conventional commits at release time, so hand-editing the tracked
+    // changelog in a feature PR is both pointless and a guaranteed multi-PR
+    // merge-conflict surface. Surface a steering hint when the changeset
+    // modifies the component's configured changelog target. Agnostic: keys off
+    // `changelog_target` with no hardcoded filenames, and only runs when we
+    // actually computed a changed-file set (scoped review).
+    if let Some(changed_files) = review_context.precomputed_changed_files() {
+        if let Some(violation) =
+            changelog::detect_changelog_edit(component.changelog_target.as_deref(), changed_files)
+        {
+            top_hints.push(violation.message);
+        }
+    }
 
     let mut audit_stage = None;
     let mut lint_stage = None;
