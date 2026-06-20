@@ -133,7 +133,9 @@ impl NpmDependencyProvider {
         }
 
         Ok(Some(DependencyCommandResult {
-            command: std::iter::once(install.binary).chain(install.args).collect(),
+            command: std::iter::once(install.binary)
+                .chain(install.args)
+                .collect(),
             skipped: false,
             status,
             stdout,
@@ -384,10 +386,16 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let plugin = workspace.path().join("plugins/woocommerce");
         std::fs::create_dir_all(&plugin).expect("plugin dir");
-        std::fs::write(workspace.path().join("pnpm-workspace.yaml"), "packages:\n  - plugins/*\n")
-            .expect("workspace file");
-        std::fs::write(workspace.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n")
-            .expect("lock file");
+        std::fs::write(
+            workspace.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - plugins/*\n",
+        )
+        .expect("workspace file");
+        std::fs::write(
+            workspace.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .expect("lock file");
         std::fs::write(plugin.join("package.json"), "{}").expect("package json");
 
         let command = npm_install_command(&plugin);
