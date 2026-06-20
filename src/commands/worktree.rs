@@ -133,6 +133,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                         apply: true,
                         self_artifacts: true,
                         temp_roots: Vec::new(),
+                        merged_only: false,
                     },
                 )?)
             };

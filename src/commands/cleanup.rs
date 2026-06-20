@@ -34,6 +34,11 @@ pub struct CleanupArtifactsArgs {
     /// Also scan this temp root for detached Homeboy build artifacts. Repeatable.
     #[arg(long, value_name = "PATH")]
     pub temp_root: Vec<PathBuf>,
+
+    /// Only reclaim artifacts from worktrees whose branch is already merged
+    /// into its upstream. Preserves in-progress cooks' build dirs.
+    #[arg(long)]
+    pub merged_only: bool,
 }
 
 pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<ArtifactCleanupOutput> {
@@ -43,6 +48,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Artifact
             apply: args.apply,
             self_artifacts: args.self_artifacts,
             temp_roots: args.temp_root,
+            merged_only: args.merged_only,
         })
         .map(|output| (output, 0)),
     }
