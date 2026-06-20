@@ -21,6 +21,8 @@ assert.match(plugin, /rest_post_dispatch/);
 assert.match(plugin, /\$wpdb->save_queries = true/);
 assert.match(plugin, /homeboy\/wordpress-rest-db-query-profile\/v1/);
 assert.match(plugin, /'query_count'\s+=> max\( 0, \$end_count - \$start_count \)/);
+assert.match(plugin, /homeboy_rest_db_query_profiler_normalize_sql/);
+assert.match(plugin, /'top_query_shapes'\s+=> homeboy_rest_db_query_profiler_top_query_shapes\( \$start_count, 5 \)/);
 assert.match(plugin, /ABSPATH \. 'wp-content\/profiles\/rest-db\.jsonl'/);
 
 const paths = resolveRestDbQueryProfilerPaths('/tmp/site', { artifactRelativePath: 'wp-content/profiles/rest-db.jsonl' });

@@ -107,6 +107,68 @@ if ( ! function_exists( 'homeboy_rest_db_query_profiler_query_time' ) ) {
 	}
 }
 
+if ( ! function_exists( 'homeboy_rest_db_query_profiler_normalize_sql' ) ) {
+	function homeboy_rest_db_query_profiler_normalize_sql( $sql ) {
+		$shape = preg_replace( '/\s+/', ' ', trim( (string) $sql ) );
+		$shape = preg_replace( '/\b0x[0-9a-f]+\b/i', '?', $shape );
+		$shape = preg_replace( "/'(?:''|[^'])*'/", '?', $shape );
+		$shape = preg_replace( '/"(?:\\\\"|[^"])*"/', '?', $shape );
+		$shape = preg_replace( '/\b\d+(?:\.\d+)?\b/', '?', $shape );
+		$shape = preg_replace( '/\(\s*\?(?:\s*,\s*\?)+\s*\)/', '(?)', $shape );
+
+		return $shape;
+	}
+}
+
+if ( ! function_exists( 'homeboy_rest_db_query_profiler_top_query_shapes' ) ) {
+	function homeboy_rest_db_query_profiler_top_query_shapes( $start = 0, $limit = 5 ) {
+		global $wpdb;
+
+		$queries = isset( $wpdb->queries ) && is_array( $wpdb->queries ) ? array_slice( $wpdb->queries, max( 0, (int) $start ) ) : array();
+		$shapes  = array();
+		foreach ( $queries as $query ) {
+			$sql = isset( $query[0] ) ? (string) $query[0] : '';
+			if ( '' === trim( $sql ) ) {
+				continue;
+			}
+
+			$shape = homeboy_rest_db_query_profiler_normalize_sql( $sql );
+			if ( ! isset( $shapes[ $shape ] ) ) {
+				$shapes[ $shape ] = array(
+					'sql'     => $shape,
+					'count'   => 0,
+					'time_ms' => 0.0,
+				);
+			}
+
+			$shapes[ $shape ]['count'] += 1;
+			if ( isset( $query[1] ) && is_numeric( $query[1] ) ) {
+				$shapes[ $shape ]['time_ms'] += (float) $query[1] * 1000;
+			}
+		}
+
+		usort(
+			$shapes,
+			static function ( $a, $b ) {
+				if ( $a['time_ms'] === $b['time_ms'] ) {
+					return $b['count'] <=> $a['count'];
+				}
+
+				return $b['time_ms'] <=> $a['time_ms'];
+			}
+		);
+
+		return array_map(
+			static function ( $shape ) {
+				$shape['time_ms'] = round( $shape['time_ms'], 3 );
+
+				return $shape;
+			},
+			array_slice( $shapes, 0, max( 0, (int) $limit ) )
+		);
+	}
+}
+
 if ( ! function_exists( 'homeboy_rest_db_query_profiler_write' ) ) {
 	function homeboy_rest_db_query_profiler_write( $entry ) {
 		global $homeboy_rest_db_query_profiler_file;
@@ -166,6 +228,7 @@ add_filter(
 				'duration_ms'    => round( ( microtime( true ) - (float) $start['start_time'] ) * 1000, 3 ),
 				'query_count'    => max( 0, $end_count - $start_count ),
 				'query_time_ms'  => round( homeboy_rest_db_query_profiler_query_time( $start_count ) * 1000, 3 ),
+				'top_query_shapes' => homeboy_rest_db_query_profiler_top_query_shapes( $start_count, 5 ),
 				'total_queries'  => $end_count,
 			)
 		);

@@ -211,6 +211,7 @@ function normalizeRestDbProfile(entry = {}) {
 	const route = resultRoutePath(entry);
 	const method = normalizeRestRouteMethod(entry.method);
 	const id = resultCaseKey({ ...entry, method, route });
+	const topQueryShapes = normalizeTopQueryShapes(entry.topQueryShapes ?? entry.top_query_shapes ?? entry.queryShapes ?? entry.query_shapes);
 	return {
 		id,
 		key: id,
@@ -222,7 +223,28 @@ function normalizeRestDbProfile(entry = {}) {
 		queryCount: maybeNumericValue(entry.queryCount ?? entry.query_count ?? entry.dbQueryCount ?? entry.db_query_count),
 		queryTimeMs: maybeNumericValue(entry.queryTimeMs ?? entry.query_time_ms ?? entry.dbQueryTimeMs ?? entry.db_query_time_ms),
 		totalQueries: maybeNumericValue(entry.totalQueries ?? entry.total_queries),
+		topQueryShapes,
 	};
+}
+
+function normalizeTopQueryShapes(value) {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.map((entry) => {
+		if (!isPlainObject(entry)) {
+			return null;
+		}
+		const sql = String(entry.sql ?? entry.shape ?? entry.query ?? '').trim();
+		if (!sql) {
+			return null;
+		}
+		return {
+			sql,
+			count: maybeNumericValue(entry.count) ?? 0,
+			timeMs: maybeNumericValue(entry.timeMs ?? entry.time_ms ?? entry.queryTimeMs ?? entry.query_time_ms) ?? 0,
+		};
+	}).filter(Boolean).sort((a, b) => b.timeMs - a.timeMs || b.count - a.count || sortText(a.sql, b.sql));
 }
 
 function normalizeInputDbProfiles(input = {}) {
@@ -243,10 +265,12 @@ function mergeRestDbProfile(row, profile) {
 		durationMs: row.durationMs ?? profile.durationMs,
 		queryCount: row.queryCount ?? profile.queryCount,
 		queryTimeMs: row.queryTimeMs ?? profile.queryTimeMs,
+		topQueryShapes: row.topQueryShapes?.length ? row.topQueryShapes : profile.topQueryShapes,
 		dbProfile: {
 			queryCount: profile.queryCount,
 			queryTimeMs: profile.queryTimeMs,
 			totalQueries: profile.totalQueries,
+			topQueryShapes: profile.topQueryShapes,
 		},
 		covered: row.covered || profile.queryCount !== undefined || profile.queryTimeMs !== undefined,
 	};
@@ -564,6 +588,18 @@ function formatRouteRows(rows, options = {}) {
 	return lines;
 }
 
+function formatQueryShapeRows(rows, options = {}) {
+	const limit = Math.max(0, Math.floor(numericValue(options.limit ?? DEFAULT_REPORT_LIMIT)));
+	const rowsWithShapes = rows.filter((row) => Array.isArray(row.topQueryShapes) && row.topQueryShapes.length > 0);
+	const visibleRows = limit > 0 ? rowsWithShapes.slice(0, limit) : rowsWithShapes;
+	const lines = ['| Route | Query count | Query time ms | Top query shapes |', '| --- | ---: | ---: | --- |'];
+	for (const row of visibleRows) {
+		const shapes = row.topQueryShapes.slice(0, 3).map((shape) => `${formatNumber(shape.timeMs)}ms x${formatNumber(shape.count)} ${shape.sql}`).join('<br>');
+		lines.push(`| \`${escapeMarkdownCell(`${row.method} ${row.path || row.route || row.id}`)}\` | ${formatNumber(row.queryCount)} | ${formatNumber(row.queryTimeMs)} | ${escapeMarkdownCell(shapes)} |`);
+	}
+	return lines;
+}
+
 function formatRestRouteMatrixMarkdownReport(input = {}, options = {}) {
 	const artifact = input?.schema === 'homeboy/wordpress-rest-route-matrix-artifact/v1'
 		? input
@@ -595,6 +631,9 @@ function formatRestRouteMatrixMarkdownReport(input = {}, options = {}) {
 	}
 	if (artifact.slowestByQueryTime.length > 0) {
 		lines.push('', '## Slowest routes by query time', '', ...formatRouteRows(artifact.slowestByQueryTime, { limit }));
+	}
+	if (artifact.routes.some((row) => Array.isArray(row.topQueryShapes) && row.topQueryShapes.length > 0)) {
+		lines.push('', '## Top DB query shapes by REST case', '', ...formatQueryShapeRows(artifact.slowestByQueryTime, { limit }));
 	}
 	if (artifact.uncoveredRoutes.length > 0) {
 		lines.push('', '## Missing or uncovered routes', '', ...formatRouteRows(artifact.uncoveredRoutes, { limit }));
