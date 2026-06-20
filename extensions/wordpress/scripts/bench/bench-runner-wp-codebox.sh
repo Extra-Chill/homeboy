@@ -14,6 +14,7 @@ DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/v
 BENCH_BROWSER_TARGET_HELPER="${SCRIPT_DIR}/browser-target.sh"
 WP_CODEBOX_PATHS_HELPER="${SCRIPT_DIR}/../lib/wp-codebox-paths.sh"
 BENCH_RECIPE_BUILDER="${SCRIPT_DIR}/build-wp-codebox-bench-recipe.mjs"
+BENCH_PRIMITIVE_CHECKER="${SCRIPT_DIR}/check-wp-codebox-bench-primitive.mjs"
 
 # shellcheck source=/dev/null
 source "$RESOLVE_CONTEXT_HELPER"
@@ -601,6 +602,52 @@ homeboy_wp_codebox_extra_workload_scenarios_json() {
     printf '%s\n' "$scenarios"
 }
 
+homeboy_wp_codebox_workloads_need_primitive() {
+    local primitive="$1"
+    local workloads_value="${HOMEBOY_BENCH_EXTRA_WORKLOADS:-}"
+    local workload_path workload_name
+
+    if printf '%s' "$WP_CODEBOX_WORKLOADS_JSON" | jq -e --arg primitive "$primitive" '
+        def walk(f):
+            . as $in
+            | if type == "object" then reduce keys[] as $key ({}; . + {($key): ($in[$key] | walk(f))}) | f
+              elif type == "array" then map(walk(f)) | f
+              else f
+              end;
+        walk(.) | any(.. | objects; .type? == $primitive)
+    ' >/dev/null 2>&1; then
+        return 0
+    fi
+
+    [ -n "$workloads_value" ] || return 1
+    IFS=':' read -r -a workload_paths <<< "$workloads_value"
+    for workload_path in "${workload_paths[@]}"; do
+        [ -n "$workload_path" ] || continue
+        workload_name="$(basename "$workload_path")"
+        if [[ "$workload_name" == *"$primitive"* ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+homeboy_wp_codebox_require_bench_primitive() {
+    local primitive="$1"
+
+    if ! homeboy_wp_codebox_workloads_need_primitive "$primitive"; then
+        return 0
+    fi
+    if [ ! -f "$BENCH_PRIMITIVE_CHECKER" ]; then
+        return 0
+    fi
+
+    if ! node "$BENCH_PRIMITIVE_CHECKER" "$primitive" "$WP_CODEBOX_RESOLVED_BIN"; then
+        FAILED_STEP="WP Codebox bench primitive preflight"
+        exit 1
+    fi
+}
+
 homeboy_wp_codebox_component_workload_scenarios_json() {
     local bench_dir="${WP_CODEBOX_PLUGIN_SOURCE_PATH}/tests/bench"
     local scenarios="[]"
@@ -911,6 +958,7 @@ if [ "$settings_json" != "{}" ]; then
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 homeboy_wp_codebox_append_extra_bench_workloads_configured_json
+homeboy_wp_codebox_require_bench_primitive "external-http-guardrail"
 
 MOUNTS_JSON="[]"
 COMPONENT_PLUGIN_FILE="$(homeboy_wp_codebox_find_plugin_file "$WP_CODEBOX_PLUGIN_SOURCE_PATH" || true)"
