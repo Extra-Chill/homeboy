@@ -189,6 +189,52 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     })
 }
 
+/// Reclaim declared rebuildable artifacts (e.g. `target/`, `node_modules/`,
+/// plus any `homeboy.json:artifact_cleanup_paths`) for a single worktree path.
+///
+/// This is the merge-aware reclamation entry point used by `worktree cleanup`
+/// to free build artifacts from worktrees whose PRs have merged but which
+/// cannot be fully removed (squash-merged branches keep "unpushed" commits and
+/// stay blocked by the worktree removal safety gates). It applies the same
+/// per-artifact safety checks as [`cleanup_artifacts`] — paths with tracked or
+/// staged source changes are skipped — but scopes discovery to exactly the one
+/// worktree instead of walking every sibling worktree.
+pub fn reclaim_worktree_artifacts(
+    worktree_path: &Path,
+    apply: bool,
+) -> Result<Vec<ArtifactCleanupApplied>> {
+    let mut applied = Vec::new();
+    if !worktree_path.exists() {
+        return Ok(applied);
+    }
+    let safety = git_safety(worktree_path)?;
+    for declaration in artifact_declarations(worktree_path)? {
+        let artifact_path = worktree_path.join(&declaration.relative_path);
+        if !artifact_path.exists() {
+            continue;
+        }
+        if !is_safe_artifact_path(&declaration.relative_path) {
+            continue;
+        }
+        if has_tracked_changes_under(&safety.dirty_paths, &declaration.relative_path) {
+            continue;
+        }
+        let size_bytes = path_size(&artifact_path)?;
+        if apply {
+            remove_artifact_path(&artifact_path)?;
+        }
+        applied.push(ArtifactCleanupApplied {
+            worktree: worktree_path.to_string_lossy().to_string(),
+            path: artifact_path.to_string_lossy().to_string(),
+            relative_path: declaration.relative_path.clone(),
+            kind: declaration.kind.clone(),
+            size_bytes,
+            removed: apply,
+        });
+    }
+    Ok(applied)
+}
+
 fn resolve_root(options: &ArtifactCleanupOptions) -> Result<PathBuf> {
     if options.path.is_some() && options.self_artifacts {
         return Err(Error::validation_invalid_argument(

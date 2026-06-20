@@ -57,6 +57,11 @@ mod types {
         pub primary_checkout: bool,
         pub path_contained: bool,
         pub worktree_missing: bool,
+        /// Whether the worktree's branch content is already integrated into
+        /// its base ref. True for squash/rebase-merged PRs whose local
+        /// commits are no longer ancestors of the base but whose patch-ids
+        /// are present in it. Drives merge-aware artifact reclamation.
+        pub merged: bool,
         pub safe: bool,
         pub reasons: Vec<String>,
     }
@@ -87,6 +92,26 @@ mod types {
     #[derive(Debug, Clone, Serialize)]
     pub struct WorktreeCleanupOutput {
         pub candidates: Vec<WorktreeRemoveOutput>,
+        /// Build artifacts reclaimed from merged worktrees that survived full
+        /// removal (e.g. squash-merged branches blocked by the unpushed-commit
+        /// safety gate). Each entry is a `target/`-style rebuildable directory
+        /// freed in place without deleting the worktree itself.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub reclaimed_artifacts: Vec<ReclaimedArtifact>,
+        /// Total bytes freed by `reclaimed_artifacts`.
+        #[serde(default)]
+        pub reclaimed_bytes: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    pub struct ReclaimedArtifact {
+        pub worktree_id: String,
+        pub worktree_path: String,
+        pub path: String,
+        pub relative_path: String,
+        pub kind: String,
+        pub size_bytes: u64,
+        pub removed: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -107,7 +132,7 @@ mod types {
 }
 
 pub use types::{
-    CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCleanupOutput,
+    CleanupPolicy, ReclaimedArtifact, TaskWorktreeRecord, TaskWorktreeState, WorktreeCleanupOutput,
     WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput, WorktreeRemoveOptions,
     WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStatusOutput,
 };
@@ -139,22 +164,71 @@ pub fn cleanup(force: bool) -> Result<WorktreeCleanupOutput> {
 
 fn cleanup_with_store(force: bool, store: &Path) -> Result<WorktreeCleanupOutput> {
     let mut candidates = Vec::new();
+    let mut reclaimed_artifacts = Vec::new();
     for record in list_with_store(store)?.worktrees {
         if record.state != TaskWorktreeState::Active {
             continue;
         }
-        if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
+
+        // Inspect safety (including merge state) once so we can decide between
+        // full removal and in-place artifact reclamation without aborting the
+        // whole cleanup pass on a single un-removable worktree.
+        let safety = safety_report(&record)?;
+
+        // A worktree is fully removable when it clears the soft gate (safe, or
+        // forced) and the hard gates (not the primary checkout, path
+        // contained). This mirrors `remove_with_store` so we never trip its
+        // validation error mid-loop.
+        let hard_gates_ok = !safety.primary_checkout && safety.path_contained;
+        let removable = hard_gates_ok && (force || safety.safe);
+
+        if record.cleanup_policy != CleanupPolicy::PreserveOnFailure && removable {
+            candidates.push(remove_with_store(
+                WorktreeRemoveOptions {
+                    id: record.id,
+                    force,
+                },
+                store,
+            )?);
             continue;
         }
-        candidates.push(remove_with_store(
-            WorktreeRemoveOptions {
-                id: record.id,
-                force,
-            },
-            store,
-        )?);
+
+        // The worktree survives this pass — either it is preserved on failure,
+        // or it is blocked by the safety gates. Squash-/rebase-merged branches
+        // keep "unpushed" commits relative to base, so a merged worktree stays
+        // blocked here while its multi-gigabyte `target/` lingers. Reclaim the
+        // rebuildable build artifacts in place so the disk is freed even though
+        // the worktree itself is kept for inspection.
+        if safety.merged && !safety.worktree_missing {
+            reclaimed_artifacts.extend(reclaim_record_artifacts(&record)?);
+        }
     }
-    Ok(WorktreeCleanupOutput { candidates })
+    let reclaimed_bytes = reclaimed_artifacts.iter().map(|row| row.size_bytes).sum();
+    Ok(WorktreeCleanupOutput {
+        candidates,
+        reclaimed_artifacts,
+        reclaimed_bytes,
+    })
+}
+
+/// Reclaim rebuildable build artifacts (e.g. `target/`) for a single worktree
+/// record, mapping the cleanup module's applied rows into [`ReclaimedArtifact`]
+/// entries tagged with the worktree id.
+fn reclaim_record_artifacts(record: &TaskWorktreeRecord) -> Result<Vec<ReclaimedArtifact>> {
+    let worktree_path = Path::new(&record.worktree_path);
+    let applied = crate::core::cleanup::reclaim_worktree_artifacts(worktree_path, true)?;
+    Ok(applied
+        .into_iter()
+        .map(|row| ReclaimedArtifact {
+            worktree_id: record.id.clone(),
+            worktree_path: record.worktree_path.clone(),
+            path: row.path,
+            relative_path: row.relative_path,
+            kind: row.kind,
+            size_bytes: row.size_bytes,
+            removed: row.removed,
+        })
+        .collect())
 }
 
 fn create_with_store(
@@ -336,6 +410,11 @@ fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
     } else {
         unpushed_commit_count(&worktree, &record.base_ref)?
     };
+    let merged = if worktree_missing {
+        false
+    } else {
+        branch_merged_into_base(&worktree, &record.base_ref)
+    };
     let mut reasons = Vec::new();
     if dirty {
         reasons.push("dirty worktree".to_string());
@@ -356,9 +435,42 @@ fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {
         primary_checkout,
         path_contained,
         worktree_missing,
+        merged,
         safe,
         reasons,
     })
+}
+
+/// Whether every commit on the worktree's branch is already integrated into
+/// `base_ref`, including squash- and rebase-merged PRs.
+///
+/// Uses `git cherry <base> HEAD`, which lists each commit reachable from HEAD
+/// but not from base, prefixing `-` when the commit's patch-id is already
+/// present in base and `+` when it is not. A branch is considered merged when
+/// there are no `+` lines: either HEAD is an ancestor of base (no output) or
+/// every commit's patch-id appears in base (squash/rebase merge). Returns
+/// `false` conservatively whenever the probe cannot run (detached upstream,
+/// missing base, git error) so reclamation never fires on uncertain state.
+fn branch_merged_into_base(worktree: &Path, base_ref: &str) -> bool {
+    let Ok(output) = git::run_git(worktree, &["cherry", base_ref, "HEAD"], "git cherry") else {
+        return false;
+    };
+    let mut saw_commit = false;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        saw_commit = true;
+        if line.starts_with('+') {
+            return false;
+        }
+    }
+    // No `+` lines: either base already contains HEAD (no output) or every
+    // commit's patch-id is in base. Treat an empty/ancestor result as merged
+    // only when the branch actually has commits relative to base to avoid
+    // reclaiming a brand-new worktree that has not diverged yet.
+    saw_commit
 }
 
 fn is_dirty(path: &Path) -> Result<bool> {
@@ -644,5 +756,142 @@ mod tests {
             .and_then(|name| name.to_str())
             .unwrap_or("source");
         source.with_file_name(format!("{name}-{suffix}-worktree"))
+    }
+
+    /// Build a source checkout with an `origin/main` baseline so squash-merge
+    /// scenarios can be reproduced. Returns the temp dir holding the bare
+    /// remote (kept alive by the caller) and the source checkout temp dir.
+    fn source_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
+        let remote = tempfile::tempdir().unwrap();
+        run_git(remote.path(), &["init", "--bare", "-q"]);
+        let source = tempfile::tempdir().unwrap();
+        run_git(
+            source.path(),
+            &["clone", &remote.path().to_string_lossy(), "."],
+        );
+        run_git(
+            source.path(),
+            &["config", "user.email", "homeboy@example.com"],
+        );
+        run_git(source.path(), &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.path().join("README.md"), "initial\n").unwrap();
+        run_git(source.path(), &["add", "."]);
+        run_git(source.path(), &["commit", "-q", "-m", "initial"]);
+        run_git(source.path(), &["push", "-u", "origin", "HEAD:main"]);
+        (remote, source)
+    }
+
+    #[test]
+    fn branch_merged_into_base_detects_squash_merge() {
+        let (_remote, source) = source_with_remote();
+
+        // Branch with a single feature commit.
+        let worktree = sibling_worktree_path(source.path(), "squash");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "squash-task",
+                &worktree.to_string_lossy(),
+                "origin/main",
+            ],
+        );
+        fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-q", "-m", "add feature"]);
+
+        // Not yet integrated into base.
+        assert!(!branch_merged_into_base(&worktree, "origin/main"));
+
+        // Simulate a squash-merge: same content lands on main as a brand-new
+        // commit with an unrelated SHA, then origin/main advances.
+        fs::write(source.path().join("feature.txt"), "feature\n").unwrap();
+        run_git(source.path(), &["add", "."]);
+        run_git(source.path(), &["commit", "-q", "-m", "squashed feature"]);
+        run_git(source.path(), &["push", "origin", "HEAD:main"]);
+        run_git(&worktree, &["fetch", "-q", "origin"]);
+
+        // git cherry now reports the patch-id as present in base ("- " prefix).
+        assert!(branch_merged_into_base(&worktree, "origin/main"));
+    }
+
+    #[test]
+    fn branch_merged_into_base_is_false_for_fresh_worktree() {
+        let (_remote, source) = source_with_remote();
+        let worktree = sibling_worktree_path(source.path(), "fresh");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fresh-task",
+                &worktree.to_string_lossy(),
+                "origin/main",
+            ],
+        );
+
+        // No commits relative to base yet → not a reclamation candidate.
+        assert!(!branch_merged_into_base(&worktree, "origin/main"));
+    }
+
+    #[test]
+    fn cleanup_reclaims_target_for_merged_blocked_worktree() {
+        let (_remote, source) = source_with_remote();
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+
+        let worktree = sibling_worktree_path(source.path(), "merged-target");
+        run_git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "merged-target-task",
+                &worktree.to_string_lossy(),
+                "origin/main",
+            ],
+        );
+        fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-q", "-m", "add feature"]);
+
+        // Squash-merge the content onto main.
+        fs::write(source.path().join("feature.txt"), "feature\n").unwrap();
+        run_git(source.path(), &["add", "."]);
+        run_git(source.path(), &["commit", "-q", "-m", "squashed feature"]);
+        run_git(source.path(), &["push", "origin", "HEAD:main"]);
+        run_git(&worktree, &["fetch", "-q", "origin"]);
+
+        // A multi-gigabyte `target/` stand-in lingers in the merged worktree.
+        fs::create_dir_all(worktree.join("target/debug")).unwrap();
+        fs::write(worktree.join("target/debug/bin"), "build artifact\n").unwrap();
+
+        let mut record = fixture_record(source.path(), &worktree);
+        record.id = "fixture@merged-target-task".to_string();
+        record.base_ref = "origin/main".to_string();
+        write_record(&store, &record).unwrap();
+
+        let output = cleanup_with_store(false, &store).unwrap();
+        let updated = read_record(&store, &record.id).unwrap();
+
+        // Full removal stays blocked (squash-merge leaves "unpushed" commits),
+        // so the worktree is neither removed nor recorded as a removal
+        // candidate, and its record stays active...
+        assert!(output.candidates.is_empty());
+        assert_eq!(updated.state, TaskWorktreeState::Active);
+        assert!(worktree.exists());
+        assert!(worktree.join("feature.txt").exists());
+
+        // ...but its `target/` build directory is reclaimed in place.
+        assert!(!worktree.join("target").exists());
+        assert_eq!(output.reclaimed_artifacts.len(), 1);
+        assert_eq!(output.reclaimed_artifacts[0].relative_path, "target");
+        assert_eq!(output.reclaimed_artifacts[0].worktree_id, record.id);
+        assert!(output.reclaimed_artifacts[0].removed);
+        assert!(output.reclaimed_bytes > 0);
     }
 }
