@@ -90,12 +90,6 @@ struct ApiInput {
     body_format: BodyFormat,
 }
 
-impl Default for BodyFormat {
-    fn default() -> Self {
-        Self::Json
-    }
-}
-
 impl<'de> serde::Deserialize<'de> for BodyFormat {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where

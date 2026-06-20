@@ -133,9 +133,7 @@ pub(crate) fn finish_lab_dispatch_observation(
     status: RunStatus,
     metadata: serde_json::Value,
 ) -> Option<PersistedRunRetrieval> {
-    let Some(observation) = observation else {
-        return None;
-    };
+    let observation = observation?;
     let retrieval = PersistedRunRetrieval::for_run(&observation.run_id);
     let _ = observation.store.record_trace_run(
         NewTraceRunRecord::builder(

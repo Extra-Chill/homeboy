@@ -244,8 +244,9 @@ impl ApiClient {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BodyFormat {
+    #[default]
     Json,
     Form,
 }

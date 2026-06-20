@@ -268,13 +268,13 @@ fn default_test_result_parse_spec() -> ParseSpec {
     }
 }
 
-pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<CoverageOutput, ()> {
-    let content = local_files::read_file(path, "read coverage file").map_err(|_| ())?;
-    let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| ())?;
+pub fn parse_coverage_file(path: &std::path::Path) -> Option<CoverageOutput> {
+    let content = local_files::read_file(path, "read coverage file").ok()?;
+    let data: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let totals = data.get("totals").ok_or(())?;
-    let lines = totals.get("lines").ok_or(())?;
-    let methods = totals.get("methods").ok_or(())?;
+    let totals = data.get("totals")?;
+    let lines = totals.get("lines")?;
+    let methods = totals.get("methods")?;
 
     let lines_pct = lines
         .get("pct")
@@ -318,7 +318,7 @@ pub fn parse_coverage_file(path: &std::path::Path) -> std::result::Result<Covera
         })
         .unwrap_or_default();
 
-    Ok(CoverageOutput {
+    Some(CoverageOutput {
         lines_pct,
         lines_total,
         lines_covered,

@@ -133,9 +133,7 @@ pub(crate) fn render_comment(
         out.push_str(&format!("<!-- homeboy:section-key={}:end -->", key));
         // Blank line between sections, and between the last section and a
         // footer block. Trailing newline on the last line of the comment.
-        if idx + 1 < ordered.len() {
-            out.push_str("\n\n");
-        } else if has_footer {
+        if idx + 1 < ordered.len() || has_footer {
             out.push_str("\n\n");
         } else {
             out.push('\n');

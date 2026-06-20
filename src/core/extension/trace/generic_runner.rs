@@ -89,7 +89,7 @@ pub(super) fn run_generic_trace_runner(
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         child_resource: None,
         extension_phase_timings: super::super::runner::read_extension_phase_timings(
-            &run_dir.path().to_path_buf(),
+            run_dir.path(),
         )?,
     })
 }

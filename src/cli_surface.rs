@@ -208,9 +208,7 @@ pub struct CommandSafetyManifest {
 
 impl CommandSafetyManifest {
     pub fn find_path(&self, path: &[&str]) -> Option<&CommandSafetyEntry> {
-        let Some((first, rest)) = path.split_first() else {
-            return None;
-        };
+        let (first, rest) = path.split_first()?;
 
         self.commands
             .iter()

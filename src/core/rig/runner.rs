@@ -627,9 +627,7 @@ impl RigRunObserver {
         pipeline: Option<&PipelineOutcome>,
         result: &Result<T>,
     ) -> Option<RigRunArtifactIndex> {
-        let Some(observer) = observer else {
-            return None;
-        };
+        let observer = observer?;
         let status = match result {
             Ok(_) if pipeline.is_some_and(PipelineOutcome::is_success) => RunStatus::Pass,
             Ok(_) => RunStatus::Fail,
