@@ -1511,7 +1511,10 @@ fn completed_typed_artifacts_are_carried_to_later_required_workflow_artifacts() 
             .next_actions
             .iter()
             .all(|action| action.status == AgentTaskLoopActionStatus::Completed));
-        assert!(loaded.next_actions.iter().all(|action| action.diagnostics.is_empty()));
+        assert!(loaded
+            .next_actions
+            .iter()
+            .all(|action| action.diagnostics.is_empty()));
         assert_eq!(
             result.value.results[1].execution["workflow_artifacts"][0]["name"],
             json!("static_site_candidate")
