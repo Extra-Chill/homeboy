@@ -1485,12 +1485,12 @@ mod tests {
             "iterations": 1,
             "scenarios": [
                 {
-                    "id": "rest-db-query-profile",
+                    "id": "query-profile",
                     "iterations": 1,
                     "metrics": { "duration_ms": 12.0 },
                     "artifacts": {
-                        "rest-db-query-profile": {
-                            "schema": "wp-codebox/wordpress-rest-db-query-profile/v1",
+                        "query-profile": {
+                            "schema": "example/query-profile/v1",
                             "summary": { "query_count": 1 },
                             "cases": [ { "case_id": "products", "samples": [] } ]
                         },
@@ -1507,7 +1507,7 @@ mod tests {
 
         assert!(!parsed.scenarios[0]
             .artifacts
-            .contains_key("rest-db-query-profile"));
+            .contains_key("query-profile"));
         assert!(parsed.scenarios[0].artifacts.contains_key("diagnostics"));
     }
 

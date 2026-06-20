@@ -32,6 +32,11 @@ struct ArtifactDispatchHook {
 }
 
 #[derive(Clone, Default)]
+struct TypedArtifactHandoffDispatchHook {
+    observed_requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[derive(Clone, Default)]
 struct EvidenceExecutor;
 
 impl ControllerDispatchHook for CapturingDispatchHook {
@@ -80,6 +85,31 @@ impl ControllerDispatchHook for ArtifactDispatchHook {
             }),
             0,
         ))
+    }
+}
+
+impl ControllerDispatchHook for TypedArtifactHandoffDispatchHook {
+    fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+        let mut observed = self
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        observed.push(request.clone());
+        let index = observed.len();
+        drop(observed);
+
+        let mut result = json!({
+            "schema": "homeboy/test-generic-dispatch-result/v1",
+            "run_id": format!("typed-artifact-handoff-{index}"),
+        });
+        if index == 1 {
+            result["typed_artifacts"] = json!([{
+                "name": "static_site_candidate",
+                "type": "static_site",
+                "payload": { "path": "dist/index.html" }
+            }]);
+        }
+        Ok((result, 0))
     }
 }
 
@@ -1414,6 +1444,96 @@ fn resume_fails_required_workflow_artifact_handoff_before_downstream_action() {
                 && event.payload["diagnostics"][0]["code"]
                     == json!("required_workflow_artifacts_missing")
         }));
+    });
+}
+
+#[test]
+fn completed_typed_artifacts_are_carried_to_later_required_workflow_artifacts() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-typed-artifact-handoff".to_string(),
+            phase: "generate".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        let workflow_context = json!({
+            "schema": "homeboy/repo-loop-workflow-context/v1",
+            "workflow_id": "import-static-site",
+            "plan": {
+                "schema": "homeboy/repo-loop-workflow-plan/v1",
+                "artifacts": [{
+                    "id": "static_site_candidate",
+                    "artifact_type": "static_site",
+                    "required": true
+                }]
+            }
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:build-static-site".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "run_id": "typed-artifact-handoff-producer"
+                }),
+            },
+            "produce static site candidate",
+        );
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:import-static-site".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "run_id": "typed-artifact-handoff-consumer",
+                    "dispatch": {
+                        "client_context": workflow_context.to_string()
+                    }
+                }),
+            },
+            "consume static site candidate",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let dispatch = TypedArtifactHandoffDispatchHook::default();
+        let result = resume(
+            "loop-service-typed-artifact-handoff",
+            CapturingExecutor::default(),
+            &dispatch,
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.value.results.len(), 2);
+        let loaded = controller::load_controller("loop-service-typed-artifact-handoff")
+            .expect("controller loaded");
+        assert!(loaded
+            .next_actions
+            .iter()
+            .all(|action| action.status == AgentTaskLoopActionStatus::Completed));
+        assert!(loaded
+            .next_actions
+            .iter()
+            .all(|action| action.diagnostics.is_empty()));
+        assert_eq!(
+            result.value.results[1]["execution"]["workflow_artifacts"][0]["name"],
+            json!("static_site_candidate")
+        );
+
+        let observed = dispatch
+            .observed_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(observed.len(), 2);
+        assert_eq!(
+            observed[1]["workflow_artifacts"][0]["type"],
+            json!("static_site")
+        );
+        assert_eq!(
+            observed[1]["dispatch"]["workflow_artifacts"][0]["name"],
+            json!("static_site_candidate")
+        );
     });
 }
 
