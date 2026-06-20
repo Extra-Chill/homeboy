@@ -267,8 +267,8 @@ fn collect_bench_metric_points(output: &Value) -> Vec<BenchMetricPoint> {
 
     let mut points = Vec::new();
     for scenario in scenarios {
-        let Some(scenario_id) = string_value(scenario, &["scenario_id"])
-            .or_else(|| string_value(scenario, &["id"]))
+        let Some(scenario_id) =
+            string_value(scenario, &["scenario_id"]).or_else(|| string_value(scenario, &["id"]))
         else {
             continue;
         };
@@ -326,7 +326,10 @@ fn top_slowest_metrics(points: &[BenchMetricPoint], limit: usize) -> Vec<BenchMe
 fn top_metric_families(points: &[BenchMetricPoint], limit: usize) -> Vec<MetricFamilyTotal> {
     let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     let mut metric_counts: HashMap<String, usize> = HashMap::new();
-    for point in points.iter().filter(|point| is_family_metric(&point.metric)) {
+    for point in points
+        .iter()
+        .filter(|point| is_family_metric(&point.metric))
+    {
         let family = metric_family(&point.metric);
         *totals.entry(family.clone()).or_default() += point.value;
         *metric_counts.entry(family).or_default() += 1;

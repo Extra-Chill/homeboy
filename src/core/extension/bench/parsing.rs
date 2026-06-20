@@ -1490,7 +1490,7 @@ mod tests {
                     "metrics": { "duration_ms": 12.0 },
                     "artifacts": {
                         "rest-db-query-profile": {
-                            "schema": "wp-codebox/wordpress-rest-db-query-profile/v1",
+                            "schema": "example/rest-db-query-profile/v1",
                             "summary": { "query_count": 1 },
                             "cases": [ { "case_id": "products", "samples": [] } ]
                         },
