@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.57] - 2026-06-21
+
+### Changed
+- Normalize WP Codebox runtime outcomes
+
 ## [3.7.56] - 2026-06-21
 
 ### Changed
