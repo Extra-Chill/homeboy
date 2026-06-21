@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.59] - 2026-06-21
+
+### Changed
+- Isolate Data Machine bundle result mapping
+
 ## [3.7.58] - 2026-06-21
 
 ### Changed
