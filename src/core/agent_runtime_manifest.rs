@@ -15,6 +15,25 @@ pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
     "homeboy/agent-runtime-materialization-plan/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeDiscoveryDiagnostic {
+    pub class: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeDiscoveryCatalog {
+    pub manifests: Vec<AgentRuntimeManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeManifest {
     pub schema: String,
     pub id: String,
@@ -142,12 +161,19 @@ pub(crate) fn runtime_materialization_plan(
 }
 
 pub(crate) fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    merge_agent_runtime_manifests(
-        discover_standalone_agent_runtime_manifests(),
-        discover_agent_runtime_manifests_from_extensions(
-            &load_all_extensions().unwrap_or_default(),
-        ),
-    )
+    discover_agent_runtime_catalog().manifests
+}
+
+pub(crate) fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
+    let standalone = discover_standalone_agent_runtime_catalog();
+    let extensions = load_all_extensions().unwrap_or_default();
+    let extension = discover_agent_runtime_catalog_from_extensions(&extensions);
+    let mut diagnostics = standalone.diagnostics;
+    diagnostics.extend(extension.diagnostics);
+    AgentRuntimeDiscoveryCatalog {
+        manifests: merge_agent_runtime_manifests(standalone.manifests, extension.manifests),
+        diagnostics,
+    }
 }
 
 fn merge_agent_runtime_manifests(
@@ -168,61 +194,125 @@ fn merge_agent_runtime_manifests(
 }
 
 fn discover_standalone_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    let mut manifests = Vec::new();
-    if let Ok(runtime_dir) = paths::agent_runtimes() {
-        manifests.extend(discover_standalone_agent_runtime_manifests_in(
-            runtime_dir,
-            paths::agent_runtime_manifest,
-        ));
-    }
-    manifests.sort_by(|a, b| a.id.cmp(&b.id));
-    manifests
+    discover_standalone_agent_runtime_catalog().manifests
 }
 
-fn discover_standalone_agent_runtime_manifests_in(
+fn discover_standalone_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
+    let mut manifests = Vec::new();
+    let mut diagnostics = Vec::new();
+    if let Ok(runtime_dir) = paths::agent_runtimes() {
+        let catalog = discover_standalone_agent_runtime_catalog_in(
+            runtime_dir,
+            paths::agent_runtime_manifest,
+        );
+        manifests.extend(catalog.manifests);
+        diagnostics.extend(catalog.diagnostics);
+    }
+    manifests.sort_by(|a, b| a.id.cmp(&b.id));
+    AgentRuntimeDiscoveryCatalog {
+        manifests,
+        diagnostics,
+    }
+}
+
+fn discover_standalone_agent_runtime_catalog_in(
     runtime_dir: PathBuf,
     manifest_path_for: fn(&str) -> crate::core::Result<PathBuf>,
-) -> Vec<AgentRuntimeManifest> {
+) -> AgentRuntimeDiscoveryCatalog {
     let Ok(entries) = std::fs::read_dir(runtime_dir) else {
-        return Vec::new();
+        return AgentRuntimeDiscoveryCatalog::default();
     };
 
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            load_standalone_agent_runtime_manifest(&entry.path(), manifest_path_for)
-        })
-        .collect()
+    let mut catalog = AgentRuntimeDiscoveryCatalog::default();
+    for entry in entries.flatten() {
+        match load_standalone_agent_runtime_manifest(&entry.path(), manifest_path_for) {
+            StandaloneAgentRuntimeManifestLoad::Loaded(manifest) => {
+                catalog.manifests.push(manifest)
+            }
+            StandaloneAgentRuntimeManifestLoad::Skipped => {}
+            StandaloneAgentRuntimeManifestLoad::Invalid(diagnostic) => {
+                catalog.diagnostics.push(diagnostic)
+            }
+        }
+    }
+    catalog
+}
+
+enum StandaloneAgentRuntimeManifestLoad {
+    Loaded(AgentRuntimeManifest),
+    Skipped,
+    Invalid(AgentRuntimeDiscoveryDiagnostic),
 }
 
 fn load_standalone_agent_runtime_manifest(
     path: &Path,
     manifest_path_for: fn(&str) -> crate::core::Result<PathBuf>,
-) -> Option<AgentRuntimeManifest> {
+) -> StandaloneAgentRuntimeManifestLoad {
     if !path.is_dir() {
-        return None;
+        return StandaloneAgentRuntimeManifestLoad::Skipped;
     }
-    let id = path.file_name()?.to_string_lossy().to_string();
-    let manifest_path = manifest_path_for(&id).ok()?;
+    let Some(file_name) = path.file_name() else {
+        return StandaloneAgentRuntimeManifestLoad::Skipped;
+    };
+    let id = file_name.to_string_lossy().to_string();
+    let Ok(manifest_path) = manifest_path_for(&id) else {
+        return StandaloneAgentRuntimeManifestLoad::Skipped;
+    };
     if !manifest_path.exists() {
-        return None;
+        return StandaloneAgentRuntimeManifestLoad::Skipped;
     }
-    let content = std::fs::read_to_string(manifest_path).ok()?;
-    let mut manifest: AgentRuntimeManifest = config::from_str(&content).ok()?;
+    let content = match std::fs::read_to_string(&manifest_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return StandaloneAgentRuntimeManifestLoad::Invalid(AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_runtime_manifest.read_failed".to_string(),
+                message: error.to_string(),
+                runtime_id: Some(id),
+                extension_id: None,
+                path: Some(manifest_path.display().to_string()),
+            })
+        }
+    };
+    let mut manifest: AgentRuntimeManifest = match config::from_str(&content) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return StandaloneAgentRuntimeManifestLoad::Invalid(AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_runtime_manifest.parse_failed".to_string(),
+                message: error.to_string(),
+                runtime_id: Some(id),
+                extension_id: None,
+                path: Some(manifest_path.display().to_string()),
+            })
+        }
+    };
     manifest.id = id;
     manifest.extension_id = None;
     manifest.extension_path = None;
     manifest.runtime_path = Some(path.to_string_lossy().to_string());
-    Some(manifest)
+    StandaloneAgentRuntimeManifestLoad::Loaded(manifest)
 }
 
 pub(crate) fn discover_agent_runtime_manifests_from_extensions(
     extensions: &[ExtensionManifest],
 ) -> Vec<AgentRuntimeManifest> {
+    discover_agent_runtime_catalog_from_extensions(extensions).manifests
+}
+
+pub(crate) fn discover_agent_runtime_catalog_from_extensions(
+    extensions: &[ExtensionManifest],
+) -> AgentRuntimeDiscoveryCatalog {
     let mut runtime_manifests = Vec::new();
+    let mut diagnostics = Vec::new();
     for extension in extensions {
         for runtime in &extension.agent_runtimes {
-            let providers = parse_agent_task_executor_providers(&runtime.agent_task_executors);
+            let provider_catalog = parse_agent_task_executor_provider_catalog(
+                &runtime.agent_task_executors,
+                &runtime.id,
+                Some(&extension.id),
+                extension.extension_path.as_deref(),
+            );
+            diagnostics.extend(provider_catalog.diagnostics);
+            let providers = provider_catalog.providers;
             if providers.is_empty() {
                 continue;
             }
@@ -251,11 +341,30 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
             });
         }
     }
-    runtime_manifests
+    AgentRuntimeDiscoveryCatalog {
+        manifests: runtime_manifests,
+        diagnostics,
+    }
 }
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
-    agent_task_executor_providers_from_runtime_manifests(discover_agent_runtime_manifests())
+    discover_agent_task_executor_provider_catalog().providers
+}
+
+pub(crate) fn discover_agent_task_executor_provider_catalog(
+) -> AgentTaskExecutorProviderDiscoveryCatalog {
+    let catalog = discover_agent_runtime_catalog();
+    AgentTaskExecutorProviderDiscoveryCatalog {
+        providers: agent_task_executor_providers_from_runtime_manifests(catalog.manifests),
+        diagnostics: catalog.diagnostics,
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskExecutorProviderDiscoveryCatalog {
+    pub providers: Vec<AgentTaskExecutorProvider>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
 }
 
 fn agent_task_executor_providers_from_runtime_manifests(
@@ -363,11 +472,35 @@ fn expected_agent_runtime_provider_refs(
     Ok(expected)
 }
 
-fn parse_agent_task_executor_providers(values: &[Value]) -> Vec<AgentTaskExecutorProvider> {
-    values
-        .iter()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
-        .collect()
+struct ParsedAgentTaskExecutorProviderCatalog {
+    providers: Vec<AgentTaskExecutorProvider>,
+    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+}
+
+fn parse_agent_task_executor_provider_catalog(
+    values: &[Value],
+    runtime_id: &str,
+    extension_id: Option<&str>,
+    path: Option<&str>,
+) -> ParsedAgentTaskExecutorProviderCatalog {
+    let mut providers = Vec::new();
+    let mut diagnostics = Vec::new();
+    for value in values {
+        match serde_json::from_value(value.clone()) {
+            Ok(provider) => providers.push(provider),
+            Err(error) => diagnostics.push(AgentRuntimeDiscoveryDiagnostic {
+                class: "agent_task_executor_provider.parse_failed".to_string(),
+                message: error.to_string(),
+                runtime_id: Some(runtime_id.to_string()),
+                extension_id: extension_id.map(str::to_string),
+                path: path.map(str::to_string),
+            }),
+        }
+    }
+    ParsedAgentTaskExecutorProviderCatalog {
+        providers,
+        diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +761,64 @@ mod tests {
                 vec!["STANDALONE_RUNTIME_HOME".to_string()]
             );
         });
+    }
+
+    #[test]
+    fn standalone_runtime_catalog_reports_invalid_manifests() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes")
+                .join("broken-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(runtime_dir.join("broken-runtime.json"), "{not json")
+                .expect("runtime manifest");
+
+            let catalog = discover_standalone_agent_runtime_catalog();
+
+            assert!(catalog.manifests.is_empty());
+            assert_eq!(catalog.diagnostics.len(), 1);
+            assert_eq!(
+                catalog.diagnostics[0].class,
+                "agent_runtime_manifest.parse_failed"
+            );
+            assert_eq!(
+                catalog.diagnostics[0].runtime_id.as_deref(),
+                Some("broken-runtime")
+            );
+        });
+    }
+
+    #[test]
+    fn extension_runtime_catalog_reports_invalid_provider_entries() {
+        let mut extension = extension("runtime-extension");
+        extension.agent_runtimes.push(
+            serde_json::from_value(json!({
+                "id": "example-runtime",
+                "agent_task_executors": [{
+                    "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                    "id": "missing-backend"
+                }]
+            }))
+            .expect("runtime manifest"),
+        );
+
+        let catalog = discover_agent_runtime_catalog_from_extensions(&[extension]);
+
+        assert!(catalog.manifests.is_empty());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(
+            catalog.diagnostics[0].class,
+            "agent_task_executor_provider.parse_failed"
+        );
+        assert_eq!(
+            catalog.diagnostics[0].runtime_id.as_deref(),
+            Some("example-runtime")
+        );
+        assert_eq!(
+            catalog.diagnostics[0].extension_id.as_deref(),
+            Some("runtime-extension")
+        );
     }
 
     #[test]

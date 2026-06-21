@@ -15,7 +15,7 @@ use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::core::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
-    provider_requires_cwd_git_checkout,
+    provider_requires_cwd_git_checkout, AgentTaskProviderCatalog,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskScheduler,
@@ -84,7 +84,43 @@ pub fn dispatch<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
-    dispatch_with_provider_requirements(request, executor, provider_requires_cwd_git_checkout)
+    let catalog = AgentTaskProviderCatalog::discover();
+    dispatch_with_provider_catalog(request, executor, &catalog)
+}
+
+pub fn dispatch_with_provider_catalog<E>(
+    request: AgentTaskDispatchRequest,
+    executor: E,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>>
+where
+    E: AgentTaskExecutorAdapter,
+{
+    let mut plan =
+        build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
+            catalog.provider_requires_cwd_git_checkout(backend, selector)
+        })?;
+    catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    preflight_dispatch_provider_secrets(&plan)?;
+    let submitted = lifecycle::submit_plan(&plan, request.run_id.as_deref())?;
+    let run_id = submitted.run_id.clone();
+
+    if request.core.queue_only {
+        return Ok(AgentTaskRunResult {
+            value: dispatch_report(submitted, None, true),
+            exit_code: 0,
+        });
+    }
+
+    lifecycle::mark_running(&run_id)?;
+    let aggregate = AgentTaskScheduler::new(executor).run(plan.clone());
+    let record = lifecycle::record_run_aggregate(&run_id, &plan, &aggregate)?;
+    let exit_code = aggregate_exit_code(&aggregate);
+
+    Ok(AgentTaskRunResult {
+        value: dispatch_report(record, Some(aggregate), false),
+        exit_code,
+    })
 }
 
 pub fn dispatch_with_provider_requirements<E>(
@@ -218,8 +254,20 @@ pub fn run_dispatch_command<E>(
 where
     E: AgentTaskExecutorAdapter,
 {
+    let catalog = AgentTaskProviderCatalog::discover();
+    run_dispatch_command_with_provider_catalog(command, executor, &catalog)
+}
+
+pub fn run_dispatch_command_with_provider_catalog<E>(
+    command: AgentTaskDispatchCommand,
+    executor: E,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<(Value, i32)>
+where
+    E: AgentTaskExecutorAdapter,
+{
     let request = resolve_dispatch_request(command)?;
-    let result = dispatch(request, executor)?;
+    let result = dispatch_with_provider_catalog(request, executor, catalog)?;
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
@@ -229,8 +277,21 @@ pub fn run_cook_command<E>(command: AgentTaskDispatchCommand, executor: E) -> Re
 where
     E: AgentTaskExecutorAdapter,
 {
+    let catalog = AgentTaskProviderCatalog::discover();
+    run_cook_command_with_provider_catalog(command, executor, &catalog)
+}
+
+pub fn run_cook_command_with_provider_catalog<E>(
+    command: AgentTaskDispatchCommand,
+    executor: E,
+    catalog: &AgentTaskProviderCatalog,
+) -> Result<(Value, i32)>
+where
+    E: AgentTaskExecutorAdapter,
+{
     let target_worktree = command.workspace.clone();
-    let (mut value, exit_code) = run_dispatch_command(command, executor)?;
+    let (mut value, exit_code) =
+        run_dispatch_command_with_provider_catalog(command, executor, catalog)?;
     value["handoff"] = cook_handoff(&value, target_worktree.as_deref());
     Ok((value, exit_code))
 }
