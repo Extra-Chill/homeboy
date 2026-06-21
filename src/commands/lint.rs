@@ -18,7 +18,7 @@ use homeboy::core::validation_progress::validation_progress_metadata;
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::{CmdResult, GlobalArgs};
@@ -64,17 +64,8 @@ pub struct LintArgs {
     #[arg(long, value_name = "ID", conflicts_with = "fix")]
     pub ci_job: Option<String>,
 
-    /// Show only errors, suppress warnings
-    #[arg(long)]
-    pub errors_only: bool,
-
-    /// Only check specific sniffs (comma-separated codes)
-    #[arg(long)]
-    pub sniffs: Option<String>,
-
-    /// Exclude sniffs from checking (comma-separated codes)
-    #[arg(long)]
-    pub exclude_sniffs: Option<String>,
+    #[command(flatten)]
+    pub sniff_filters: LintSniffArgs,
 
     /// Filter by category: security, i18n, yoda, whitespace
     #[arg(long)]
@@ -230,9 +221,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             changed_only: args.changed_only,
             changed_since: args.changed_since.clone(),
             precomputed_changed_files: args.precomputed_changed_files.clone(),
-            errors_only: args.errors_only,
-            sniffs: args.sniffs.clone(),
-            exclude_sniffs: args.exclude_sniffs.clone(),
+            sniff_filters: args.sniff_filters.to_lint_sniff_filters(),
             category: args.category.clone(),
             ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
             baseline_flags: homeboy::core::engine::baseline::BaselineFlags {
@@ -428,9 +417,7 @@ fn run_fix(
         selected_files,
         file: args.file.clone(),
         glob: args.glob.clone(),
-        errors_only: args.errors_only,
-        sniffs: args.sniffs.clone(),
-        exclude_sniffs: args.exclude_sniffs.clone(),
+        sniff_filters: args.sniff_filters.to_lint_sniff_filters(),
         category: args.category.clone(),
     };
 
@@ -644,9 +631,11 @@ mod tests {
                 selected_files: Some(vec!["src/lib.rs".to_string()]),
                 file: None,
                 glob: Some("/tmp/demo/src/lib.rs".to_string()),
-                errors_only: true,
-                sniffs: Some("WordPress.Security".to_string()),
-                exclude_sniffs: Some("WordPress.WhiteSpace".to_string()),
+                sniff_filters: homeboy::core::extension::lint::LintSniffFilters {
+                    errors_only: true,
+                    sniffs: Some("WordPress.Security".to_string()),
+                    exclude_sniffs: Some("WordPress.WhiteSpace".to_string()),
+                },
                 category: Some("security".to_string()),
             },
             true,

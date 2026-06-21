@@ -10,6 +10,7 @@ pub use report::LintCommandOutput;
 pub use run::{
     run_main_lint_workflow, run_self_check_lint_workflow,
     run_self_check_lint_workflow_with_progress, LintRunWorkflowArgs, LintRunWorkflowResult,
+    LintSniffFilters,
 };
 
 use crate::core::engine::run_dir::RunDir;

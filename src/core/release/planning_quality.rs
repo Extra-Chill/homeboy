@@ -29,6 +29,13 @@ pub(super) enum LintQualityOutcome {
 /// harness/infrastructure failure. Missing lint support is not a release
 /// blocker because not every extension provides it.
 pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome {
+    // Shared mapping for a lint-runner construction/execution error into the
+    // standard hard-blocking outcome, used by both the scripts.lint and the
+    // extension-resolved lint paths below.
+    let runner_error = |e: Error| {
+        LintQualityOutcome::Failed(quality_error("lint", format!("Lint runner error: {}", e)))
+    };
+
     if component.has_script(ExtensionCapability::Lint) {
         log_status!("release", "Running lint (scripts.lint)...");
 
@@ -39,12 +46,7 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
             false,
         ) {
             Ok(workflow) => workflow,
-            Err(e) => {
-                return LintQualityOutcome::Failed(quality_error(
-                    "lint",
-                    format!("Lint runner error: {}", e),
-                ));
-            }
+            Err(e) => return runner_error(e),
         };
 
         if workflow.status == "passed" {
@@ -99,12 +101,7 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
     .and_then(|runner| runner.run())
     {
         Ok(output) => output,
-        Err(e) => {
-            return LintQualityOutcome::Failed(quality_error(
-                "lint",
-                format!("Lint runner error: {}", e),
-            ));
-        }
+        Err(e) => return runner_error(e),
     };
 
     if output.success {

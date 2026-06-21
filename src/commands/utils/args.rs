@@ -542,6 +542,43 @@ pub struct BaselineArgs {
 }
 
 // ============================================================================
+// LintSniffArgs: --errors-only + --sniffs + --exclude-sniffs
+// ============================================================================
+
+/// Sniff-selection flags flattened into the lint command.
+///
+/// The `[errors_only, sniffs, exclude_sniffs]` triplet used to be re-declared
+/// field-by-field on `LintArgs` (CLI), `LintRunWorkflowArgs` (workflow), and
+/// `LintSourceOptions` (refactor). Owning the group here — and mapping it to
+/// the core [`homeboy::core::extension::lint::LintSniffFilters`] contract —
+/// keeps the shape defined once instead of being repeated across layers (#5576).
+#[derive(Args, Debug, Clone, Default)]
+pub struct LintSniffArgs {
+    /// Show only errors, suppress warnings
+    #[arg(long)]
+    pub errors_only: bool,
+
+    /// Only check specific sniffs (comma-separated codes)
+    #[arg(long)]
+    pub sniffs: Option<String>,
+
+    /// Exclude sniffs from checking (comma-separated codes)
+    #[arg(long)]
+    pub exclude_sniffs: Option<String>,
+}
+
+impl LintSniffArgs {
+    /// Project the CLI flags onto the shared core sniff-filter contract.
+    pub(crate) fn to_lint_sniff_filters(&self) -> homeboy::core::extension::lint::LintSniffFilters {
+        homeboy::core::extension::lint::LintSniffFilters {
+            errors_only: self.errors_only,
+            sniffs: self.sniffs.clone(),
+            exclude_sniffs: self.exclude_sniffs.clone(),
+        }
+    }
+}
+
+// ============================================================================
 // WriteModeArgs: --write (dry-run by default)
 // ============================================================================
 

@@ -99,9 +99,7 @@ pub struct LintSourceOptions {
     pub selected_files: Option<Vec<String>>,
     pub file: Option<String>,
     pub glob: Option<String>,
-    pub errors_only: bool,
-    pub sniffs: Option<String>,
-    pub exclude_sniffs: Option<String>,
+    pub sniff_filters: crate::core::extension::lint::LintSniffFilters,
     pub category: Option<String>,
 }
 

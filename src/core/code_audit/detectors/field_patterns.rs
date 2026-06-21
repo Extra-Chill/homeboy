@@ -80,11 +80,33 @@ impl ResolvedFieldScan {
         } else {
             Vec::new()
         };
+
+        // Inline-test-strip and test-file-suffix tokens fall back to the
+        // agnostic builtin set when a component opts into defaults but has not
+        // declared them. Without this, builtin-default components scan `.rs`
+        // files yet never strip `#[cfg(test)]` modules, so inline test fixtures
+        // leak into production field-pattern findings (#5576).
+        let resolve_with_builtin = |configured: &[String], builtin: &[&str]| -> Vec<String> {
+            if !configured.is_empty() {
+                configured.to_vec()
+            } else if config.use_builtin_defaults {
+                builtin.iter().map(|token| (*token).to_string()).collect()
+            } else {
+                Vec::new()
+            }
+        };
+
         Self {
             scan_tokens,
             type_before_name_tokens: config.field_pattern_type_before_name_tokens.clone(),
-            inline_test_strip_tokens: config.field_pattern_inline_test_strip_tokens.clone(),
-            test_file_suffixes: config.test_file_suffixes.clone(),
+            inline_test_strip_tokens: resolve_with_builtin(
+                &config.field_pattern_inline_test_strip_tokens,
+                Language::builtin_inline_test_strip_tokens(),
+            ),
+            test_file_suffixes: resolve_with_builtin(
+                &config.test_file_suffixes,
+                Language::builtin_test_file_suffixes(),
+            ),
         }
     }
 
