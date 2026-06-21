@@ -32,6 +32,7 @@ repository.
 - Rig spec JSON schema: [rig-spec](commands/rig-spec.md)
 - Combined-fixes branch specs: [stack](commands/stack.md)
 - Performance benchmarks with baseline ratchet: [bench](commands/bench.md)
+- Generic fuzz workload execution and evidence: [fuzz](commands/fuzz.md)
 - API authentication scoped per project: [auth](commands/auth.md)
 - JSON output envelope: [JSON output contract](architecture/output-system.md)
 - CI artifact payload for PR review agents: [CI result JSON contract](architecture/ci-results-contract.md)
