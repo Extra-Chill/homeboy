@@ -691,8 +691,12 @@ fn prepare_lab_offload_workspace_stage(
         homeboy_path,
         &remote_cwd,
         &changed_since_preflight.args,
-        &synced.local_path,
-        &remote_cwd,
+        rig_materialization::LabOffloadPrimaryRigSource {
+            local_path: &synced.local_path,
+            remote_path: &remote_cwd,
+            source_snapshot: &source_snapshot,
+            workspace_snapshot_identity: &synced.snapshot_identity,
+        },
     )?;
     if !synced_rigs.is_empty() {
         plan = with_step(
@@ -1141,6 +1145,17 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
+    lab_metadata["source_snapshot"] =
+        serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
+    lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
+        &source_snapshot,
+        &synced.snapshot_identity,
+        &remote_cwd,
+        &runner_homeboy,
+        &source_checkout,
+        &workspace_mapping_metadata,
+        &synced_rigs,
+    );
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
     let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
     apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
@@ -1506,6 +1521,39 @@ fn lab_source_checkout_metadata(source_path: &Path) -> serde_json::Value {
         "git_remote": git_remote,
         "dirty": dirty,
     })
+}
+
+fn lab_materialization_proof_metadata(
+    source_snapshot: &SourceSnapshot,
+    workspace_snapshot_identity: &str,
+    remote_workspace: &str,
+    runner_homeboy: &serde_json::Value,
+    source_checkout: &serde_json::Value,
+    workspace_mapping: &serde_json::Value,
+    synced_rigs: &[rig_materialization::LabOffloadRigSync],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-materialization-proof/v1",
+        "remote_workspace": remote_workspace,
+        "workload_hashes": {
+            "source_snapshot_hash": source_snapshot.snapshot_hash,
+            "workspace_snapshot_identity": workspace_snapshot_identity,
+        },
+        "source_snapshot": source_snapshot,
+        "source_checkout": source_checkout,
+        "runner_homeboy": runner_homeboy,
+        "wp_codebox_version": passive_wp_codebox_version(),
+        "workspace_mapping": workspace_mapping,
+        "rigs": synced_rigs,
+    })
+}
+
+fn passive_wp_codebox_version() -> Option<String> {
+    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
@@ -2412,6 +2460,66 @@ mod tests {
         .expect("parse lab offload metadata");
 
         assert_eq!(parsed["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn materialization_proof_records_hashes_source_and_runner_identity() {
+        let source_snapshot = SourceSnapshot {
+            runner_id: "lab".to_string(),
+            local_path: Some("/Users/user/Developer/app".to_string()),
+            remote_path: Some("/srv/homeboy/_lab_workspaces/app-abc".to_string()),
+            workspace_root: Some("/Users/user/Developer/app".to_string()),
+            git_branch: Some("main".to_string()),
+            git_sha: Some("abc123".to_string()),
+            dirty: false,
+            sync_mode: "lab_offload".to_string(),
+            snapshot_hash: "sha256:source".to_string(),
+            synced_at: "2026-06-21T00:00:00Z".to_string(),
+            sync_excludes: vec!["target/".to_string()],
+        };
+        let runner_homeboy = serde_json::json!({
+            "schema": "homeboy/lab-runner-homeboy/v1",
+            "active_daemon_version": "homeboy 0.1.0",
+        });
+        let source_checkout = serde_json::json!({
+            "schema": "homeboy/lab-source-checkout/v1",
+            "git_sha": "abc123",
+        });
+        let workspace_mapping = serde_json::json!({
+            "schema": LAB_WORKSPACE_MAPPING_SCHEMA,
+            "workspaces": [],
+            "local_to_remote": {},
+        });
+
+        let proof = lab_materialization_proof_metadata(
+            &source_snapshot,
+            "snapshot:workspace",
+            "/srv/homeboy/_lab_workspaces/app-abc",
+            &runner_homeboy,
+            &source_checkout,
+            &workspace_mapping,
+            &[],
+        );
+
+        assert_eq!(proof["schema"], "homeboy/lab-materialization-proof/v1");
+        assert_eq!(
+            proof["remote_workspace"],
+            "/srv/homeboy/_lab_workspaces/app-abc"
+        );
+        assert_eq!(
+            proof["workload_hashes"]["source_snapshot_hash"],
+            "sha256:source"
+        );
+        assert_eq!(
+            proof["workload_hashes"]["workspace_snapshot_identity"],
+            "snapshot:workspace"
+        );
+        assert_eq!(proof["source_snapshot"]["git_sha"], "abc123");
+        assert_eq!(
+            proof["runner_homeboy"]["active_daemon_version"],
+            "homeboy 0.1.0"
+        );
+        assert!(proof["wp_codebox_version"].is_null());
     }
 
     #[test]

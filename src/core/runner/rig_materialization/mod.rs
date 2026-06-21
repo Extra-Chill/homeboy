@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
 use crate::core::rig;
+use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 use crate::extensions::deps_provider;
 
@@ -36,8 +37,42 @@ pub(super) struct LabOffloadRigSync {
     pub rig_id: String,
     pub source: String,
     pub source_kind: LabOffloadRigSyncSource,
+    pub package_source: LabOffloadRigPackageSource,
+    pub workload_hashes: LabOffloadRigWorkloadHashes,
+    pub source_snapshot: SourceSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_installed_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct LabOffloadRigPackageSource {
+    pub source: String,
+    pub source_root: String,
+    pub package_path: String,
+    pub install_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    pub linked: bool,
+    pub materialized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct LabOffloadRigWorkloadHashes {
+    pub source_snapshot_hash: String,
+    pub workspace_snapshot_identity: String,
+}
+
+pub(super) struct LabOffloadPrimaryRigSource<'a> {
+    pub local_path: &'a str,
+    pub remote_path: &'a str,
+    pub source_snapshot: &'a SourceSnapshot,
+    pub workspace_snapshot_identity: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -52,59 +87,102 @@ pub(super) fn sync_lab_offload_rigs(
     command_path: &str,
     remote_cwd: &str,
     args: &[String],
-    primary_local_path: &str,
-    primary_remote_path: &str,
+    primary: LabOffloadPrimaryRigSource<'_>,
 ) -> Result<Vec<LabOffloadRigSync>> {
     let rig_ids = lab_offload_rig_ids(args);
     if rig_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let primary_rig_ids = primary_source_rig_ids(primary_local_path)?;
+    let primary_rig_ids = primary_source_rig_ids(primary.local_path)?;
     let mut synced_rigs = Vec::new();
     for rig_id in &rig_ids {
-        let (source, source_kind) = if primary_rig_ids.contains(rig_id) {
-            (
-                primary_remote_path.to_string(),
-                LabOffloadRigSyncSource::PrimarySnapshot,
-            )
-        } else {
-            let metadata = rig::read_source_metadata(rig_id).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "rig",
-                    format!(
-                        "runner dispatch cannot materialize rig `{rig_id}` because it has no installed source metadata"
-                    ),
-                    Some(rig_id.clone()),
-                    Some(vec![
-                        format!("Reinstall rig `{rig_id}` from a rig package before using --runner."),
-                        "Run the rig sources command to inspect installed rig sources.".to_string(),
-                    ]),
+        let (source, source_kind, package_source, workload_hashes, source_snapshot) =
+            if primary_rig_ids.contains(rig_id) {
+                (
+                    primary.remote_path.to_string(),
+                    LabOffloadRigSyncSource::PrimarySnapshot,
+                    LabOffloadRigPackageSource {
+                        source: primary.local_path.to_string(),
+                        source_root: primary.local_path.to_string(),
+                        package_path: primary.local_path.to_string(),
+                        install_source: primary.remote_path.to_string(),
+                        rig_path: None,
+                        discovery_path: None,
+                        source_revision: primary.source_snapshot.git_sha.clone(),
+                        linked: true,
+                        materialized: false,
+                    },
+                    LabOffloadRigWorkloadHashes {
+                        source_snapshot_hash: primary.source_snapshot.snapshot_hash.clone(),
+                        workspace_snapshot_identity: primary
+                            .workspace_snapshot_identity
+                            .to_string(),
+                    },
+                    primary.source_snapshot.clone(),
                 )
-            })?;
-            let source_root = metadata
-                .source_root
-                .clone()
-                .unwrap_or_else(|| metadata.package_path.clone());
-            validate_installed_rig_source(rig_id, &source_root, &metadata.package_path)?;
-            let synced = sync_workspace(
-                runner_id,
-                RunnerWorkspaceSyncOptions {
-                    path: source_root.clone(),
-                    mode: RunnerWorkspaceSyncMode::Snapshot,
-                    controller_routed_git: false,
-                    changed_since_base: None,
-                    git_fetch_refs: Vec::new(),
-                    snapshot_includes: Vec::new(),
-                    allow_dirty_lab_workspace: false,
-                    run_isolation_token: None,
-                },
-            )?
-            .0;
-            let install_source =
-                remote_package_path(&source_root, &metadata.package_path, &synced.remote_path);
-            (install_source, LabOffloadRigSyncSource::InstalledMetadata)
-        };
+            } else {
+                let metadata = rig::read_source_metadata(rig_id).ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "rig",
+                        format!(
+                            "runner dispatch cannot materialize rig `{rig_id}` because it has no installed source metadata"
+                        ),
+                        Some(rig_id.clone()),
+                        Some(vec![
+                            format!("Reinstall rig `{rig_id}` from a rig package before using --runner."),
+                            "Run the rig sources command to inspect installed rig sources.".to_string(),
+                        ]),
+                    )
+                })?;
+                let source_root = metadata
+                    .source_root
+                    .clone()
+                    .unwrap_or_else(|| metadata.package_path.clone());
+                validate_installed_rig_source(rig_id, &source_root, &metadata.package_path)?;
+                let synced = sync_workspace(
+                    runner_id,
+                    RunnerWorkspaceSyncOptions {
+                        path: source_root.clone(),
+                        mode: RunnerWorkspaceSyncMode::Snapshot,
+                        controller_routed_git: false,
+                        changed_since_base: None,
+                        git_fetch_refs: Vec::new(),
+                        snapshot_includes: Vec::new(),
+                        allow_dirty_lab_workspace: false,
+                        run_isolation_token: None,
+                    },
+                )?
+                .0;
+                let install_source =
+                    remote_package_path(&source_root, &metadata.package_path, &synced.remote_path);
+                let source_snapshot = SourceSnapshot::collect_local(
+                    runner_id,
+                    Path::new(&synced.local_path),
+                    Some(&synced.remote_path),
+                    "lab_rig_source",
+                );
+                (
+                    install_source.clone(),
+                    LabOffloadRigSyncSource::InstalledMetadata,
+                    LabOffloadRigPackageSource {
+                        source: metadata.source,
+                        source_root,
+                        package_path: metadata.package_path,
+                        install_source,
+                        rig_path: Some(metadata.rig_path),
+                        discovery_path: metadata.discovery_path,
+                        source_revision: metadata.source_revision,
+                        linked: metadata.linked,
+                        materialized: metadata.materialized,
+                    },
+                    LabOffloadRigWorkloadHashes {
+                        source_snapshot_hash: source_snapshot.snapshot_hash.clone(),
+                        workspace_snapshot_identity: synced.snapshot_identity,
+                    },
+                    source_snapshot,
+                )
+            };
 
         let removed_source =
             remove_runner_installed_rig_source(runner_id, command_path, remote_cwd, rig_id)?;
@@ -128,7 +206,7 @@ pub(super) fn sync_lab_offload_rigs(
             "Runner rig materialization",
             runner_id,
             &install_command,
-            Path::new(primary_local_path),
+            Path::new(primary.local_path),
             remote_cwd,
         )?;
 
@@ -163,21 +241,42 @@ pub(super) fn sync_lab_offload_rigs(
                 Some(vec![
                     output.stderr.trim().to_string(),
                     "Run the command with --force-hot to execute locally while investigating runner rig setup.".to_string(),
-                    format!("Lab source snapshot remote path: {primary_remote_path}"),
+                    format!("Lab source snapshot remote path: {}", primary.remote_path),
                     format!("Selected rig install source: {source}"),
                 ]),
             ));
         }
 
+        let remote_installed_path = installed_rig_path_from_stdout(&output.stdout, rig_id);
+
         synced_rigs.push(LabOffloadRigSync {
             rig_id: rig_id.clone(),
             source,
             source_kind,
+            package_source,
+            workload_hashes,
+            source_snapshot,
+            remote_installed_path,
             removed_source,
         });
     }
 
     Ok(synced_rigs)
+}
+
+fn installed_rig_path_from_stdout(stdout: &str, rig_id: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdout).ok()?;
+    value
+        .get("data")
+        .unwrap_or(&value)
+        .get("installed")?
+        .as_array()?
+        .iter()
+        .find(|installed| installed.get("id").and_then(|value| value.as_str()) == Some(rig_id))
+        .and_then(|installed| installed.get("path"))
+        .and_then(|path| path.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
 }
 
 pub(super) fn remap_bench_rig_default_component_to_primary_snapshot(
@@ -1029,6 +1128,51 @@ mod tests {
         assert_eq!(
             remap_bench_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
             args
+        );
+    }
+
+    #[test]
+    fn installed_rig_path_from_stdout_reads_success_envelope() {
+        let stdout = serde_json::json!({
+            "success": true,
+            "data": {
+                "command": "rig.install",
+                "installed": [
+                    {
+                        "id": "other-rig",
+                        "path": "/home/user/.config/homeboy/rigs/other.json"
+                    },
+                    {
+                        "id": "target-rig",
+                        "path": "/home/user/.config/homeboy/rigs/target.json"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            installed_rig_path_from_stdout(&stdout, "target-rig").as_deref(),
+            Some("/home/user/.config/homeboy/rigs/target.json")
+        );
+    }
+
+    #[test]
+    fn installed_rig_path_from_stdout_handles_plain_output() {
+        let stdout = serde_json::json!({
+            "command": "rig.install",
+            "installed": [
+                {
+                    "id": "target-rig",
+                    "path": "/home/user/.config/homeboy/rigs/target.json"
+                }
+            ]
+        })
+        .to_string();
+
+        assert_eq!(
+            installed_rig_path_from_stdout(&stdout, "target-rig").as_deref(),
+            Some("/home/user/.config/homeboy/rigs/target.json")
         );
     }
 
