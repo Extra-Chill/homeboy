@@ -301,11 +301,32 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let providers = executor.providers();
     let fallback_sources =
         homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+    if args.validate_readiness {
+        let backend = args.backend.as_deref().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "backend",
+                "agent-task providers --validate-readiness requires --backend",
+                None,
+                Some(vec![
+                    "Pass the same --backend value that the agent-task dispatch/cook command will use.".to_string(),
+                ]),
+            )
+        })?;
+        homeboy::core::agent_tasks::provider::validate_provider_runner_readiness_for_backend(
+            backend,
+            args.selector.as_deref(),
+        )?;
+    }
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
             "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
+            "readiness_validation": {
+                "validated": args.validate_readiness,
+                "backend": args.backend,
+                "selector": args.selector,
+            },
             "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,
