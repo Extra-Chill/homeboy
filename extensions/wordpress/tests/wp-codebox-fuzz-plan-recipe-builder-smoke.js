@@ -43,7 +43,7 @@ assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.equal(recipe.fuzzRun.metadata.planner, 'homeboy/wordpress-fuzz-plan-recipe-builder/v1');
 assert(!JSON.stringify(recipe).includes('woocommerce'), 'fuzz plan builder must stay product-agnostic');
 
-const script = path.join(__dirname, '..', 'scripts', 'bench', 'build-wp-codebox-fuzz-plan-recipe.mjs');
+const script = path.join(__dirname, '..', 'scripts', 'fuzz', 'build-wp-codebox-fuzz-plan-recipe.mjs');
 const result = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),
 	input: JSON.stringify({ plan }),

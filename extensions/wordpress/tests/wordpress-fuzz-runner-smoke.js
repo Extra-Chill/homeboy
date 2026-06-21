@@ -53,7 +53,8 @@ const result = buildWordPressFuzzRunnerResult({
 });
 
 assert.equal(result.schema, WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA);
-assert.equal(result.status, 'planned');
+assert.equal(result.status, 'failed');
+assert.equal(result.succeeded, false);
 assert.equal(result.run_id, 'run-from-env');
 assert.equal(result.workload_id, 'workload-from-env');
 assert.equal(result.seed, 'seed-123');
@@ -65,6 +66,22 @@ assert.equal(result.wp_codebox_plan_recipe.fuzzRun.cases[0].case_id, 'get-posts'
 assert.equal(result.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggregate/v1');
 assert.equal(result.coverage.totals.exercised, 1);
 assert(!JSON.stringify(result).includes('woocommerce'), 'WordPress fuzz runner must stay product-agnostic');
+
+const executedResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'executed-run',
+	},
+	workload: {
+		...workload,
+		wp_codebox_result: {
+			status: 'succeeded',
+		},
+	},
+});
+
+assert.equal(executedResult.status, 'succeeded');
+assert.equal(executedResult.succeeded, true);
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'));
 const workloadPath = path.join(tempDir, 'workload.json');
@@ -86,6 +103,7 @@ assert.equal(cli.status, 0, cli.stderr);
 const cliResult = JSON.parse(cli.stdout);
 assert.equal(cliResult.schema, WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA);
 assert.equal(cliResult.run_id, 'cli-run');
+assert.equal(cliResult.succeeded, false);
 assert.equal(cliResult.wp_codebox_input.limits.max_duration_seconds, 15);
 
 console.log('WordPress fuzz runner smoke passed.');
