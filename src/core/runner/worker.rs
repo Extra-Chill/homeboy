@@ -336,6 +336,7 @@ fn run_once_output(
             capability_preflight,
             required_extensions: Vec::new(),
             require_paths: claim.request.require_paths.clone(),
+            detach_after_handoff: false,
         },
         || {
             if cancel_seen || last_cancel_poll.elapsed() < BROKER_CANCEL_POLL_INTERVAL {

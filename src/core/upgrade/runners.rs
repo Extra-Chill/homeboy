@@ -1621,6 +1621,7 @@ fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptio
         capability_preflight: Some(runner_upgrade_capability_plan()),
         required_extensions: Vec::new(),
         require_paths: Vec::new(),
+        detach_after_handoff: false,
     }
 }
 

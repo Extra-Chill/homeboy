@@ -58,6 +58,7 @@ pub struct RunnerExecOptions {
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
     pub require_paths: Vec<String>,
+    pub detach_after_handoff: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -238,6 +239,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.require_paths,
+                options.detach_after_handoff,
             )
         }
         RunnerTransport::ReverseBroker(handle) => {
@@ -253,6 +255,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.require_paths,
+                options.detach_after_handoff,
             )
         }
         RunnerTransport::Local => exec_local(plan),
@@ -428,6 +431,7 @@ fn exec_via_reverse_broker(
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
+    detach_after_handoff: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -477,6 +481,17 @@ fn exec_via_reverse_broker(
         )
     })?;
     persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    if detach_after_handoff {
+        return Ok(detached_handoff_output(
+            runner,
+            RunnerExecMode::ReverseBroker,
+            cwd,
+            command,
+            source_snapshot,
+            job,
+            require_paths,
+        ));
+    }
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -575,6 +590,7 @@ fn exec_via_daemon(
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
+    detach_after_handoff: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -625,6 +641,17 @@ fn exec_via_daemon(
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
     persist_lab_offload_handoff_run(runner, &cwd, &command, &job);
+    if detach_after_handoff {
+        return Ok(detached_handoff_output(
+            runner,
+            RunnerExecMode::Daemon,
+            cwd,
+            command,
+            source_snapshot,
+            job,
+            require_paths,
+        ));
+    }
 
     let deadline = Instant::now() + runner_exec_wait_timeout();
     while !matches!(
@@ -725,6 +752,63 @@ fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -> Result<Jo
     let body = canonical_daemon_body(&data, "daemon job response")?;
     serde_json::from_value(body["job"].clone())
         .map_err(|err| Error::internal_json(err.to_string(), Some("parse daemon job".to_string())))
+}
+
+fn detached_handoff_output(
+    runner: &Runner,
+    mode: RunnerExecMode,
+    cwd: String,
+    command: Vec<String>,
+    source_snapshot: SourceSnapshot,
+    job: Job,
+    require_paths: Vec<String>,
+) -> (RunnerExecOutput, i32) {
+    let job_id = job.id.to_string();
+    print_lab_offload_handoff(
+        &runner.id,
+        Some(&cwd),
+        &job_id,
+        None,
+        DaemonJobHandoffState::InFlight,
+    );
+    let stdout = serde_json::to_string_pretty(&json!({
+        "schema": "homeboy/runner-exec-handoff/v1",
+        "status": "handoff_complete",
+        "execution_location": format!("runner:{}", runner.id),
+        "runner_id": runner.id.clone(),
+        "job_id": job_id,
+        "remote_cwd": cwd.clone(),
+        "follow_commands": {
+            "job_logs": format!("homeboy runner job logs {} {} --follow", runner.id, job.id),
+            "job_cancel": format!("homeboy runner job cancel {} {}", runner.id, job.id),
+        }
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+
+    (
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: runner.id.clone(),
+            dry_run: false,
+            mode,
+            argv: command,
+            remote_cwd: cwd,
+            exit_code: 0,
+            stdout,
+            stderr: String::new(),
+            source_snapshot: Some(source_snapshot.clone()),
+            job: Some(job.clone()),
+            job_id: Some(job.id.to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            metrics: None,
+            capture: None,
+            diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
+        },
+        0,
+    )
 }
 
 /// Grace window during which a transient daemon polling failure (connection
@@ -3094,6 +3178,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    detach_after_handoff: false,
                 },
             )
             .expect("exec local runner");
@@ -3148,6 +3233,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    detach_after_handoff: false,
                 },
             )
             .expect("exec local runner");
@@ -3185,6 +3271,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    detach_after_handoff: false,
                 },
             )
             .expect("exec local runner");
@@ -3227,6 +3314,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: vec![missing.display().to_string()],
+                    detach_after_handoff: false,
                 },
             )
             .expect_err("missing required path rejects before command");
@@ -3268,6 +3356,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: vec![required_path.display().to_string()],
+                    detach_after_handoff: false,
                 },
             )
             .expect("exec with required path");
@@ -3320,6 +3409,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    detach_after_handoff: false,
                 },
             )
             .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
@@ -3356,6 +3446,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         };
 
         assert!(should_force_diagnostic_ssh(&ssh_runner(), &options));
@@ -3399,6 +3490,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         };
 
         let err = validate_runner_policy(&runner, "/srv/homeboy/project", policy_request(&options))
@@ -3433,6 +3525,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         };
         validate_runner_policy(
             &runner,

@@ -32,6 +32,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_local_hot: bool,
 
+    /// Require Lab routing and fail instead of executing locally.
+    #[arg(long, visible_alias = "no-local-execution", global = true)]
+    pub lab_only: bool,
+
+    /// Return after a runner daemon accepts the job instead of waiting for remote completion.
+    #[arg(long, global = true)]
+    pub detach_after_handoff: bool,
+
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]

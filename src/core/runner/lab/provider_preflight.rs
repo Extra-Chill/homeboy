@@ -270,6 +270,7 @@ fn probe_agent_task_providers_on_runner(
             capability_preflight,
             required_extensions,
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
 
