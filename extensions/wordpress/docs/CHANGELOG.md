@@ -2,6 +2,15 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.11.1] - 2026-06-21
+
+### Changed
+- Add generic WordPress discovery surfaces
+
+### Fixed
+- tighten wordpress fuzz artifact contracts
+- remove fuzz runner bench fallbacks
+
 ## [3.11.0] - 2026-06-21
 
 ### Added
