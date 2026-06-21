@@ -11,6 +11,11 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const { codeboxTaskRequestFromAgentTaskRequest } = require(
 	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'codebox-agent-task-executor.js')
 );
+const {
+	WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA,
+	assertProviderCredentialBoundaryNamesOnly,
+	providerCredentialSecretEnvNames,
+} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
 
 const providerDir = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-provider-'));
 const explicitProviderDir = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-explicit-provider-'));
@@ -38,6 +43,7 @@ try {
 	const taskInput = codeboxTaskRequestFromAgentTaskRequest(taskRequest, options);
 
 	assert.deepEqual(taskInput.provider_plugin_paths, [providerDir]);
+	assert.equal(taskInput.provider_credential_boundary.schema, WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA);
 
 	const explicitTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 		...taskRequest,
@@ -51,6 +57,14 @@ try {
 	}, options);
 
 	assert.deepEqual(explicitTaskInput.provider_plugin_paths, [explicitProviderDir]);
+	assert.deepEqual(providerCredentialSecretEnvNames({ secret_env: ['OPENAI_API_KEY'] }, { recipe: { secret_env: ['GITHUB_TOKEN'] } }), [
+		'OPENAI_API_KEY',
+		'GITHUB_TOKEN',
+	]);
+	assert.throws(
+		() => assertProviderCredentialBoundaryNamesOnly({ secret_env_values: { OPENAI_API_KEY: 'sk-secret' } }),
+		/secret_env names only/
+	);
 	console.log('wp-codebox provider plugin defaults smoke passed');
 } finally {
 	rmSync(providerDir, { recursive: true, force: true });

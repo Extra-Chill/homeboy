@@ -31,7 +31,9 @@ Codebox owns these primitives:
 
 - `wp-codebox/runtime-profile/v1` for runtime dependencies and mounts.
 - `wp-codebox/run-agent-task/v1` for launching a prepared agent task through a Codebox-owned run contract.
+- `wp-codebox/agent-task-run-result/v1` for the stable `agent_task_run_result` output produced by the run contract.
 - `wp-codebox/parent-tool-bridge/v1` for exposing parent-owned tools inside the sandbox.
+- `wp-codebox/provider-credential-boundary/v1` for the provider credential boundary: Homeboy passes only `secret_env` names, while provider plugins or parent control-plane filters resolve values.
 - `wp-codebox/provider-runtime-invocation-contract/v1` for runner workspace, transcript, and artifact handoff operations.
 - `wp-codebox/evidence-artifact-envelope/v1` for typed artifacts, evidence refs, and run summaries.
 
@@ -42,6 +44,11 @@ Codebox package advertises it. Older packages continue through the legacy
 `agent-task-run` / `wp-codebox/task-input/v1` path, but that compatibility is
 kept behind this adapter so the follow-up swap can remove the fallback without
 changing Homeboy callers.
+
+Provider credentials stay outside adapter payloads. The adapter forwards
+`secret_env` names and a `provider_credential_boundary` descriptor, and rejects
+raw credential fields such as `secret_env_values` or `credentials` before a task
+request reaches WP Codebox.
 
 ## Delegated Run Preparation
 

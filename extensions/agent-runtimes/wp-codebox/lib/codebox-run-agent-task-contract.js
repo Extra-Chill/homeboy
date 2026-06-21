@@ -5,7 +5,9 @@ const {
 } = require('./wp-codebox-adapter-contract');
 
 const WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA = 'wp-codebox/run-agent-task/v1';
-const WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA = 'wp-codebox/run-agent-task-result/v1';
+const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = 'wp-codebox/agent-task-run-result/v1';
+const WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA = 'wp-codebox/agent-task-run/v1';
+const WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA = WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA;
 const WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND = 'run-agent-task';
 const WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND = 'agent-task-run';
 
@@ -55,7 +57,8 @@ function codeboxRunAgentTaskInvocation(options = {}) {
     implementation: useStableRunAgentTask ? 'stable-run-agent-task' : 'legacy-agent-task-run-compat',
     input,
     args,
-    result_schema: useStableRunAgentTask ? WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA : 'wp-codebox/agent-task-run/v1',
+    result_schema: useStableRunAgentTask ? WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA : WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
+    result_key: 'agent_task_run_result',
   };
 }
 
@@ -68,6 +71,8 @@ function withoutUndefinedValues(value) {
 }
 
 module.exports = {
+  WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
+  WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
   WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
   WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,

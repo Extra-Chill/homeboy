@@ -332,6 +332,13 @@
           "artifact_result_envelope": "wp-codebox/artifact-result-envelope/v1"
         }
       },
+      "provider_credential_boundary": {
+        "schema": "wp-codebox/provider-credential-boundary/v1",
+        "version": 1,
+        "transport": "secret-env-names-only",
+        "resolution": "provider-plugin-or-parent-control-plane",
+        "redaction": "raw-provider-credentials-never-in-json-artifacts-or-diagnostics"
+      },
       "role_aliases": {
         "artifact_roles": {
           "artifact_bundle": ["codebox-artifact-bundle", "artifact-bundle", "codebox-artifact-directory", "codebox-session-artifacts"],
@@ -362,6 +369,20 @@
         }
       },
       "upstream_primitive_requirements": [
+        {
+          "id": "run-agent-task",
+          "schema": "wp-codebox/run-agent-task/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "prefer_stable_run_agent_task_with_legacy_agent_task_run_fallback",
+          "requirement": "Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Until that primitive is present, Homeboy Extensions keeps the legacy agent-task-run CLI compatibility path behind codebox-run-agent-task-contract.js."
+        },
+        {
+          "id": "provider-credential-boundary",
+          "schema": "wp-codebox/provider-credential-boundary/v1",
+          "owner": "wp-codebox",
+          "adapter_behavior": "forward_secret_env_names_only",
+          "requirement": "Resolve provider credentials through provider plugins or parent control-plane filters. Homeboy passes only secret_env names and must not serialize raw provider credentials into request JSON, artifacts, diagnostics, or review output."
+        },
         {
           "id": "runtime-profile",
           "schema": "wp-codebox/runtime-profile/v1",

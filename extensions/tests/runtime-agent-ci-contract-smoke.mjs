@@ -57,7 +57,7 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeInvocation: { operations: ['workspaceCommand'] },
 });
 
-assert.equal(genericConfig.runtime_provider, 'codebox');
+assert.equal(genericConfig.runtime_provider, 'wp-codebox');
 assert.equal(genericConfig.runtime_profile, 'example-agent-ci');
 assert.deepEqual(genericConfig.runtime_component_paths, { agent_runtime: '/workspace/components/example-runtime' });
 assert.deepEqual(genericConfig.ignored_workspace_paths, ['.cache', 'tmp']);
@@ -149,7 +149,7 @@ const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
 
 assert.equal(genericRequest.schema, 'homeboy/agent-task-request/v1');
 assert.equal(genericRequest.executor.backend, 'codebox');
-assert.equal(genericRequest.executor.runtime, 'codebox');
+assert.equal(genericRequest.executor.runtime, 'wp-codebox');
 assert.deepEqual(genericRequest.expected_artifacts, ['packet']);
 assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
 

@@ -11,6 +11,7 @@
     "./datamachine-agent-bundle-result": "./lib/datamachine-agent-bundle-result.js",
     "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
     "./delegated-run-contract": "./lib/delegated-run-contract.js",
+    "./provider-credential-boundary": "./lib/provider-credential-boundary.js",
     "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",
     "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js"
   },

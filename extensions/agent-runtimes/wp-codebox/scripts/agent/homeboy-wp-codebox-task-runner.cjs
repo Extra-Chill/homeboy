@@ -21,6 +21,11 @@ const {
   providerPreflightManifest,
 } = require('../../lib/provider-preflight-manifest');
 const {
+  assertProviderCredentialBoundaryNamesOnly,
+  providerCredentialRequestFields,
+  providerCredentialSecretEnvNames,
+} = require('../../lib/provider-credential-boundary');
+const {
   artifactNameFromDeclaration,
   artifactPath,
   normalizeTypedArtifactEntry,
@@ -121,7 +126,7 @@ function remapRuntimeComponentContract(contract) {
 }
 
 function secretEnvNames(request) {
-  return Array.from(new Set([...(request.secret_env || []), ...(request.recipe?.secret_env || []), ...argValues('--secret-env')].filter(Boolean)));
+  return providerCredentialSecretEnvNames(request, request.recipe, { secret_env: argValues('--secret-env') });
 }
 
 function requestWithCliSecretEnv(request) {
@@ -1199,6 +1204,8 @@ function uniqueComponentContracts(contracts) {
 }
 
 function runnerInput(request, artifacts) {
+  assertProviderCredentialBoundaryNamesOnly(request);
+  assertProviderCredentialBoundaryNamesOnly(request.recipe || {});
   const mounts = mountEntries(request);
   const runtimeComponentPaths = {
     ...requestRuntimeComponents(request, mounts),
@@ -1212,7 +1219,7 @@ function runnerInput(request, artifacts) {
     model: argValue('--model') || request.model || '',
     provider_plugin_paths: [...(request.provider_plugin_paths || []), ...argValues('--provider-plugin-path')],
     runtime_overlay_profiles: request.runtime_overlay_profiles || request.runtimeOverlayProfiles || [],
-    secret_env: secretEnvNames(request),
+    ...providerCredentialRequestFields({ secret_env: secretEnvNames(request) }),
     mounts,
     runtime_stack_mounts: runtimeStackMountEntries(request),
     runtime_overlays: runtimeOverlayEntries(request),
@@ -1380,7 +1387,7 @@ function extraPlugins(input) {
 
 function stableTaskInput(input) {
   const allowedTools = input.parent_request?.allowed_tools || input.parent_request?.task?.allowed_tools || [];
-  const secretEnv = input.secret_env || [];
+  const providerCredentialFields = providerCredentialRequestFields(input, input.parent_request, input.recipe);
   return Object.fromEntries(Object.entries({
     schema: 'wp-codebox/task-input/v1',
     version: 1,
@@ -1410,7 +1417,7 @@ function stableTaskInput(input) {
     // success until the supplied gates (e.g. the repo's smoke/test suite) pass.
     verify_steps: verifySteps(input),
     runtime_overlay_profiles: input.runtime_overlay_profiles || [],
-    secret_env: secretEnv,
+    ...providerCredentialFields,
     mounts: input.mounts || [],
     workspaces: input.parent_request?.workspaces || [],
     runtime_stack_mounts: input.runtime_stack_mounts || [],
