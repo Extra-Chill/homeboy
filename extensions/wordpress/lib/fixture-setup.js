@@ -24,6 +24,63 @@ function normalizeFixtureList(fixtures) {
 	return fixtures.map((fixture, index) => normalizeFixtureStep(fixture, index));
 }
 
+function normalizeFixtureProfileSiteSeeds(profile) {
+	if (profile === undefined || profile === null || profile === false) {
+		return [];
+	}
+	if (Array.isArray(profile)) {
+		return profile.map((siteSeed, index) => normalizeFixtureProfileSiteSeed(siteSeed, index));
+	}
+	if (!isPlainObject(profile)) {
+		throw new TypeError('fixture profile must be an object or array');
+	}
+	if (Array.isArray(profile.siteSeeds)) {
+		return profile.siteSeeds.map((siteSeed, index) => normalizeFixtureProfileSiteSeed(siteSeed, index));
+	}
+	return [normalizeFixtureProfileSiteSeed(profile, 0)];
+}
+
+function normalizeFixtureProfileSiteSeed(siteSeed, index) {
+	if (!isPlainObject(siteSeed)) {
+		throw new TypeError(`fixture profile site seed ${index + 1} must be an object`);
+	}
+	const scopes = siteSeed.scopes || pickSiteSeedScopes(siteSeed);
+	if (!isPlainObject(scopes) || Object.keys(scopes).length === 0) {
+		throw new TypeError(`fixture profile site seed ${index + 1} requires scopes`);
+	}
+	const name = siteSeed.name || siteSeed.id || `fixture-profile-${index + 1}`;
+	if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) {
+		throw new TypeError(`fixture profile site seed ${index + 1} requires a valid name`);
+	}
+	const type = siteSeed.type || (siteSeed.source ? 'fixture' : 'parent_site');
+	if (type !== 'fixture' && type !== 'parent_site') {
+		throw new Error(`Unsupported fixture profile site seed type: ${type}`);
+	}
+	if (type === 'fixture' && (typeof siteSeed.source !== 'string' || siteSeed.source.trim() === '')) {
+		throw new TypeError(`fixture profile site seed ${index + 1} requires source`);
+	}
+
+	return {
+		type,
+		name,
+		...(siteSeed.source ? { source: siteSeed.source } : {}),
+		...(siteSeed.format ? { format: siteSeed.format } : {}),
+		...(siteSeed.deterministicIds ? { deterministicIds: siteSeed.deterministicIds } : {}),
+		...(siteSeed.bootstrap ? { bootstrap: siteSeed.bootstrap } : {}),
+		scopes,
+	};
+}
+
+function pickSiteSeedScopes(siteSeed) {
+	const scopes = {};
+	for (const key of ['posts', 'terms', 'options', 'users', 'media', 'activePlugins', 'activeTheme']) {
+		if (siteSeed[key] !== undefined) {
+			scopes[key] = siteSeed[key];
+		}
+	}
+	return scopes;
+}
+
 function normalizeFixtureStep(fixture, index) {
 	if (!isPlainObject(fixture)) {
 		throw new TypeError(`fixture step ${index + 1} must be an object`);
@@ -505,6 +562,7 @@ module.exports = {
 	fixtureRecipeStep,
 	defaultRunCli,
 	installWordPressFixturePlugins,
+	normalizeFixtureProfileSiteSeeds,
 	normalizeFixtureList,
 	normalizeFixturePluginList,
 	restoreWordPressFixturePlugins,

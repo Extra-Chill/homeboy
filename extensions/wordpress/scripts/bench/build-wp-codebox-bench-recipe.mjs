@@ -3,12 +3,16 @@
  * External dependencies
  */
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 /**
  * Internal dependencies
  */
 import { loadCodeboxRecipeBuilder } from './wp-codebox-recipe-builder-loader.mjs';
 import { applyWpCodeboxStepDiagnostics } from '../lib/wp-codebox-diagnostics-plan.mjs';
+
+const require = createRequire(import.meta.url);
+const { normalizeFixtureProfileSiteSeeds } = require('../../lib/fixture-setup.js');
 
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const { builder: buildWordPressBenchRecipe } = await loadCodeboxRecipeBuilder('buildWordPressBenchRecipe');
@@ -30,6 +34,15 @@ if (selectedScenarioIds.length && Array.isArray(options.workloads)) {
 }
 
 const recipe = buildWordPressBenchRecipe(options);
+const fixtureProfile = options.fixtureProfile ?? options.fixture_profile ?? options.wp_codebox_fixture_profile;
+const siteSeeds = normalizeFixtureProfileSiteSeeds(fixtureProfile);
+if (siteSeeds.length > 0) {
+	recipe.inputs = recipe.inputs ?? {};
+	recipe.inputs.siteSeeds = [
+		...(Array.isArray(recipe.inputs.siteSeeds) ? recipe.inputs.siteSeeds : []),
+		...siteSeeds,
+	];
+}
 applyWpCodeboxStepDiagnostics(recipe, options);
 if (options.pluginRuntime && typeof options.pluginRuntime === 'object' && !Array.isArray(options.pluginRuntime)) {
 	recipe.inputs = recipe.inputs ?? {};

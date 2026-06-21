@@ -640,6 +640,33 @@ The plugin helper backs up an existing plugin directory, installs each fixture
 plugin by symlink or copy, activates entries unless `activate: false`, and
 restores the original plugin tree in reverse order.
 
+Fuzz and coverage recipe builders can also pass a product-agnostic fixture
+profile. The WordPress extension maps the profile to WP Codebox
+`inputs.siteSeeds`; WP Codebox owns the actual seed import and validation:
+
+```json
+{
+  "fixture_profile": {
+    "siteSeeds": [
+      {
+        "type": "fixture",
+        "name": "generic-content",
+        "source": "fixtures/content.json",
+        "format": "json",
+        "scopes": {
+          "posts": { "slugs": ["home"] },
+          "options": { "names": ["blogname"] }
+        }
+      }
+    ]
+  }
+}
+```
+
+Profiles may also use a single seed object with top-level `posts`, `terms`,
+`options`, `users`, `media`, `activePlugins`, or `activeTheme` keys; the mapper
+collects those keys into the required `scopes` object.
+
 ## Reusable Block Quality Probes
 
 WordPress workloads can collect product-neutral block quality counts without

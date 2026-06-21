@@ -10,6 +10,7 @@ const path = require('node:path');
 const {
 	fixtureRecipeStep,
 	installWordPressFixturePlugins,
+	normalizeFixtureProfileSiteSeeds,
 	normalizeFixtureList,
 	normalizeFixturePluginList,
 	restoreWordPressFixturePlugins,
@@ -29,6 +30,29 @@ async function main() {
 		assert.deepEqual(
 			normalizeFixturePluginList(['/tmp/example-plugin']).map((plugin) => ({ slug: plugin.slug, plugin: plugin.plugin, activate: plugin.activate })),
 			[{ slug: 'example-plugin', plugin: 'example-plugin', activate: true }]
+		);
+		assert.deepEqual(
+			normalizeFixtureProfileSiteSeeds({
+				id: 'editorial-shape',
+				posts: { postTypes: ['page'], maxRecords: 2 },
+				options: { names: ['blogname'] },
+				activeTheme: true,
+			}),
+			[{
+				type: 'parent_site',
+				name: 'editorial-shape',
+				scopes: {
+					posts: { postTypes: ['page'], maxRecords: 2 },
+					options: { names: ['blogname'] },
+					activeTheme: true,
+				},
+			}]
+		);
+		assert.deepEqual(
+			normalizeFixtureProfileSiteSeeds({
+				siteSeeds: [{ type: 'fixture', name: 'demo-content', source: 'fixtures/content.json', scopes: { posts: { slugs: ['home'] } } }],
+			}),
+			[{ type: 'fixture', name: 'demo-content', source: 'fixtures/content.json', scopes: { posts: { slugs: ['home'] } } }]
 		);
 
 		const calls = [];
@@ -203,6 +227,11 @@ async function main() {
 				assert.equal(error.fixtureSummary.status, 'failed');
 				return true;
 			}
+		);
+
+		assert.throws(
+			() => normalizeFixtureProfileSiteSeeds({ id: 'missing-scopes' }),
+			/requires scopes/
 		);
 
 		console.log('WordPress fixture setup smoke passed.');
