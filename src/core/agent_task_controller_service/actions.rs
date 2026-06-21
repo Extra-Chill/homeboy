@@ -35,6 +35,8 @@ where
                 )?;
             }
             controller::write_controller(record)?;
+            let failure_summary = (exit_code != 0)
+                .then(|| controller_action_failure_summary(record, &action, &execution));
             Ok(AgentTaskRunResult {
                 value: ControllerActionReport {
                     schema: ACTION_RESULT_SCHEMA,
@@ -49,6 +51,7 @@ where
                         }
                         .to_string(),
                     ),
+                    failure_summary,
                     execution: Some(execution),
                     controller: record.clone(),
                 },
@@ -60,6 +63,149 @@ where
             controller::write_controller(record)?;
             Err(error)
         }
+    }
+}
+
+fn controller_action_failure_summary(
+    record: &AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+    execution: &Value,
+) -> ControllerActionFailureSummary {
+    let request = action_request(&action.action);
+    let context = find_failure_context(execution).unwrap_or_default();
+    ControllerActionFailureSummary {
+        action_id: action.action_id.clone(),
+        dedupe_key: action.dedupe_key.clone(),
+        workflow_id: request.and_then(workflow_id_from_request),
+        run_id: request
+            .and_then(|request| string_field(request, "run_id"))
+            .or_else(|| find_string_field(execution, "run_id")),
+        task_id: context
+            .task_id
+            .or_else(|| find_string_field(execution, "task_id")),
+        phase: Some(record.phase.clone()),
+        provider: context.provider,
+        failure_phase: context.failure_phase,
+        diagnostic: context
+            .diagnostic
+            .or_else(|| first_action_diagnostic_message(record, &action.action_id))
+            .unwrap_or_else(|| "controller action failed".to_string()),
+    }
+}
+
+fn action_request(action: &AgentTaskLoopPolicyAction) -> Option<&Value> {
+    match action {
+        AgentTaskLoopPolicyAction::SpawnTask { request, .. }
+        | AgentTaskLoopPolicyAction::SpawnController { request, .. }
+        | AgentTaskLoopPolicyAction::SpawnSubloop { request, .. } => Some(request),
+        AgentTaskLoopPolicyAction::FanOut {
+            request_template, ..
+        }
+        | AgentTaskLoopPolicyAction::RouteFinding {
+            request_template, ..
+        } => Some(request_template),
+        _ => None,
+    }
+}
+
+fn workflow_id_from_request(request: &Value) -> Option<String> {
+    let context = request.pointer("/dispatch/client_context")?;
+    if let Some(workflow_id) = context.get("workflow_id").and_then(Value::as_str) {
+        return Some(workflow_id.to_string());
+    }
+    let context = context.as_str()?;
+    let parsed: Value = serde_json::from_str(context).ok()?;
+    string_field(&parsed, "workflow_id")
+}
+
+fn first_action_diagnostic_message(
+    record: &AgentTaskLoopControllerRecord,
+    action_id: &str,
+) -> Option<String> {
+    record
+        .next_actions
+        .iter()
+        .find(|candidate| candidate.action_id == action_id)?
+        .diagnostics
+        .first()
+        .map(|diagnostic| diagnostic.message.clone())
+}
+
+#[derive(Default)]
+struct FailureContext {
+    diagnostic: Option<String>,
+    task_id: Option<String>,
+    provider: Option<String>,
+    failure_phase: Option<String>,
+}
+
+fn find_failure_context(value: &Value) -> Option<FailureContext> {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Array(diagnostics)) = map.get("diagnostics") {
+                if let Some(diagnostic) = diagnostics.iter().find_map(Value::as_object) {
+                    let message = diagnostic
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if message.is_some() {
+                        return Some(FailureContext {
+                            diagnostic: message,
+                            task_id: string_field(value, "task_id"),
+                            provider: diagnostic
+                                .get("provider")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| nested_string_field(diagnostic, "data", "provider"))
+                                .or_else(|| nested_string_field(diagnostic, "data", "provider_id")),
+                            failure_phase: diagnostic
+                                .get("phase")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| nested_string_field(diagnostic, "data", "phase"))
+                                .or_else(|| {
+                                    diagnostic
+                                        .get("class")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string)
+                                }),
+                        });
+                    }
+                }
+            }
+            map.values().find_map(find_failure_context)
+        }
+        Value::Array(items) => items.iter().find_map(find_failure_context),
+        _ => None,
+    }
+}
+
+fn string_field(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(Value::as_str).map(str::to_string)
+}
+
+fn nested_string_field(
+    map: &serde_json::Map<String, Value>,
+    parent: &str,
+    field: &str,
+) -> Option<String> {
+    map.get(parent)?.get(field)?.as_str().map(str::to_string)
+}
+
+fn find_string_field(value: &Value, field: &str) -> Option<String> {
+    match value {
+        Value::Object(map) => map
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                map.values()
+                    .find_map(|value| find_string_field(value, field))
+            }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_string_field(value, field)),
+        _ => None,
     }
 }
 

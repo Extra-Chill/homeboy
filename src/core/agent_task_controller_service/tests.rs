@@ -27,6 +27,9 @@ struct CapturingDispatchHook {
 }
 
 #[derive(Clone, Default)]
+struct FailingDispatchHook;
+
+#[derive(Clone, Default)]
 struct ArtifactDispatchHook {
     observed_requests: Arc<Mutex<Vec<Value>>>,
 }
@@ -55,6 +58,32 @@ impl ControllerDispatchHook for CapturingDispatchHook {
                 "run_id": format!("generic-run-{}", entity_id.replace([':', '/', '#', ' '], "_")),
             }),
             0,
+        ))
+    }
+}
+
+impl ControllerDispatchHook for FailingDispatchHook {
+    fn dispatch(&self, _request: &Value) -> Result<(Value, i32)> {
+        Ok((
+            json!({
+                "schema": "homeboy/test-generic-dispatch-result/v1",
+                "run_id": "generic-run-overlay",
+                "aggregate": {
+                    "outcomes": [{
+                        "task_id": "task-overlay-prepare",
+                        "status": "failed",
+                        "diagnostics": [{
+                            "class": "provider.runtime_overlay",
+                            "message": "Recipe runtime overlay preparation failed: download php-scoper timed out after 60004ms",
+                            "data": {
+                                "provider": "codebox",
+                                "phase": "runtime_overlay_preparation"
+                            }
+                        }]
+                    }]
+                }
+            }),
+            1,
         ))
     }
 }
@@ -1444,6 +1473,79 @@ fn resume_fails_required_workflow_artifact_handoff_before_downstream_action() {
                 && event.payload["diagnostics"][0]["code"]
                     == json!("required_workflow_artifacts_missing")
         }));
+    });
+}
+
+#[test]
+fn resume_failed_action_result_includes_top_level_failure_summary() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-failure-summary".to_string(),
+            phase: "prepare".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        let workflow_context = json!({
+            "schema": "homeboy/repo-loop-workflow-context/v1",
+            "workflow_id": "scope-runtime",
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:scope-runtime".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "dispatch": {
+                        "client_context": workflow_context.to_string()
+                    }
+                }),
+            },
+            "prepare runtime overlay",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume(
+            "loop-service-failure-summary",
+            CapturingExecutor::default(),
+            &FailingDispatchHook,
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.results.len(), 1);
+        let failed = &result.value.results[0];
+        assert_eq!(failed["status"], json!("failed"));
+        assert_eq!(failed["failure_summary"]["action_id"], failed["action_id"]);
+        assert_eq!(
+            failed["failure_summary"]["dedupe_key"],
+            json!("workflow:scope-runtime")
+        );
+        assert_eq!(
+            failed["failure_summary"]["workflow_id"],
+            json!("scope-runtime")
+        );
+        assert_eq!(
+            failed["failure_summary"]["run_id"],
+            json!("generic-run-overlay")
+        );
+        assert_eq!(
+            failed["failure_summary"]["task_id"],
+            json!("task-overlay-prepare")
+        );
+        assert_eq!(failed["failure_summary"]["phase"], json!("prepare"));
+        assert_eq!(failed["failure_summary"]["provider"], json!("codebox"));
+        assert_eq!(
+            failed["failure_summary"]["failure_phase"],
+            json!("runtime_overlay_preparation")
+        );
+        assert_eq!(
+            failed["failure_summary"]["diagnostic"],
+            json!("Recipe runtime overlay preparation failed: download php-scoper timed out after 60004ms")
+        );
+        assert_eq!(
+            failed["execution"]["result"]["aggregate"]["outcomes"][0]["diagnostics"][0]["message"],
+            failed["failure_summary"]["diagnostic"]
+        );
     });
 }
 

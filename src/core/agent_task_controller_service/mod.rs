@@ -307,6 +307,7 @@ where
                 claimed: false,
                 action_id: None,
                 status: None,
+                failure_summary: None,
                 execution: None,
                 controller: record,
             },
