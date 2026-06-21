@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.56] - 2026-06-21
+
+### Changed
+- Read WP Codebox binary from settings JSON
+
 ## [3.7.55] - 2026-06-21
 
 ### Changed
