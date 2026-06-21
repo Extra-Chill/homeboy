@@ -68,6 +68,26 @@ fn release_audit_is_advisory_without_losing_raw_failure_outcome() {
 }
 
 #[test]
+fn release_test_gate_does_not_repeat_separate_lint_gate() {
+    let gate_test = job_section(release_workflow(), "gate-test");
+
+    assert!(gate_test.contains("commands: test"));
+    assert!(gate_test.contains("--skip-lint"));
+    assert!(gate_test.contains("--changed-since {0}"));
+}
+
+#[test]
+fn release_planning_skips_quality_gates_already_owned_by_gate_jobs() {
+    let check = job_section(release_workflow(), "check");
+    let prepare = job_section(release_workflow(), "prepare");
+
+    for section in [check, prepare] {
+        assert!(section.contains("commands: release"));
+        assert!(section.contains("args: --skip-checks=audit,lint,test"));
+    }
+}
+
+#[test]
 fn release_prepare_waits_for_command_policy_not_raw_audit_or_refactor() {
     let gate_refactor = job_section(release_workflow(), "gate-refactor");
     let prepare = job_section(release_workflow(), "prepare");
