@@ -10,4 +10,5 @@ module.exports = {
 	...require('./lib/provider-credential-boundary'),
 	...require('./lib/provider-preflight-manifest'),
 	...require('./lib/provider-outcome-normalizer'),
+	...require('./lib/wp-codebox-runtime-contract-source'),
 };

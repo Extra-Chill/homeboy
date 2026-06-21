@@ -1,6 +1,12 @@
 'use strict';
 
-const WP_CODEBOX_RUNTIME_PROFILE_SCHEMA = 'wp-codebox/runtime-profile/v1';
+const {
+  runtimeContractSchemas,
+} = require('./wp-codebox-runtime-contract-source');
+
+const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+
+const WP_CODEBOX_RUNTIME_PROFILE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.runtimeBoundary.profile;
 const WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA = 'wp-codebox/parent-tool-bridge/v1';
 const WP_CODEBOX_UPSTREAM_REQUIREMENT_SCHEMA = 'wp-codebox/upstream-primitive-requirement/v1';
 

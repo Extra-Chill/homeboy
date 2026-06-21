@@ -4,8 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
+const {
+  runtimeContractSchemas,
+} = require('./wp-codebox-runtime-contract-source');
+
+const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
-const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = 'wp-codebox/artifact-result-envelope/v1';
+const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope;
 const WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA = 'wp-codebox/case-artifact-index/v1';
 
 const ARTIFACT_ROLE_FALLBACK_PATTERNS = [

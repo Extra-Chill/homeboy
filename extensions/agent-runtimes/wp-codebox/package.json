@@ -13,13 +13,15 @@
     "./delegated-run-contract": "./lib/delegated-run-contract.js",
     "./provider-credential-boundary": "./lib/provider-credential-boundary.js",
     "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",
-    "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js"
+    "./wp-codebox-adapter-contract": "./lib/wp-codebox-adapter-contract.js",
+    "./wp-codebox-runtime-contract-source": "./lib/wp-codebox-runtime-contract-source.js"
   },
   "bin": {
     "homeboy-codebox-agent-task-executor": "./scripts/agent/homeboy-codebox-agent-task-executor.cjs"
   },
   "scripts": {
     "test:codebox-agent-task-executor-boundary": "node ../../wordpress/tests/codebox-agent-task-executor-boundary.test.js",
+    "test:wp-codebox-runtime-contract-source": "node ../../tests/wp-codebox-runtime-contract-source-smoke.mjs",
     "test:codebox-agent-task-executor": "node ../../wordpress/tests/codebox-agent-task-executor-smoke.js"
   },
   "engines": {
