@@ -350,6 +350,9 @@ fn collect_outputs(
             name: path
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string()),
+            label: None,
+            role: None,
+            semantic_key: None,
             path: Some(path.display().to_string()),
             url: None,
             mime: Some("application/json".to_string()),

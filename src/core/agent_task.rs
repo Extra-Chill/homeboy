@@ -739,6 +739,12 @@ pub struct AgentTaskArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -752,10 +758,41 @@ pub struct AgentTaskArtifact {
     pub metadata: Value,
 }
 
+impl AgentTaskArtifact {
+    pub fn display_label(&self) -> Option<&str> {
+        self.label
+            .as_deref()
+            .or(self.name.as_deref())
+            .or(Some(self.id.as_str()))
+    }
+
+    pub fn declared_role(&self) -> Option<&str> {
+        self.role.as_deref().or_else(|| {
+            self.metadata
+                .get("role")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+    }
+
+    pub fn declared_semantic_key(&self) -> Option<&str> {
+        self.semantic_key.as_deref().or_else(|| {
+            self.metadata
+                .get("semantic_key")
+                .or_else(|| self.metadata.get("semanticKey"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+        })
+    }
+}
+
 #[cfg(test)]
 impl AgentTaskArtifact {
     fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
         self.name = self.name.map(|value| policy.redact_string(&value));
+        self.label = self.label.map(|value| policy.redact_string(&value));
+        self.role = self.role.map(|value| policy.redact_string(&value));
+        self.semantic_key = self.semantic_key.map(|value| policy.redact_string(&value));
         self.path = self.path.map(|value| policy.redact_string(&value));
         self.url = self.url.map(|value| policy.redact_url(&value));
         self.metadata = policy.redact_json(&self.metadata);
@@ -1292,6 +1329,9 @@ mod tests {
                     id: "artifact-1".to_string(),
                     kind: "patch".to_string(),
                     name: Some("fix.patch".to_string()),
+                    label: Some("Fix patch".to_string()),
+                    role: Some("patch".to_string()),
+                    semantic_key: Some("task.fix_patch".to_string()),
                     path: Some("artifacts/fix.patch".to_string()),
                     url: None,
                     mime: Some("text/x-patch".to_string()),
@@ -1338,6 +1378,32 @@ mod tests {
     }
 
     #[test]
+    fn artifact_role_helpers_fall_back_to_metadata() {
+        let artifact = AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "artifact-1".to_string(),
+            kind: "json".to_string(),
+            name: Some("result.json".to_string()),
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("artifacts/result.json".to_string()),
+            url: None,
+            mime: Some("application/json".to_string()),
+            size_bytes: None,
+            sha256: None,
+            metadata: json!({
+                "role": "summary",
+                "semantic_key": "task.summary"
+            }),
+        };
+
+        assert_eq!(artifact.display_label(), Some("result.json"));
+        assert_eq!(artifact.declared_role(), Some("summary"));
+        assert_eq!(artifact.declared_semantic_key(), Some("task.summary"));
+    }
+
+    #[test]
     fn outcome_round_trips_nested_workflow_step_evidence() {
         let outcome = AgentTaskOutcome {
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
@@ -1350,6 +1416,9 @@ mod tests {
                 id: "screenshot-1".to_string(),
                 kind: "screenshot".to_string(),
                 name: Some("homepage.png".to_string()),
+                label: None,
+                role: None,
+                semantic_key: None,
                 path: Some("artifacts/homepage.png".to_string()),
                 url: None,
                 mime: Some("image/png".to_string()),
@@ -1487,6 +1556,9 @@ mod tests {
                 id: "log".to_string(),
                 kind: "log".to_string(),
                 name: None,
+                label: Some("secret log".to_string()),
+                role: Some("log".to_string()),
+                semantic_key: Some("secret.log".to_string()),
                 path: None,
                 url: Some("https://example.test/log?token=abc123".to_string()),
                 mime: None,

@@ -168,6 +168,7 @@ pub mod cook_loop {
 pub mod dispatch_service {
     pub use super::super::agent_task_dispatch_plan::{
         build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
+        preflight_dispatch_provider_secrets,
     };
     pub use super::super::agent_task_dispatch_service::{
         dispatch, dispatch_with_provider_requirements, resolve_dispatch_request,

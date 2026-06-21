@@ -163,8 +163,8 @@ pub struct AgentTaskDoctorArgs {
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Provider selector/id to disambiguate when more than one backend provider exists.
-    #[arg(long, value_name = "SELECTOR")]
+    /// Provider id to disambiguate when more than one provider exists for the backend.
+    #[arg(long, visible_alias = "provider-id", value_name = "PROVIDER_ID")]
     pub selector: Option<String>,
 
     /// Component/workspace path used as the runner extension parity probe cwd.

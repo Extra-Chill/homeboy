@@ -128,10 +128,10 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
                     "stage": "provider_contracts",
                     "code": "selector_unmatched",
                     "message": format!(
-                        "No provider for backend `{backend}` matched selector `{}`",
+                        "No provider for backend `{backend}` matched provider id `{}`",
                         args.selector.as_deref().unwrap_or("")
                     ),
-                    "remediation": "List providers with `homeboy agent-task providers` and pass a --selector that matches a declared provider id",
+                    "remediation": "List providers with `homeboy agent-task providers` and pass --provider-id/--selector with a declared provider id, not a model or provider family",
                 }));
                 mapping_value = json!({
                     "selected_backend": backend,
