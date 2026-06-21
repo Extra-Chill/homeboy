@@ -12,18 +12,31 @@ const SURFACE_TYPES = new Set([
 	'database-table',
 	'frontend-url',
 	'hook',
+	'media',
 	'option',
 	'post-type',
 	'rest-route',
 	'role',
 	'taxonomy',
+	'user',
 	'wp-cli-command',
 ]);
 
 const CASE_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 const RESULT_STATUSES = new Set(['passed', 'failed', 'errored', 'partial', 'skipped']);
 const SURFACE_TYPE_ALIASES = new Map([
+	['action', 'hook'],
+	['admin', 'admin-page'],
+	['admin_page', 'admin-page'],
+	['cron', 'cron-event'],
+	['filter', 'hook'],
+	['frontend', 'frontend-url'],
+	['frontend_url', 'frontend-url'],
+	['post_type', 'post-type'],
 	['rest', 'rest-route'],
+	['rest_route', 'rest-route'],
+	['taxonomy_term', 'taxonomy'],
+	['users', 'user'],
 	['wp-cli', 'wp-cli-command'],
 ]);
 
