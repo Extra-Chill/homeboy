@@ -82,6 +82,12 @@ pub struct AgentTaskArtifactInventoryItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -387,6 +393,9 @@ fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtif
         artifact_id: artifact.id.clone(),
         kind: artifact.kind.clone(),
         name: artifact.name.clone(),
+        label: artifact.label.clone(),
+        role: artifact.declared_role().map(str::to_string),
+        semantic_key: artifact.declared_semantic_key().map(str::to_string),
         path: artifact.path.clone(),
         url: artifact.url.clone(),
         size_bytes: artifact.size_bytes,
@@ -744,6 +753,9 @@ mod tests {
             id: id.to_string(),
             kind: kind.to_string(),
             name: Some(format!("{id}.txt")),
+            label: None,
+            role: None,
+            semantic_key: None,
             path: Some(format!("artifacts/{id}.txt")),
             url: None,
             mime: None,

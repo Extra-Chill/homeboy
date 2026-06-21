@@ -33,7 +33,11 @@ pub struct ArtifactContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,7 +63,9 @@ impl ArtifactContract {
             path: Some(record.path.clone()),
             url: record.url.clone(),
             public_url: record.public_url.clone(),
+            role: None,
             label: None,
+            semantic_key: None,
             size_bytes: record
                 .size_bytes
                 .and_then(|value| u64::try_from(value).ok()),
@@ -84,6 +90,8 @@ impl ArtifactContract {
             kind: self.kind.clone(),
             target,
             label,
+            role: self.role.clone(),
+            semantic_key: self.semantic_key.clone(),
             artifact: Some(self),
             metadata: Value::Null,
             extra: BTreeMap::new(),
@@ -105,6 +113,8 @@ impl ArtifactContract {
                 .unwrap_or_default(),
             url: self.url.clone(),
             public_url: self.public_url.clone(),
+            role: self.role.clone(),
+            semantic_key: self.semantic_key.clone(),
         }
     }
 
@@ -116,7 +126,9 @@ impl ArtifactContract {
         self.path = normalize_optional_string(self.path.take());
         self.url = normalize_optional_string(self.url.take());
         self.public_url = normalize_optional_string(self.public_url.take());
+        self.role = normalize_optional_string(self.role.take());
         self.label = normalize_optional_string(self.label.take());
+        self.semantic_key = normalize_optional_string(self.semantic_key.take());
         if self.metadata.is_null() {
             self.metadata = Value::Null;
         }
@@ -138,7 +150,9 @@ impl From<ArtifactRef> for ArtifactContract {
             path: Some(artifact.path),
             url: artifact.url,
             public_url: artifact.public_url,
+            role: artifact.role,
             label: None,
+            semantic_key: artifact.semantic_key,
             size_bytes: None,
             sha256: None,
             metadata: Value::Null,
@@ -154,6 +168,10 @@ pub struct EvidenceContract {
     pub kind: String,
     pub target: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<ArtifactContract>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -175,6 +193,8 @@ impl EvidenceContract {
         self.kind = required_trimmed("kind", &self.kind)?;
         self.target = required_trimmed("target", &self.target)?;
         self.label = trim_or_default(&self.label, &self.kind);
+        self.role = normalize_optional_string(self.role.take());
+        self.semantic_key = normalize_optional_string(self.semantic_key.take());
         if let Some(artifact) = &mut self.artifact {
             artifact.normalize()?;
         }
@@ -240,7 +260,9 @@ mod tests {
             "type": " json ",
             "path": " artifacts/run.json ",
             "url": " ",
+            "role": " primary-output ",
             "label": " Run transcript ",
+            "semantic_key": " task.transcript ",
             "producer": "extension"
         }))
         .expect("artifact contract");
@@ -250,7 +272,9 @@ mod tests {
         assert_eq!(artifact.artifact_type, "json");
         assert_eq!(artifact.path.as_deref(), Some("artifacts/run.json"));
         assert_eq!(artifact.url, None);
+        assert_eq!(artifact.role.as_deref(), Some("primary-output"));
         assert_eq!(artifact.label.as_deref(), Some("Run transcript"));
+        assert_eq!(artifact.semantic_key.as_deref(), Some("task.transcript"));
         assert_eq!(artifact.extra["producer"], "extension");
     }
 
@@ -269,6 +293,8 @@ mod tests {
     fn artifact_contract_can_become_evidence_contract() {
         let evidence = ArtifactContract::from_value(json!({
             "kind": "summary",
+            "role": "summary",
+            "semantic_key": "controller.summary",
             "public_url": "https://artifacts.example.test/summary.json"
         }))
         .expect("artifact contract")
@@ -282,6 +308,8 @@ mod tests {
             "https://artifacts.example.test/summary.json"
         );
         assert_eq!(evidence.label, "summary");
+        assert_eq!(evidence.role.as_deref(), Some("summary"));
+        assert_eq!(evidence.semantic_key.as_deref(), Some("controller.summary"));
         assert!(evidence.artifact.is_some());
     }
 

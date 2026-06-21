@@ -58,7 +58,9 @@ pub(super) fn execute_own_pr_until_green_action(
         evidence: vec![AgentTaskLoopArtifactRef {
             uri: format!("github://{}/{}/pull/{}", view.owner, view.repo, view.number),
             kind: Some("github.pull_request".to_string()),
+            role: None,
             label: Some("Owned pull request".to_string()),
+            semantic_key: None,
         }],
         missing_pr: false,
     };

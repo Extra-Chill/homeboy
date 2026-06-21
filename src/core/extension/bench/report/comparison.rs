@@ -508,6 +508,9 @@ fn agent_task_outcome_for_entry(
                     .or_else(|| artifact.artifact_type.clone())
                     .unwrap_or_else(|| "bench_artifact".to_string()),
                 name: Some(artifact.name.clone()),
+                label: artifact.label.clone(),
+                role: artifact.role.clone(),
+                semantic_key: None,
                 path: artifact.path.clone(),
                 url: artifact.url.clone(),
                 mime: None,
