@@ -364,15 +364,35 @@ gate, and `budget_findings` paths.
     "rest_response_bytes": {
       "preset": "absolute_budget",
       "max": 250000
+    },
+    "coverage_ratio": {
+      "preset": "min_coverage",
+      "min": 0.8
+    },
+    "failure_rate": {
+      "preset": "max_failure_rate",
+      "max": 0.02
+    },
+    "blocked_rate": {
+      "preset": "max_blocked_rate",
+      "max": 0.05
+    },
+    "critical_findings": {
+      "preset": "max_critical_findings",
+      "max": 0
     }
   }
 }
 ```
 
 Supported presets are `latency_regression`, `memory_regression`,
-`cold_warm_delta`, `flake_noise_threshold`, and `absolute_budget`. Regression
-presets expand to `metric_policies`; absolute budgets expand to normal gates so
-failures render through the existing budget finding and failure digest surfaces.
+`cold_warm_delta`, `flake_noise_threshold`, `absolute_budget`, `min_coverage`,
+`max_failure_rate`, `max_blocked_rate`, and `max_critical_findings`. Regression
+and outcome presets expand to `metric_policies` so saved baselines and ratchets
+compare the same generic numeric metrics across runs. Outcome presets also accept
+`min` or `max` threshold values and expand those into normal gates, so absolute
+threshold failures render through the existing budget finding and failure digest
+surfaces.
 
 Rigs can also declare gates for scenario metrics when the workload output is
 owned elsewhere. The keys under `metric_gates` are exact scenario ids:

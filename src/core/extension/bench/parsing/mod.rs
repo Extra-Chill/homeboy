@@ -1298,6 +1298,62 @@ mod tests {
     }
 
     #[test]
+    fn outcome_metric_policy_presets_expand_to_policies_and_gates() {
+        let raw = r#"{
+            "component_id": "example",
+            "iterations": 10,
+            "metric_policy_presets": {
+                "coverage_ratio": { "preset": "min_coverage", "min": 0.8 },
+                "failure_rate": { "preset": "max_failure_rate", "max": 0.02 },
+                "blocked_rate": { "preset": "max_blocked_rate", "max": 0.05 },
+                "critical_findings": { "preset": "max_critical_findings", "max": 0 }
+            },
+            "scenarios": [
+                {
+                    "id": "generic-outcomes",
+                    "iterations": 10,
+                    "metrics": {
+                        "coverage_ratio": 0.75,
+                        "failure_rate": 0.03,
+                        "blocked_rate": 0.0,
+                        "critical_findings": 1
+                    }
+                }
+            ]
+        }"#;
+
+        let mut parsed = parse_bench_results_str(raw).unwrap();
+        let failures = evaluate_gates(&mut parsed);
+
+        assert_eq!(
+            parsed.metric_policies["coverage_ratio"].direction,
+            BenchMetricDirection::HigherIsBetter
+        );
+        assert_eq!(
+            parsed.metric_policies["failure_rate"].direction,
+            BenchMetricDirection::LowerIsBetter
+        );
+        assert_eq!(
+            parsed.metric_policies["blocked_rate"].direction,
+            BenchMetricDirection::LowerIsBetter
+        );
+        assert_eq!(
+            parsed.metric_policies["critical_findings"].direction,
+            BenchMetricDirection::LowerIsBetter
+        );
+        assert_eq!(parsed.scenarios[0].gates.len(), 4);
+        assert!(parsed.scenarios[0]
+            .gates
+            .iter()
+            .any(|gate| gate.metric == "coverage_ratio" && gate.op == BenchGateOp::Gte));
+        assert!(parsed.scenarios[0]
+            .gates
+            .iter()
+            .any(|gate| gate.metric == "failure_rate" && gate.op == BenchGateOp::Lte));
+        assert_eq!(failures.len(), 3);
+    }
+
+    #[test]
     fn absolute_budget_preset_expands_to_gate_and_budget_finding() {
         let raw = r#"{
             "component_id": "example",

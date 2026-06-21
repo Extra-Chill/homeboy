@@ -37,6 +37,10 @@ pub enum BenchMetricPolicyPresetKind {
     ColdWarmDelta,
     FlakeNoiseThreshold,
     AbsoluteBudget,
+    MinCoverage,
+    MaxFailureRate,
+    MaxBlockedRate,
+    MaxCriticalFindings,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -63,9 +67,76 @@ pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result
             BenchMetricPolicyPresetKind::AbsoluteBudget => {
                 expand_absolute_budget_preset(results, &metric, &preset)?;
             }
+            BenchMetricPolicyPresetKind::MinCoverage => {
+                expand_thresholded_policy_preset(
+                    results,
+                    &metric,
+                    &preset,
+                    BenchMetricDirection::HigherIsBetter,
+                    ThresholdBound::Min,
+                )?;
+            }
+            BenchMetricPolicyPresetKind::MaxFailureRate
+            | BenchMetricPolicyPresetKind::MaxBlockedRate
+            | BenchMetricPolicyPresetKind::MaxCriticalFindings => {
+                expand_thresholded_policy_preset(
+                    results,
+                    &metric,
+                    &preset,
+                    BenchMetricDirection::LowerIsBetter,
+                    ThresholdBound::Max,
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ThresholdBound {
+    Min,
+    Max,
+}
+
+fn expand_thresholded_policy_preset(
+    results: &mut BenchResults,
+    metric: &str,
+    preset: &BenchMetricPolicyPreset,
+    direction: BenchMetricDirection,
+    bound: ThresholdBound,
+) -> Result<()> {
+    results
+        .metric_policies
+        .entry(metric.to_string())
+        .or_insert_with(|| preset.to_policy(direction, 0.0));
+
+    match bound {
+        ThresholdBound::Min if preset.min.is_some() => {
+            expand_absolute_budget_preset(results, metric, preset)
+        }
+        ThresholdBound::Max if preset.max.is_some() => {
+            expand_absolute_budget_preset(results, metric, preset)
+        }
+        ThresholdBound::Min if preset.max.is_some() => {
+            Err(invalid_bound_error(metric, "min", "max"))
+        }
+        ThresholdBound::Max if preset.min.is_some() => {
+            Err(invalid_bound_error(metric, "max", "min"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn invalid_bound_error(metric: &str, expected: &str, got: &str) -> Error {
+    Error::validation_invalid_argument(
+        "metric_policy_presets",
+        format!(
+            "outcome preset for `{}` must declare `{}` threshold, not `{}`",
+            metric, expected, got
+        ),
+        None,
+        None,
+    )
 }
 
 fn expand_absolute_budget_preset(
