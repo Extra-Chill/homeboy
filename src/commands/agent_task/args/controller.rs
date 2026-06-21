@@ -56,6 +56,10 @@ pub struct AgentTaskControllerFromSpecArgs {
     #[arg(long)]
     pub resume: bool,
 
+    /// Compile and preflight generic controller prerequisites without writing state.
+    #[arg(long)]
+    pub doctor: bool,
+
     /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]
     pub dispatch_backend: Option<String>,
