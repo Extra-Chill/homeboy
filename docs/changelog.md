@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.247.6] - 2026-06-21
+
+### Changed
+- extract repeated field groups into shared structs (#5576)
+- Mark failed bench hotspots in run summaries
+- refactor(agent-task): delegate controller execution policy to reusable core service (#4303)
+
+### Fixed
+- remove core agnostic-source boundary leaks (#5580)
+- capture version verifier output
+- resolve test-phase failure (#5578)
+- accept materialized controller gates
+- fix(agent-task): materialize symlinked plan dependencies for Lab offload (#3913)
+- resolve intermittent 502s for parallel static asset requests (#4062)
+
 ## [0.247.5] - 2026-06-21
 
 ### Changed
