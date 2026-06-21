@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.0] - 2026-06-21
+
+### Added
+- support head artifact release completion
+
 ## [2.7.14] - 2026-06-20
 
 ### Fixed
