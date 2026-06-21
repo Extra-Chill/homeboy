@@ -1,4 +1,5 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
 };
@@ -63,6 +64,9 @@ pub fn route_after_parse(
     // the positional component to the runner's registered checkout and writes
     // fixes there — so the source-tree mutation lands outside the captured
     // workspace and the runner returns no patch to apply (#4315).
+    let scoped_args = inject_lab_changed_files(&cli.command, normalized_args)?;
+    let normalized_args = scoped_args.as_deref().unwrap_or(normalized_args);
+
     let rewritten_args = (mutation_flag.is_some())
         .then(|| rewrite_component_target_to_path(&cli.command, normalized_args))
         .flatten()
@@ -102,6 +106,94 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn inject_lab_changed_files(
+    command: &Commands,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<Vec<String>>> {
+    let Some((component_id, path_override, changed_since, changed_only)) =
+        changed_scope_request(command)
+    else {
+        return Ok(None);
+    };
+    if has_lab_changed_files_json(normalized_args) {
+        return Ok(None);
+    }
+    if changed_since.is_none() && !changed_only {
+        return Ok(None);
+    }
+
+    let source_path = resolve_changed_scope_source_path(component_id, path_override)?;
+    let changed_files = if let Some(git_ref) = changed_since {
+        git::get_files_changed_since(&source_path, git_ref)?
+    } else if changed_only {
+        git::get_dirty_files(&source_path)?
+    } else {
+        return Ok(None);
+    };
+    let payload = serde_json::to_string(&changed_files).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to encode Lab changed-file payload: {error}"
+        ))
+    })?;
+
+    let mut rewritten = Vec::with_capacity(normalized_args.len() + 2);
+    let insert_at = normalized_args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(normalized_args.len());
+    rewritten.extend_from_slice(&normalized_args[..insert_at]);
+    rewritten.push("--lab-changed-files-json".to_string());
+    rewritten.push(payload);
+    rewritten.extend_from_slice(&normalized_args[insert_at..]);
+    Ok(Some(rewritten))
+}
+
+fn changed_scope_request(
+    command: &Commands,
+) -> Option<(Option<&String>, Option<&String>, Option<&str>, bool)> {
+    match command {
+        Commands::Lint(args) => Some((
+            args.comp.component.as_ref(),
+            args.comp.path.as_ref(),
+            args.changed_since.as_deref(),
+            args.changed_only,
+        )),
+        Commands::Review(args) => Some((
+            args.comp.component.as_ref(),
+            args.comp.path.as_ref(),
+            args.changed_since.as_deref(),
+            args.changed_only,
+        )),
+        Commands::Test(args) => Some((
+            args.comp.component.as_ref(),
+            args.comp.path.as_ref(),
+            args.changed_since.as_deref(),
+            false,
+        )),
+        _ => None,
+    }
+}
+
+fn has_lab_changed_files_json(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--lab-changed-files-json" || arg.starts_with("--lab-changed-files-json=")
+    })
+}
+
+fn resolve_changed_scope_source_path(
+    component_id: Option<&String>,
+    path_override: Option<&String>,
+) -> homeboy::core::Result<String> {
+    use homeboy::core::engine::execution_context::{self, ResolveOptions};
+
+    let ctx = execution_context::resolve(&ResolveOptions {
+        component_id: component_id.cloned(),
+        path_override: path_override.cloned(),
+        ..ResolveOptions::default()
+    })?;
+    Ok(ctx.source_path.to_string_lossy().to_string())
 }
 
 /// Build the Lab dispatch observer for the parsed command. Only `trace`
@@ -488,41 +580,18 @@ mod tests {
     }
 
     #[test]
-    fn hot_local_only_command_records_lab_plan_metadata() {
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    fn changed_scope_lint_is_lab_portable() {
         let cli = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
 
-        let outcome = route_after_parse(
-            &cli,
-            &[
-                "homeboy".into(),
-                "lint".into(),
-                "--changed-since".into(),
-                "origin/main".into(),
-            ],
-            None,
-        )
-        .unwrap();
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(outcome, None);
-        let raw = std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV)
-            .expect("Lab routing metadata captured");
-        let metadata: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(metadata["status"], "skipped");
-        assert_eq!(metadata["source"], "automatic");
-        assert!(metadata["plan_id"]
-            .as_str()
-            .unwrap()
-            .contains("lab_offload"));
-        assert!(metadata["fallback_reason"]
-            .as_str()
-            .unwrap()
-            .contains("Changed-scope lint runs stay local"));
+        assert_eq!(command.hot_label, "lint");
+        assert!(command.portable);
+        assert!(command.unsupported_reason.is_none());
     }
 
     #[test]
-    fn explicit_runner_for_local_only_hot_command_errors_from_lab_plan_path() {
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+    fn explicit_runner_for_changed_scope_test_is_lab_portable() {
         let cli = Cli::parse_from([
             "homeboy",
             "--runner",
@@ -532,23 +601,12 @@ mod tests {
             "origin/main",
         ]);
 
-        let err = route_after_parse(
-            &cli,
-            &[
-                "homeboy".into(),
-                "--runner".into(),
-                "homeboy-lab".into(),
-                "test".into(),
-                "--changed-since".into(),
-                "origin/main".into(),
-            ],
-            None,
-        )
-        .expect_err("local-only hot command rejects explicit runner");
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("--runner is unavailable"));
-        assert!(err.message.contains("test --changed-since"));
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(command.hot_label, "test");
+        assert!(command.portable);
+        assert!(command.unsupported_reason.is_none());
     }
 
     #[test]

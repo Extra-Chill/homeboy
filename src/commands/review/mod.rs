@@ -80,6 +80,15 @@ pub struct ReviewArgs {
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
+
+    #[arg(long, hide = true, value_name = "JSON")]
+    pub lab_changed_files_json: Option<String>,
+}
+
+impl ReviewArgs {
+    pub(crate) fn lab_contract(&self) -> LabCommandContract {
+        LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate()
+    }
 }
 
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
@@ -421,6 +430,11 @@ fn preflight_review_scope(
     // extension setup, include a stable changed-file count in its artifact,
     // and pass the same resolved scope to each internal stage.
     let precomputed_changed_files = match (&args.changed_since, args.changed_only) {
+        _ if args.lab_changed_files_json.is_some() => args
+            .lab_changed_files_json
+            .as_deref()
+            .map(parse_lab_changed_files_json)
+            .transpose()?,
         (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?),
         (_, true) => Some(git::get_dirty_files(source_path)?),
         _ => None,
@@ -537,6 +551,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         extension_override: args.extension_override.clone(),
         setting_args: Default::default(),
         baseline_args: args.baseline_args.clone(),
+        lab_changed_files_json: None,
         json_summary: args.summary,
     }
 }
@@ -560,8 +575,20 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         ci_job: None,
         setting_args: Default::default(),
         args: Vec::new(),
+        lab_changed_files_json: None,
         json_summary: args.summary,
     }
+}
+
+fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+    serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "lab_changed_files_json",
+            format!("invalid Lab changed-file payload: {error}"),
+            None,
+            None,
+        )
+    })
 }
 
 fn audit_finding_count(output: &AuditCommandOutput) -> usize {
@@ -896,6 +923,7 @@ mod tests {
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
+            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-since=trunk");
         assert_eq!(scope_flag_suffix(&args, false), " --changed-since=trunk");
@@ -916,6 +944,7 @@ mod tests {
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
+            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
         // audit/test do not support --changed-only, so the suffix is empty
@@ -938,6 +967,7 @@ mod tests {
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
+            lab_changed_files_json: None,
         };
         assert_eq!(scope_flag_suffix(&args, true), "");
         assert_eq!(scope_flag_suffix(&args, false), "");
@@ -982,6 +1012,7 @@ mod tests {
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
+            lab_changed_files_json: None,
         }
     }
 }

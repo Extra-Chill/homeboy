@@ -199,6 +199,7 @@ mod tests {
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
+            lab_changed_files_json: None,
         }
     }
 

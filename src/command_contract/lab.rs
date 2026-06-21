@@ -153,13 +153,13 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
         #[cfg(test)]
         contract_labels: &[LINT_LAB_LABEL],
         message_label: LINT_LAB_LABEL,
-        hint_label: "full lint",
+        hint_label: LINT_LAB_LABEL,
     },
     LabSupportedCommandSummary {
         #[cfg(test)]
         contract_labels: &[TEST_LAB_LABEL],
         message_label: TEST_LAB_LABEL,
-        hint_label: "full test",
+        hint_label: TEST_LAB_LABEL,
     },
     LabSupportedCommandSummary {
         #[cfg(test)]
@@ -171,7 +171,7 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
         #[cfg(test)]
         contract_labels: &[REVIEW_LAB_LABEL],
         message_label: REVIEW_LAB_LABEL,
-        hint_label: "full review",
+        hint_label: REVIEW_LAB_LABEL,
     },
     LabSupportedCommandSummary {
         #[cfg(test)]

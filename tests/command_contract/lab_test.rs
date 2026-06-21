@@ -43,7 +43,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     );
     assert_eq!(
         lab_runner_unsupported_hint(),
-        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, full lint, full test, audit, full review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
     );
 }
 
@@ -65,9 +65,22 @@ fn rig_check_supports_lab_runner_but_rig_up_stays_local_only() {
 #[test]
 fn test_supports_lab_runner() {
     assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
+    assert!(
+        parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+            .supports_lab_runner()
+    );
     assert!(parsed_command(&["homeboy", "test"]).supports_lab_runner());
+    assert!(
+        parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
+            .supports_lab_runner()
+    );
     assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
+    assert!(
+        parsed_command(&["homeboy", "review", "--changed-since", "origin/main"])
+            .supports_lab_runner()
+    );
+    assert!(parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
@@ -172,20 +185,6 @@ fn test_supports_lab_runner() {
     .supports_lab_runner());
     assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
     assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
-    assert!(
-        !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
-    assert!(
-        !parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
-    assert!(
-        !parsed_command(&["homeboy", "review", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
-    assert!(!parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
-
     let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
     assert_eq!(cli.runner.as_deref(), Some("lab-a"));
     assert!(cli.command.supports_lab_runner());
@@ -213,6 +212,10 @@ fn test_lab_command_contracts_cover_hot_commands() {
         (parsed_command(&["homeboy", "test"]), "test"),
         (parsed_command(&["homeboy", "audit"]), "audit"),
         (parsed_command(&["homeboy", "review"]), "review"),
+        (
+            parsed_command(&["homeboy", "review", "--changed-since", "origin/main"]),
+            "review",
+        ),
         (parsed_command(&["homeboy", "bench"]), "bench"),
         (
             parsed_command(&[
@@ -373,15 +376,15 @@ fn test_lab_command_contracts_cover_hot_commands() {
         .expect("review contract");
     assert!(review_full.routing_policy.release_gate);
 
-    // Changed-scope/local-only variants and non-gate commands are NOT
-    // release gates.
     assert!(
-        !parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
+        parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
             .lab_contract()
             .expect("changed-scope lint contract")
             .routing_policy
             .release_gate
     );
+
+    // Non-gate commands are NOT release gates.
     assert!(
         !parsed_command(&["homeboy", "bench"])
             .lab_contract()
@@ -735,14 +738,12 @@ fn test_lab_runner_unsupported_hot_command_reasons() {
     assert!(
         parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
             .lab_runner_unsupported_reason()
-            .expect("changed-scope lint reason")
-            .contains("Changed-scope lint runs stay local")
+            .is_none()
     );
     assert!(
         parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
             .lab_runner_unsupported_reason()
-            .expect("changed-since test reason")
-            .contains("test --changed-since")
+            .is_none()
     );
     assert!(parsed_command(&["homeboy", "status"])
         .lab_runner_unsupported_reason()
