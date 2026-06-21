@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.9.0] - 2026-06-21
+
+### Added
+- convert WordPress surfaces into fuzz plans
+
 ## [3.8.4] - 2026-06-21
 
 ### Changed
