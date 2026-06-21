@@ -15,7 +15,7 @@ use crate::core::agent_task_lifecycle as lifecycle;
 use crate::core::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::core::agent_task_provider::{
     apply_provider_runner_secret_env_contracts, default_backend_for_component,
-    provider_requires_cwd_git_checkout, AgentTaskProviderCatalog,
+    AgentTaskProviderCatalog,
 };
 use crate::core::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskScheduler,

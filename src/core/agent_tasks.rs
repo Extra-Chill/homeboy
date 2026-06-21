@@ -172,9 +172,11 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         dispatch, dispatch_with_provider_requirements, resolve_dispatch_request,
-        resolve_dispatch_request_with_default, run_cook_command, run_dispatch_command,
-        AgentTaskDispatchCommand, AgentTaskDispatchReport, AgentTaskDispatchRequest,
-        DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
+        resolve_dispatch_request_with_default, run_cook_command,
+        run_cook_command_with_provider_catalog, run_dispatch_command,
+        run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
+        AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
+        DISPATCH_RESULT_SCHEMA,
     };
 }
 
