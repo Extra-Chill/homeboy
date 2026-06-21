@@ -48,10 +48,16 @@ homeboy_wp_codebox_component_relative_path() {
 homeboy_wp_codebox_resolve_bin() {
     local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
     local config_label="${2:-settings}"
-    local bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
+    local bin=""
 
-    if [ -z "$bin" ] && [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
+    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
         bin=$(printf '%s' "$settings_json" | jq -r '.wp_codebox_bin // empty' 2>/dev/null || true)
+    fi
+    if [ -z "$bin" ]; then
+        bin="${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}"
+    fi
+    if [ -z "$bin" ]; then
+        bin="${HOMEBOY_WP_CODEBOX_BIN:-}"
     fi
 
     bin="${bin:-wp-codebox}"
