@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.249.0] - 2026-06-21
+
+### Added
+- add explicit refresh/setup mode for CI to call core instead of hardcoding (#2917)
+- feat(agent-task): surface controller acceptance gates
+- feat(agent-task): add generic artifact roles
+- feat(agent-task): add controller from-spec doctor
+- summarize synced workspace source
+- feat(agent-task): summarize controller runs
+
+### Changed
+- scope changed-scope detectors to changed files to avoid timeout (#3609)
+
+### Fixed
+- fix(agent-task): improve controller resume commands
+- fix(agent-task): clarify provider id selector
+- classify differential failure origins
+
 ## [0.248.1] - 2026-06-21
 
 ### Fixed
