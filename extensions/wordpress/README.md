@@ -328,6 +328,31 @@ descriptors.
 The generated recipe is the single runtime entry point for benchmarks: legacy
 `wp_codebox_blueprint` becomes `runtime.blueprint`, dependencies become recipe
 plugin inputs, and scenario manifests compile into configured workloads.
+Fixture profiles can seed the sandbox through WP Codebox `inputs.siteSeeds`
+without product-specific recipe steps:
+
+```json
+{
+  "fixture_profile": {
+    "siteSeeds": [
+      {
+        "type": "fixture",
+        "name": "generic-content",
+        "source": "fixtures/content.json",
+        "format": "json",
+        "scopes": {
+          "posts": { "slugs": ["home"] },
+          "options": { "names": ["blogname"] }
+        }
+      }
+    ]
+  }
+}
+```
+
+The bridge also accepts `fixtureProfile` and `wp_codebox_fixture_profile` when
+building the recipe. Homeboy Extensions only maps and validates the profile
+shape; WP Codebox owns seed import behavior and runtime validation.
 
 Each run also emits `${HOMEBOY_BENCH_RESULTS_ARTIFACT_DIR}/bench-summary.json`
 when result artifacts are enabled. The summary is the canonical reviewer
@@ -694,6 +719,7 @@ Configure per-component in the component's homeboy/component config under
 | `wp_codebox_extra_plugins` | array | `[]` | Legacy WP Codebox bench setting for additional plugin entries that are not Homeboy validation dependencies |
 | `wp_codebox_workloads` | array | `[]` | Legacy WP Codebox bench setting for declared workloads passed to `wordpress.bench` through the generated recipe after deps and component load |
 | `wp_codebox_file_mounts` | array | `[]` | Legacy WP Codebox bench setting for files from the component or validation dependencies mounted into explicit WordPress runtime paths |
+| `fixture_profile` | object | `{}` | Product-agnostic fixture profile mapped to WP Codebox `inputs.siteSeeds` for sandbox setup before fuzz/coverage workloads run |
 | `bench_browser_target` | object | `{}` | Browser bench target descriptor (see Bench runner above) |
 
 ## Blueprint Validation

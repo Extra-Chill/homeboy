@@ -34,6 +34,15 @@ const input = {
 			sha256: 'abc123',
 			setup: [{ command: 'wordpress.wp-cli', args: ['command=option update fixture_bootstrap yes'] }],
 		},
+		fixtureProfile: {
+			siteSeeds: [{
+				type: 'fixture',
+				name: 'generic-fixture-content',
+				source: 'fixtures/content.json',
+				format: 'json',
+				scopes: { posts: { slugs: ['home'] }, options: { names: ['blogname'] } },
+			}],
+		},
 		mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 		extraPlugins: [{ source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true }],
 	},
@@ -54,6 +63,13 @@ assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.deepEqual(recipe.inputs.extraPlugins[0], { source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true });
 assert.deepEqual(recipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload', 'other-workload']);
 assert.deepEqual(recipe.inputs.pluginRuntime, input.options.pluginRuntime);
+assert.deepEqual(recipe.inputs.siteSeeds, [{
+	type: 'fixture',
+	name: 'generic-fixture-content',
+	source: 'fixtures/content.json',
+	format: 'json',
+	scopes: { posts: { slugs: ['home'] }, options: { names: ['blogname'] } },
+}]);
 assert.deepEqual(recipe.workflow.steps, [{
 	command: 'fixture.wordpress.bench',
 	args: [
