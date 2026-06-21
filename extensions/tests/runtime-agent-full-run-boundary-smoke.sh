@@ -18,9 +18,20 @@ const files = [
   '.github/scripts/runtime-agent-full-run/assert-success.cjs',
   '.github/scripts/runtime-agent-full-run/artifacts-and-comments.cjs',
   '.github/scripts/runtime-agent-full-run/build-runner-config.cjs',
+  '.github/scripts/runtime-agent-full-run/run-runtime-agent-task.cjs',
+  '.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs',
+  '.github/scripts/runtime-agent-full-run/extract-engine-data.sh',
+  '.github/scripts/runtime-agent-full-run/update-runner-workspace-pr.cjs',
   '.github/scripts/runtime-agent-full-run/lib/common.cjs',
-  'wordpress/scripts/agent/run-runtime-agent-task.cjs',
 ];
+
+const workflow = fs.readFileSync(path.join(root, '.github/workflows/runtime-agent-full-run.yml'), 'utf8');
+if (/wordpress\/scripts\/agent\/(run-runtime-agent-task|run-host-runner-lifecycle|extract-engine-data|update-runner-workspace-pr)/.test(workflow)) {
+  failures.push('runtime-agent-full-run.yml: generic workflow must invoke runtime-agent-full-run scripts, not wordpress/scripts/agent');
+}
+if (/default:\s*wp-codebox/.test(workflow)) {
+  failures.push('runtime-agent-full-run.yml: generic workflow must not default to wp-codebox');
+}
 
 const failures = [];
 const compatibilityReferences = [];

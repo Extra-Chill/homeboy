@@ -133,7 +133,9 @@ shorthand for direct ability execution. Mount downloaded GitHub Actions
 artifacts with `runtime_mounts`, and enforce typed outputs with
 `artifact_declarations` plus `runtime_output_projections`.
 
-New callers should select runtimes with `runtime` and `profile`. Existing
+New callers should select runtimes with `runtime` and `profile`. Omitting
+`runtime` selects the neutral `local-shell` runtime for generic contract smokes;
+WordPress callers must pass `runtime: wp-codebox` explicitly. Existing
 `runtime_provider` / `runtime_profile` callers remain supported, and the legacy
 `codebox` runtime value resolves to `wp-codebox`.
 
