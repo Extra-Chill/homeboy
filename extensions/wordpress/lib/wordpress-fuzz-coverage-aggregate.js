@@ -172,15 +172,43 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 	totals.coveragePercent = totals.discovered + totals.exercised === 0
 		? 0
 		: Math.round((totals.exercised / (totals.discovered + totals.exercised)) * 10000) / 100;
+	const coverageSummary = buildCoverageSummary(totals, coverageItems);
+	const coverageGaps = buildCoverageGaps(coverageItems);
 
 	return {
 		schema: 'homeboy/wordpress-fuzz-coverage-aggregate/v1',
 		type: 'wordpress-fuzz-coverage-aggregate',
 		totals,
+		coverage_summary: coverageSummary,
+		coverage_gaps: coverageGaps,
 		byType: buildByType(coverageItems),
 		items: coverageItems,
-		gapReport: buildGapReport(coverageItems),
+		gapReport: buildGapReport(coverageGaps),
+		metadata: {
+			surface_count: coverageSummary.surface_count,
+			exercised_count: coverageSummary.exercised_count,
+			skipped_count: coverageSummary.skipped_count,
+			failed_count: coverageSummary.failed_count,
+		},
 	};
+}
+
+function buildCoverageSummary(totals, items) {
+	return {
+		schema: 'homeboy/wordpress-fuzz-coverage-summary/v1',
+		surface_count: totals.total,
+		exercised_count: totals.exercised,
+		skipped_count: totals.skipped,
+		failed_count: totals.failed,
+		discovered_count: totals.discovered,
+		coverage_percent: totals.coveragePercent,
+		by_status: Object.fromEntries(STATUS_ORDER.map((status) => [status, totals[status]])),
+		by_type: buildByType(items),
+	};
+}
+
+function buildCoverageGaps(items) {
+	return items.filter((item) => item.status !== 'exercised');
 }
 
 function buildByType(items) {
@@ -196,8 +224,7 @@ function buildByType(items) {
 	return Object.fromEntries(Object.entries(byType).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function buildGapReport(items) {
-	const gapItems = items.filter((item) => item.status !== 'exercised');
+function buildGapReport(gapItems) {
 	return {
 		schema: 'homeboy/wordpress-fuzz-coverage-gap-report/v1',
 		totals: Object.fromEntries(STATUS_ORDER.filter((status) => status !== 'exercised').map((status) => [status, gapItems.filter((item) => item.status === status).length])),
