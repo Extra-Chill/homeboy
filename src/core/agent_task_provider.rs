@@ -1803,6 +1803,12 @@ fn run_provider_command_once(
             json!({ "provider": provider.id }),
         );
     };
+
+    if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
+    {
+        return preflight;
+    }
+
     let timeout = request
         .limits
         .timeout_ms
@@ -1962,6 +1968,145 @@ fn run_provider_command_once(
             json!({ "provider": provider.id, "command": command, "exit_code": output.status.code(), "stderr": stderr, "stdout": stdout }),
         ),
     }
+}
+
+fn provider_preflight_failure(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    program: &str,
+    cwd: &Option<PathBuf>,
+    command: &str,
+) -> Option<AgentTaskOutcome> {
+    let digest = provider_preflight_digest(request, provider, program, cwd, command);
+    if digest.failures.is_empty() {
+        return None;
+    }
+
+    Some(failure_outcome(
+        request,
+        AgentTaskOutcomeStatus::ProviderError,
+        digest.classification,
+        digest.diagnostic_class,
+        digest.message,
+        digest.data,
+    ))
+}
+
+struct ProviderPreflightDigest {
+    diagnostic_class: &'static str,
+    classification: AgentTaskFailureClassification,
+    message: String,
+    data: Value,
+    failures: Vec<Value>,
+}
+
+fn provider_preflight_digest(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    program: &str,
+    cwd: &Option<PathBuf>,
+    command: &str,
+) -> ProviderPreflightDigest {
+    let mut failures = Vec::new();
+    let mut diagnostic_class = "agent_task.provider_preflight_failed";
+    let mut classification = AgentTaskFailureClassification::Provider;
+
+    if !provider_command_program_available(program) {
+        diagnostic_class = "agent_task.provider_command_unavailable";
+        failures.push(json!({
+            "field": "command",
+            "message": format!("provider command executable '{program}' is not available"),
+            "remediation": format!("Install '{program}' on the runner or configure the provider invocation with an absolute executable path available to the runner PATH."),
+        }));
+    }
+
+    if let Some(cwd) = cwd {
+        if !cwd.is_dir() {
+            failures.push(json!({
+                "field": "invocation.cwd",
+                "message": format!("provider command working directory '{}' does not exist", cwd.display()),
+                "remediation": "Fix the provider runtime path or invocation.cwd template so it resolves to an existing directory on the runner.",
+            }));
+        }
+    }
+
+    let secret_status = provider_secret_env_plan_with_status(provider, request).status;
+    let missing_secret_env: Vec<String> = secret_status
+        .iter()
+        .filter(|status| !status.configured)
+        .map(|status| status.name.clone())
+        .collect();
+    if !missing_secret_env.is_empty() {
+        diagnostic_class = "agent_task.secret_env_missing";
+        classification = AgentTaskFailureClassification::InvalidInput;
+        failures.push(json!({
+            "field": "secret_env",
+            "message": format!("missing provider secret env: {}", missing_secret_env.join(", ")),
+            "remediation": "Set the missing secret_env values in the runner environment or Homeboy secret-env configuration before launching the sandbox.",
+        }));
+    }
+
+    let message = if failures.len() == 1 {
+        failures[0]
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("agent-task provider preflight failed")
+            .to_string()
+    } else {
+        format!(
+            "agent-task provider preflight failed with {} actionable issue(s)",
+            failures.len()
+        )
+    };
+
+    let digest_failures = failures.clone();
+    let data = json!({
+        "provider": provider.id,
+        "backend": provider.backend,
+        "command": command,
+        "program": program,
+        "path": std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
+        "runtime_path_provenance": runtime_path_provenance(provider),
+        "secret_env_status": secret_status,
+        "failures": failures,
+    });
+
+    ProviderPreflightDigest {
+        diagnostic_class,
+        classification,
+        message,
+        data,
+        failures: digest_failures,
+    }
+}
+
+fn provider_command_program_available(program: &str) -> bool {
+    let program = program.trim();
+    if program.is_empty() {
+        return false;
+    }
+    let path = Path::new(program);
+    if path.components().count() > 1 || path.is_absolute() {
+        return executable_file(path);
+    }
+    resolve_executable_candidate(program).is_some()
+}
+
+fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
+    let (path, source) = if let Some(runtime_path) = provider.runtime_path.as_deref() {
+        (runtime_path, "runtime_path")
+    } else if let Some(extension_path) = provider.extension_path.as_deref() {
+        (extension_path, "extension_path_fallback")
+    } else {
+        ("", "missing")
+    };
+    json!({
+        "runtime_id": provider.runtime_id.as_deref(),
+        "runtime_path": path,
+        "source": source,
+        "extension_id": provider.extension_id.as_deref(),
+        "extension_path": provider.extension_path.as_deref(),
+    })
 }
 
 fn parse_provider_outcome_from_mixed_output(output: &str) -> Option<AgentTaskOutcome> {
@@ -3171,6 +3316,64 @@ mod tests {
             metadata: Value::Null,
         };
         (request, provider)
+    }
+
+    #[test]
+    fn provider_preflight_reports_missing_command_before_spawn() {
+        let (request, provider) = request(
+            "missing-command",
+            "homeboy-definitely-missing-provider-command --json".to_string(),
+        );
+
+        let outcome = run_provider_command_once(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.provider_command_unavailable"
+        );
+        assert_eq!(
+            outcome.diagnostics[0].data["program"],
+            "homeboy-definitely-missing-provider-command"
+        );
+        assert!(outcome.diagnostics[0].data["failures"][0]["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("PATH"));
+    }
+
+    #[test]
+    fn provider_preflight_reports_missing_secret_readiness() {
+        let (request, mut provider) = request(
+            "missing-secret",
+            std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+        );
+        provider.secret_requirements = vec![AgentTaskProviderSecretRequirement {
+            name: None,
+            env: vec!["HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST".to_string()],
+            required: Some(true),
+            purpose: Some("test".to_string()),
+            extra: BTreeMap::new(),
+        }];
+
+        let outcome = run_provider_command_once(&request, &provider);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.secret_env_missing"
+        );
+        assert_eq!(
+            outcome.diagnostics[0].data["secret_env_status"][0]["name"],
+            "HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST"
+        );
+        assert_eq!(
+            outcome.diagnostics[0].data["secret_env_status"][0]["configured"],
+            false
+        );
     }
 
     #[test]
