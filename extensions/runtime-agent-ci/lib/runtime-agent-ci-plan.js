@@ -2,16 +2,21 @@
 
 const {
   AGENT_TASK_RUNNER_SPEC_SCHEMA,
-  agentTaskRequestFromRunnerSpec,
-  agentTaskRunnerSpec,
   validateAgentTaskRunnerSpec,
 } = require('./agent-task-runner-contract');
+const {
+  GENERIC_AGENT_TASK_PLAN_SCHEMA,
+  GENERIC_AGENT_TASK_REQUEST_SCHEMA,
+  genericAgentTaskPlan,
+  genericAgentTaskRequest,
+  genericAgentTaskRunnerSpec,
+  normalizeRuntimeExecutionDescriptor,
+} = require('./generic-agent-task-plan');
 const { normalizeRuntimeId } = require('./runtime-provider-resolver.cjs');
 
-const AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
-const AGENT_TASK_REQUEST_SCHEMA = 'homeboy/agent-task-request/v1';
+const AGENT_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
+const AGENT_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
 const RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID = 'runtime-agent-ci';
-const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 
 function runtimeAgentCiRuntimeTaskRequest(options = {}, context = {}) {
   const taskId = requiredString(options.taskId || options.task_id, 'taskId');
@@ -37,9 +42,8 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
     ...options,
     ability,
   }, context);
-  const runnerRequest = agentTaskRequestFromRunnerSpec({ runnerSpec });
 
-  return stripUndefined({
+  return genericAgentTaskRequest({
     schema: AGENT_TASK_REQUEST_SCHEMA,
     task_id: taskId,
     group_key: options.groupKey || options.group_key,
@@ -47,15 +51,12 @@ function runtimeAgentCiAbilityTaskRequest(options = {}, context = {}) {
     cwd: options.cwd,
     repo: options.repo,
     workspace: options.workspace,
-    executor: runnerRequest.executor,
     instructions: options.instructions || '',
     inputs: {
       ...(options.inputs || {}),
       ...(options.title ? { title: options.title } : {}),
     },
-    limits: runnerRequest.limits,
-    artifact_declarations: runnerRequest.artifact_declarations,
-    expected_artifacts: runnerRequest.expected_artifacts,
+    runnerSpec,
   });
 }
 
@@ -64,7 +65,7 @@ function runtimeAgentCiRunnerSpec(options = {}, context = {}) {
   const config = taskExecutorConfig(options);
   const runtime = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
   const normalizedRuntime = runtime ? normalizeRuntimeId(runtime) : runtime;
-  return agentTaskRunnerSpec({
+  return genericAgentTaskRunnerSpec({
     backend: options.backend || options.runtimeBackend || options.runtime_backend || runtimeBackendForRuntime(normalizedRuntime),
     runtime: normalizedRuntime,
     config,
@@ -128,26 +129,6 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
   });
 }
 
-function normalizeRuntimeExecutionDescriptor(descriptor, runtimeProfile = {}) {
-  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
-    return null;
-  }
-  if (Object.keys(descriptor).length === 0) {
-    return null;
-  }
-  const kind = descriptor.kind || descriptor.type || (descriptor.workflow ? 'workflow' : descriptor.bundle || descriptor.source || descriptor.path ? 'bundle' : 'ability');
-  const ability = descriptor.ability || abilityForRuntimeExecutionKind(kind, runtimeProfile);
-  const input = runtimeExecutionInput(descriptor, kind);
-  return stripUndefined({
-    schema: descriptor.schema || RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
-    kind,
-    ability,
-    input,
-    outputs: descriptor.outputs,
-    metadata: descriptor.metadata,
-  });
-}
-
 function runtimeAgentCiBundleRuntimeExecution(options = {}, input = {}) {
   const bundle = options.bundle && typeof options.bundle === 'object' && !Array.isArray(options.bundle) ? options.bundle : {};
   const source = options.source || options.bundlePath || options.bundle_path || bundle.source || bundle.path || bundle.bundle_path || (typeof options.bundle === 'string' ? options.bundle : undefined);
@@ -199,44 +180,6 @@ function runtimeAgentCiFirstNonEmptyArray(primary = [], legacy = []) {
   return Array.isArray(primary) && primary.length > 0 ? primary : legacy;
 }
 
-function abilityForRuntimeExecutionKind(kind, runtimeProfile = {}) {
-  if (kind === 'bundle') {
-    return runtimeProfile.runtime_bundle_ability || runtimeProfile.runtime_task_ability;
-  }
-  if (kind === 'workflow') {
-    return runtimeProfile.runtime_workflow_ability || runtimeProfile.runtime_task_ability;
-  }
-  return runtimeProfile.runtime_task_ability;
-}
-
-function runtimeExecutionInput(descriptor, kind) {
-  const explicitInput = descriptor.input && typeof descriptor.input === 'object' && !Array.isArray(descriptor.input)
-    ? descriptor.input
-    : {};
-  const bundle = descriptor.bundle && typeof descriptor.bundle === 'object' && !Array.isArray(descriptor.bundle)
-    ? descriptor.bundle
-    : {};
-  const workflow = descriptor.workflow && typeof descriptor.workflow === 'object' && !Array.isArray(descriptor.workflow)
-    ? descriptor.workflow
-    : descriptor.workflow;
-  const source = descriptor.source || descriptor.path || bundle.source || bundle.path || bundle.bundle_path;
-  const normalizedBundle = Object.keys(bundle).length > 0 ? bundle : undefined;
-  const normalizedWorkflow = workflow && (typeof workflow !== 'object' || Object.keys(workflow).length > 0) ? workflow : undefined;
-  return stripUndefined({
-    ...(kind === 'bundle' ? {
-      source,
-      bundle: normalizedBundle,
-      workflow: normalizedWorkflow,
-    } : {}),
-    ...(kind === 'workflow' ? {
-      source,
-      path: descriptor.path,
-      workflow: normalizedWorkflow,
-    } : {}),
-    ...explicitInput,
-  });
-}
-
 function resolveRuntimeAgentCiRuntimeProfile(options = {}) {
   const runtimeProfiles = options.runtimeProfiles || options.runtime_profiles || options.config?.runtime_profiles || options.config?.runtimeProfiles || {};
   const runtimeProfilePresets = options.runtimeProfilePresets || options.runtime_profile_presets || options.config?.runtime_profile_presets || options.config?.runtimeProfilePresets || {};
@@ -270,15 +213,10 @@ function runtimeAgentCiRuntimeProfilesForOptions(options, runtimeProfile) {
 const runtimeProfilesForOptions = runtimeAgentCiRuntimeProfilesForOptions;
 
 function runtimeAgentCiPlan(options = {}) {
-  const planId = requiredString(options.planId || options.plan_id, 'planId');
-  const tasks = normalizeArray(options.tasks);
-  if (tasks.length === 0) {
-    throw new Error('tasks must contain at least one task request.');
-  }
-  return stripUndefined({
+  return genericAgentTaskPlan({
     schema: AGENT_TASK_PLAN_SCHEMA,
-    plan_id: planId,
-    tasks,
+    plan_id: options.planId || options.plan_id,
+    tasks: options.tasks,
     options: options.options,
     metadata: options.metadata,
   });
@@ -309,7 +247,9 @@ module.exports = {
   AGENT_TASK_REQUEST_SCHEMA,
   AGENT_TASK_RUNNER_SPEC_SCHEMA,
   RUNTIME_AGENT_CI_RUNTIME_PROFILE_ID,
-  agentTaskRequestFromRunnerSpec,
+  genericAgentTaskPlan,
+  genericAgentTaskRequest,
+  genericAgentTaskRunnerSpec,
   runtimeAgentCiAbilityTaskRequest,
   runtimeAgentCiBundleRuntimeExecution,
   runtimeAgentCiFirstNonEmptyArray,
