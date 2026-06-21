@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -712,6 +712,8 @@ pub struct AgentTaskLoopControllerDiagnostics {
     pub summary: AgentTaskLoopControllerDiagnosticSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_gates: Vec<AgentTaskLoopAcceptanceGateDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -719,6 +721,34 @@ pub struct AgentTaskLoopControllerDiagnosticSummary {
     pub pending_action_count: usize,
     pub stale_pending_action_count: usize,
     pub orphaned_pending_action_count: usize,
+    pub acceptance_gate_count: usize,
+    pub missing_acceptance_gate_count: usize,
+    pub failed_acceptance_gate_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopAcceptanceGateStatus {
+    Satisfied,
+    Missing,
+    Failed,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopAcceptanceGateDiagnostic {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    pub status: AgentTaskLoopAcceptanceGateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<AgentTaskGateBundleStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1560,6 +1590,15 @@ where
     let mut pending_actions = Vec::new();
     let mut stale_pending_action_count = 0;
     let mut orphaned_pending_action_count = 0;
+    let acceptance_gates = acceptance_gate_diagnostics(record);
+    let missing_acceptance_gate_count = acceptance_gates
+        .iter()
+        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Missing)
+        .count();
+    let failed_acceptance_gate_count = acceptance_gates
+        .iter()
+        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Failed)
+        .count();
 
     for action in record
         .next_actions
@@ -1621,9 +1660,80 @@ where
             pending_action_count: pending_actions.len(),
             stale_pending_action_count,
             orphaned_pending_action_count,
+            acceptance_gate_count: acceptance_gates.len(),
+            missing_acceptance_gate_count,
+            failed_acceptance_gate_count,
         },
         pending_actions,
+        acceptance_gates,
     })
+}
+
+fn acceptance_gate_diagnostics(
+    record: &AgentTaskLoopControllerRecord,
+) -> Vec<AgentTaskLoopAcceptanceGateDiagnostic> {
+    let mut declared = BTreeSet::new();
+    for action in &record.next_actions {
+        if let AgentTaskLoopPolicyAction::RunGates {
+            bundle_id,
+            entity_id,
+        } = &action.action
+        {
+            declared.insert((bundle_id.clone(), entity_id.clone()));
+        }
+    }
+    for result in &record.gate_results {
+        declared.insert((result.bundle_id.clone(), result.entity_id.clone()));
+    }
+    for bundle in &record.gate_bundles {
+        if !declared
+            .iter()
+            .any(|(bundle_id, _)| bundle_id == &bundle.bundle_id)
+        {
+            declared.insert((bundle.bundle_id.clone(), None));
+        }
+    }
+
+    declared
+        .into_iter()
+        .map(|(bundle_id, entity_id)| {
+            let result = record
+                .gate_results
+                .iter()
+                .rev()
+                .find(|result| result.bundle_id == bundle_id && result.entity_id == entity_id);
+            let status = match result.map(|result| result.status) {
+                Some(AgentTaskGateBundleStatus::Passed) => {
+                    AgentTaskLoopAcceptanceGateStatus::Satisfied
+                }
+                Some(AgentTaskGateBundleStatus::Failed) => {
+                    AgentTaskLoopAcceptanceGateStatus::Failed
+                }
+                Some(AgentTaskGateBundleStatus::Warn) => AgentTaskLoopAcceptanceGateStatus::Warning,
+                None => AgentTaskLoopAcceptanceGateStatus::Missing,
+            };
+            let problems = match status {
+                AgentTaskLoopAcceptanceGateStatus::Missing => {
+                    vec!["acceptance gate has no recorded result".to_string()]
+                }
+                AgentTaskLoopAcceptanceGateStatus::Failed => {
+                    vec!["acceptance gate recorded a failed result".to_string()]
+                }
+                AgentTaskLoopAcceptanceGateStatus::Satisfied
+                | AgentTaskLoopAcceptanceGateStatus::Warning => Vec::new(),
+            };
+
+            AgentTaskLoopAcceptanceGateDiagnostic {
+                bundle_id,
+                entity_id,
+                status,
+                result_id: result.map(|result| result.result_id.clone()),
+                result_status: result.map(|result| result.status),
+                recorded_at: result.map(|result| result.recorded_at.clone()),
+                problems,
+            }
+        })
+        .collect()
 }
 
 pub fn create_controller(
@@ -2438,6 +2548,67 @@ mod tests {
         assert!(action
             .problems
             .contains(&"referenced run record is missing".to_string()));
+    }
+
+    #[test]
+    fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "verify", "v1");
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "required-artifacts".to_string(),
+            description: "required artifact contract".to_string(),
+            checks: Vec::new(),
+        });
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "quality".to_string(),
+            description: "quality contract".to_string(),
+            checks: Vec::new(),
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunGates {
+                bundle_id: "quality".to_string(),
+                entity_id: Some("artifact:summary".to_string()),
+            },
+            "run quality gate",
+        );
+        record.gate_results.push(AgentTaskGateBundleResult {
+            result_id: "gate-result-1".to_string(),
+            bundle_id: "quality".to_string(),
+            entity_id: Some("artifact:summary".to_string()),
+            run_id: None,
+            status: AgentTaskGateBundleStatus::Failed,
+            checks: Vec::new(),
+            recorded_at: "2026-06-11T00:00:00Z".to_string(),
+        });
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.summary.acceptance_gate_count, 2);
+        assert_eq!(diagnostics.summary.missing_acceptance_gate_count, 1);
+        assert_eq!(diagnostics.summary.failed_acceptance_gate_count, 1);
+        assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+            gate.bundle_id == "required-artifacts"
+                && gate.entity_id.is_none()
+                && gate.status == AgentTaskLoopAcceptanceGateStatus::Missing
+                && gate
+                    .problems
+                    .contains(&"acceptance gate has no recorded result".to_string())
+        }));
+        assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+            gate.bundle_id == "quality"
+                && gate.entity_id.as_deref() == Some("artifact:summary")
+                && gate.status == AgentTaskLoopAcceptanceGateStatus::Failed
+                && gate.result_id.as_deref() == Some("gate-result-1")
+                && gate
+                    .problems
+                    .contains(&"acceptance gate recorded a failed result".to_string())
+        }));
     }
 
     #[test]
