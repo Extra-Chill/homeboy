@@ -93,6 +93,13 @@ const bundleRun = isAgentBundle && process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN
           file_refs: [{ path: input.artifacts_path + '/example-review.json', mime: 'application/json' }]
         }
       },
+      artifacts: {
+        result: { path: input.artifacts_path + '/datamachine-result.json', mime: 'application/json' }
+      },
+      transcripts: {
+        json: input.artifacts_path + '/transcript.json',
+        summary: input.artifacts_path + '/transcript.md'
+      },
       workflow: { steps: [{ step_type: 'ai' }] },
       wait_result: { success: true, terminal_state: 'completed' },
       engine_data: process.env.FIXTURE_WP_CODEBOX_BUNDLE_RUN_TOOL_RECORDERS
@@ -1112,6 +1119,8 @@ try {
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.schema, 'datamachine/agent-bundle-run/v1');
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.job_status, 'completed');
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.engine_data.example_agent.issue_number, 123);
+  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.artifacts.result.mime, 'application/json');
+  assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.transcripts.summary.endsWith('/transcript.md'), true);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metadata.dry_run, true);
   assert.equal(canonicalBundleRunOutput.run.agentResult.scenarios[0].metrics.workflow_step_count, 1);
   assert.equal(canonicalBundleRunOutput.outputs.typed_artifacts.example_review.type, 'ExampleReviewArtifact');
