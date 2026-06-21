@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.4] - 2026-06-21
+
+### Changed
+- Add WordPress performance observation aggregation
+
 ## [3.12.3] - 2026-06-21
 
 ### Changed
