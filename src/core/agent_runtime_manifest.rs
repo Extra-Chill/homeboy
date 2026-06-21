@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_task_provider::{
@@ -142,10 +142,28 @@ pub(crate) fn runtime_materialization_plan(
 }
 
 pub(crate) fn discover_agent_runtime_manifests() -> Vec<AgentRuntimeManifest> {
-    let mut manifests = discover_standalone_agent_runtime_manifests();
-    manifests.extend(discover_agent_runtime_manifests_from_extensions(
-        &load_all_extensions().unwrap_or_default(),
-    ));
+    merge_agent_runtime_manifests(
+        discover_standalone_agent_runtime_manifests(),
+        discover_agent_runtime_manifests_from_extensions(
+            &load_all_extensions().unwrap_or_default(),
+        ),
+    )
+}
+
+fn merge_agent_runtime_manifests(
+    standalone_manifests: Vec<AgentRuntimeManifest>,
+    extension_manifests: Vec<AgentRuntimeManifest>,
+) -> Vec<AgentRuntimeManifest> {
+    let extension_runtime_ids: BTreeSet<String> = extension_manifests
+        .iter()
+        .map(|manifest| manifest.id.clone())
+        .collect();
+    let mut manifests = extension_manifests;
+    manifests.extend(
+        standalone_manifests
+            .into_iter()
+            .filter(|manifest| !extension_runtime_ids.contains(manifest.id.as_str())),
+    );
     manifests
 }
 
@@ -237,8 +255,14 @@ pub(crate) fn discover_agent_runtime_manifests_from_extensions(
 }
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
+    agent_task_executor_providers_from_runtime_manifests(discover_agent_runtime_manifests())
+}
+
+fn agent_task_executor_providers_from_runtime_manifests(
+    runtime_manifests: Vec<AgentRuntimeManifest>,
+) -> Vec<AgentTaskExecutorProvider> {
     let mut providers = Vec::new();
-    for runtime_manifest in discover_agent_runtime_manifests() {
+    for runtime_manifest in runtime_manifests {
         let materialization_plan = runtime_materialization_plan(&runtime_manifest);
         for mut provider in runtime_manifest.agent_task_executors {
             provider.extension_id = runtime_manifest.extension_id.clone();
@@ -601,6 +625,72 @@ mod tests {
             assert_eq!(
                 materialization_plan.env_passthrough,
                 vec!["STANDALONE_RUNTIME_HOME".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn extension_agent_runtime_wins_over_same_id_standalone_cache() {
+        crate::test_support::with_isolated_home(|home| {
+            let runtime_dir = home
+                .path()
+                .join(".config/homeboy/agent-runtimes/sample-runtime");
+            std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+            std::fs::write(
+                runtime_dir.join("sample-runtime.json"),
+                json!({
+                    "schema": AGENT_RUNTIME_MANIFEST_SCHEMA,
+                    "id": "ignored-on-disk",
+                    "label": "Stale cached sample runtime",
+                    "agent_task_executors": [provider_json("sample.default", "sample")],
+                    "runtime_metadata": { "origin": "stale-cache" }
+                })
+                .to_string(),
+            )
+            .expect("runtime manifest");
+
+            let standalone = discover_standalone_agent_runtime_manifests();
+            let mut extension = extension("sample-runtime-extension");
+            extension.agent_runtimes.push(
+                serde_json::from_value(json!({
+                    "id": "sample-runtime",
+                    "label": "Extension sample runtime",
+                    "agent_task_executors": [{
+                        "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+                        "id": "sample.default",
+                        "backend": "sample",
+                        "command": "fresh-extension-executor",
+                        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
+                        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA
+                    }],
+                    "runtime_metadata": { "origin": "extension" }
+                }))
+                .expect("extension runtime"),
+            );
+            let extension_manifests =
+                discover_agent_runtime_manifests_from_extensions(&[extension]);
+
+            let merged = merge_agent_runtime_manifests(standalone, extension_manifests);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].id, "sample-runtime");
+            assert_eq!(
+                merged[0].extension_id.as_deref(),
+                Some("sample-runtime-extension")
+            );
+            assert_eq!(merged[0].extra["runtime_metadata"]["origin"], "extension");
+
+            let providers = agent_task_executor_providers_from_runtime_manifests(merged);
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].id, "sample.default");
+            assert_eq!(providers[0].runtime_id.as_deref(), Some("sample-runtime"));
+            assert_eq!(
+                providers[0].extension_id.as_deref(),
+                Some("sample-runtime-extension")
+            );
+            assert_eq!(providers[0].command, "fresh-extension-executor");
+            assert_eq!(
+                providers[0].runtime_path.as_deref(),
+                Some("/extensions/sample-runtime-extension")
             );
         });
     }
