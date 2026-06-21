@@ -194,6 +194,8 @@ mod tests {
                 .to_string();
             let patch_path = std::path::Path::new(&workspace).join("changes.patch");
             std::fs::write(&patch_path, "diff --git a/file b/file\n").expect("patch fixture");
+            let transcript_path = std::path::Path::new(&workspace).join("transcript.log");
+            std::fs::write(&transcript_path, "cook transcript\n").expect("transcript fixture");
             let (value, exit_code) = dispatch_service::run_cook_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Cook a patch.".to_string()),
@@ -202,7 +204,10 @@ mod tests {
                     ..DispatchArgOverrides::default()
                 })
                 .into(),
-                PatchExecutor { patch_path },
+                PatchExecutor {
+                    patch_path,
+                    transcript_path,
+                },
             )
             .expect("cook run");
 
@@ -249,6 +254,7 @@ mod tests {
                 .into(),
                 PatchExecutor {
                     patch_path: std::path::PathBuf::new(),
+                    transcript_path: std::path::PathBuf::new(),
                 },
             )
             .expect("queued cook");
@@ -358,6 +364,7 @@ mod tests {
 
     struct PatchExecutor {
         patch_path: std::path::PathBuf,
+        transcript_path: std::path::PathBuf,
     }
 
     impl AgentTaskExecutorAdapter for PatchExecutor {
@@ -372,20 +379,36 @@ mod tests {
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("patch ready".to_string()),
                 failure_classification: None,
-                artifacts: vec![AgentTaskArtifact {
-                    schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                    id: "patch-1".to_string(),
-                    kind: "patch".to_string(),
-                    name: Some("changes.patch".to_string()),
-                    path: Some(self.patch_path.display().to_string()),
-                    url: None,
-                    mime: None,
-                    size_bytes: std::fs::metadata(&self.patch_path)
-                        .ok()
-                        .map(|metadata| metadata.len()),
-                    sha256: None,
-                    metadata: Value::Null,
-                }],
+                artifacts: vec![
+                    AgentTaskArtifact {
+                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                        id: "patch-1".to_string(),
+                        kind: "patch".to_string(),
+                        name: Some("changes.patch".to_string()),
+                        path: Some(self.patch_path.display().to_string()),
+                        url: None,
+                        mime: None,
+                        size_bytes: std::fs::metadata(&self.patch_path)
+                            .ok()
+                            .map(|metadata| metadata.len()),
+                        sha256: None,
+                        metadata: Value::Null,
+                    },
+                    AgentTaskArtifact {
+                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                        id: "transcript-1".to_string(),
+                        kind: "transcript".to_string(),
+                        name: Some("transcript.log".to_string()),
+                        path: Some(self.transcript_path.display().to_string()),
+                        url: None,
+                        mime: None,
+                        size_bytes: std::fs::metadata(&self.transcript_path)
+                            .ok()
+                            .map(|metadata| metadata.len()),
+                        sha256: None,
+                        metadata: Value::Null,
+                    },
+                ],
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),
