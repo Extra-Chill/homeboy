@@ -45,9 +45,9 @@ function buildConfig(env) {
 
   const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', false);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || '');
-  const providerCredentials = providerPlugin.credentials || {};
+  const providerSecretEnvMapping = providerPlugin.provider_secret_env || {};
   const providerBenchEnv = {};
-  for (const providerEnvName of Object.values(providerCredentials)) {
+  for (const providerEnvName of Object.values(providerSecretEnvMapping)) {
     if (typeof providerEnvName !== 'string' || providerEnvName.length === 0) {
       continue;
     }
@@ -130,7 +130,7 @@ function buildConfig(env) {
     provider: env.PROVIDER || '',
     model: env.MODEL || '',
     provider_register_function: providerPlugin.register_function || '',
-    provider_credentials: providerCredentials,
+    provider_secret_env_mapping: providerSecretEnvMapping,
     ...(runtimeBin ? { runtime_bin: runtimeBin } : {}),
     runtime_components: {
       ...(runtime.paths.runtime_component ? { runtime: runtime.paths.runtime_component } : {}),

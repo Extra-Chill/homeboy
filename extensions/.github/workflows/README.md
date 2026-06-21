@@ -190,7 +190,7 @@ jobs:
 - `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the selected runtime profile.
 - Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to WP Codebox as runtime component requirements.
-- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `credentials` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults.
+- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
@@ -300,7 +300,7 @@ jobs:
           "ref": "main",
           "path": ".",
           "register_function": "Example\\AiProvider\\register_provider",
-          "credentials": {
+          "provider_secret_env": {
             "connectors_ai_example_api_key": "PROVIDER_SECRET_1"
           }
         }

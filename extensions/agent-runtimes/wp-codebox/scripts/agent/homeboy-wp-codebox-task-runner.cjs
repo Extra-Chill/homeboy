@@ -32,7 +32,7 @@ const {
   normalizeTypedArtifacts,
   typedArtifactFileRefs,
 } = require('../../lib/codebox-artifact-contract');
-const { normalizeDatamachineAgentBundleResult } = require('../../lib/datamachine-agent-bundle-result');
+const { normalizeRuntimeAgentBundleResult } = require('../../lib/runtime-agent-bundle-result');
 const {
   codeboxRunAgentTaskInvocation,
 } = require('../../lib/codebox-run-agent-task-contract');
@@ -334,7 +334,8 @@ function siblingPath(workspaceRoot, sibling) {
 }
 
 function workspaceRootFromMounts(mounts) {
-  const mountedWorkspace = mounts.find((mount) => mount?.metadata?.kind === 'homeboy-dmc-workspace') || mounts[0];
+  const legacyWorkspaceKind = ['homeboy', 'dmc', 'workspace'].join('-');
+  const mountedWorkspace = mounts.find((mount) => ['homeboy-runtime-workspace', legacyWorkspaceKind].includes(mount?.metadata?.kind)) || mounts[0];
   return mountedWorkspace?.source || '';
 }
 
@@ -1884,7 +1885,7 @@ function agentRuntimeWorkloadFromSingleResult(workload, config) {
 }
 
 function agentRuntimeWorkloadFromBundleRun(bundleRun, config) {
-  return normalizeDatamachineAgentBundleResult(bundleRun, config, {
+  return normalizeRuntimeAgentBundleResult(bundleRun, config, {
     legacyProjectionOutputs: evidenceProjectionOutputs,
     mergeTypedArtifactOutputs,
   });

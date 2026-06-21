@@ -20,11 +20,14 @@ function main() {
   };
 
   if (includeCredentials) {
-    const credentials = jqAlternative(providerPlugin.credentials, provider === 'openai' ? { connectors_ai_openai_api_key: 'OPENAI_API_KEY' } : {});
-    if (!credentials || Array.isArray(credentials) || typeof credentials !== 'object') {
-      throw new Error('provider_plugin.credentials must be a JSON object');
+    const providerSecretEnv = jqAlternative(
+      providerPlugin.provider_secret_env || providerPlugin.providerSecretEnv || providerPlugin.provider_secret_env_mapping || providerPlugin.providerSecretEnvMapping || providerPlugin.credentials,
+      provider === 'openai' ? { connectors_ai_openai_api_key: 'OPENAI_API_KEY' } : {}
+    );
+    if (!providerSecretEnv || Array.isArray(providerSecretEnv) || typeof providerSecretEnv !== 'object') {
+      throw new Error('provider_plugin.provider_secret_env must be a JSON object');
     }
-    normalized.credentials = credentials;
+    normalized.provider_secret_env = providerSecretEnv;
   }
 
   process.stdout.write(`${JSON.stringify(normalized)}\n`);

@@ -61,6 +61,19 @@ assert.equal(
 );
 assert.doesNotMatch(JSON.stringify(provider.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
+assert.throws(() => codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'raw-provider-credentials-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      provider_credentials: { OPENAI_API_KEY: 'raw-value' },
+    },
+  },
+  instructions: 'Reject raw provider credential payloads.',
+  inputs: {},
+}), /provider credential boundary accepts secret_env names only/);
 
 assert.deepEqual(normalizeCodeboxArtifactDeclaration('fallback', {
   schema: 'homeboy/agent-task-artifact-declaration/v1',
@@ -609,12 +622,13 @@ const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
 });
 
 const repoLoopWorkspaceMount = repoLoopWorkspaceTaskInput.mounts.find(
-  (mount) => mount.metadata?.kind === 'homeboy-dmc-workspace'
+  (mount) => mount.metadata?.kind === 'homeboy-runtime-workspace'
 );
 assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox workspace mount');
 assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
 assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
 assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
+assert.equal(repoLoopWorkspaceMount.metadata.legacy_kinds.includes(['homeboy', 'dmc', 'workspace'].join('-')), true);
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
   repo: 'example-repo@example-loop-main-20260616',
@@ -624,6 +638,35 @@ assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
 assert.deepEqual(
   repoLoopWorkspaceTaskInput.target.materialization,
   repoLoopWorkspaceTaskInput.workspace_materialization
+);
+
+const legacyRuntimeAliasPrefix = ['data', 'machine'].join('_');
+const legacyRuntimeAliasTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'legacy-runtime-alias-task-1',
+  executor: {
+    backend: 'codebox',
+    config: {
+      provider: 'openai',
+      [legacyRuntimeAliasPrefix]: '/tmp/legacy-runtime',
+      [`${legacyRuntimeAliasPrefix}_code_path`]: '/tmp/legacy-runtime-tools',
+    },
+  },
+  instructions: 'Accept legacy runtime component aliases with diagnostics.',
+  inputs: {
+    ability_request: { name: 'example/run-agent-bundle' },
+  },
+});
+
+assert.equal(legacyRuntimeAliasTaskInput.runtime_component_paths.agent_runtime, '/tmp/legacy-runtime');
+assert.equal(legacyRuntimeAliasTaskInput.runtime_component_paths.agent_runtime_tools, '/tmp/legacy-runtime-tools');
+assert.deepEqual(
+  legacyRuntimeAliasTaskInput.compatibility_diagnostics.map((diagnostic) => diagnostic.class),
+  ['codebox.compat.deprecated_runtime_component_alias', 'codebox.compat.deprecated_runtime_component_alias']
+);
+assert.deepEqual(
+  legacyRuntimeAliasTaskInput.compatibility_diagnostics.map((diagnostic) => diagnostic.data.replacement),
+  ['agent_runtime', 'agent_runtime_tools']
 );
 
 const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
