@@ -37,6 +37,7 @@ use super::{normalize_runner_command_env, resolve_runner_secret_env};
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
 pub(crate) const RUNNER_EXEC_WAIT_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS";
 pub(crate) const RUNNER_HOSTED_EXEC_ENV: &str = "HOMEBOY_RUNNER_HOSTED_EXEC";
+pub(crate) const RUNNER_ID_ENV: &str = "HOMEBOY_RUNNER_ID";
 
 mod extension_parity;
 mod policy;
@@ -1319,6 +1320,7 @@ pub(crate) fn prepare_runner_process(
     env.extend(request.env);
     if runner.kind != RunnerKind::Local {
         env.insert(RUNNER_HOSTED_EXEC_ENV.to_string(), "1".to_string());
+        env.insert(RUNNER_ID_ENV.to_string(), runner.id.clone());
     }
     if runner.kind == RunnerKind::Local {
         env.extend(resolve_runner_secret_env_for_command(
@@ -2773,6 +2775,7 @@ mod tests {
                 plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
                 Some("1")
             );
+            assert_eq!(plan.env.get(RUNNER_ID_ENV).map(String::as_str), Some("lab"));
         });
     }
 
@@ -2804,6 +2807,7 @@ mod tests {
             .expect("prepare local runner process");
 
             assert!(!plan.env.contains_key(RUNNER_HOSTED_EXEC_ENV));
+            assert!(!plan.env.contains_key(RUNNER_ID_ENV));
         });
     }
 

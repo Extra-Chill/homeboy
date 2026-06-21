@@ -84,7 +84,7 @@ const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/loop/run-plan/r
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
-const AGENT_TASK_STATUS_LAB_LABEL: &str = "agent-task status/logs/artifacts/review";
+const AGENT_TASK_STATUS_LAB_LABEL: &str = "agent-task run/run-next/status/logs/artifacts/review";
 const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
 const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
 pub(crate) const LINT_LAB_LABEL: &str = "lint";
@@ -140,8 +140,8 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         #[cfg(test)]
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
-        message_label: "agent-task status/logs/artifacts/review/providers",
-        hint_label: "agent-task status/logs/artifacts/review/providers",
+        message_label: "agent-task run/run-next/status/logs/artifacts/review/providers",
+        hint_label: "agent-task run/run-next/status/logs/artifacts/review/providers",
     },
     LabSupportedCommandSummary {
         #[cfg(test)]
@@ -317,6 +317,8 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Status(_)
+                    | agent_task::AgentTaskCommand::Run(_)
+                    | agent_task::AgentTaskCommand::RunNext
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
                     | agent_task::AgentTaskCommand::Review(_),

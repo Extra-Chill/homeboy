@@ -21,7 +21,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "agent-task dispatch/cook/loop/run-plan",
             "agent-task controller from-spec --resume/materialize/resume",
             "agent-task retry --run",
-            "agent-task status/logs/artifacts/review/providers",
+            "agent-task run/run-next/status/logs/artifacts/review/providers",
             "agent-task auth status",
             "lint",
             "test",
@@ -39,11 +39,11 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     );
     assert_eq!(
         lab_runner_unsupported_message(),
-        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, review, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, review, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
     );
     assert_eq!(
         lab_runner_unsupported_hint(),
-        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
     );
 }
 
@@ -110,6 +110,20 @@ fn test_supports_lab_runner() {
         !parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123"])
             .supports_lab_runner()
     );
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "run", "agent-task-123"]).supports_lab_runner()
+    );
+    assert!(parsed_command(&["homeboy", "agent-task", "run-next"]).supports_lab_runner());
+    let cli = parsed_cli(&[
+        "homeboy",
+        "agent-task",
+        "run",
+        "--runner",
+        "homeboy-lab",
+        "agent-task-123",
+    ]);
+    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    assert!(cli.command.supports_lab_runner());
     assert!(
         parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
             .supports_lab_runner()
@@ -408,6 +422,8 @@ fn test_lab_command_contracts_cover_hot_commands() {
     );
 
     for args in [
+        ["homeboy", "agent-task", "run", "agent-task-123"].as_slice(),
+        ["homeboy", "agent-task", "run-next"].as_slice(),
         ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),

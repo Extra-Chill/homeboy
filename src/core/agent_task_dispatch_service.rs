@@ -241,6 +241,8 @@ fn command_json_value<T: Serialize>(value: T) -> Result<Value> {
 
 fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
     let run_id = value["run_id"].as_str().unwrap_or("<run-id>");
+    let run_command = agent_task_run_command(value, run_id);
+    let run_next_command = agent_task_run_next_command(value);
     let aggregate_path = value["aggregate_path"].as_str().unwrap_or(run_id);
     let aggregate_review = value
         .get("aggregate")
@@ -269,7 +271,7 @@ fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
         ));
     } else if value["queued"].as_bool().unwrap_or(false) {
         next_actions.push(format!(
-            "queued only; run `homeboy agent-task run {run_id}` or let a daemon claim it with `homeboy agent-task run-next`"
+            "queued only; run `{run_command}` or let a daemon claim it with `{run_next_command}`"
         ));
     } else {
         next_actions.push("no patch artifact was produced; inspect `aggregate` candidates before retrying or reporting".to_string());
@@ -295,6 +297,28 @@ fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
         ),
         "next_actions": next_actions
     })
+}
+
+fn agent_task_run_command(value: &Value, run_id: &str) -> String {
+    match value
+        .pointer("/record/metadata/runner_id")
+        .and_then(Value::as_str)
+        .filter(|runner_id| !runner_id.trim().is_empty())
+    {
+        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task run {run_id}"),
+        None => format!("homeboy agent-task run {run_id}"),
+    }
+}
+
+fn agent_task_run_next_command(value: &Value) -> String {
+    match value
+        .pointer("/record/metadata/runner_id")
+        .and_then(Value::as_str)
+        .filter(|runner_id| !runner_id.trim().is_empty())
+    {
+        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task run-next"),
+        None => "homeboy agent-task run-next".to_string(),
+    }
 }
 
 fn cook_promotion_commands(
@@ -325,4 +349,31 @@ fn cook_promotion_commands(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_cook_handoff_uses_recorded_runner_context() {
+        let handoff = cook_handoff(
+            &serde_json::json!({
+                "run_id": "agent-task-queued",
+                "queued": true,
+                "record": {
+                    "metadata": {
+                        "runner_id": "homeboy-lab"
+                    }
+                }
+            }),
+            None,
+        );
+
+        let next_action = handoff["next_actions"][0].as_str().expect("next action");
+        assert!(
+            next_action.contains("homeboy --runner homeboy-lab agent-task run agent-task-queued")
+        );
+        assert!(next_action.contains("homeboy --runner homeboy-lab agent-task run-next"));
+    }
 }
