@@ -15,12 +15,27 @@ const DEFAULT_EVENT_PREFIX = 'recipe';
 
 function wpCodeboxBin(options = {}) {
   const env = options.env || process.env;
+  const settings = homeboySettings(env);
   return options.wpCodeboxBin
     || options.bin
     || env.HOMEBOY_WP_CODEBOX_BIN
     || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
+    || settings.wp_codebox_bin
     || env.WP_CODEBOX_BIN
     || 'wp-codebox';
+}
+
+function homeboySettings(env) {
+  if (!env.HOMEBOY_SETTINGS_JSON) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(env.HOMEBOY_SETTINGS_JSON);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
 }
 
 function wpCodeboxCommand(bin = wpCodeboxBin()) {
@@ -124,6 +139,7 @@ module.exports = {
   parseWpCodeboxJson,
   recipeEventName,
   runWpCodeboxRecipe,
+  homeboySettings,
   wpCodeboxBin,
   wpCodeboxCommand,
 };
