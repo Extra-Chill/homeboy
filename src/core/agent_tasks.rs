@@ -172,9 +172,11 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         dispatch, dispatch_with_provider_requirements, resolve_dispatch_request,
-        resolve_dispatch_request_with_default, run_cook_command, run_dispatch_command,
-        AgentTaskDispatchCommand, AgentTaskDispatchReport, AgentTaskDispatchRequest,
-        DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
+        resolve_dispatch_request_with_default, run_cook_command,
+        run_cook_command_with_provider_catalog, run_dispatch_command,
+        run_dispatch_command_with_provider_catalog, AgentTaskDispatchCommand,
+        AgentTaskDispatchReport, AgentTaskDispatchRequest, DispatchCoreInputs,
+        DISPATCH_RESULT_SCHEMA,
     };
 }
 
@@ -263,11 +265,11 @@ pub mod provider {
         provider_runner_source_contracts, provider_secret_sources_for_plan,
         provider_secret_sources_for_providers, required_extension_ids_for_plan,
         validate_provider_runner_readiness_for_backend, AgentTaskExecutorProvider,
-        AgentTaskProviderCapabilityContract, AgentTaskProviderDependencyFailurePattern,
-        AgentTaskProviderEnvPathReadiness, AgentTaskProviderRoleAliases,
-        AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
-        AgentTaskProviderWorkspaceMaterialization, AgentTaskRuntimeContract,
-        AgentTaskRuntimeLifecycleStates, AgentTaskRuntimeNormalization,
+        AgentTaskProviderCapabilityContract, AgentTaskProviderCatalog,
+        AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
+        AgentTaskProviderRoleAliases, AgentTaskProviderRunnerReadiness,
+        AgentTaskProviderRunnerSource, AgentTaskProviderWorkspaceMaterialization,
+        AgentTaskRuntimeContract, AgentTaskRuntimeLifecycleStates, AgentTaskRuntimeNormalization,
         AgentTaskRuntimeOutputArtifactMapping, ExtensionProviderAgentTaskExecutor,
         WorkspaceMaterializationSpec, WorkspaceMountSpec, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
         AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
