@@ -2556,6 +2556,31 @@ function missingRequiredTypedArtifactDiagnostic(request, outputs) {
   };
 }
 
+function invalidRequiredTypedArtifactDiagnostic(request, outputs) {
+  const typedArtifacts = outputs?.typed_artifacts && typeof outputs.typed_artifacts === 'object' && !Array.isArray(outputs.typed_artifacts)
+    ? outputs.typed_artifacts
+    : {};
+  const invalid = requiredArtifactDeclarationsFromRequest(request)
+    .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+    .filter((name) => name && unexecutedWorkspaceToolCallArtifact(typedArtifacts[name]));
+  if (invalid.length === 0) {
+    return null;
+  }
+  return {
+    class: 'codebox.required_typed_artifacts_invalid',
+    message: `WP Codebox agent task produced invalid required typed artifacts: ${invalid.join(', ')}.`,
+    data: { reason: 'invalid_required_typed_artifacts', invalid },
+  };
+}
+
+function unexecutedWorkspaceToolCallArtifact(artifact) {
+  if (!artifact || typeof artifact !== 'object') {
+    return false;
+  }
+  const content = String(artifact.payload?.content || '').trim();
+  return /^<workspace_[a-z0-9_:-]+(?:\s[^>]*)?\/>$/i.test(content);
+}
+
 function outputsWithInputTypedArtifacts(outputs, request) {
   const typedArtifacts = outputs?.typed_artifacts && typeof outputs.typed_artifacts === 'object' && !Array.isArray(outputs.typed_artifacts)
     ? { ...outputs.typed_artifacts }
@@ -3100,8 +3125,12 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
   const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request), request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
+  const invalidRequiredTypedArtifacts = invalidRequiredTypedArtifactDiagnostic(request, outputs);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   if (status === 'succeeded' && missingRequiredTypedArtifacts) {
+    status = 'failed';
+  }
+  if (status === 'succeeded' && invalidRequiredTypedArtifacts) {
     status = 'failed';
   }
   if (status === 'succeeded' && runtimeFailureDiagnostic) {
@@ -3117,11 +3146,11 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     providerLabel: 'WP Codebox agent',
     integrationContract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
     status,
-    summary: missingRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    summary: missingRequiredTypedArtifacts?.message || invalidRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
     evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
     outputs,
-    diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -3143,7 +3172,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   });
   if (failureClassification) {
     outcome.failure_classification = failureClassification;
-  } else if (missingRequiredTypedArtifacts) {
+  } else if (missingRequiredTypedArtifacts || invalidRequiredTypedArtifacts) {
     outcome.failure_classification = 'execution_failed';
   }
   return outcomeWithOutputTypedArtifacts(outcome, outputs);

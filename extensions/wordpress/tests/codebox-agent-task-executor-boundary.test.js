@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+  agentTaskOutcomeFromCodeboxResult,
   artifactResultEnvelopeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   normalizeCodeboxArtifactDeclaration,
@@ -523,6 +524,28 @@ assert.equal(
   providerAndControllerArtifactsTaskInput.runtime_task.input.engine_data_outputs.concept_packet,
   'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload'
 );
+
+const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'placeholder-artifact-task-1',
+  executor: { backend: 'codebox', config: { provider: 'openai' } },
+  artifact_declarations: [{
+    name: 'concept_packet',
+    artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+    required: true,
+  }],
+}, {
+  success: true,
+  status: 'completed',
+  reply: '<workspace_ls path="/workspace/wp-site-generator" />',
+});
+assert.equal(placeholderArtifactOutcome.status, 'failed');
+assert.equal(placeholderArtifactOutcome.failure_classification, 'execution_failed');
+assert.deepEqual(
+  placeholderArtifactOutcome.diagnostics.map((diagnostic) => diagnostic.class),
+  ['codebox.required_typed_artifacts_invalid']
+);
+assert.match(placeholderArtifactOutcome.summary, /invalid required typed artifacts: concept_packet/);
 
 const genericRepoLoopTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
