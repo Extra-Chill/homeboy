@@ -34,6 +34,24 @@ homeboy ci run --path /path/to/repo --extension nodejs --profile pr
 
 For command-native reproduction, `homeboy lint --ci-job <ID>` and `homeboy test --ci-job <ID>` select a single declared job whose `command` is `lint` or `test` respectively, then run through the normal Homeboy lint/test workflow with the job's declared local context applied. `homeboy bench --ci-profile <ID>` selects a single-job profile whose job declares `command: "bench"` and runs it through the normal bench workflow.
 
+## Autofix Transaction
+
+```sh
+homeboy ci autofix --path /path/to/repo \
+  --target-repo owner/repo --target-branch pr-head-branch \
+  --message "chore(ci): homeboy autofix — refactor (3 files)"
+```
+
+`ci autofix` owns the end-to-end CI autofix transaction so the GitHub Action is a thin caller instead of re-implementing branch/commit/push orchestration in shell. It assumes the working tree already contains the autofix changes to commit, then:
+
+- stages all working-tree changes and skips cleanly when nothing is staged,
+- classifies the staged paths against the component's computed `drift_files` (see `homeboy component show`),
+- routes drift-only changes as a direct push (distinct commit prefix that does not count toward the autofix cap) and authored fixes as an autofix-branch push,
+- commits with the CI bot identity (single source of truth shared with the autofix guards), and
+- resolves the push target (`origin` for the same repo without a token, an authenticated `x-access-token` URL when `--token`/`APP_TOKEN` is set, an anonymous URL for cross-repo pushes) and pushes `HEAD` to `--target-branch`.
+
+`--dry-run` classifies the changes and resolves the push target without committing or pushing. The JSON output uses command `ci.autofix` and includes `push_target`, the `route` (`direct-drift` or `autofix-branch`), `changed_files`, `committed`, and a machine-readable `status` (`pushed`, `no-changes`, `push-failed`, or `dry-run`).
+
 ## Manifest Shape
 
 Extensions can declare CI profiles with a `ci` block:

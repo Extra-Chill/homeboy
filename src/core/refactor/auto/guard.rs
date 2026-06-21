@@ -15,9 +15,7 @@ use serde::Serialize;
 use std::process::Command;
 
 use crate::core::git::BOT_NAME;
-
-/// Prefix used for all autofix commits. Must match the action's prefix.
-const AUTOFIX_COMMIT_PREFIX: &str = "chore(ci): homeboy autofix";
+use crate::core::refactor::auto::transaction::AUTOFIX_COMMIT_PREFIX;
 
 /// Label that permanently disables autofix on a PR.
 const AUTOFIX_DISABLED_LABEL: &str = "autofix-disabled";
