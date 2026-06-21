@@ -8,18 +8,45 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { promisify } = require('node:util');
 
-const {
-  homeboySettings,
-  wpCodeboxBin,
-  wpCodeboxCliDescriptor,
-  wpCodeboxCommand,
-} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-adapter-descriptor');
-
 const execFileAsync = promisify(execFile);
-const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = wpCodeboxCliDescriptor().commands.recipe_run;
+const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = 'recipe-run';
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 50;
 const DEFAULT_EVENT_SOURCE = 'wp_codebox';
 const DEFAULT_EVENT_PREFIX = 'recipe';
+
+function homeboySettings(env) {
+  if (!env.HOMEBOY_SETTINGS_JSON) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(env.HOMEBOY_SETTINGS_JSON);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function wpCodeboxBin(options = {}) {
+  const env = options.env || process.env;
+  const settings = homeboySettings(env);
+  return options.wpCodeboxBin
+    || options.bin
+    || settings.wp_codebox_bin
+    || settings.wpCodeboxBin
+    || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
+    || env.HOMEBOY_WP_CODEBOX_BIN
+    || env.WP_CODEBOX_BIN
+    || 'wp-codebox';
+}
+
+function wpCodeboxCommand(bin = wpCodeboxBin()) {
+  if (/\.(?:js|cjs|mjs)$/.test(bin)) {
+    return { command: process.execPath, args: [bin] };
+  }
+
+  return { command: bin, args: [] };
+}
 
 function recipeEventName(name, options = {}) {
   const prefix = options.eventPrefix || DEFAULT_EVENT_PREFIX;
