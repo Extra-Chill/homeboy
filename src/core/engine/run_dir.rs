@@ -37,6 +37,7 @@ pub mod files {
     pub const FIX_RESULTS: &str = "fix-results.json";
     pub const BENCH_RESULTS: &str = "bench-results.json";
     pub const BENCH_RESPONSIVENESS: &str = "bench-responsiveness.jsonl";
+    pub const FUZZ_RESULTS: &str = "fuzz-results.json";
     pub const TRACE_RESULTS: &str = "trace.json";
     pub const RESOURCE_SUMMARY: &str = "resource-summary.json";
     pub const PHASE_TIMINGS: &str = "phase-timings.json";
@@ -159,6 +160,12 @@ impl RunDir {
                 crate::core::product_identity::PRODUCT_IDENTITY
                     .env_var("BENCH_RESPONSIVENESS_FILE"),
                 self.step_file(files::BENCH_RESPONSIVENESS)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            (
+                crate::core::product_identity::PRODUCT_IDENTITY.env_var("FUZZ_RESULTS_FILE"),
+                self.step_file(files::FUZZ_RESULTS)
                     .to_string_lossy()
                     .to_string(),
             ),

@@ -4,11 +4,13 @@
 //! runners can attach their own details through `metadata` or flattened extras.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::artifact_contract::ArtifactContract;
+use crate::core::{Error, Result};
 
 pub const FUZZ_CORE_CONTRACT_SCHEMA: &str = "homeboy/fuzz-core-contract/v1";
 pub const FUZZ_SURFACE_SCHEMA: &str = "homeboy/fuzz-surface/v1";
@@ -369,6 +371,30 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
     }
 }
 
+pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let campaign: FuzzCampaign = serde_json::from_str(&contents).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!("parse fuzz results file {}", path.display())),
+            Some(contents),
+        )
+    })?;
+    if campaign.schema != FUZZ_CAMPAIGN_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            format!(
+                "fuzz results schema must be {FUZZ_CAMPAIGN_SCHEMA}, got {}",
+                campaign.schema
+            ),
+            Some(campaign.schema),
+            None,
+        ));
+    }
+    Ok(campaign)
+}
+
 fn fuzz_core_contract_schema() -> String {
     FUZZ_CORE_CONTRACT_SCHEMA.to_string()
 }
@@ -609,5 +635,26 @@ mod tests {
         assert_eq!(value["artifacts"][0]["schema"], FUZZ_ARTIFACT_SCHEMA);
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);
         assert_eq!(value["provenance"]["schema"], FUZZ_PROVENANCE_SCHEMA);
+    }
+
+    #[test]
+    fn parse_fuzz_results_file_reads_campaign_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fuzz-results.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema": FUZZ_CAMPAIGN_SCHEMA,
+                "id": "campaign-1",
+                "safety_class": "read_only"
+            })
+            .to_string(),
+        )
+        .expect("write fuzz results");
+
+        let parsed = parse_fuzz_results_file(&path).expect("parse fuzz results");
+
+        assert_eq!(parsed.id, "campaign-1");
+        assert_eq!(parsed.safety_class, FuzzSafetyClass::ReadOnly);
     }
 }

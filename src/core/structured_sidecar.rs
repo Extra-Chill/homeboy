@@ -55,6 +55,14 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         required_fields: &[],
     },
     StructuredSidecarSchema {
+        key: "fuzz.results",
+        schema_version: "v1",
+        path: run_dir::files::FUZZ_RESULTS,
+        producer: Some("fuzz"),
+        shape: StructuredSidecarShape::Object,
+        required_fields: &[],
+    },
+    StructuredSidecarSchema {
         key: "trace.results",
         schema_version: "v1",
         path: run_dir::files::TRACE_RESULTS,
