@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
+use homeboy::core::ci_plan::{self, CiEventContext, CiPlan};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::refactor::auto::transaction::{
@@ -21,6 +22,13 @@ pub struct CiArgs {
 pub enum CiCommand {
     /// List declared CI profiles and shallow discovered CI surfaces.
     List(CiListArgs),
+    /// Resolve a CI command request into a structured execution plan.
+    ///
+    /// This is the core-owned orchestration the action calls instead of
+    /// inferring commands, splitting quality vs operations, enforcing canonical
+    /// order, and deriving output filenames in shell. It is pure and emits
+    /// JSON; it does not execute anything.
+    Plan(CiPlanArgs),
     /// Run an extension-declared CI job or profile locally.
     Run(CiRunArgs),
     /// Run the end-to-end CI autofix transaction (branch prep, drift-only
@@ -72,6 +80,20 @@ pub struct CiAutofixArgs {
 }
 
 #[derive(Args)]
+pub struct CiPlanArgs {
+    /// Raw, comma-separated command request (e.g. `audit,lint,test` or
+    /// `refactor --from all`). When empty, commands are inferred from
+    /// `--context`.
+    #[arg(long, default_value = "")]
+    pub commands: String,
+
+    /// Event context driving inference: `pr`, `push`, `cron`, or `manual`.
+    /// Unknown values fall back to `manual`. Defaults to `manual`.
+    #[arg(long, default_value = "manual")]
+    pub context: String,
+}
+
+#[derive(Args)]
 pub struct CiListArgs {
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
@@ -109,8 +131,16 @@ pub struct CiListOutput {
 #[serde(untagged)]
 pub enum CiOutput {
     List(CiListOutput),
+    Plan(CiPlanCommandOutput),
     Run(CiRunCommandOutput),
     Autofix(CiAutofixCommandOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CiPlanCommandOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub plan: CiPlan,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,9 +165,23 @@ pub struct CiRunCommandOutput {
 pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
     match args.command {
         CiCommand::List(args) => run_list(args, global),
+        CiCommand::Plan(args) => run_plan(args, global),
         CiCommand::Run(args) => run_ci(args, global),
         CiCommand::Autofix(args) => run_autofix(args, global),
     }
+}
+
+fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+    let context = CiEventContext::parse(&args.context);
+    let plan = ci_plan::plan(&args.commands, context);
+
+    Ok((
+        CiOutput::Plan(CiPlanCommandOutput {
+            command: "ci.plan",
+            plan,
+        }),
+        0,
+    ))
 }
 
 fn run_list(args: CiListArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
@@ -326,6 +370,30 @@ mod tests {
         assert_eq!(args.comp.path.as_deref(), Some("/tmp/repo"));
         assert_eq!(args.extension_override.extensions, vec!["fixture-ci"]);
         assert_eq!(args.job.as_deref(), Some("lint"));
+    }
+
+    #[test]
+    fn parses_ci_plan_commands_and_context() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "ci",
+            "plan",
+            "--commands",
+            "audit,lint,test",
+            "--context",
+            "pr",
+        ])
+        .expect("parse cli");
+
+        let crate::cli_surface::Commands::Ci(args) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommand::Plan(args) = args.command else {
+            panic!("expected ci plan");
+        };
+
+        assert_eq!(args.commands, "audit,lint,test");
+        assert_eq!(args.context, "pr");
     }
 
     #[test]
