@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.10.2] - 2026-06-21
+
+### Fixed
+- make runtime full run runtime-agnostic
+
 ## [3.10.1] - 2026-06-21
 
 ### Fixed
