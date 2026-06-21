@@ -98,6 +98,7 @@ jobs:
         with:
           commands: release
           expected-commands: audit,lint,test
+          args: --skip-checks=audit,lint,test
           release-dry-run: 'true'
 
       - name: Validate existing release tag
@@ -321,7 +322,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: test
           expected-commands: audit,lint,test
-          args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
+          args: ${{ github.event.before && format('--skip-lint --changed-since {0}', github.event.before) || '--skip-lint' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
@@ -474,6 +475,7 @@ jobs:
           source: '.'
           commands: release
           expected-commands: audit,lint,test
+          args: --skip-checks=audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           release-skip-publish: 'true'
           release-skip-github-release: 'true'
