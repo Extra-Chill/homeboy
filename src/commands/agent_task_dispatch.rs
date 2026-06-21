@@ -4,7 +4,9 @@ use serde_json::Value;
 use homeboy::core::agent_tasks::dispatch_service::{
     self, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{
+    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+};
 
 use super::{CmdResult, GlobalArgs};
 
@@ -132,14 +134,21 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
 }
 
 pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    dispatch_service::run_dispatch_command(
+    let catalog = AgentTaskProviderCatalog::discover();
+    dispatch_service::run_dispatch_command_with_provider_catalog(
         args.into(),
-        ExtensionProviderAgentTaskExecutor::discover(),
+        ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
+        &catalog,
     )
 }
 
 pub(crate) fn cook(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    dispatch_service::run_cook_command(args.into(), ExtensionProviderAgentTaskExecutor::discover())
+    let catalog = AgentTaskProviderCatalog::discover();
+    dispatch_service::run_cook_command_with_provider_catalog(
+        args.into(),
+        ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
+        &catalog,
+    )
 }
 
 #[cfg(test)]

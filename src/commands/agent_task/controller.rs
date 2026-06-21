@@ -689,7 +689,7 @@ mod tests {
             "dispatch": {
                 "prompt": "Cook",
                 "tasks": ["Do the work"],
-                "backend": "codebox"
+                "backend": "synthetic-runtime"
             }
         }))
         .expect("dispatch args");
@@ -702,7 +702,7 @@ mod tests {
         }
         .apply(&mut args);
 
-        assert_eq!(args.backend.as_deref(), Some("codebox"));
+        assert_eq!(args.backend.as_deref(), Some("synthetic-runtime"));
         assert_eq!(args.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             args.core.provider_config.as_deref(),

@@ -154,9 +154,9 @@ fn spec_has_provider_plugin_paths(spec: &str) -> bool {
 /// directories a cook actually references, so an absolute provider-plugin path
 /// inherited from stale/global controller or runner settings (e.g. a Codex
 /// provider plugin path that is not part of this run's workspace) survives
-/// remapping unchanged. Forwarding it would make the WP Codebox recipe declare
-/// an `extra_plugins[..]` entry pointing at a directory that does not exist on
-/// the runner, failing recipe validation with a `missing-path` error before the
+/// remapping unchanged. Forwarding it would make the provider runtime declare
+/// an extra plugin/workspace entry pointing at a directory that does not exist
+/// on the runner, failing runtime validation with a `missing-path` error before the
 /// task runs (homeboy #4829). Such entries are not materialized on the selected
 /// runner, so we omit them; explicit, materializable refs and entries that did
 /// remap into a synced remote location are preserved.

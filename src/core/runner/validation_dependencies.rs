@@ -459,19 +459,19 @@ mod tests {
     fn sync_workspace_materializes_validation_dependency_siblings() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
-            let source = workspace_parent.path().join("studio-web");
-            let dependency = workspace_parent.path().join("agents-api");
+            let source = workspace_parent.path().join("host-app");
+            let dependency = workspace_parent.path().join("shared-runtime");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(source.join("src")).expect("source dir");
             fs::create_dir_all(dependency.join("lib")).expect("dependency dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
-                                "validation_dependencies": ["agents-api"]
+                                "validation_dependencies": ["shared-runtime"]
                             }
                         }
                     }
@@ -482,10 +482,10 @@ mod tests {
             fs::write(source.join("src/main.php"), "<?php\n").expect("source file");
             fs::write(
                 dependency.join("homeboy.json"),
-                serde_json::json!({ "id": "agents-api" }).to_string(),
+                serde_json::json!({ "id": "shared-runtime" }).to_string(),
             )
             .expect("dependency manifest");
-            fs::write(dependency.join("lib/agents.php"), "<?php\n").expect("dependency file");
+            fs::write(dependency.join("lib/runtime.php"), "<?php\n").expect("dependency file");
             let _remote = init_checkout_with_upstream(&dependency);
 
             super::super::create(
@@ -514,7 +514,7 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.validation_dependencies.len(), 1);
-            assert_eq!(output.validation_dependencies[0].id, "agents-api");
+            assert_eq!(output.validation_dependencies[0].id, "shared-runtime");
             assert_eq!(
                 output.validation_dependencies[0].role,
                 "validation_dependency"
@@ -525,7 +525,7 @@ mod tests {
             );
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&output.remote_path).join("src/main.php").exists());
-            let remote_dependency = Path::new(&remote_parent).join("agents-api");
+            let remote_dependency = Path::new(&remote_parent).join("shared-runtime");
             assert_eq!(
                 output.validation_dependencies[0].remote_path,
                 remote_dependency.display().to_string()
@@ -537,7 +537,7 @@ mod tests {
                     .display()
                     .to_string()
             );
-            assert!(remote_dependency.join("lib/agents.php").exists());
+            assert!(remote_dependency.join("lib/runtime.php").exists());
             assert!(!remote_dependency.join(".git").exists());
             assert!(remote_dependency
                 .join(".homeboy/lab-source-evidence.json")
@@ -545,7 +545,7 @@ mod tests {
 
             crate::core::hygiene::require_checkout_hygiene_without_lifecycle(
                 vec![crate::core::hygiene::DependencyCheckout {
-                    id: "agents-api".to_string(),
+                    id: "shared-runtime".to_string(),
                     role: "validation_dependency".to_string(),
                     path: remote_dependency,
                 }],
@@ -559,19 +559,19 @@ mod tests {
     fn sync_workspace_runs_validation_dependency_lifecycle_before_materializing() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
-            let source = workspace_parent.path().join("studio-web");
-            let dependency = workspace_parent.path().join("agents-api");
+            let source = workspace_parent.path().join("host-app");
+            let dependency = workspace_parent.path().join("shared-runtime");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(&source).expect("source dir");
             fs::create_dir_all(&dependency).expect("dependency dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
-                                "validation_dependencies": ["agents-api"]
+                                "validation_dependencies": ["shared-runtime"]
                             }
                         }
                     }
@@ -582,7 +582,7 @@ mod tests {
             fs::write(
                 dependency.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "agents-api",
+                    "id": "shared-runtime",
                     "scripts": {
                         "deps": ["sh -c 'printf install > deps-installed.txt'"],
                         "build": ["sh -c 'printf build > build-built.txt'"]
@@ -625,10 +625,10 @@ mod tests {
             assert_eq!(exit_code, 0);
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&remote_parent)
-                .join("agents-api/deps-installed.txt")
+                .join("shared-runtime/deps-installed.txt")
                 .exists());
             assert!(Path::new(&remote_parent)
-                .join("agents-api/build-built.txt")
+                .join("shared-runtime/build-built.txt")
                 .exists());
             assert!(!dependency.join("deps-installed.txt").exists());
             assert!(!dependency.join("build-built.txt").exists());
@@ -639,15 +639,15 @@ mod tests {
     fn sync_workspace_uses_manifest_id_for_absolute_validation_dependency() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
-            let source = workspace_parent.path().join("studio-web");
-            let dependency = workspace_parent.path().join("agents-api");
+            let source = workspace_parent.path().join("host-app");
+            let dependency = workspace_parent.path().join("shared-runtime");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(&source).expect("source dir");
             fs::create_dir_all(&dependency).expect("dependency dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
@@ -662,7 +662,7 @@ mod tests {
             fs::write(
                 dependency.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "agents-api",
+                    "id": "shared-runtime",
                     "scripts": {
                         "build": ["sh -c 'printf \"$HOMEBOY_COMPONENT_ID\" > component-id.txt'"]
                     }
@@ -700,11 +700,11 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             let remote_parent = parent_remote_path(&output.remote_path);
-            let remote_dependency = Path::new(&remote_parent).join("agents-api");
+            let remote_dependency = Path::new(&remote_parent).join("shared-runtime");
             assert!(remote_dependency.join("component-id.txt").exists());
             assert_eq!(
                 fs::read_to_string(remote_dependency.join("component-id.txt")).unwrap(),
-                "agents-api"
+                "shared-runtime"
             );
             assert!(!Path::new(&remote_parent).join("Users").exists());
         });
@@ -714,19 +714,19 @@ mod tests {
     fn sync_workspace_failed_validation_dependency_build_keeps_source_clean() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
-            let source = workspace_parent.path().join("studio-web");
-            let dependency = workspace_parent.path().join("agents-api");
+            let source = workspace_parent.path().join("host-app");
+            let dependency = workspace_parent.path().join("shared-runtime");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(&source).expect("source dir");
             fs::create_dir_all(&dependency).expect("dependency dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
-                                "validation_dependencies": ["agents-api"]
+                                "validation_dependencies": ["shared-runtime"]
                             }
                         }
                     }
@@ -737,7 +737,7 @@ mod tests {
             fs::write(
                 dependency.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "agents-api",
+                    "id": "shared-runtime",
                     "scripts": {
                         "build": ["sh -c 'mkdir .homeboy-build && printf dirty > .homeboy-build/state && exit 7'"]
                     }
@@ -788,20 +788,20 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
             let remote_parent = tempfile::tempdir().expect("remote parent");
-            let source = workspace_parent.path().join("studio-web");
-            let seed = remote_parent.path().join("agents-api-seed");
-            let clone_target = workspace_parent.path().join("agents-api-clone");
+            let source = workspace_parent.path().join("host-app");
+            let seed = remote_parent.path().join("shared-runtime-seed");
+            let clone_target = workspace_parent.path().join("shared-runtime-clone");
             let runner_root = tempfile::tempdir().expect("runner root tempdir");
             fs::create_dir_all(&source).expect("source dir");
             fs::create_dir_all(seed.join("lib")).expect("seed dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
-                                "validation_dependencies": ["agents-api"]
+                                "validation_dependencies": ["shared-runtime"]
                             }
                         }
                     }
@@ -811,15 +811,15 @@ mod tests {
             .expect("source manifest");
             fs::write(
                 seed.join("homeboy.json"),
-                serde_json::json!({ "id": "agents-api" }).to_string(),
+                serde_json::json!({ "id": "shared-runtime" }).to_string(),
             )
             .expect("seed manifest");
-            fs::write(seed.join("lib/agents.php"), "<?php\n").expect("seed file");
+            fs::write(seed.join("lib/runtime.php"), "<?php\n").expect("seed file");
             let remote = init_checkout_with_upstream(&seed);
             let components_dir = crate::core::paths::components().expect("components dir");
             fs::create_dir_all(&components_dir).expect("components dir exists");
             fs::write(
-                components_dir.join("agents-api.json"),
+                components_dir.join("shared-runtime.json"),
                 serde_json::json!({
                     "local_path": clone_target,
                     "remote_url": remote.path()
@@ -853,10 +853,10 @@ mod tests {
             .expect("sync workspace");
 
             assert_eq!(exit_code, 0);
-            assert!(clone_target.join("lib/agents.php").exists());
+            assert!(clone_target.join("lib/runtime.php").exists());
             let remote_parent = parent_remote_path(&output.remote_path);
             assert!(Path::new(&remote_parent)
-                .join("agents-api/lib/agents.php")
+                .join("shared-runtime/lib/runtime.php")
                 .exists());
         });
     }
@@ -865,16 +865,16 @@ mod tests {
     fn validation_dependency_workspace_errors_when_sibling_missing() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_parent = tempfile::tempdir().expect("workspace parent");
-            let source = workspace_parent.path().join("studio-web");
+            let source = workspace_parent.path().join("host-app");
             fs::create_dir_all(&source).expect("source dir");
             fs::write(
                 source.join("homeboy.json"),
                 serde_json::json!({
-                    "id": "studio-web",
+                    "id": "host-app",
                     "extensions": {
                         "wordpress": {
                             "settings": {
-                                "validation_dependencies": ["agents-api"]
+                                "validation_dependencies": ["shared-runtime"]
                             }
                         }
                     }
@@ -887,7 +887,7 @@ mod tests {
                 validation_dependency_workspaces(&source, &[]).expect_err("missing dependency");
 
             assert_eq!(err.details["field"], "validation_dependencies");
-            assert!(err.message.contains("agents-api"));
+            assert!(err.message.contains("shared-runtime"));
         });
     }
 }

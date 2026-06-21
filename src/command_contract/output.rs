@@ -88,13 +88,43 @@ pub struct CommandOutputDescriptor {
 pub struct CommandRegistryEntry {
     pub name: &'static str,
     pub json_family: CommandJsonFamily,
+    pub docs_slug: Option<&'static str>,
+    pub output_notes: &'static str,
+    pub lab_supported: bool,
+    pub lab_notes: &'static str,
 }
 
 const fn command_registry_entry(
     name: &'static str,
     json_family: CommandJsonFamily,
 ) -> CommandRegistryEntry {
-    CommandRegistryEntry { name, json_family }
+    CommandRegistryEntry {
+        name,
+        json_family,
+        docs_slug: Some(name),
+        output_notes: "standard CLI output contract",
+        lab_supported: false,
+        lab_notes: "not declared as Lab-routable in the command registry",
+    }
+}
+
+const fn lab_command_registry_entry(
+    name: &'static str,
+    json_family: CommandJsonFamily,
+) -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        lab_supported: true,
+        lab_notes: "portable Lab offload may be available for resource-heavy workflows",
+        ..command_registry_entry(name, json_family)
+    }
+}
+
+const fn raw_command_registry_entry(name: &'static str) -> CommandRegistryEntry {
+    CommandRegistryEntry {
+        docs_slug: None,
+        output_notes: "hidden raw Markdown help alias",
+        ..command_registry_entry(name, CommandJsonFamily::RawOnly)
+    }
 }
 
 pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
@@ -102,12 +132,12 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("project", CommandJsonFamily::Workspace),
     command_registry_entry("ssh", CommandJsonFamily::Ops),
     command_registry_entry("server", CommandJsonFamily::Ops),
-    command_registry_entry("test", CommandJsonFamily::Quality),
-    command_registry_entry("bench", CommandJsonFamily::Quality),
-    command_registry_entry("fuzz", CommandJsonFamily::Quality),
-    command_registry_entry("trace", CommandJsonFamily::Quality),
+    lab_command_registry_entry("test", CommandJsonFamily::Quality),
+    lab_command_registry_entry("bench", CommandJsonFamily::Quality),
+    lab_command_registry_entry("fuzz", CommandJsonFamily::Quality),
+    lab_command_registry_entry("trace", CommandJsonFamily::Quality),
     command_registry_entry("observe", CommandJsonFamily::Quality),
-    command_registry_entry("lint", CommandJsonFamily::Quality),
+    lab_command_registry_entry("lint", CommandJsonFamily::Quality),
     command_registry_entry("db", CommandJsonFamily::Ops),
     command_registry_entry("deps", CommandJsonFamily::Ops),
     command_registry_entry("ci", CommandJsonFamily::Ops),
@@ -132,8 +162,8 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("changes", CommandJsonFamily::Workspace),
     command_registry_entry("release", CommandJsonFamily::Workspace),
     command_registry_entry("report", CommandJsonFamily::Workspace),
-    command_registry_entry("review", CommandJsonFamily::Quality),
-    command_registry_entry("audit", CommandJsonFamily::Quality),
+    lab_command_registry_entry("review", CommandJsonFamily::Quality),
+    lab_command_registry_entry("audit", CommandJsonFamily::Quality),
     command_registry_entry("audit-baseline", CommandJsonFamily::Quality),
     command_registry_entry("refactor", CommandJsonFamily::Workspace),
     command_registry_entry("refs", CommandJsonFamily::Workspace),
@@ -151,14 +181,15 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("api", CommandJsonFamily::Ops),
     command_registry_entry("http", CommandJsonFamily::Ops),
     command_registry_entry("upgrade", CommandJsonFamily::Ops),
-    command_registry_entry("list", CommandJsonFamily::RawOnly),
+    raw_command_registry_entry("list"),
 ];
 
+pub fn registered_command(name: &str) -> Option<&'static CommandRegistryEntry> {
+    COMMAND_REGISTRY.iter().find(|entry| entry.name == name)
+}
+
 pub fn registered_command_json_family(name: &str) -> Option<CommandJsonFamily> {
-    COMMAND_REGISTRY
-        .iter()
-        .find(|entry| entry.name == name)
-        .map(|entry| entry.json_family)
+    registered_command(name).map(|entry| entry.json_family)
 }
 
 pub fn registered_command_dispatch_family(name: &str) -> Option<CommandDispatchFamily> {

@@ -129,13 +129,6 @@ impl ArtifactRef {
             semantic_key: None,
         }
     }
-
-    pub(crate) fn public_target(&self) -> Option<String> {
-        self.public_url
-            .clone()
-            .or_else(|| self.url.clone())
-            .or_else(|| (self.artifact_type == "url").then(|| self.path.clone()))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,19 +160,6 @@ impl EvidenceRef {
             semantic_key: None,
             artifact: None,
         }
-    }
-
-    pub(crate) fn from_artifact(artifact: ArtifactRef) -> Option<Self> {
-        let target = artifact.public_target()?;
-        Some(Self {
-            schema: EVIDENCE_REF_SCHEMA.to_string(),
-            kind: artifact.kind.clone(),
-            target,
-            label: artifact.kind.clone(),
-            role: artifact.role.clone(),
-            semantic_key: artifact.semantic_key.clone(),
-            artifact: Some(artifact),
-        })
     }
 }
 
@@ -256,32 +236,6 @@ mod tests {
                 "role": "summary",
                 "semantic_key": "run.summary"
             })
-        );
-    }
-
-    #[test]
-    fn evidence_ref_can_wrap_public_artifact_ref() {
-        let artifact = ArtifactRef {
-            schema: ARTIFACT_REF_SCHEMA.to_string(),
-            id: "artifact-1".to_string(),
-            run_id: "run-1".to_string(),
-            kind: "review".to_string(),
-            artifact_type: "url".to_string(),
-            path: "https://example.test/review".to_string(),
-            url: None,
-            public_url: None,
-            role: Some("review".to_string()),
-            semantic_key: Some("run.review".to_string()),
-        };
-
-        let evidence = EvidenceRef::from_artifact(artifact).expect("evidence ref");
-        assert_eq!(evidence.schema, EVIDENCE_REF_SCHEMA);
-        assert_eq!(evidence.target, "https://example.test/review");
-        assert_eq!(evidence.role.as_deref(), Some("review"));
-        assert_eq!(evidence.semantic_key.as_deref(), Some("run.review"));
-        assert_eq!(
-            evidence.artifact.expect("artifact").schema,
-            ARTIFACT_REF_SCHEMA
         );
     }
 }

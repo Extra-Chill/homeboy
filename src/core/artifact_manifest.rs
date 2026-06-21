@@ -120,23 +120,6 @@ impl ArtifactManifest {
         }
     }
 
-    pub(crate) fn artifact_contracts(
-        &self,
-    ) -> Result<Vec<crate::core::artifact_contract::ArtifactContract>> {
-        if self.schema != ARTIFACT_MANIFEST_SCHEMA {
-            return Err(Error::validation_invalid_argument(
-                "schema",
-                format!("expected {ARTIFACT_MANIFEST_SCHEMA}"),
-                Some(self.schema.clone()),
-                None,
-            ));
-        }
-        self.artifacts
-            .iter()
-            .map(ArtifactManifestEntry::to_artifact_contract)
-            .collect()
-    }
-
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let raw = fs::read_to_string(path).map_err(|e| {
@@ -733,7 +716,7 @@ mod tests {
 
     #[test]
     fn validates_descriptor_fields_and_projects_artifact_contracts() {
-        let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+        let entry = ArtifactManifestEntry {
             id: Some("artifact-1".to_string()),
             path: "reports/summary.json".to_string(),
             kind: "summary".to_string(),
@@ -768,36 +751,35 @@ mod tests {
             ),
             redaction: Some(ArtifactRedactionState::Raw),
             metadata: json!({ "format": "homeboy-proof" }),
-        }]);
+        };
 
-        let contracts = manifest.artifact_contracts().expect("contracts");
+        let contract = entry.to_artifact_contract().expect("contract");
 
-        assert_eq!(contracts.len(), 1);
         assert_eq!(
-            contracts[0].schema,
+            contract.schema,
             crate::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA
         );
-        assert_eq!(contracts[0].kind, "summary");
-        assert_eq!(contracts[0].path.as_deref(), Some("reports/summary.json"));
+        assert_eq!(contract.kind, "summary");
+        assert_eq!(contract.path.as_deref(), Some("reports/summary.json"));
         assert_eq!(
-            contracts[0].public_url.as_deref(),
+            contract.public_url.as_deref(),
             Some("https://artifacts.example.test/reports/summary.json")
         );
-        assert_eq!(contracts[0].label.as_deref(), Some("Summary"));
-        assert_eq!(contracts[0].role.as_deref(), Some("summary"));
-        assert_eq!(contracts[0].semantic_key.as_deref(), Some("run.summary"));
-        assert_eq!(contracts[0].size_bytes, Some(17));
-        assert_eq!(contracts[0].metadata, json!({ "format": "homeboy-proof" }));
-        assert_eq!(contracts[0].extra["id"], "artifact-1");
+        assert_eq!(contract.label.as_deref(), Some("Summary"));
+        assert_eq!(contract.role.as_deref(), Some("summary"));
+        assert_eq!(contract.semantic_key.as_deref(), Some("run.summary"));
+        assert_eq!(contract.size_bytes, Some(17));
+        assert_eq!(contract.metadata, json!({ "format": "homeboy-proof" }));
+        assert_eq!(contract.extra["id"], "artifact-1");
         assert_eq!(
-            contracts[0].extra["provenance"]["producer"],
+            contract.extra["provenance"]["producer"],
             "homeboy-extension"
         );
         assert_eq!(
-            contracts[0].extra["viewer"]["links"][0]["kind"],
+            contract.extra["viewer"]["links"][0]["kind"],
             "report-viewer"
         );
-        assert_eq!(contracts[0].extra["public_url_state"]["reachable"], true);
+        assert_eq!(contract.extra["public_url_state"]["reachable"], true);
     }
 
     #[test]

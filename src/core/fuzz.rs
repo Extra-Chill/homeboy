@@ -76,13 +76,13 @@ pub struct FuzzSurface {
 }
 
 impl FuzzSurface {
-    pub fn from_value(value: Value) -> Result<Self, String> {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
         let mut surface: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
         surface.normalize()?;
         Ok(surface)
     }
 
-    fn normalize(&mut self) -> Result<(), String> {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
         self.schema = trim_or_default(&self.schema, FUZZ_SURFACE_SCHEMA);
         require_schema(&self.schema, FUZZ_SURFACE_SCHEMA, "fuzz surface")?;
         self.id = required_trimmed("id", &self.id)?;
@@ -110,7 +110,7 @@ pub struct FuzzOperation {
 }
 
 impl FuzzOperation {
-    fn normalize(&mut self) -> Result<(), String> {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
         self.id = required_trimmed("operation.id", &self.id)?;
         self.kind = required_trimmed("operation.kind", &self.kind)?;
         self.label = normalize_optional_string(self.label.take());
@@ -132,7 +132,7 @@ pub struct FuzzInput {
 }
 
 impl FuzzInput {
-    fn normalize(&mut self) -> Result<(), String> {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
         self.name = required_trimmed("input.name", &self.name)?;
         self.kind = required_trimmed("input.kind", &self.kind)?;
         self.generator = normalize_optional_string(self.generator.take());
@@ -461,7 +461,7 @@ fn trim_or_default(value: &str, default: &str) -> String {
     }
 }
 
-fn required_trimmed(field: &str, value: &str) -> Result<String, String> {
+fn required_trimmed(field: &str, value: &str) -> std::result::Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         Err(format!("{field} must be non-empty"))
@@ -470,7 +470,7 @@ fn required_trimmed(field: &str, value: &str) -> Result<String, String> {
     }
 }
 
-fn require_schema(actual: &str, expected: &str, label: &str) -> Result<(), String> {
+fn require_schema(actual: &str, expected: &str, label: &str) -> std::result::Result<(), String> {
     if actual == expected {
         Ok(())
     } else {
