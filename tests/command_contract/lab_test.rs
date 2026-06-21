@@ -27,6 +27,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "test",
             "audit",
             "bench",
+            "fuzz",
             "trace",
             "refactor source runs",
             "rig check",
@@ -37,11 +38,11 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     );
     assert_eq!(
         lab_runner_unsupported_message(),
-        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, lint, test, audit, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
     );
     assert_eq!(
         lab_runner_unsupported_hint(),
-        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, full lint, full test, audit, bench run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task status/logs/artifacts/review/providers, agent-task auth status, full lint, full test, audit, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
     );
 }
 
