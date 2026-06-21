@@ -78,8 +78,12 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Optional provider selector/id when more than one backend provider exists.
-    #[arg(long, value_name = "SELECTOR")]
+    /// Optional provider id when more than one provider exists for the backend.
+    #[arg(
+        long,
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
     pub selector: Option<String>,
 
     /// Optional model override passed through to the provider.
