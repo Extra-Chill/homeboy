@@ -22,6 +22,7 @@ pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsO
             content_type: download.content_type,
             size_bytes: download.size_bytes,
             sha256: download.sha256,
+            artifact_ref: download.artifact_ref,
         }),
         0,
     ))
