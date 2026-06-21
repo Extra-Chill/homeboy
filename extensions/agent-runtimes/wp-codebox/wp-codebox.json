@@ -10,6 +10,19 @@
       "export": "scenarioResultsFromOutcome"
     }
   },
+  "runner_config_projection": {
+    "adapter": {
+      "module": "agent-runtimes/wp-codebox/lib/runtime-config-projection.js",
+      "export": "projectRuntimeConfig"
+    },
+    "transcript_guest_dir_template": "/wordpress/wp-content/plugins/{component_id}/runtime-agent-artifacts/{workload_id}",
+    "runtime_fields": {
+      "runtime_wordpress_version": {
+        "env": "RUNTIME_WORDPRESS_VERSION",
+        "default": "7.0"
+      }
+    }
+  },
   "ci_materialization": {
     "checkout": {
       "repo": "Automattic/wp-codebox",
@@ -36,7 +49,8 @@
       "runtime_bin": ".ci/wp-codebox/packages/cli/dist/index.js",
       "runtime_component": ".ci/wp-codebox/packages/wordpress-plugin",
       "runtime_core_module": ".ci/wp-codebox/packages/runtime-core/dist/index.js"
-    }
+    },
+    "required_paths": ["runtime_bin"]
   },
   "agent_task_executors": [
     {
