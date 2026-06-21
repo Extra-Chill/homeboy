@@ -53,8 +53,21 @@ runWpCodeboxFuzzRun({
 				schema: 'wp-codebox/fuzz-run-result/v1',
 				request_id: request.task_id,
 				status: 'succeeded',
+				coverage_summary: {
+					surface_count: 3,
+					exercised_count: 1,
+					skipped_count: 1,
+					failed_count: 1,
+				},
+				coverage_gaps: [{ id: 'route:/wp/v2/users', type: 'rest_route', status: 'skipped' }],
 				coverage: { hooks: { actions: { init: 1 } } },
-				artifacts: { directory: '/tmp/codebox-fuzz-artifacts' },
+				artifacts: {
+					fuzz_report: { path: 'reports/fuzz-report.json', content_type: 'application/json' },
+					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
+					failing_case: { path: 'cases/failing-case.json', case_id: 'case-002' },
+					case_artifact: { path: 'cases/case-001.json', case_id: 'case-001' },
+					repro_case: { path: 'repro/case-002.js', case_id: 'case-002' },
+				},
 			},
 		};
 	},
@@ -64,6 +77,15 @@ runWpCodeboxFuzzRun({
 	assert.equal(summary.delegated_schema, WP_CODEBOX_FUZZ_RUN_SCHEMA);
 	assert.equal(summary.succeeded, true);
 	assert.equal(summary.coverage.hooks.actions.init, 1);
+	assert.equal(summary.coverage_summary.surface_count, 3);
+	assert.equal(summary.coverage_summary.exercised_count, 1);
+	assert.equal(summary.coverage_gaps[0].status, 'skipped');
+	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case']);
+	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').semantic_key, 'fuzz.case');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'failing_case').semantic_key, 'fuzz.case.failing');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
 
 	const normalized = normalizeWpCodeboxFuzzRunResult({ status: 'failed', failures: [{ message: 'boom' }] });
 	assert.equal(normalized.succeeded, false);
