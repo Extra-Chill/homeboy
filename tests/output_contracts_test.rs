@@ -523,6 +523,9 @@ fn normalize_provider_fanout_fixture(task_id: &str, provider_payload: &Value) ->
                 .expect("artifact kind")
                 .to_string(),
             name: artifact["label"].as_str().map(str::to_string),
+            label: artifact["label"].as_str().map(str::to_string),
+            role: None,
+            semantic_key: None,
             path: None,
             url: artifact["uri"].as_str().map(str::to_string),
             mime: artifact["mime"].as_str().map(str::to_string),

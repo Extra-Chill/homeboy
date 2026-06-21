@@ -27,7 +27,11 @@ pub struct ArtifactManifestEntry {
     pub path: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,7 +305,9 @@ impl ArtifactManifestEntry {
             path: Some(self.path.clone()),
             url: None,
             public_url: self.public_url.clone(),
+            role: self.role.clone(),
             label: self.label.clone(),
+            semantic_key: self.semantic_key.clone(),
             size_bytes: self.size_bytes,
             sha256: self.sha256.clone(),
             metadata: self.metadata.clone(),
@@ -382,7 +388,9 @@ fn collect_manifest_entries(
             artifacts.push(ArtifactManifestEntry {
                 id: None,
                 kind: "file".to_string(),
+                role: None,
                 label: None,
+                semantic_key: None,
                 content_type: crate::core::artifact_metadata::content_type_from_path(&path),
                 provenance: None,
                 viewer: None,
@@ -405,8 +413,14 @@ fn validate_entry_shape(entry: &ArtifactManifestEntry) -> Result<()> {
     }
     validate_non_empty("path", &entry.path)?;
     validate_non_empty("kind", &entry.kind)?;
+    if let Some(role) = &entry.role {
+        validate_non_empty("role", role)?;
+    }
     if let Some(label) = &entry.label {
         validate_non_empty("label", label)?;
+    }
+    if let Some(semantic_key) = &entry.semantic_key {
+        validate_non_empty("semantic_key", semantic_key)?;
     }
     if let Some(content_type) = &entry.content_type {
         validate_non_empty("content_type", content_type)?;
@@ -587,7 +601,9 @@ mod tests {
             id: None,
             path: "logs/output.log".to_string(),
             kind: "log".to_string(),
+            role: None,
             label: Some("Output log".to_string()),
+            semantic_key: None,
             content_type: None,
             provenance: None,
             viewer: None,
@@ -618,7 +634,9 @@ mod tests {
             id: None,
             path: "../secret.txt".to_string(),
             kind: "log".to_string(),
+            role: None,
             label: None,
+            semantic_key: None,
             content_type: None,
             provenance: None,
             viewer: None,
@@ -671,7 +689,9 @@ mod tests {
                 id: None,
                 path: "link.txt".to_string(),
                 kind: "log".to_string(),
+                role: None,
                 label: None,
+                semantic_key: None,
                 content_type: None,
                 provenance: None,
                 viewer: None,
@@ -717,7 +737,9 @@ mod tests {
             id: Some("artifact-1".to_string()),
             path: "reports/summary.json".to_string(),
             kind: "summary".to_string(),
+            role: Some("summary".to_string()),
             label: Some("Summary".to_string()),
+            semantic_key: Some("run.summary".to_string()),
             content_type: Some("application/json".to_string()),
             provenance: Some(ArtifactManifestProvenance {
                 producer: Some("homeboy-extension".to_string()),
@@ -762,6 +784,8 @@ mod tests {
             Some("https://artifacts.example.test/reports/summary.json")
         );
         assert_eq!(contracts[0].label.as_deref(), Some("Summary"));
+        assert_eq!(contracts[0].role.as_deref(), Some("summary"));
+        assert_eq!(contracts[0].semantic_key.as_deref(), Some("run.summary"));
         assert_eq!(contracts[0].size_bytes, Some(17));
         assert_eq!(contracts[0].metadata, json!({ "format": "homeboy-proof" }));
         assert_eq!(contracts[0].extra["id"], "artifact-1");
@@ -782,7 +806,9 @@ mod tests {
             id: None,
             path: "report.json".to_string(),
             kind: "summary".to_string(),
+            role: None,
             label: None,
+            semantic_key: None,
             content_type: None,
             provenance: None,
             viewer: Some(ArtifactManifestViewer {

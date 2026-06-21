@@ -115,7 +115,11 @@ pub struct AgentTaskLoopArtifactRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2806,7 +2810,9 @@ mod tests {
             lineage: vec![AgentTaskLoopArtifactRef {
                 uri: "artifact://candidate/site".to_string(),
                 kind: Some("static_site_candidate".to_string()),
+                role: None,
                 label: Some("candidate".to_string()),
+                semantic_key: None,
             }],
             payload: json!({ "selector": ".hero" }),
         };
@@ -2935,7 +2941,9 @@ mod tests {
         AgentTaskLoopArtifactRef {
             uri: uri.to_string(),
             kind: Some("artifact".to_string()),
+            role: None,
             label: None,
+            semantic_key: None,
         }
     }
 }
