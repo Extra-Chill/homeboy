@@ -11,7 +11,7 @@ use crate::core::error::{Error, Result};
 use crate::core::server::{self, Server, SshClient};
 
 use super::validation_dependencies::RunnerValidationDependencySyncOutput;
-use super::{load, Runner, RunnerKind};
+use super::{load, Runner, RunnerKind, RunnerLifecycleOwner, RunnerWorkspaceLease};
 
 pub(super) const DEFAULT_EXCLUDES: &[&str] = &[
     ".git",
@@ -89,6 +89,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub local_path: String,
     pub remote_path: String,
     pub current_workspace: RunnerWorkspaceCurrentSummary,
+    pub workspace_lease: RunnerWorkspaceLease,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
     pub files: usize,
@@ -175,6 +176,7 @@ pub fn sync_workspace(
                 RunnerWorkspaceSyncMode::Snapshot,
                 true,
             );
+            let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
                 RunnerWorkspaceSyncOutput {
                     variant: "workspace_sync",
@@ -183,6 +185,7 @@ pub fn sync_workspace(
                     local_path: local_path.display().to_string(),
                     remote_path,
                     current_workspace,
+                    workspace_lease,
                     sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                     snapshot_identity: snapshot,
                     files: stats.files,
@@ -254,6 +257,7 @@ pub fn sync_workspace(
                 RunnerWorkspaceSyncMode::Git,
                 true,
             );
+            let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
                 RunnerWorkspaceSyncOutput {
                     variant: "workspace_sync",
@@ -262,6 +266,7 @@ pub fn sync_workspace(
                     local_path: local_path.display().to_string(),
                     remote_path,
                     current_workspace,
+                    workspace_lease,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
                     files: 0,
@@ -278,6 +283,23 @@ pub fn sync_workspace(
                 0,
             ))
         }
+    }
+}
+
+fn workspace_lease(
+    runner_id: &str,
+    current: &RunnerWorkspaceCurrentSummary,
+) -> RunnerWorkspaceLease {
+    RunnerWorkspaceLease {
+        runner_id: runner_id.to_string(),
+        local_path: current.local_path.clone(),
+        remote_path: current.remote_path.clone(),
+        sync_mode: current.sync_mode.label().to_string(),
+        materialized: current.materialized,
+        lifecycle_owner: RunnerLifecycleOwner::Controller,
+        source_commit: current.source_commit.clone(),
+        source_ref: current.source_ref.clone(),
+        source_dirty: current.source_dirty,
     }
 }
 

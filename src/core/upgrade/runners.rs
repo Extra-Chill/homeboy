@@ -2901,6 +2901,7 @@ mod tests {
             session: None,
             stale_daemon: None,
             active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
             active_job_count: 0,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
@@ -2920,6 +2921,7 @@ mod tests {
                 None,
             )),
             active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
             active_job_count: 0,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
@@ -3008,12 +3010,15 @@ mod tests {
             stderr: stderr.to_string(),
             source_snapshot: None,
             job: None,
+            runner_job: None,
             job_id: None,
             job_events: None,
             mirror_run_id: None,
             patch: None,
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: None,
         }
     }
