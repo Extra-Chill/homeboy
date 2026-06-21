@@ -126,14 +126,14 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     schema: 'wp-codebox/runtime-profile/v1',
     owner: 'wp-codebox',
     adapter_behavior: 'forward_profile_payload',
-    requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals.',
+    requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts through the public runtime profile payload Homeboy forwards.',
   },
   {
     id: 'parent-tool-bridge',
     schema: 'wp-codebox/parent-tool-bridge/v1',
     owner: 'wp-codebox',
     adapter_behavior: 'declare_requirement_when_missing',
-    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details.',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   },
   {
     id: 'provider-runtime-invocation',

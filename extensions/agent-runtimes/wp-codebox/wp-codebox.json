@@ -217,7 +217,7 @@
             "executor.config.model",
             "model"
           ],
-          "guidance": "Select the generic executor backend with executor.backend=codebox, then select the WordPress AI provider id with executor.config.provider and the provider model with executor.config.model or executor.model. Homeboy core should treat provider ids and models as opaque runtime metadata."
+          "guidance": "Select the generic executor backend with executor.backend=codebox, then select the WordPress AI provider id with executor.config.provider and the provider model with executor.config.model or executor.model. Homeboy forwards provider ids and models to the WP Codebox runtime contract."
         },
         "providers": [
           {
@@ -465,14 +465,14 @@
           "schema": "wp-codebox/runtime-profile/v1",
           "owner": "wp-codebox",
           "adapter_behavior": "forward_profile_payload",
-          "requirement": "Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals."
+          "requirement": "Consume generic runtime dependencies, provider plugins, overlays, env, and mounts through the public runtime profile payload Homeboy forwards."
         },
         {
           "id": "parent-tool-bridge",
           "schema": "wp-codebox/parent-tool-bridge/v1",
           "owner": "wp-codebox",
           "adapter_behavior": "declare_requirement_when_missing",
-          "requirement": "Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details."
+          "requirement": "Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract."
         },
         {
           "id": "provider-runtime-invocation",
