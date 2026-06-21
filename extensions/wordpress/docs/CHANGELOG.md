@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.10.1] - 2026-06-21
+
+### Fixed
+- report bench artifacts from shared-state mount
+
 ## [3.10.0] - 2026-06-21
 
 ### Added
