@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 
 use homeboy::core::deps::{
-    self, DependencyStackApplyResult, DependencyStackPlan, DependencyStackStatus, DependencyStatus,
-    DependencyUpdateOptions, DependencyUpdateResult,
+    self, DependencyInstallResult, DependencyStackApplyResult, DependencyStackPlan,
+    DependencyStackStatus, DependencyStatus, DependencyUpdateOptions, DependencyUpdateResult,
 };
 
 use super::CmdResult;
@@ -23,6 +23,19 @@ enum DepsCommand {
         /// Limit output to one package.
         #[arg(long, value_name = "PACKAGE")]
         package: Option<String>,
+
+        /// Workspace path to operate on directly.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Install a component's dependencies through its detected providers
+    ///
+    /// Package manager (composer/npm/component script/extension) is chosen by
+    /// workspace detection and manifest config — not hardcoded. CI uses this
+    /// (or `component setup`) instead of shell-level composer/npm/pnpm/yarn.
+    Install {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
 
         /// Workspace path to operate on directly.
         #[arg(long, value_name = "PATH")]
@@ -105,6 +118,19 @@ pub fn run(args: DepsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<s
                     homeboy::core::Error::internal_json(
                         e.to_string(),
                         Some("serialize deps status".to_string()),
+                    )
+                })?,
+                0,
+            ))
+        }
+        DepsCommand::Install { component, path } => {
+            let output: DependencyInstallResult =
+                deps::install(component.as_deref(), path.as_deref())?;
+            Ok((
+                serde_json::to_value(output).map_err(|e| {
+                    homeboy::core::Error::internal_json(
+                        e.to_string(),
+                        Some("serialize deps install".to_string()),
                     )
                 })?,
                 0,

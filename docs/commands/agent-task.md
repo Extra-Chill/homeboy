@@ -221,6 +221,11 @@ identifiers in core lifecycle state. Provider-specific execution settings belong
 in `--provider-config`; durable lifecycle commands remain headless and can be
 claimed later with `agent-task run` or `agent-task run-next`.
 
+`--backend` selects the generic executor backend, `--dispatch-provider-id` (also
+accepted as `--selector`) selects a specific provider id for that backend, and
+`--model` is only a provider-owned model override. Provider ids come from
+`homeboy agent-task providers`; they are not model names or provider families.
+
 ## Headless Fleet-Cooking Review
 
 The authoritative non-chat workflow is the durable `agent-task` lifecycle. Chat
