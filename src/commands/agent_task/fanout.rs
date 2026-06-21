@@ -302,19 +302,18 @@ fn packet_parse_error(error: serde_json::Error) -> Error {
 }
 
 fn default_executor(args: &AgentTaskFanoutInputArgs) -> Result<AgentTaskExecutor> {
-    let backend = args
-        .backend
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(provider::default_backend)?
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "backend",
-                "fanout packets without executor objects require --backend or a configured default agent-task backend",
-                None,
-                None,
-            )
-        })?;
+    let backend = match &args.backend {
+        Some(backend) => Some(backend.clone()),
+        None => provider::default_backend()?,
+    }
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "backend",
+            "fanout packets without executor objects require --backend or a configured default agent-task backend",
+            None,
+            None,
+        )
+    })?;
     Ok(AgentTaskExecutor {
         backend,
         selector: args.selector.clone(),

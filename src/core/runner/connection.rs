@@ -305,6 +305,7 @@ fn active_runner_jobs(
             broker_url,
             "/jobs",
             "list reverse runner broker jobs",
+            None,
         )?
     } else {
         return Ok(Vec::new());
