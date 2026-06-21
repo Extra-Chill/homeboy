@@ -226,10 +226,11 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
         lines.push("  Slowest timing metrics:".to_string());
         for point in slowest {
             lines.push(format!(
-                "    {} {}={}",
-                point.0,
-                point.1,
-                format_metric(point.2)
+                "    {} {}={}{}",
+                point.scenario_id,
+                point.metric,
+                format_metric(point.value),
+                point.failure_context.annotation()
             ));
         }
     }
@@ -244,13 +245,76 @@ pub(crate) fn bench_hotspot_lines(output: &Value) -> Vec<String> {
             ));
         }
     }
+    lines.extend(bench_failure_context_lines(&metrics));
     lines
 }
 
-fn collect_bench_metric_points(output: &Value) -> Vec<(String, String, f64)> {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ScenarioFailureContext {
+    success_rate_zero: bool,
+    http_error_count: u64,
+    request_error_count: u64,
+    status_counts: BTreeMap<String, u64>,
+    fatal_signatures: Vec<String>,
+}
+
+impl ScenarioFailureContext {
+    fn is_failure(&self) -> bool {
+        self.success_rate_zero
+            || self.http_error_count > 0
+            || self.request_error_count > 0
+            || !self.status_counts.is_empty()
+            || !self.fatal_signatures.is_empty()
+    }
+
+    fn annotation(&self) -> String {
+        if self.is_failure() {
+            format!(" [failed: {}]", self.summary())
+        } else {
+            String::new()
+        }
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.success_rate_zero {
+            parts.push("success_rate=0".to_string());
+        }
+        if self.http_error_count > 0 {
+            parts.push(format!("http_errors={}", self.http_error_count));
+        }
+        if self.request_error_count > 0 {
+            parts.push(format!("request_errors={}", self.request_error_count));
+        }
+        if !self.status_counts.is_empty() {
+            let statuses = self
+                .status_counts
+                .iter()
+                .map(|(status, count)| format!("{status}:{count}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            parts.push(format!("statuses={statuses}"));
+        }
+        if let Some(signature) = self.fatal_signatures.first() {
+            parts.push(format!("fatal={signature}"));
+        }
+        parts.join(" ")
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BenchMetricPoint {
+    scenario_id: String,
+    metric: String,
+    value: f64,
+    failure_context: ScenarioFailureContext,
+}
+
+fn collect_bench_metric_points(output: &Value) -> Vec<BenchMetricPoint> {
     let scenarios = value_at(output, &["results", "scenarios"])
         .and_then(Value::as_array)
-        .or_else(|| value_at(output, &["scenario_metrics"]).and_then(Value::as_array));
+        .or_else(|| value_at(output, &["scenario_metrics"]).and_then(Value::as_array))
+        .or_else(|| value_at(output, &["metadata", "scenario_metrics"]).and_then(Value::as_array));
     let Some(scenarios) = scenarios else {
         return Vec::new();
     };
@@ -262,10 +326,23 @@ fn collect_bench_metric_points(output: &Value) -> Vec<(String, String, f64)> {
         else {
             continue;
         };
-        collect_numeric_metric_points(scenario_id, None, &scenario["metrics"], &mut points);
+        let failure_context = scenario_failure_context(output, scenario_id, scenario);
+        collect_numeric_metric_points(
+            scenario_id,
+            None,
+            &scenario["metrics"],
+            &failure_context,
+            &mut points,
+        );
         if let Some(groups) = scenario["metric_groups"].as_object() {
             for (group, values) in groups {
-                collect_numeric_metric_points(scenario_id, Some(group), values, &mut points);
+                collect_numeric_metric_points(
+                    scenario_id,
+                    Some(group),
+                    values,
+                    &failure_context,
+                    &mut points,
+                );
             }
         }
     }
@@ -276,7 +353,8 @@ fn collect_numeric_metric_points(
     scenario_id: &str,
     group: Option<&str>,
     value: &Value,
-    points: &mut Vec<(String, String, f64)>,
+    failure_context: &ScenarioFailureContext,
+    points: &mut Vec<BenchMetricPoint>,
 ) {
     let Some(object) = value.as_object() else {
         return;
@@ -289,37 +367,40 @@ fn collect_numeric_metric_points(
             Some(group) => format!("{group}.{name}"),
             None => name.clone(),
         };
-        points.push((scenario_id.to_string(), metric, number));
+        points.push(BenchMetricPoint {
+            scenario_id: scenario_id.to_string(),
+            metric,
+            value: number,
+            failure_context: failure_context.clone(),
+        });
     }
 }
 
-fn top_slowest_metrics(
-    points: &[(String, String, f64)],
-    limit: usize,
-) -> Vec<(String, String, f64)> {
+fn top_slowest_metrics(points: &[BenchMetricPoint], limit: usize) -> Vec<BenchMetricPoint> {
     let mut timing = points
         .iter()
-        .filter(|point| is_timing_metric(&point.1))
+        .filter(|point| is_timing_metric(&point.metric))
         .cloned()
         .collect::<Vec<_>>();
     timing.sort_by(|a, b| {
-        b.2.total_cmp(&a.2)
-            .then_with(|| a.0.cmp(&b.0))
-            .then_with(|| a.1.cmp(&b.1))
+        b.value
+            .total_cmp(&a.value)
+            .then_with(|| a.scenario_id.cmp(&b.scenario_id))
+            .then_with(|| a.metric.cmp(&b.metric))
     });
     timing.truncate(limit);
     timing
 }
 
-fn top_metric_families(
-    points: &[(String, String, f64)],
-    limit: usize,
-) -> Vec<(String, f64, usize)> {
+fn top_metric_families(points: &[BenchMetricPoint], limit: usize) -> Vec<(String, f64, usize)> {
     let mut totals: BTreeMap<String, f64> = BTreeMap::new();
     let mut metric_counts: HashMap<String, usize> = HashMap::new();
-    for point in points.iter().filter(|point| is_family_metric(&point.1)) {
-        let family = metric_family(&point.1);
-        *totals.entry(family.clone()).or_default() += point.2;
+    for point in points
+        .iter()
+        .filter(|point| is_family_metric(&point.metric))
+    {
+        let family = metric_family(&point.metric);
+        *totals.entry(family.clone()).or_default() += point.value;
         *metric_counts.entry(family).or_default() += 1;
     }
 
@@ -336,6 +417,167 @@ fn top_metric_families(
     families.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     families.truncate(limit);
     families
+}
+
+fn bench_failure_context_lines(points: &[BenchMetricPoint]) -> Vec<String> {
+    let mut scenarios = BTreeMap::<String, ScenarioFailureContext>::new();
+    for point in points {
+        if point.failure_context.is_failure() {
+            scenarios
+                .entry(point.scenario_id.clone())
+                .or_insert_with(|| point.failure_context.clone());
+        }
+    }
+    if scenarios.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["  Failure context:".to_string()];
+    for (scenario_id, context) in scenarios {
+        lines.push(format!("    {scenario_id}: {}", context.summary()));
+    }
+    lines
+}
+
+fn scenario_failure_context(
+    output: &Value,
+    scenario_id: &str,
+    scenario: &Value,
+) -> ScenarioFailureContext {
+    let mut context = ScenarioFailureContext::default();
+    collect_failure_context_from_value(scenario, &mut context);
+    collect_artifact_fatal_signatures(output, scenario_id, &mut context);
+    context.fatal_signatures.sort();
+    context.fatal_signatures.dedup();
+    context
+}
+
+fn collect_failure_context_from_value(value: &Value, context: &mut ScenarioFailureContext) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let normalized = key.to_ascii_lowercase();
+                if normalized == "success_rate" && child.as_f64() == Some(0.0) {
+                    context.success_rate_zero = true;
+                } else if normalized == "http_error_count" {
+                    context.http_error_count += numeric_count(child);
+                } else if normalized == "request_error_count" {
+                    context.request_error_count += numeric_count(child);
+                } else if is_status_count_object_key(&normalized) {
+                    collect_status_count_object(child, context);
+                } else if let Some(status) = status_count_key(&normalized) {
+                    add_status_count(context, status, numeric_count(child));
+                } else if normalized == "fatal_signature" {
+                    collect_signature_value(child, context);
+                } else if normalized == "fatal_signatures" {
+                    collect_signature_value(child, context);
+                }
+                collect_failure_context_from_value(child, context);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_failure_context_from_value(child, context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_artifact_fatal_signatures(
+    output: &Value,
+    scenario_id: &str,
+    context: &mut ScenarioFailureContext,
+) {
+    for artifacts_path in [&["artifacts"][..], &["metadata", "artifacts"][..]] {
+        let Some(artifacts) = value_at(output, artifacts_path).and_then(Value::as_array) else {
+            continue;
+        };
+        for artifact in artifacts {
+            let artifact_scenario = string_value(artifact, &["scenario_id"]);
+            if artifact_scenario.is_some_and(|value| value != scenario_id) {
+                continue;
+            }
+            if artifact_scenario.is_none() {
+                continue;
+            }
+            collect_artifact_signature_fields(artifact, context);
+        }
+    }
+}
+
+fn collect_artifact_signature_fields(value: &Value, context: &mut ScenarioFailureContext) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, child) in object {
+        let normalized = key.to_ascii_lowercase();
+        if normalized == "fatal_signature" || normalized == "fatal_signatures" {
+            collect_signature_value(child, context);
+        }
+    }
+}
+
+fn numeric_count(value: &Value) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.as_f64().map(|number| number as u64))
+        .unwrap_or(0)
+}
+
+fn is_status_count_object_key(key: &str) -> bool {
+    matches!(
+        key,
+        "status_counts" | "status_count" | "status_codes" | "http_status_counts"
+    )
+}
+
+fn collect_status_count_object(value: &Value, context: &mut ScenarioFailureContext) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (status, count) in object {
+        if status_is_error(status) {
+            add_status_count(context, status.clone(), numeric_count(count));
+        }
+    }
+}
+
+fn status_count_key(key: &str) -> Option<String> {
+    for prefix in ["status_", "http_status_"] {
+        let Some(rest) = key.strip_prefix(prefix) else {
+            continue;
+        };
+        let status = rest.strip_suffix("_count").unwrap_or(rest);
+        if status_is_error(status) {
+            return Some(status.to_string());
+        }
+    }
+    None
+}
+
+fn status_is_error(status: &str) -> bool {
+    status.starts_with('4') || status.starts_with('5')
+}
+
+fn add_status_count(context: &mut ScenarioFailureContext, status: String, count: u64) {
+    if count > 0 {
+        *context.status_counts.entry(status).or_default() += count;
+    }
+}
+
+fn collect_signature_value(value: &Value, context: &mut ScenarioFailureContext) {
+    match value {
+        Value::String(signature) if !signature.is_empty() => {
+            context.fatal_signatures.push(signature.clone());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_signature_value(value, context);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn is_timing_metric(metric: &str) -> bool {
@@ -724,6 +966,53 @@ mod tests {
         assert!(lines.contains("  Hottest metric families:\n"));
         assert!(lines.contains("    query_families total=67 metrics=4"));
         assert!(lines.contains("    create total=36 metrics=2"));
+    }
+
+    #[test]
+    fn hotspot_lines_annotate_failed_http_coverage_metrics() {
+        let payload = json!({
+            "scenario_metrics": [
+                {
+                    "scenario_id": "admin-page-coverage",
+                    "metrics": {
+                        "duration_ms": 32210.0,
+                        "success_rate": 0.0,
+                        "http_error_count": 62.0,
+                        "request_error_count": 3.0,
+                        "status_counts": {
+                            "500": 47,
+                            "403": 15,
+                            "200": 9
+                        }
+                    }
+                },
+                {
+                    "scenario_id": "normal-slow-path",
+                    "metrics": {
+                        "duration_ms": 1500.0,
+                        "success_rate": 1.0
+                    }
+                }
+            ],
+            "artifacts": [
+                {
+                    "scenario_id": "admin-page-coverage",
+                    "name": "fatal-log",
+                    "fatal_signature": "PHP Fatal error: sample"
+                }
+            ]
+        });
+
+        let lines = bench_hotspot_lines(&payload).join("\n");
+
+        assert!(lines.contains(
+            "admin-page-coverage duration_ms=32210 [failed: success_rate=0 http_errors=62 request_errors=3 statuses=403:15,500:47 fatal=PHP Fatal error: sample]"
+        ));
+        assert!(lines.contains("normal-slow-path duration_ms=1500\n"));
+        assert!(lines.contains("  Failure context:\n"));
+        assert!(lines.contains(
+            "    admin-page-coverage: success_rate=0 http_errors=62 request_errors=3 statuses=403:15,500:47 fatal=PHP Fatal error: sample"
+        ));
     }
 
     #[test]

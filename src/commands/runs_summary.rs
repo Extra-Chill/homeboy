@@ -53,9 +53,7 @@ fn render_run_detail(run: &Value) -> String {
     }
 
     if kind == "bench" {
-        if let Some(metadata) = value_at(run, &["metadata"]) {
-            lines.extend(super::bench_summary::bench_hotspot_lines(metadata));
-        }
+        lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_coverage_lines(run));
     }
     lines.extend(artifact_lines(run, run_id));
@@ -231,6 +229,58 @@ mod tests {
         assert!(summary.contains("  Hottest metric families:\n"));
         assert!(summary.contains("    work total=34 metrics=2\n"));
         assert!(summary.contains("Artifacts: none recorded\n"));
+    }
+
+    #[test]
+    fn bench_show_summary_marks_failed_hotspots_from_run_metadata() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "bench-run-42",
+                    "kind": "bench",
+                    "status": "pass",
+                    "metadata": {
+                        "scenario_metrics": [
+                            {
+                                "scenario_id": "admin-page-coverage",
+                                "metrics": {
+                                    "duration_ms": 42000.0,
+                                    "success_rate": 0.0,
+                                    "http_error_count": 62.0,
+                                    "status_counts": {
+                                        "500": 47,
+                                        "403": 15
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    "artifacts": [
+                        {
+                            "id": "fatal-log",
+                            "run_id": "bench-run-42",
+                            "scenario_id": "admin-page-coverage",
+                            "kind": "log",
+                            "type": "file",
+                            "path": "/tmp/fatal.log",
+                            "fatal_signatures": ["PHP Fatal error: sample"]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains(
+            "admin-page-coverage duration_ms=42000 [failed: success_rate=0 http_errors=62 statuses=403:15,500:47 fatal=PHP Fatal error: sample]\n"
+        ));
+        assert!(summary.contains("  Failure context:\n"));
+        assert!(summary.contains(
+            "    admin-page-coverage: success_rate=0 http_errors=62 statuses=403:15,500:47 fatal=PHP Fatal error: sample\n"
+        ));
     }
 
     #[test]
