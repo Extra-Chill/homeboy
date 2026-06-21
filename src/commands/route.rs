@@ -65,7 +65,8 @@ pub fn route_after_parse(
     // workspace and the runner returns no patch to apply (#4315).
     let rewritten_args = (mutation_flag.is_some())
         .then(|| rewrite_component_target_to_path(&cli.command, normalized_args))
-        .flatten();
+        .flatten()
+        .or_else(|| rewrite_ad_hoc_lab_workspace_to_path(&cli.command, normalized_args));
     let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
 
     let outcome = lab_routing::dispatch_lab_offload(
@@ -311,6 +312,52 @@ fn resolve_component_source_path(component_id: &str) -> Option<String> {
     Some(ctx.source_path.to_string_lossy().to_string())
 }
 
+/// Lab sync already materializes the controller CWD when no explicit source path
+/// is supplied. For component commands, make that implicit source explicit so
+/// the runner re-enters the command through `--path <runner-workspace>` and can
+/// synthesize an ad-hoc component instead of requiring registry state there.
+fn rewrite_ad_hoc_lab_workspace_to_path(
+    command: &Commands,
+    normalized_args: &[String],
+) -> Option<Vec<String>> {
+    let needs_path = match command {
+        Commands::Audit(args) => args.comp.component.is_none() && args.comp.path.is_none(),
+        Commands::Lint(args) => args.comp.component.is_none() && args.comp.path.is_none(),
+        Commands::Test(args) => args.comp.component.is_none() && args.comp.path.is_none(),
+        _ => false,
+    };
+    if !needs_path {
+        return None;
+    }
+
+    let source_path = std::env::current_dir().ok()?;
+    Some(insert_path_arg_before_passthrough(
+        normalized_args,
+        &source_path.to_string_lossy(),
+    ))
+}
+
+fn insert_path_arg_before_passthrough(
+    normalized_args: &[String],
+    source_path: &str,
+) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(normalized_args.len() + 2);
+    let mut inserted = false;
+    for arg in normalized_args {
+        if !inserted && arg == "--" {
+            rewritten.push("--path".to_string());
+            rewritten.push(source_path.to_string());
+            inserted = true;
+        }
+        rewritten.push(arg.clone());
+    }
+    if !inserted {
+        rewritten.push("--path".to_string());
+        rewritten.push(source_path.to_string());
+    }
+    rewritten
+}
+
 /// Drop component-targeting args (the bare positional id and any
 /// `-c`/`--component`/`--components` flags) and append `--path <source_path>`.
 fn strip_component_target_args(
@@ -370,6 +417,11 @@ mod tests {
         _guard: MutexGuard<'static, ()>,
     }
 
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+        _guard: MutexGuard<'static, ()>,
+    }
+
     impl EnvGuard {
         fn set(name: &'static str, value: &str) -> Self {
             let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
@@ -405,6 +457,24 @@ mod tests {
                 Some(value) => std::env::set_var(self.name, value),
                 None => std::env::remove_var(self.name),
             }
+        }
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self {
+                previous,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).expect("restore current dir");
         }
     }
 
@@ -1088,5 +1158,82 @@ mod tests {
         ];
 
         assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
+    }
+
+    #[test]
+    fn rewrite_ad_hoc_lab_workspace_adds_path_for_pathless_lint() {
+        let dir = tempdir().unwrap();
+        let _cwd = CwdGuard::set(dir.path());
+        let cli = Cli::parse_from(["homeboy", "lint"]);
+        let normalized = vec!["homeboy".to_string(), "lint".to_string()];
+
+        let rewritten = rewrite_ad_hoc_lab_workspace_to_path(&cli.command, &normalized)
+            .expect("pathless lint should become explicit path");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "--path".to_string(),
+                dir.path().to_string_lossy().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_ad_hoc_lab_workspace_inserts_path_before_passthrough() {
+        let dir = tempdir().unwrap();
+        let _cwd = CwdGuard::set(dir.path());
+        let cli = Cli::parse_from(["homeboy", "test", "--", "--filter", "ExampleTest"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--".to_string(),
+            "--filter".to_string(),
+            "ExampleTest".to_string(),
+        ];
+
+        let rewritten = rewrite_ad_hoc_lab_workspace_to_path(&cli.command, &normalized)
+            .expect("pathless test should become explicit path");
+
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "test".to_string(),
+                "--path".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                "--".to_string(),
+                "--filter".to_string(),
+                "ExampleTest".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_ad_hoc_lab_workspace_skips_registered_component_or_path() {
+        let component_cli = Cli::parse_from(["homeboy", "lint", "homeboy"]);
+        let path_cli = Cli::parse_from(["homeboy", "audit", "--path", "/tmp/homeboy"]);
+
+        assert!(rewrite_ad_hoc_lab_workspace_to_path(
+            &component_cli.command,
+            &[
+                "homeboy".to_string(),
+                "lint".to_string(),
+                "homeboy".to_string(),
+            ],
+        )
+        .is_none());
+        assert!(rewrite_ad_hoc_lab_workspace_to_path(
+            &path_cli.command,
+            &[
+                "homeboy".to_string(),
+                "audit".to_string(),
+                "--path".to_string(),
+                "/tmp/homeboy".to_string(),
+            ],
+        )
+        .is_none());
     }
 }
