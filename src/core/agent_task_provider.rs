@@ -1265,18 +1265,13 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             return run_repo_local_gate_task(&request);
         }
 
-        let Some(provider) = select_provider(&self.providers, &request) else {
-            return failure_outcome(
-                &request,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskFailureClassification::CapabilityMissing,
-                "agent_task.provider_missing",
-                format!(
-                    "no extension agent-task provider found for backend '{}'",
-                    request.executor.backend
-                ),
-                json!({ "backend": request.executor.backend }),
-            );
+        let provider = match resolve_provider_for_backend(
+            &self.providers,
+            &request.executor.backend,
+            request.executor.selector.as_deref(),
+        ) {
+            ProviderResolution::Resolved(provider) => provider,
+            resolution => return provider_resolution_failure_outcome(&request, resolution),
         };
 
         let missing_capabilities: Vec<String> = request
@@ -1302,6 +1297,56 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         }
 
         run_provider_command(&request, provider)
+    }
+}
+
+fn provider_resolution_failure_outcome(
+    request: &AgentTaskRequest,
+    resolution: ProviderResolution<'_>,
+) -> AgentTaskOutcome {
+    match resolution {
+        ProviderResolution::Resolved(_) => unreachable!("resolved provider handled before failure"),
+        ProviderResolution::NotFound => failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::CapabilityMissing,
+            "agent_task.provider_missing",
+            format!(
+                "no extension agent-task provider found for backend '{}'",
+                request.executor.backend
+            ),
+            json!({ "backend": request.executor.backend }),
+        ),
+        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::CapabilityMissing,
+            "agent_task.provider_ambiguous",
+            format!(
+                "multiple extension agent-task providers match backend '{}'; pass --selector with one provider id",
+                request.executor.backend
+            ),
+            json!({
+                "backend": request.executor.backend,
+                "available_provider_ids": candidate_ids,
+            }),
+        ),
+        ProviderResolution::SelectorMismatch { available_ids } => failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::CapabilityMissing,
+            "agent_task.provider_selector_mismatch",
+            format!(
+                "no extension agent-task provider for backend '{}' matched selector '{}'",
+                request.executor.backend,
+                request.executor.selector.as_deref().unwrap_or("")
+            ),
+            json!({
+                "backend": request.executor.backend,
+                "selector": request.executor.selector,
+                "available_provider_ids": available_ids,
+            }),
+        ),
     }
 }
 
@@ -1535,11 +1580,24 @@ pub(crate) fn resolve_provider_for_backend<'a>(
     backend: &str,
     selector: Option<&str>,
 ) -> ProviderResolution<'a> {
-    if let Some(provider) = providers
+    let exact_matches: Vec<&AgentTaskExecutorProvider> = providers
         .iter()
-        .find(|provider| provider_matches_exact_backend(provider, backend, selector))
-    {
-        return ProviderResolution::Resolved(provider);
+        .filter(|provider| provider.backend == backend)
+        .collect();
+
+    if !exact_matches.is_empty() {
+        if let Some(provider) = exact_matches
+            .iter()
+            .find(|provider| selector.is_none_or(|selector| provider.id == selector))
+        {
+            return ProviderResolution::Resolved(provider);
+        }
+        return ProviderResolution::SelectorMismatch {
+            available_ids: exact_matches
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect(),
+        };
     }
     resolve_provider_by_extension_alias(providers, backend, selector)
 }
@@ -1550,14 +1608,6 @@ fn select_provider_by_backend<'a>(
     selector: Option<&str>,
 ) -> Option<&'a AgentTaskExecutorProvider> {
     resolve_provider_for_backend(providers, backend, selector).resolved()
-}
-
-fn provider_matches_exact_backend(
-    provider: &AgentTaskExecutorProvider,
-    backend: &str,
-    selector: Option<&str>,
-) -> bool {
-    provider.backend == backend && selector.is_none_or(|selector| provider.id == selector)
 }
 
 fn resolve_provider_by_extension_alias<'a>(
@@ -3455,6 +3505,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_selection_reports_exact_backend_selector_mismatch() {
+        let (_, mut provider) = request("task-a", "node provider.js".to_string());
+        provider.id = "wordpress.codebox-agent-task-executor".to_string();
+        provider.backend = "codebox".to_string();
+
+        let providers = [provider];
+        let resolution = resolve_provider_for_backend(&providers, "codebox", Some("openai"));
+
+        assert_eq!(
+            resolution,
+            ProviderResolution::SelectorMismatch {
+                available_ids: vec!["wordpress.codebox-agent-task-executor".to_string()],
+            }
+        );
+    }
+
+    #[test]
     fn provider_selection_matches_unique_extension_alias() {
         let (_, mut provider) = request("task-a", "node provider.js".to_string());
         provider.id = "extension-a.provider".to_string();
@@ -4643,6 +4710,34 @@ process.stdout.write(JSON.stringify({
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].class,
             "agent_task.provider_missing"
+        );
+    }
+
+    #[test]
+    fn scheduler_reports_provider_selector_mismatch() {
+        let (mut request, mut provider) = request("task-selector-mismatch", "unused".to_string());
+        request.executor.backend = "codebox".to_string();
+        request.executor.selector = Some("openai".to_string());
+        provider.id = "wordpress.codebox-agent-task-executor".to_string();
+        provider.backend = "codebox".to_string();
+        let scheduler =
+            AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+                provider,
+            ]));
+
+        let aggregate = scheduler.run(AgentTaskPlan::new(
+            "plan-selector-mismatch",
+            vec![request],
+        ));
+
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.provider_selector_mismatch"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].data["available_provider_ids"],
+            json!(["wordpress.codebox-agent-task-executor"])
         );
     }
 
