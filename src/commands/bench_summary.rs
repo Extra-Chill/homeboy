@@ -81,6 +81,10 @@ fn render_single_summary(output: &Value) -> String {
     lines.extend(bench_hotspot_lines(output));
     lines.extend(bench_coverage_lines(output));
     lines.extend(gate_failure_lines(output));
+    lines.extend(key_artifact_lines(
+        output,
+        persisted_run_id(output).as_deref(),
+    ));
     lines.extend(artifact_lines(output));
     lines.extend(failure_lines(output));
     lines.extend(hint_lines(output));
@@ -253,23 +257,18 @@ fn artifact_lines(output: &Value) -> Vec<String> {
     lines
 }
 
+fn key_artifact_lines(output: &Value, run_id: Option<&str>) -> Vec<String> {
+    value_at(output, &["artifacts"])
+        .and_then(Value::as_array)
+        .map(|artifacts| super::key_artifacts::key_artifact_lines(artifacts, run_id, false))
+        .unwrap_or_default()
+}
+
 /// Best on-disk / network locator for an artifact ref, in preference order.
 /// Paths come first because shared-state and bundle artifacts are local
 /// files the operator wants to open directly.
 fn artifact_locator(artifact: &Value) -> Option<String> {
-    for key in [
-        "path",
-        "local_url",
-        "viewer_url",
-        "preview_url",
-        "public_url",
-        "url",
-    ] {
-        if let Some(value) = string_value(artifact, &[key]) {
-            return Some(value.to_string());
-        }
-    }
-    None
+    super::key_artifacts::artifact_locator(artifact).map(str::to_string)
 }
 
 fn failure_lines(output: &Value) -> Vec<String> {
@@ -497,6 +496,43 @@ mod tests {
         assert!(summary.contains("Failure: scenario rtc-smoke exceeded budget\n"));
         // No persisted run id: suggest --json for full output.
         assert!(summary.contains("Full output: re-run with --json\n"));
+    }
+
+    #[test]
+    fn single_summary_surfaces_key_artifacts_before_full_artifact_list() {
+        let payload = single_payload(json!({
+            "passed": true,
+            "status": "passed",
+            "component": "homeboy",
+            "iterations": 1,
+            "artifacts": [
+                {
+                    "scenario_id": "scenario-a",
+                    "name": "route_inventory",
+                    "observation_artifact_id": "artifact-route-inventory",
+                    "path": "/tmp/route-inventory.json"
+                },
+                {
+                    "scenario_id": "scenario-a",
+                    "name": "transcript",
+                    "path": "/tmp/transcript.txt"
+                }
+            ],
+            "persisted_run": {
+                "run_id": "bench-run-42"
+            }
+        }));
+
+        let summary = render_bench_summary(&payload).expect("summary");
+        let key_index = summary.find("Key artifacts:\n").expect("key artifacts");
+        let artifact_index = summary.find("Artifacts (2):\n").expect("artifacts");
+
+        assert!(key_index < artifact_index);
+        assert!(summary.contains("  scenario-a/route_inventory: /tmp/route-inventory.json\n"));
+        assert!(summary.contains(
+            "    get: homeboy runs artifact get bench-run-42 artifact-route-inventory -o <path>\n"
+        ));
+        assert!(!summary.contains("Key artifacts:\n  scenario-a/transcript"));
     }
 
     #[test]

@@ -4,6 +4,8 @@ use serde_json::{Map, Value};
 
 pub type CmdResult<T> = homeboy::core::Result<(T, i32)>;
 
+mod key_artifacts;
+
 pub(crate) fn escape_markdown_table_cell(value: &str) -> String {
     value.replace('|', "\\|")
 }
