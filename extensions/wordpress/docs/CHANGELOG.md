@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.9.1] - 2026-06-21
+
+### Fixed
+- preserve prepared dependency plugin slugs
+
 ## [3.9.0] - 2026-06-21
 
 ### Added
