@@ -28,6 +28,10 @@ Start by listing the workloads declared by the rig and the selected extension:
 homeboy fuzz list --rig <rig-id>
 ```
 
+`fuzz list` is the declared-workload view. It is not proof that a workload ran.
+Use the listed workload id in `fuzz run`, then use `runs show` or `runs evidence`
+to inspect the executable/proven state and recorded artifacts.
+
 Run one workload through the fuzz command surface:
 
 ```bash
@@ -47,6 +51,11 @@ runner provides it, and fetch commands for recorded artifacts such as failing
 cases, repro cases, and coverage reports. Use `homeboy runs artifact get` for
 artifact bytes that are stored locally or mirrored from a runner.
 
+Full-coverage claims need persisted proof artifacts. A neutral coverage summary
+can report declared, executable, and proven counts; operation totals; skipped
+reason codes; and case/manifest artifacts. Treat missing `proven` counts or
+missing coverage/case artifacts as incomplete evidence, not as full coverage.
+
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab
 routing and re-run `homeboy fuzz run`; do not substitute `homeboy bench` as fuzz
@@ -59,6 +68,12 @@ select the runner, or pass a runner explicitly with the global `--runner <id>`
 flag when required. The reviewer-facing proof is the persisted run plus artifact
 refs surfaced by `homeboy runs show` and `homeboy runs artifact get`, not a
 controller-local hot run or a benchmark surrogate.
+
+If `homeboy fuzz` is present in source but unavailable on a Lab runner, compare
+the controller and runner Homeboy versions with `homeboy lab status --runner
+<id>`. The status output includes command availability checks such as
+`homeboy fuzz --help`; refresh or upgrade the runner binary before rerunning the
+campaign.
 
 ## Manifest Shape
 
@@ -80,11 +95,11 @@ Rigs can add private fuzz workloads keyed by extension id:
 ```json
 {
   "fuzz": {
-    "default_component": "woocommerce"
+    "default_component": "package"
   },
   "fuzz_workloads": {
-    "wordpress": [
-      { "path": "${package.root}/fuzz/checkout-create-order.json" }
+    "generic": [
+      { "path": "${package.root}/fuzz/parser.json" }
     ]
   }
 }
