@@ -11,6 +11,8 @@ const assert = require('node:assert/strict');
 const wordpress = require('../index');
 
 assert.equal(typeof wordpress.profileWordPressAdminPageScenario, 'function');
+assert.equal(typeof wordpress.normalizeWordPressAjaxActionSurface, 'function');
+assert.equal(typeof wordpress.buildAjaxActionPlanArtifact, 'function');
 assert.equal(typeof wordpress.normalizeWordPressRestRouteMatrix, 'function');
 assert.equal(typeof wordpress.generateWordPressRestRequestCases, 'function');
 assert.equal(typeof wordpress.buildFullSurfaceCoverageArtifact, 'function');

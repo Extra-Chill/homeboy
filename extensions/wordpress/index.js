@@ -15,6 +15,7 @@ module.exports = {
 	...require('./lib/full-surface-coverage'),
 	...require('./lib/external-http-guardrail'),
 	...require('./lib/page-profiler'),
+	...require('./lib/ajax-action-surface'),
 	...require('./lib/rest-route-matrix'),
 	...require('./lib/wordpress-route-latency'),
 	...require('./lib/block-quality'),
