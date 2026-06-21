@@ -723,26 +723,14 @@ mod tests {
 
         let env = fuzz_runner_env(&args, Some(&workload));
 
-        assert!(env.contains(&(
-            "HOMEBOY_FUZZ_WORKLOAD_ID".to_string(),
-            "parser".to_string()
-        )));
+        assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
         assert!(env.contains(&(
             "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
             "/tmp/fuzz/parser.json".to_string()
         )));
-        assert!(env.contains(&(
-            "HOMEBOY_FUZZ_RUN_ID".to_string(),
-            "proof-1".to_string()
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_FUZZ_SEED".to_string(),
-            "1234".to_string()
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_FUZZ_MAX_DURATION".to_string(),
-            "60s".to_string()
-        )));
+        assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
+        assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
+        assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
     }
 
     #[test]
