@@ -670,6 +670,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     runs-on: ubuntu-22.04
     outputs:
       val: ${{ steps.host.outputs.manifest }}
@@ -721,62 +722,19 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
 
       - name: Finish Homeboy release pipeline at tag
-        run: |
-          cargo build --release --bin homeboy
-          ./target/release/homeboy extension install-for-component --path . --source https://github.com/Extra-Chill/homeboy-extensions
-          ./target/release/homeboy release homeboy --head --from-artifacts artifacts --skip-checks --apply
-
-  publish-homebrew-formula:
-    needs:
-      - prepare
-      - plan
-      - host
-    runs-on: ubuntu-22.04
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PLAN: ${{ needs.plan.outputs.val }}
-      GITHUB_USER: "axo bot"
-      GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    steps:
-      - uses: actions/checkout@v4
+        uses: Extra-Chill/homeboy-action@v2
         with:
-          persist-credentials: true
-          repository: "Extra-Chill/homebrew-tap"
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      - name: Fetch homebrew formulae
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: Formula/
-          merge-multiple: true
-
-      - name: Commit formula files
-        run: |
-          git config --global user.name "${GITHUB_USER}"
-          git config --global user.email "${GITHUB_EMAIL}"
-
-          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
-            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
-            name=$(echo "$filename" | sed "s/\.rb$//")
-            version=$(echo "$release" | jq .app_version --raw-output)
-
-            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-            brew update
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
-
-            git add "Formula/${filename}"
-            git commit -m "${name} ${version}"
-          done
-          git push
+          source: '.'
+          component: homeboy
+          commands: release
+          release-head: 'true'
+          release-from-artifacts: artifacts
 
   announce:
     needs:
       - plan
       - host
-      - publish-homebrew-formula
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -801,7 +759,6 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
-      - publish-homebrew-formula
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
     runs-on: ubuntu-latest
@@ -832,7 +789,6 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - host
-      - publish-homebrew-formula
       - announce
     if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}
     runs-on: ubuntu-latest
