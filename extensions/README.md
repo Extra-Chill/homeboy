@@ -161,6 +161,12 @@ when the runtime profile exposes one. When it is missing, the adapter only
 declares an upstream primitive requirement in the runtime profile; it does not
 inject bridge environment variables or synthesize sandbox bridge descriptors.
 
+For WordPress fuzzing, Homeboy Extensions builds and forwards the
+Codebox-owned `wp-codebox/fuzz-run/v1` request through the WP Codebox runtime
+task boundary. HBX may describe WordPress targets, seeds, limits, coverage
+requests, and artifact expectations, but WP Codebox owns the fuzz execution
+loop and result envelope.
+
 Each extension also exposes a CLI binding for direct use against a project or component:
 
 ```bash
