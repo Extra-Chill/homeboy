@@ -100,6 +100,23 @@ impl Language {
     pub fn builtin_version_guard_tokens() -> &'static [&'static str] {
         &["php"]
     }
+
+    /// Extension tokens whose source files embed unit tests inline in the same
+    /// file (e.g. Rust's `#[cfg(test)] mod tests { ... }`). Detectors that parse
+    /// production structure must strip these inline test modules first so test
+    /// fixtures are never mistaken for production declarations. Components that
+    /// opt into builtin defaults inherit this set; others declare their own.
+    pub fn builtin_inline_test_strip_tokens() -> &'static [&'static str] {
+        &["rs"]
+    }
+
+    /// File-name suffixes that mark a whole file as test-only across the
+    /// languages Homeboy can classify. Detectors skip these entirely so their
+    /// fixtures and assertions never count as production structure. Components
+    /// that opt into builtin defaults inherit this set; others declare theirs.
+    pub fn builtin_test_file_suffixes() -> &'static [&'static str] {
+        &["_test.rs", "_test.php", ".test.ts", ".test.js", ".test.tsx"]
+    }
 }
 
 /// Builtin tracker-reference regex defaults shipped with Homeboy. These match

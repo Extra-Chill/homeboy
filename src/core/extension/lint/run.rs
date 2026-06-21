@@ -22,6 +22,23 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Sniff-selection filters shared by every lint entry point.
+///
+/// The CLI args (`LintArgs`), the workflow args (`LintRunWorkflowArgs`), and
+/// the refactor-source options (`LintSourceOptions`) all carry the same
+/// `errors_only` / `sniffs` / `exclude_sniffs` triplet. Extracting it into one
+/// composed struct keeps that contract defined in a single place instead of
+/// being re-declared field-by-field across layers.
+#[derive(Debug, Clone, Default)]
+pub struct LintSniffFilters {
+    /// Show only errors, suppress warnings.
+    pub errors_only: bool,
+    /// Only check specific sniffs (comma-separated codes).
+    pub sniffs: Option<String>,
+    /// Exclude sniffs from checking (comma-separated codes).
+    pub exclude_sniffs: Option<String>,
+}
+
 /// Arguments for the main lint workflow — populated by the command layer from CLI flags.
 #[derive(Debug, Clone)]
 pub struct LintRunWorkflowArgs {
@@ -35,9 +52,7 @@ pub struct LintRunWorkflowArgs {
     pub changed_only: bool,
     pub changed_since: Option<String>,
     pub precomputed_changed_files: Option<Vec<String>>,
-    pub errors_only: bool,
-    pub sniffs: Option<String>,
-    pub exclude_sniffs: Option<String>,
+    pub sniff_filters: LintSniffFilters,
     pub category: Option<String>,
     pub ci_env: Vec<(String, String)>,
     pub baseline_flags: BaselineFlags,
@@ -142,9 +157,9 @@ pub fn run_main_lint_workflow(
             args.summary || args.json_summary,
             args.file.as_deref(),
             args.glob.as_deref(),
-            args.errors_only,
-            args.sniffs.as_deref(),
-            args.exclude_sniffs.as_deref(),
+            args.sniff_filters.errors_only,
+            args.sniff_filters.sniffs.as_deref(),
+            args.sniff_filters.exclude_sniffs.as_deref(),
             args.category.as_deref(),
             None,
             run_dir,
@@ -281,8 +296,8 @@ fn filter_lint_findings(
     findings: Vec<HomeboyFinding>,
     args: &LintRunWorkflowArgs,
 ) -> Vec<HomeboyFinding> {
-    let included_sniffs = parse_csv_filter(args.sniffs.as_deref());
-    let excluded_sniffs = parse_csv_filter(args.exclude_sniffs.as_deref());
+    let included_sniffs = parse_csv_filter(args.sniff_filters.sniffs.as_deref());
+    let excluded_sniffs = parse_csv_filter(args.sniff_filters.exclude_sniffs.as_deref());
     let category = args
         .category
         .as_deref()
@@ -652,9 +667,9 @@ fn run_scoped_lint_runs(
             args.summary || args.json_summary,
             args.file.as_deref(),
             Some(run.glob.as_str()),
-            args.errors_only,
-            args.sniffs.as_deref(),
-            args.exclude_sniffs.as_deref(),
+            args.sniff_filters.errors_only,
+            args.sniff_filters.sniffs.as_deref(),
+            args.sniff_filters.exclude_sniffs.as_deref(),
             args.category.as_deref(),
             run.step.as_deref(),
             active_run_dir,
@@ -1045,9 +1060,7 @@ mod tests {
             changed_only: false,
             changed_since: None,
             precomputed_changed_files: None,
-            errors_only: false,
-            sniffs: None,
-            exclude_sniffs: None,
+            sniff_filters: LintSniffFilters::default(),
             category: None,
             ci_env: Vec::new(),
             baseline_flags: BaselineFlags::default(),
@@ -1256,10 +1269,10 @@ mod tests {
     #[test]
     fn filter_lint_findings_honors_include_and_exclude_sniffs() {
         let mut args = lint_args();
-        args.sniffs = Some(
+        args.sniff_filters.sniffs = Some(
             "WordPress.Security.ValidatedSanitizedInput,Generic.WhiteSpace.ScopeIndent".to_string(),
         );
-        args.exclude_sniffs = Some("Generic.WhiteSpace.ScopeIndent".to_string());
+        args.sniff_filters.exclude_sniffs = Some("Generic.WhiteSpace.ScopeIndent".to_string());
         let findings = vec![
             lint_finding(
                 "inc/a.php::WordPress.Security.ValidatedSanitizedInput",

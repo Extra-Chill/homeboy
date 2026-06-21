@@ -517,9 +517,7 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
             .precomputed_changed_files()
             .map(<[String]>::to_vec),
         ci_job: None,
-        errors_only: false,
-        sniffs: None,
-        exclude_sniffs: None,
+        sniff_filters: Default::default(),
         category: None,
         fix: false,
         force: false,
