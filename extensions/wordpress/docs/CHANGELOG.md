@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.11.0] - 2026-06-21
+
+### Added
+- pass WordPress runtime evidence steps
+
 ## [3.10.3] - 2026-06-21
 
 ### Changed
