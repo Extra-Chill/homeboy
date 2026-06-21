@@ -10,6 +10,7 @@ use super::spec::{RigSpec, TraceDependencySpec};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RigWorkloadKind {
     Bench,
+    Fuzz,
     Trace,
 }
 
@@ -22,6 +23,7 @@ pub struct RigWorkloadPathExpansion {
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
     let mut ids: Vec<String> = match kind {
         RigWorkloadKind::Bench => rig_spec.bench_workloads.keys().cloned().collect(),
+        RigWorkloadKind::Fuzz => rig_spec.fuzz_workloads.keys().cloned().collect(),
         RigWorkloadKind::Trace => rig_spec.trace_workloads.keys().cloned().collect(),
     };
     ids.sort();
@@ -48,6 +50,7 @@ pub fn workload_path_expansions_for_extension(
 ) -> Vec<RigWorkloadPathExpansion> {
     let workloads = match kind {
         RigWorkloadKind::Bench => &rig_spec.bench_workloads,
+        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
         RigWorkloadKind::Trace => &rig_spec.trace_workloads,
     };
 
@@ -121,6 +124,7 @@ pub fn check_groups_for_extension_workloads(
 ) -> Option<Vec<String>> {
     let workloads = match kind {
         RigWorkloadKind::Bench => &rig_spec.bench_workloads,
+        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
         RigWorkloadKind::Trace => &rig_spec.trace_workloads,
     };
     let entries = workloads.get(extension_id)?;
@@ -141,6 +145,7 @@ pub fn invocation_requirements_for_extension_workloads(
 ) -> InvocationRequirements {
     let workloads = match kind {
         RigWorkloadKind::Bench => &rig_spec.bench_workloads,
+        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
         RigWorkloadKind::Trace => &rig_spec.trace_workloads,
     };
     let Some(entries) = workloads.get(extension_id) else {

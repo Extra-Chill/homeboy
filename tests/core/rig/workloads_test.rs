@@ -131,6 +131,38 @@ fn test_trace_workloads_for_extension_filters_and_expands_paths() {
 }
 
 #[test]
+fn test_fuzz_workloads_for_extension_filters_and_expands_paths() {
+    std::env::set_var("HOMEBOY_TEST_FUZZ_ROOT", "/tmp/private-fuzz");
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "wordpress-plugin-fuzz",
+            "components": {
+                "woocommerce": { "path": "/tmp/woocommerce" }
+            },
+            "fuzz_workloads": {
+                "wordpress": [
+                    { "path": "${env.HOMEBOY_TEST_FUZZ_ROOT}/checkout-create-order.json" },
+                    { "path": "${components.woocommerce.path}/fuzz/shipping-cache.json" }
+                ],
+                "other": [{ "path": "/tmp/other.json" }]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+
+    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "wordpress");
+
+    assert_eq!(
+        workloads,
+        vec![
+            PathBuf::from("/tmp/private-fuzz/checkout-create-order.json"),
+            PathBuf::from("/tmp/woocommerce/fuzz/shipping-cache.json"),
+        ]
+    );
+    assert!(workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "missing").is_empty());
+}
+
+#[test]
 fn test_extension_workloads_expand_package_root_when_available() {
     let rig_spec: RigSpec = serde_json::from_str(
         r#"{
@@ -140,6 +172,9 @@ fn test_extension_workloads_expand_package_root_when_available() {
             },
             "trace_workloads": {
                 "extension-a": [{ "path": "${package.root}/bench/studio-app-create-site.trace.mjs" }]
+            },
+            "fuzz_workloads": {
+                "extension-a": [{ "path": "${package.root}/fuzz/studio-agent-runtime.json" }]
             }
         }"#,
     )
@@ -166,6 +201,17 @@ fn test_extension_workloads_expand_package_root_when_available() {
         ),
         vec![PathBuf::from(
             "/tmp/homeboy-rigs/example-org/studio/bench/studio-app-create-site.trace.mjs"
+        )]
+    );
+    assert_eq!(
+        workloads_for_extension(
+            &rig_spec,
+            RigWorkloadKind::Fuzz,
+            Some(&package),
+            "extension-a"
+        ),
+        vec![PathBuf::from(
+            "/tmp/homeboy-rigs/example-org/studio/fuzz/studio-agent-runtime.json"
         )]
     );
 }
