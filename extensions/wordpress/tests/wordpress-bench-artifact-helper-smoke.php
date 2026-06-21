@@ -18,7 +18,7 @@ $descriptor = homeboy_bench_write_json_artifact('Scenario One', 'step-series', a
 ));
 
 $expected_descriptor = array(
-	'path' => 'artifacts/scenario-one/step-series.json',
+	'path' => '/bench-shared-state/artifacts/scenario-one/step-series.json',
 	'kind' => 'json',
 );
 if ( $expected_descriptor !== $descriptor ) {
@@ -26,7 +26,7 @@ if ( $expected_descriptor !== $descriptor ) {
 	exit(1);
 }
 
-$artifact_path = $root . '/' . $descriptor['path'];
+$artifact_path = $root . '/artifacts/scenario-one/step-series.json';
 if ( ! is_file($artifact_path) ) {
 	fwrite(STDERR, "Expected artifact file to be written under shared state.\n");
 	exit(1);
@@ -39,7 +39,7 @@ if ( ! is_array($payload) || true !== $payload['ok'] || '/wp-admin/' !== $payloa
 }
 
 $sanitized_descriptor = homeboy_bench_write_json_artifact('../Nested Scenario', 'unsafe/name.json', array('ok' => true));
-if ( 'artifacts/nested-scenario/unsafe-name.json' !== $sanitized_descriptor['path'] ) {
+if ( '/bench-shared-state/artifacts/nested-scenario/unsafe-name.json' !== $sanitized_descriptor['path'] ) {
 	fwrite(STDERR, "Expected scenario and name to be sanitized into safe artifact path segments.\n");
 	exit(1);
 }

@@ -46,7 +46,7 @@ if ( ! function_exists('homeboy_bench_write_json_artifact') ) {
 		}
 
 		return array(
-			'path' => $relative_path,
+			'path' => '/bench-shared-state/' . $relative_path,
 			'kind' => 'json',
 		);
 	}
