@@ -35,6 +35,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
+| `fanout plan\|submit\|run-plan` | Compile, persist, or run generic provider-neutral fanout inputs. |
 
 ### Cook/Review
 
@@ -225,6 +226,48 @@ claimed later with `agent-task run` or `agent-task run-next`.
 accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
+
+## Fanout/Reconcile
+
+`agent-task fanout` is the public provider-neutral seam for downstream loops that
+need to submit many related agent tasks and reconcile aggregate outcomes without
+calling Homeboy Extensions internal scripts.
+
+It accepts these generic input shapes:
+
+- `homeboy/agent-task-plan/v1`: an existing durable task plan, stamped with fanout lineage metadata when needed.
+- `homeboy/agent-task-fanout-plan/v1`: Homeboy's explicit fanout plan wrapper.
+- A JSON array of task packets, or an object with `tasks`/`packets`.
+- A single task packet object with `task_id`/`key` and `instructions`/`prompt`/`title`.
+
+Packet inputs can carry full `AgentTaskRequest` fields including `executor`,
+`workspace`, `policy`, `source_refs`, `inputs`, `expected_artifacts`, and
+`metadata`. When a packet omits `executor`, pass `--backend` and optionally
+`--selector`/`--model`, or configure a default agent-task backend.
+
+```bash
+homeboy agent-task fanout submit \
+  --input @findings.json \
+  --fanout-id audit-batch-2026-06-21 \
+  --backend codex \
+  --selector openai-codex
+```
+
+The submit response includes the durable run record plus stable follow-up
+commands:
+
+```bash
+homeboy agent-task status <run-id>
+homeboy agent-task logs <run-id>
+homeboy agent-task artifacts <run-id>
+homeboy agent-task review <run-id>
+homeboy agent-task retry <run-id> --run
+```
+
+Use `fanout plan` when a downstream repository needs a reviewable plan artifact
+before queueing it, and `fanout run-plan --record-run-id <run-id>` when an
+operator wants to execute immediately while preserving durable lineage and
+aggregate outcomes.
 
 ## Headless Fleet-Cooking Review
 

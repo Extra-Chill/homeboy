@@ -72,7 +72,11 @@ impl AgentTaskFanoutPlan {
         }
     }
 
-    pub(crate) fn to_schedule_plan(&self) -> AgentTaskPlan {
+    pub fn to_agent_task_plan(&self) -> AgentTaskPlan {
+        self.to_schedule_plan()
+    }
+
+    fn to_schedule_plan(&self) -> AgentTaskPlan {
         let mut plan = AgentTaskPlan::new(
             self.fanout_id.clone(),
             self.tasks
