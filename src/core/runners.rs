@@ -46,14 +46,15 @@ pub use super::runner::{
     LabOffloadWorkspaceModePolicy, LabRunnerCapabilityContract, LabRunnerGateDecision,
     LabRunnerGateMode, LabRunnerSelectionSource, ManagedRunnerSourceSyncPlan,
     PreparedLabRunnerCapability, RemoteArtifactDownload, ReverseRunnerConnectOptions,
-    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerCapabilityPreflight,
-    RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode,
-    RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerKind, RunnerRequiredTool,
-    RunnerResourceMetrics, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec,
+    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerArtifactRef,
+    RunnerCapabilityPreflight, RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerHandoff,
+    RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerRequiredTool, RunnerResourceMetrics,
+    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec,
     RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
     RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 // Registry CRUD entry points (re-exported at the root for ergonomics; also

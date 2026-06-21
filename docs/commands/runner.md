@@ -250,6 +250,29 @@ reports transport success and the endpoint payload always lives under
 `data.body`; runner clients require that shape and do not parse legacy direct
 `data` payloads.
 
+Runner lifecycle output is transport-neutral even when the underlying route is a
+direct daemon tunnel or a reverse broker. JSON consumers should prefer these
+generic contracts:
+
+- `RunnerSession`: persisted connection/session ownership, including mode, role,
+  controller/broker references, process IDs, version identity, and heartbeat.
+- `RunnerJob`: active or inspected job state with lifecycle owner, claim lease,
+  command, status, durable run linkage, and artifact refs.
+- `RunnerWorkspaceLease`: controller-owned local-to-runner workspace materialization
+  with source ref/commit/dirty metadata.
+- `RunnerResult`: terminal command result with exit status, stream sizes, mirrored
+  run linkage, and artifact refs.
+- `RunnerArtifactRef`: stable artifact identity plus path/URL/hash/transport
+  metadata for later retrieval.
+- `RunnerHandoff`: the controller-to-runner handoff envelope tying transport,
+  owner, job, workspace lease, and result together.
+
+Compatibility fields such as `active_jobs`, `job`, `job_id`, and `job_events`
+remain present for existing callers. New integrations should read
+`active_runner_jobs`, `runner_job`, `workspace_lease`, `runner_result`,
+`artifact_ref`, and `handoff` so direct SSH and reverse broker implementations
+stay hidden behind the same lifecycle vocabulary.
+
 ```json
 {
   "success": true,
