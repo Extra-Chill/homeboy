@@ -81,7 +81,7 @@ function routeInputFromOptions(options = {}) {
 	return options.restIndex || options.rest_index || options.routes || options.routeIndex || options.route_index || null;
 }
 
-function buildMinimalRestFuzzSurfaceArtifact(input = {}, options = {}) {
+function buildRestIndexFuzzSurfaceArtifact(input = {}, options = {}) {
 	const routeInput = routeInputFromOptions(options) || routeInputFromOptions(input) || input;
 	const hasRoutes = isPlainObject(routeInput?.routes) || isPlainObject(routeInput);
 	const cases = hasRoutes ? normalizeWordPressRestRouteMatrix(routeInput, options) : [];
@@ -93,7 +93,7 @@ function buildMinimalRestFuzzSurfaceArtifact(input = {}, options = {}) {
 		schema: WORDPRESS_FUZZ_SURFACES_SCHEMA,
 		type: 'wordpress-fuzz-surfaces',
 		generated_at: generatedAt,
-		source: 'minimal-fallback',
+		source: 'rest-index',
 		surfaces: [{
 			id: 'wordpress-rest-api',
 			kind: 'rest',
@@ -120,13 +120,13 @@ function buildMinimalRestFuzzSurfaceArtifact(input = {}, options = {}) {
 
 function discoverWordPressRestFuzzSurfaces(input = {}, options = {}) {
 	const repositorySchema = loadRepositorySurfaceSchema({ ...input, ...options });
-	const artifact = repositorySchema ? repositorySchema.artifact : buildMinimalRestFuzzSurfaceArtifact(input, options);
+	const artifact = repositorySchema ? repositorySchema.artifact : buildRestIndexFuzzSurfaceArtifact(input, options);
 
 	return {
 		schema: WORDPRESS_REST_FUZZ_SURFACE_DISCOVERY_SCHEMA,
 		type: 'wordpress-rest-fuzz-surface-discovery',
 		adapter_id: 'homeboy/wordpress-rest-fuzz-surface-discovery/v1',
-		source: repositorySchema ? repositorySchema.source : 'minimal-fallback',
+		source: repositorySchema ? repositorySchema.source : 'rest-index',
 		source_path: repositorySchema?.path || '',
 		artifact_schema: artifact?.schema || WORDPRESS_FUZZ_SURFACES_SCHEMA,
 		artifact,
@@ -137,7 +137,7 @@ module.exports = {
 	DEFAULT_SURFACE_SCHEMA_PATHS,
 	WORDPRESS_FUZZ_SURFACES_SCHEMA,
 	WORDPRESS_REST_FUZZ_SURFACE_DISCOVERY_SCHEMA,
-	buildMinimalRestFuzzSurfaceArtifact,
+	buildRestIndexFuzzSurfaceArtifact,
 	discoverWordPressRestFuzzSurfaces,
 	loadRepositorySurfaceSchema,
 };

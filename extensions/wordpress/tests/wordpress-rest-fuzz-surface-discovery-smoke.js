@@ -32,22 +32,22 @@ const restIndex = {
 	},
 };
 
-const fallback = discoverWordPressRestFuzzSurfaces({ restIndex }, {
+const restIndexDiscovery = discoverWordPressRestFuzzSurfaces({ restIndex }, {
 	methods: ['GET'],
 	generatedAt: '2026-01-01T00:00:00.000Z',
 });
 
-assert.equal(fallback.schema, 'homeboy/wordpress-rest-fuzz-surface-discovery/v1');
-assert.equal(fallback.source, 'minimal-fallback');
-assert.equal(fallback.artifact.schema, WORDPRESS_FUZZ_SURFACES_SCHEMA);
-assert.equal(fallback.artifact.surfaces[0].kind, 'rest');
-assert.deepEqual(fallback.artifact.surfaces[0].methods, ['GET']);
-assert.deepEqual(fallback.artifact.surfaces[0].namespaces, ['demo/v1', 'wp/v2']);
-assert.deepEqual(fallback.artifact.surfaces[0].routes.map((route) => route.id), [
+assert.equal(restIndexDiscovery.schema, 'homeboy/wordpress-rest-fuzz-surface-discovery/v1');
+assert.equal(restIndexDiscovery.source, 'rest-index');
+assert.equal(restIndexDiscovery.artifact.schema, WORDPRESS_FUZZ_SURFACES_SCHEMA);
+assert.equal(restIndexDiscovery.artifact.surfaces[0].kind, 'rest');
+assert.deepEqual(restIndexDiscovery.artifact.surfaces[0].methods, ['GET']);
+assert.deepEqual(restIndexDiscovery.artifact.surfaces[0].namespaces, ['demo/v1', 'wp/v2']);
+assert.deepEqual(restIndexDiscovery.artifact.surfaces[0].routes.map((route) => route.id), [
 	'rest:get:demo-v1-items-id',
 	'rest:get:wp-v2-posts',
 ]);
-assert.equal(fallback.artifact.surfaces[0].routes[1].args.count, 1);
+assert.equal(restIndexDiscovery.artifact.surfaces[0].routes[1].args.count, 1);
 
 const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-rest-fuzz-surfaces-'));
 fs.mkdirSync(path.join(repoRoot, '.homeboy'));
