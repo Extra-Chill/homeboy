@@ -26,6 +26,7 @@ function runHeadlessDeterministicLoop(options = {}) {
 
   for (const task of tasks) {
     const plan = { ...spec, ...task, dry_run: dryRun };
+    let finalLoop = null;
     const request = buildGenericAgentLoopRequest({
       plan,
       runtime,
@@ -42,7 +43,7 @@ function runHeadlessDeterministicLoop(options = {}) {
       pushEvent(events, 'task_dry_run', { task_id: request.task_id });
     } else {
       pushEvent(events, 'task_started', { task_id: request.task_id });
-		const result = runGenericAgentLoop({
+      const result = runGenericAgentLoop({
         ...options,
         plan,
         request,
@@ -54,19 +55,22 @@ function runHeadlessDeterministicLoop(options = {}) {
       });
       finalOutcome = result.outcome;
       finalResults = result.results;
+      finalLoop = result.loop;
       pushEvent(events, 'task_completed', { task_id: request.task_id, status: result.outcome.status });
       if (result.assertion) {
         pushEvent(events, 'task_asserted', { task_id: request.task_id, assertion: result.assertion });
       }
     }
 
-		taskResults.push({
-			task_id: request.task_id,
-			request,
-			outcome: finalOutcome,
-			results: finalResults,
-		});
-	}
+    taskResults.push({
+      task_id: request.task_id,
+      request,
+      outcome: finalOutcome,
+      results: finalResults,
+      loop: finalLoop,
+      state: finalLoop?.state || null,
+    });
+  }
 
   const completedAt = new Date().toISOString();
   const result = {
@@ -76,13 +80,13 @@ function runHeadlessDeterministicLoop(options = {}) {
     dry_run: dryRun,
     started_at: startedAt,
     completed_at: completedAt,
-		runtime: { id: runtime.id, backend: runtime.executor.backend },
-		tasks: taskResults,
-		outcome: finalOutcome,
-		results: finalResults,
-		state: taskResults.at(-1)?.state || null,
-		events,
-	};
+    runtime: { id: runtime.id, backend: runtime.executor.backend },
+    tasks: taskResults,
+    outcome: finalOutcome,
+    results: finalResults,
+    state: taskResults.at(-1)?.state || null,
+    events,
+  };
   pushEvent(events, 'loop_completed', { loop_id: result.loop_id, status: result.status });
   return result;
 }

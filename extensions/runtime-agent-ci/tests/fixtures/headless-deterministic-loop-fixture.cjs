@@ -75,12 +75,12 @@ function assertHeadlessDeterministicLoopFixture(run) {
   assert.equal(result.tasks.length, 1);
   assert.equal(result.tasks[0].request.schema, 'homeboy/agent-task-request/v1');
   assert.equal(result.tasks[0].outcome.schema, 'homeboy/agent-task-outcome/v1');
-  assert.equal(Object.prototype.hasOwnProperty.call(result.tasks[0], 'loop'), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(result.tasks[0], 'state'), false);
-  assert.equal(result.tasks[0].outcome.status, 'succeeded');
-  assert.equal(result.tasks[0].outcome.artifacts.length, 1);
-  assert.equal(result.tasks[0].outcome.artifacts[0].schema, 'homeboy/deterministic-loop-artifact/v1');
-  assert.equal(result.tasks[0].outcome.artifacts[0].name, 'headless-fixture-evidence');
+  assert.equal(result.tasks[0].loop.schema, 'homeboy/deterministic-loop-result/v1');
+  assert.equal(result.tasks[0].loop.status, 'completed');
+  assert.equal(result.tasks[0].state.status, 'succeeded');
+  assert.equal(result.tasks[0].state.artifacts.length, 1);
+  assert.equal(result.tasks[0].state.artifacts[0].schema, 'homeboy/deterministic-loop-artifact/v1');
+  assert.equal(result.tasks[0].state.artifacts[0].name, 'headless-fixture-evidence');
   assert.equal(result.results.scenarios[0].metadata.evidence_schema, 'homeboy/headless-deterministic-loop-evidence/v1');
   assert.deepEqual(result.events.map((event) => event.type), [
     'loop_started',
@@ -91,7 +91,7 @@ function assertHeadlessDeterministicLoopFixture(run) {
     'loop_completed',
   ]);
 
-  const evidencePath = result.tasks[0].outcome.artifacts[0].path;
+  const evidencePath = result.tasks[0].state.artifacts[0].path;
   const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
   assert.equal(evidence.schema, 'homeboy/headless-deterministic-loop-evidence/v1');
   assert.equal(evidence.task_id, 'headless-fixture-task');
