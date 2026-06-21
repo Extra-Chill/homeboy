@@ -10,6 +10,8 @@
 #   RELEASE_BRANCH      - branch to release from (default: main)
 #   COMPONENT_NAME      - component ID override
 #   RELEASE_DRY_RUN     - if "true", preview without making changes
+#   RELEASE_HEAD        - if "true", finish release at existing HEAD/tag
+#   RELEASE_FROM_ARTIFACTS - artifact directory passed to --from-artifacts
 #
 # Outputs (GITHUB_OUTPUT):
 #   released:        true|false
@@ -25,6 +27,8 @@ source "${SCRIPT_DIR}/github-release.sh"
 
 RELEASE_BRANCH="${RELEASE_BRANCH:-main}"
 DRY_RUN="${RELEASE_DRY_RUN:-false}"
+RELEASE_HEAD="${RELEASE_HEAD:-false}"
+RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}"
 
 COMPONENT_DIR="${COMPONENT_DIR:-.}"
 if [ -n "${COMPONENT_DIR}" ] && [ "${COMPONENT_DIR}" != "." ]; then
@@ -112,7 +116,7 @@ COMP_ID="$(resolve_component_id)"
 configure_git_push_auth
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+if [ "${RELEASE_HEAD}" != "true" ] && [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
   echo "::notice::Not on ${RELEASE_BRANCH} (current: ${CURRENT_BRANCH}) - skipping release"
   write_output "released" "false"
   write_output "skipped-reason" "wrong-branch"
@@ -124,7 +128,7 @@ if [ -z "${DEFAULT_BRANCH}" ]; then
   DEFAULT_BRANCH="main"
 fi
 
-if [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
+if [ "${RELEASE_HEAD}" != "true" ] && [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
   echo "::error::Refusing to release from non-default branch '${CURRENT_BRANCH}' (default: '${DEFAULT_BRANCH}')"
   write_output "released" "false"
   write_output "skipped-reason" "wrong-default-branch"
@@ -164,6 +168,14 @@ fi
 
 if [ "${RELEASE_SKIP_GITHUB_RELEASE}" = "true" ]; then
   RELEASE_ARGS+=(--no-github-release)
+fi
+
+if [ "${RELEASE_HEAD}" = "true" ]; then
+  RELEASE_ARGS+=(--head)
+fi
+
+if [ -n "${RELEASE_FROM_ARTIFACTS}" ]; then
+  RELEASE_ARGS+=(--from-artifacts "${RELEASE_FROM_ARTIFACTS}")
 fi
 
 if [ "${DRY_RUN}" = "true" ]; then

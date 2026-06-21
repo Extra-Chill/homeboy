@@ -206,6 +206,14 @@ inputs:
     description: 'Pass --no-github-release to homeboy release. Skips the github.release step that runs `gh release create`. Set true for components that create their GitHub Release through a separate workflow step (typically pairs with release-skip-publish=true). Defaults to false so components with a github.com remote get a GitHub Release on every tag.'
     required: false
     default: 'false'
+  release-head:
+    description: 'Pass --head to homeboy release. Use for finishing a release at an existing tag or release commit, often with release-from-artifacts.'
+    required: false
+    default: 'false'
+  release-from-artifacts:
+    description: 'Pass --from-artifacts <path> to homeboy release. Use to publish artifacts produced by an earlier build job through the native Homeboy release pipeline.'
+    required: false
+    default: ''
 
 outputs:
   results:
@@ -656,6 +664,8 @@ runs:
         RELEASE_BRANCH: ${{ inputs.release-branch }}
         RELEASE_SKIP_PUBLISH: ${{ inputs.release-skip-publish }}
         RELEASE_SKIP_GITHUB_RELEASE: ${{ inputs.release-skip-github-release }}
+        RELEASE_HEAD: ${{ inputs.release-head }}
+        RELEASE_FROM_ARTIFACTS: ${{ inputs.release-from-artifacts }}
         HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}
         COMPONENT_NAME: ${{ inputs.component }}
       run: bash ${{ github.action_path }}/scripts/release/run-release.sh
