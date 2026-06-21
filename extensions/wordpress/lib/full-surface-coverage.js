@@ -11,6 +11,7 @@ function numberValue(value, fallback = 0) {
 
 const SURFACE_ALIASES = {
 	rest: ['rest', 'rest_api', 'rest-api', 'route_matrix', 'route-matrix', 'rest-route-matrix', 'wordpress-rest-route-matrix', 'benchmark-route-matrix-summary', 'benchmark-rest-request-case-summary'],
+	ajax: ['ajax', 'admin_ajax', 'admin-ajax', 'ajax_actions', 'ajax-actions', 'wordpress-ajax-action-surface', 'wordpress-ajax-action-plan'],
 	database: ['database', 'db', 'db_inventory', 'db-inventory', 'wordpress-db-inventory', 'benchmark-db-inventory', 'rest-db-query-profile', 'wordpress-rest-db-query-profile'],
 	serverRequests: ['server_requests', 'server-requests', 'serverRequests', 'external_http', 'external-http', 'external-http-guardrail', 'wordpress-external-http-guardrail'],
 	browserRequests: ['browser_requests', 'browser-requests', 'browserRequests', 'browser_network', 'browser-network', 'browser-request-coverage', 'browser-request-coverage-artifact'],
@@ -18,6 +19,7 @@ const SURFACE_ALIASES = {
 
 const SURFACE_LABELS = {
 	rest: 'REST API',
+	ajax: 'AJAX actions',
 	database: 'Database',
 	serverRequests: 'Server requests',
 	browserRequests: 'Browser requests',
@@ -348,6 +350,7 @@ function normalizeMatchValue(value) {
 
 function buildFullSurfaceCoverageArtifact(input = {}) {
 	const rest = isObject(input.rest) ? input.rest : {};
+	const ajax = ajaxSurfaceInput(input);
 	const database = isObject(input.database) ? input.database : {};
 	const serverRequests = isObject(input.serverRequests) ? input.serverRequests : {};
 	const browserRequests = isObject(input.browserRequests) ? input.browserRequests : {};
@@ -361,6 +364,11 @@ function buildFullSurfaceCoverageArtifact(input = {}) {
 				covered: numberValue(rest.totals?.coveredCount),
 				uncovered: numberValue(rest.totals?.uncoveredCount),
 				budgetFindings: numberValue(rest.totals?.budgetFindingCount),
+			},
+			ajax: {
+				actions: numberValue(ajax.totals?.actionCount),
+				planned: numberValue(ajax.totals?.plannedCount ?? ajax.totals?.planEligibleCount),
+				skipped: numberValue(ajax.totals?.skippedCount),
 			},
 			database: {
 				tables: numberValue(database.totals?.tableCount),
@@ -394,12 +402,23 @@ function buildFullSurfaceCoverageArtifact(input = {}) {
 	return artifact;
 }
 
+function ajaxSurfaceInput(input = {}) {
+	if (isObject(input.ajax)) {
+		return input.ajax;
+	}
+	if (isObject(input.ajaxActions)) {
+		return input.ajaxActions;
+	}
+	return {};
+}
+
 function formatFullSurfaceCoverageMarkdownReport(input = {}, options = {}) {
 	const artifact = input?.schema === 'homeboy/wordpress-full-surface-coverage/v1'
 		? input
 		: buildFullSurfaceCoverageArtifact(input);
 	const rows = [
 		['REST API', `${artifact.surfaces.rest.covered}/${artifact.surfaces.rest.routes}`, `cases ${artifact.surfaces.rest.cases}; budget findings ${artifact.surfaces.rest.budgetFindings}`],
+		['AJAX actions', `${artifact.surfaces.ajax.planned}/${artifact.surfaces.ajax.actions}`, `skipped ${artifact.surfaces.ajax.skipped}`],
 		['Database', `${artifact.surfaces.database.tables} tables`, `${artifact.surfaces.database.rows} rows; ${artifact.surfaces.database.columns} columns; ${artifact.surfaces.database.indexes} indexes`],
 		['Server requests', `${artifact.surfaces.serverRequests.requests} requests`, `${artifact.surfaces.serverRequests.blocked} blocked; ${artifact.surfaces.serverRequests.hosts} hosts`],
 		['Browser requests', `${artifact.surfaces.browserRequests.requests} requests`, `${artifact.surfaces.browserRequests.failures} failures; ${artifact.surfaces.browserRequests.hosts} hosts`],

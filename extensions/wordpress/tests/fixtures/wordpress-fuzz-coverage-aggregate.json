@@ -1,0 +1,50 @@
+{
+  "artifacts": [
+    {
+      "schema": "homeboy/wordpress-fuzz-discovery/v1",
+      "discovered": [
+        { "id": "route:/wp-json/wp/v2/posts", "type": "rest_route", "label": "/wp/v2/posts" },
+        { "id": "action:save_post", "type": "action", "label": "save_post" },
+        { "id": "filter:the_content", "type": "filter", "label": "the_content" },
+        { "id": "db_table:wp_posts", "type": "db_table", "label": "wp_posts" }
+      ],
+      "skipped": [
+        { "id": "route:/wp-json/wp/v2/users", "type": "rest_route", "label": "/wp/v2/users", "detail": { "reason": "requires auth" } }
+      ]
+    },
+    {
+      "schema": "homeboy/wordpress-fuzz-coverage/v1",
+      "label": "fixture-fuzz-run",
+      "hooks": {
+        "all": { "save_post": 1, "the_content": 2 },
+        "actions": { "save_post": 1 },
+        "filters": { "the_content": 2 }
+      },
+      "db": {
+        "operations": { "select": 2, "insert": 1 },
+        "tables": { "wp_posts": 3 },
+        "categories": { "content": 3 }
+      },
+      "mutations": {
+        "table_row_deltas": { "wp_posts": 1 },
+        "write_operations": { "insert": 1 }
+      },
+      "php_errors": {
+        "total": 1,
+        "by_kind": { "user_notice": 1 }
+      },
+      "coverage_gaps": [
+        { "id": "route:/wp-json/wp/v2/users", "type": "rest_route", "label": "/wp/v2/users", "status": "skipped" }
+      ]
+    },
+    {
+      "schema": "homeboy/wordpress-fuzz-run-status/v1",
+      "failed": [
+        { "id": "route:/wp-json/wp/v2/comments", "type": "rest_route", "label": "/wp/v2/comments", "detail": { "error": "500" } }
+      ],
+      "exercised": [
+        { "id": "route:/wp-json/wp/v2/posts", "type": "rest_route", "label": "/wp/v2/posts" }
+      ]
+    }
+  ]
+}

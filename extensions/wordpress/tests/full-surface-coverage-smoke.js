@@ -15,6 +15,7 @@ const {
 
 const artifact = buildFullSurfaceCoverageArtifact({
 	rest: { totals: { routeCount: 10, caseCount: 20, coveredCount: 8, uncoveredCount: 2, budgetFindingCount: 1 } },
+	ajax: { totals: { actionCount: 6, plannedCount: 2, skippedCount: 4 } },
 	database: { totals: { tableCount: 12, rowCount: 100, columnCount: 80, indexCount: 20, totalBytes: 1024 } },
 	serverRequests: { totals: { requests: 5, blocked: 1, hosts: 3 } },
 	browserRequests: { totals: { requests: 40, responses: 38, failures: 2, hosts: 4, transferSizeBytes: 9000 } },
@@ -22,32 +23,36 @@ const artifact = buildFullSurfaceCoverageArtifact({
 
 assert.equal(artifact.schema, 'homeboy/wordpress-full-surface-coverage/v1');
 assert.equal(artifact.surfaces.rest.covered, 8);
+assert.equal(artifact.surfaces.ajax.planned, 2);
 assert.equal(artifact.surfaces.database.columns, 80);
 assert.equal(artifact.surfaces.browserRequests.failures, 2);
 
 const markdown = formatFullSurfaceCoverageMarkdownReport(artifact);
 assert.match(markdown, /REST API \| 8\/10/);
+assert.match(markdown, /AJAX actions \| 2\/6/);
 assert.match(markdown, /Database \| 12 tables/);
 assert.match(markdown, /Browser requests \| 40 requests/);
 
 const manifest = normalizeFullSurfaceCoverageManifest({
-	required_surfaces: ['rest_api', 'db', 'browser_network'],
+	required_surfaces: ['rest_api', 'admin_ajax', 'db', 'browser_network'],
 });
-assert.deepEqual(manifest.requiredSurfaces, ['browserRequests', 'database', 'rest']);
+assert.deepEqual(manifest.requiredSurfaces, ['ajax', 'browserRequests', 'database', 'rest']);
 assert.equal(manifest.surfaces.rest.required, true);
+assert.equal(manifest.surfaces.ajax.required, true);
 assert.equal(manifest.surfaces.database.required, true);
 
 const refs = normalizeFullSurfaceCoverageArtifactRefs({
 	artifact_refs: [
 		{ kind: 'benchmark-route-matrix-summary', path: 'rest.json' },
+		{ kind: 'wordpress-ajax-action-plan', path: 'ajax.json' },
 		{ role: 'database', file: 'db.json' },
 		{ capability: 'browser_network', path: 'browser.json' },
 	],
 });
-assert.equal(refs.length, 3);
+assert.equal(refs.length, 4);
 assert.equal(refs[0].schema, 'homeboy/artifact-ref/v1');
-assert.equal(refs[1].path, 'db.json');
-assert.deepEqual(refs[2].capabilities, ['browser_network']);
+assert.equal(refs[2].path, 'db.json');
+assert.deepEqual(refs[3].capabilities, ['browser_network']);
 
 const codeboxRefs = normalizeFullSurfaceCoverageArtifactRefs({
 	artifacts: {

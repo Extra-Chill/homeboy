@@ -34,6 +34,16 @@ const input = {
 			sha256: 'abc123',
 			setup: [{ command: 'wordpress.wp-cli', args: ['command=option update fixture_bootstrap yes'] }],
 		},
+		fixtureProfile: {
+			siteSeeds: [{
+				type: 'fixture',
+				name: 'generic-fixture-content',
+				source: 'fixtures/content.json',
+				format: 'json',
+				scopes: { posts: { slugs: ['home'] }, options: { names: ['blogname'] } },
+			}],
+		},
+		diagnosticsCapture: true,
 		mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 		extraPlugins: [{ source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true }],
 	},
@@ -54,6 +64,13 @@ assert.equal(recipe.inputs.mounts[0].mode, 'readonly');
 assert.deepEqual(recipe.inputs.extraPlugins[0], { source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true });
 assert.deepEqual(recipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload', 'other-workload']);
 assert.deepEqual(recipe.inputs.pluginRuntime, input.options.pluginRuntime);
+assert.deepEqual(recipe.inputs.siteSeeds, [{
+	type: 'fixture',
+	name: 'generic-fixture-content',
+	source: 'fixtures/content.json',
+	format: 'json',
+	scopes: { posts: { slugs: ['home'] }, options: { names: ['blogname'] } },
+}]);
 assert.deepEqual(recipe.workflow.steps, [{
 	command: 'fixture.wordpress.bench',
 	args: [
@@ -61,6 +78,7 @@ assert.deepEqual(recipe.workflow.steps, [{
 		'lifecycle-json={"before":["fixture"]}',
 		'reset-policy-json={"mode":"snapshot"}',
 	],
+	diagnostics: { capture: ['queries', 'errors'] },
 }]);
 
 const filteredResult = spawnSync(process.execPath, [script], {
@@ -74,6 +92,50 @@ assert.equal(filteredResult.status, 0, filteredResult.stderr);
 const filteredRecipe = JSON.parse(filteredResult.stdout);
 assert.deepEqual(filteredRecipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload']);
 assert.deepEqual(filteredRecipe.inputs.scenarioIds, ['fixture-workload']);
+
+const checkpointResult = spawnSync(process.execPath, [script], {
+	cwd: path.join(__dirname, '..'),
+	input: JSON.stringify({
+		options: {
+			...input.options,
+			caseIsolation: {
+				checkpoints: true,
+				checkpointName: 'fixture-case-baseline',
+			},
+		},
+	}),
+	encoding: 'utf8',
+	env: { ...process.env, HOMEBOY_WP_CODEBOX_CORE_MODULE: fixtureCoreModule },
+});
+
+assert.equal(checkpointResult.status, 0, checkpointResult.stderr);
+const checkpointRecipe = JSON.parse(checkpointResult.stdout);
+assert.deepEqual(checkpointRecipe.workflow.steps, [
+	{ command: 'wp-codebox.checkpoint-create', args: ['name=fixture-case-baseline'] },
+	{ command: 'wp-codebox.checkpoint-list', args: [] },
+	{ command: 'wp-codebox.checkpoint-restore', args: ['name=fixture-case-baseline'] },
+	{
+		command: 'fixture.wordpress.bench',
+		args: [
+			'plugin-slug=fixture-plugin',
+			'lifecycle-json={"before":["fixture"]}',
+			'reset-policy-json={"mode":"snapshot"}',
+			'scenario-ids-json=["fixture-workload"]',
+		],
+	},
+	{ command: 'wp-codebox.checkpoint-list', args: [] },
+	{ command: 'wp-codebox.checkpoint-restore', args: ['name=fixture-case-baseline'] },
+	{
+		command: 'fixture.wordpress.bench',
+		args: [
+			'plugin-slug=fixture-plugin',
+			'lifecycle-json={"before":["fixture"]}',
+			'reset-policy-json={"mode":"snapshot"}',
+			'scenario-ids-json=["other-workload"]',
+		],
+	},
+	{ command: 'wp-codebox.checkpoint-list', args: [] },
+]);
 
 const cacheDiscoveryResult = spawnSync(process.execPath, [script], {
 	cwd: path.join(__dirname, '..'),

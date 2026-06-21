@@ -19,6 +19,7 @@ const input = {
 	projectBootstrap: 'tests/legacy/bootstrap.php',
 	dependencyMounts: ['/wordpress/wp-content/plugins/dependency-one'],
 	multisite: true,
+	diagnosticsCapture: ['errors'],
 	mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 };
 
@@ -42,6 +43,7 @@ assert.deepEqual(recipe.workflow.steps, [{
 		'bootstrap-mode=project',
 		'project-bootstrap=tests/legacy/bootstrap.php',
 	],
+	diagnostics: { capture: ['errors'] },
 }]);
 
 const diagnosticResult = spawnSync(process.execPath, [script], {

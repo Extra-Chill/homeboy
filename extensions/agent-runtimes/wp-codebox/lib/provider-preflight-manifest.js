@@ -27,6 +27,18 @@ function providerPreflightManifest(provider) {
   return manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : null;
 }
 
+function providerMetadataManifest() {
+  const manifest = runtimeExecutorManifest().provider_metadata;
+  return manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {};
+}
+
+function providerMetadata(provider) {
+  const providers = providerMetadataManifest().providers;
+  const entries = Array.isArray(providers) ? providers : [];
+  return entries
+    .find((entry) => entry && typeof entry === 'object' && entry.id === provider) || null;
+}
+
 function normalizeStringArray(value) {
   if (Array.isArray(value)) {
     return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
@@ -114,6 +126,8 @@ module.exports = {
   providerDiagnosticClass,
   providerGuidance,
   providerLabel,
+  providerMetadata,
+  providerMetadataManifest,
   providerOptionalSecretEnv,
   providerPluginValidation,
   providerPreflightManifest,
