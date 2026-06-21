@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use crate::core::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
 use crate::core::config::{self, from_str};
 use crate::core::engine::local_files::{self, FileSystem};
 use crate::core::error::{Error, Result};
@@ -116,10 +117,17 @@ pub(super) fn install_from_url(
         }
     }
 
+    let manifest_path = paths::extension_manifest(&extension_id)?;
+    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
+        let _ = std::fs::remove_dir_all(&extension_dir);
+        return Err(err);
+    }
+
     Ok(InstallResult {
         extension_id,
         url: url.to_string(),
         path: extension_dir,
+        manifest_path,
         source_revision,
     })
 }
@@ -406,11 +414,17 @@ pub(super) fn install_from_path(
 
     // For linked (local) extensions, read revision from the source dir if it's a git repo
     let source_revision = git::short_head_revision(&source);
+    let manifest_path = paths::extension_manifest(&extension_id)?;
+    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(&extension_id) {
+        let _ = std::fs::remove_file(&extension_dir);
+        return Err(err);
+    }
 
     Ok(InstallResult {
         extension_id,
         url: source.to_string_lossy().to_string(),
         path: extension_dir,
+        manifest_path,
         source_revision,
     })
 }

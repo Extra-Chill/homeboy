@@ -1,3 +1,4 @@
+use crate::core::agent_runtime_manifest::validate_installed_extension_agent_runtime_provider_discovery;
 use crate::core::config::{self, from_str};
 use crate::core::engine::local_files::{self, FileSystem};
 use crate::core::error::{Error, Result};
@@ -19,6 +20,7 @@ pub struct ReplaceResult {
     pub extension_id: String,
     pub old_path: PathBuf,
     pub new_path: PathBuf,
+    pub manifest_path: PathBuf,
     pub source: String,
     pub linked: bool,
     pub source_revision: Option<String>,
@@ -96,12 +98,15 @@ fn replace_from_url(
     }
 
     run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
+    validate_agent_runtime_discovery_or_restore(&extension_id, &extension_dir, &backup_dir)?;
     remove_existing_install(&backup_dir)?;
+    let manifest_path = paths::extension_manifest(&extension_id)?;
 
     Ok(ReplaceResult {
         extension_id,
         old_path,
         new_path: extension_dir,
+        manifest_path,
         source: url.to_string(),
         linked: false,
         source_revision,
@@ -162,12 +167,15 @@ fn replace_from_path(
     }
 
     run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
+    validate_agent_runtime_discovery_or_restore(&extension_id, &extension_dir, &backup_dir)?;
     remove_existing_install(&backup_dir)?;
+    let manifest_path = paths::extension_manifest(&extension_id)?;
 
     Ok(ReplaceResult {
         extension_id,
         old_path,
         new_path: source.clone(),
+        manifest_path,
         source: source.to_string_lossy().to_string(),
         linked: true,
         source_revision,
@@ -334,6 +342,20 @@ fn run_setup_or_restore(extension_id: &str, extension_dir: &Path, backup_dir: &P
     Ok(())
 }
 
+fn validate_agent_runtime_discovery_or_restore(
+    extension_id: &str,
+    extension_dir: &Path,
+    backup_dir: &Path,
+) -> Result<()> {
+    if let Err(err) = validate_installed_extension_agent_runtime_provider_discovery(extension_id) {
+        let _ = remove_existing_install(extension_dir);
+        let _ = restore_existing_install(backup_dir, extension_dir);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 fn clean_replace_temp(path: &Path) -> Result<()> {
     if path_exists_or_symlink(path) {
         remove_existing_install(path)?;
@@ -453,6 +475,28 @@ mod tests {
   }}
 }}"#,
                 id, setup_command
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn write_extension_fixture_with_invalid_agent_runtime_provider(root: &Path, id: &str) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).expect("extension dir");
+        fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(
+                r#"{{
+  "name": "{} extension",
+  "version": "2.0.0",
+  "agent_runtimes": [{{
+    "id": "{}-runtime",
+    "agent_task_executors": [{{
+      "id": "{}.default"
+    }}]
+  }}]
+}}"#,
+                id, id, id
             ),
         )
         .expect("extension manifest");
@@ -644,6 +688,39 @@ mod tests {
 
             let extension = load_extension("swift").expect("load relinked extension");
             assert_eq!(extension.version, "2.0.0");
+        });
+    }
+
+    #[test]
+    fn replace_fails_and_restores_existing_install_when_declared_provider_is_not_discoverable() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let old_source = home.join("old-source");
+            let new_source = home.join("new-source");
+            write_extension_fixture(&old_source, "wordpress");
+            write_extension_fixture_with_invalid_agent_runtime_provider(&new_source, "wordpress");
+
+            install(
+                &old_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            let err = replace(
+                &new_source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect_err("replace should fail invalid provider declaration");
+
+            assert!(err.message.contains("cannot be parsed"));
+            let installed_path = home.join(".config/homeboy/extensions/wordpress");
+            assert!(installed_path.is_symlink());
+            assert_eq!(
+                fs::read_link(installed_path).expect("read restored link"),
+                old_source.join("wordpress")
+            );
+            let extension = load_extension("wordpress").expect("load restored extension");
+            assert_eq!(extension.version, "1.0.0");
         });
     }
 
