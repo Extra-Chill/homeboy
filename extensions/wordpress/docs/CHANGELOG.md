@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.8.4] - 2026-06-21
+
+### Changed
+- Select runtime executors explicitly
+
 ## [3.8.3] - 2026-06-21
 
 ### Changed
