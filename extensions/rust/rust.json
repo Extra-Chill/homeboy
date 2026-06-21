@@ -209,7 +209,7 @@
     },
     {
       "id": "release.publish",
-      "label": "Publish to crates.io",
+      "label": "Publish Rust release artifacts",
       "type": "command",
       "command": "bash \"{{extension_path}}/scripts/publish-crates.sh\"",
       "payload": {
