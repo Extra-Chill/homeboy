@@ -13,11 +13,12 @@ pub use crate::core::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-    AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
-    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
-    AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskResourceBudget,
-    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
-    AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
+    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
+    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
+    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+    AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::core::agent_task_timeout::timeout_with_grace;
 use crate::core::agent_task_timeout_artifacts::{
@@ -411,6 +412,8 @@ where
 
         let artifact_lineage =
             AgentTaskScheduleSupport::artifact_lineage(&outcomes, &plan.artifact_outputs);
+        let child_runs = child_runs_for_outcomes(&outcomes);
+        let artifact_bindings = artifact_bindings_for_outcomes(&outcomes);
 
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -434,6 +437,8 @@ where
             outcomes,
             events,
             artifact_lineage,
+            child_runs,
+            artifact_bindings,
         }
     }
 }
@@ -477,6 +482,85 @@ fn record_completed_outcome(
 ) {
     completed_by_task.insert(outcome.task_id.clone(), outcome.clone());
     outcomes.push(outcome);
+}
+
+fn child_runs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskChildRun> {
+    outcomes
+        .iter()
+        .filter_map(|outcome| {
+            let run_id = child_run_id(outcome)?;
+            Some(AgentTaskChildRun {
+                task_id: outcome.task_id.clone(),
+                run_id,
+                state: AgentTaskScheduleSupport::state_for_outcome(outcome),
+                provider: outcome
+                    .metadata
+                    .get("provider")
+                    .or_else(|| outcome.metadata.pointer("/provider_handle/backend"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                metadata: child_run_metadata(outcome),
+            })
+        })
+        .collect()
+}
+
+fn artifact_bindings_for_outcomes(
+    outcomes: &[AgentTaskOutcome],
+) -> Vec<AgentTaskArtifactRunBinding> {
+    outcomes
+        .iter()
+        .filter_map(|outcome| child_run_id(outcome).map(|run_id| (outcome, run_id)))
+        .flat_map(|(outcome, run_id)| {
+            outcome
+                .artifacts
+                .iter()
+                .map(move |artifact| AgentTaskArtifactRunBinding {
+                    task_id: outcome.task_id.clone(),
+                    run_id: run_id.clone(),
+                    artifact_id: artifact.id.clone(),
+                    kind: artifact.kind.clone(),
+                    name: artifact.name.clone(),
+                    path: artifact.path.clone(),
+                    url: artifact.url.clone(),
+                    sha256: artifact.sha256.clone(),
+                })
+        })
+        .collect()
+}
+
+fn child_run_id(outcome: &AgentTaskOutcome) -> Option<String> {
+    first_non_empty_json_string([
+        outcome.metadata.get("child_run_id"),
+        outcome.metadata.get("run_id"),
+        outcome.metadata.get("remote_run_id"),
+        outcome.metadata.get("provider_run_id"),
+        outcome.metadata.pointer("/provider_handle/provider_run_id"),
+        outcome.outputs.pointer("/provider_run_result/run_id"),
+        outcome.outputs.pointer("/provider_run_result/id"),
+    ])
+}
+
+fn child_run_metadata(outcome: &AgentTaskOutcome) -> serde_json::Value {
+    let mut metadata = serde_json::Map::new();
+    for key in ["provider", "provider_handle", "provider_handles"] {
+        if let Some(value) = outcome.metadata.get(key) {
+            metadata.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(metadata)
+}
+
+fn first_non_empty_json_string<'a>(
+    values: impl IntoIterator<Item = Option<&'a serde_json::Value>>,
+) -> Option<String> {
+    values.into_iter().flatten().find_map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
 }
 
 mod outcome;

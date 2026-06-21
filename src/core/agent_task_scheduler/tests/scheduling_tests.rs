@@ -5,7 +5,7 @@ use super::super::*;
 use super::fixtures::*;
 use crate::core::agent_task::{
     expand_agent_task_matrix, AgentTaskArtifact, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
-    AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -791,6 +791,40 @@ fn binds_typed_artifact_payload_into_downstream_task_request() {
 }
 
 #[test]
+fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
+    let scheduler = AgentTaskScheduler::new(GenericChildRunExecutor);
+    let mut plan = AgentTaskPlan::new(
+        "fuzz/campaign-1",
+        vec![request("case-a"), request("case-b")],
+    );
+    plan.options.max_concurrency = 2;
+
+    let aggregate = scheduler.run(plan);
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(aggregate.child_runs.len(), 2);
+    assert_eq!(aggregate.child_runs[0].task_id, "case-a");
+    assert_eq!(aggregate.child_runs[0].run_id, "child-case-a");
+    assert_eq!(
+        aggregate.child_runs[0].provider.as_deref(),
+        Some("generic-fuzz")
+    );
+    assert_eq!(aggregate.child_runs[0].state, AgentTaskState::Succeeded);
+    assert_eq!(aggregate.artifact_bindings.len(), 2);
+    assert_eq!(aggregate.artifact_bindings[0].task_id, "case-a");
+    assert_eq!(aggregate.artifact_bindings[0].run_id, "child-case-a");
+    assert_eq!(
+        aggregate.artifact_bindings[0].artifact_id,
+        "artifact-case-a"
+    );
+    assert_eq!(aggregate.artifact_bindings[0].kind, "fuzz-report");
+    assert_eq!(
+        aggregate.artifact_bindings[0].path.as_deref(),
+        Some("artifacts/case-a/report.json")
+    );
+}
+
+#[test]
 fn skips_required_typed_artifact_binding_when_artifact_is_missing() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let scheduler = AgentTaskScheduler::new(OutputTemplateExecutor {
@@ -1104,6 +1138,49 @@ fn scheduler_executes_from_projected_homeboy_plan() {
     assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
     assert_eq!(aggregate.totals.succeeded, 2);
     assert_eq!(design.instructions, "Build design for issue #3447");
+}
+
+struct GenericChildRunExecutor;
+
+impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id.clone(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("generic fuzz case completed".to_string()),
+            failure_classification: None,
+            artifacts: vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: format!("artifact-{}", request.task_id),
+                kind: "fuzz-report".to_string(),
+                name: Some("report.json".to_string()),
+                label: Some("Fuzz report".to_string()),
+                role: Some("fuzz_report".to_string()),
+                semantic_key: Some("fuzz.report".to_string()),
+                path: Some(format!("artifacts/{}/report.json", request.task_id)),
+                url: None,
+                mime: Some("application/json".to_string()),
+                size_bytes: Some(512),
+                sha256: Some(format!("sha256:{}", request.task_id)),
+                metadata: json!({ "case_id": request.task_id }),
+            }],
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: json!({ "case_id": request.task_id }),
+            workflow: None,
+            follow_up: None,
+            metadata: json!({
+                "provider": "generic-fuzz",
+                "child_run_id": format!("child-{}", request.task_id)
+            }),
+        }
+    }
 }
 
 #[test]

@@ -75,11 +75,11 @@ pub use super::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
     AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-    AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
-    AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan,
-    AgentTaskQueueStatus, AgentTaskResourceBudget, AgentTaskResourceBudgetStatus,
-    AgentTaskResourcePressure, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
-    AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
+    AgentTaskCancellationToken, AgentTaskChildRun, AgentTaskExecutionContext,
+    AgentTaskOutputBinding, AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskQueueStatus,
+    AgentTaskResourceBudget, AgentTaskResourceBudgetStatus, AgentTaskResourcePressure,
+    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
 };
 
 // `AgentTaskProgressEvent` is defined in both `agent_task` and
@@ -288,11 +288,12 @@ pub mod scheduler {
         AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
         AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
         AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-        AgentTaskArtifactOutputDeclaration, AgentTaskBackpressureStatus,
-        AgentTaskCancellationToken, AgentTaskExecutionContext, AgentTaskOutputBinding,
-        AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskQueueStatus,
-        AgentTaskResourceBudget, AgentTaskResourceBudgetStatus, AgentTaskResourcePressure,
-        AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
+        AgentTaskArtifactOutputDeclaration, AgentTaskArtifactRunBinding,
+        AgentTaskBackpressureStatus, AgentTaskCancellationToken, AgentTaskChildRun,
+        AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies,
+        AgentTaskPlan, AgentTaskProgressEvent, AgentTaskQueueStatus, AgentTaskResourceBudget,
+        AgentTaskResourceBudgetStatus, AgentTaskResourcePressure, AgentTaskRetryPolicy,
+        AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_PLAN_SCHEMA,
     };
     pub use super::super::agent_task_scheduler::{AgentTaskExecutorAdapter, AgentTaskScheduler};
 }
