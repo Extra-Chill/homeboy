@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::agent_task_loop_definition::compile_loop_spec_value;
+use crate::core::agent_task_controller_service::AgentTaskRepoLoopSpec;
+use crate::core::agent_task_repo_loop_compile::validate_repo_loop_artifact_references;
 use crate::core::artifact_address::validated_public_url;
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
@@ -313,31 +314,20 @@ fn validate_materialized_loop_spec(
         ));
         return;
     };
-    if let Err(error) = compile_loop_spec_value(spec.clone()) {
-        let tried = error
-            .details
-            .get("tried")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if tried.is_empty() {
-            diagnostics.push(diagnostic(
-                "unsupported_controller_semantics",
-                error.message,
-                path("/spec"),
-            ));
-        } else {
-            for message in tried
-                .into_iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-            {
-                diagnostics.push(diagnostic(
-                    diagnostic_code_for_compile_message(&message),
-                    message,
-                    path("/spec"),
-                ));
-            }
-        }
+    let Ok(spec) = serde_json::from_value::<AgentTaskRepoLoopSpec>(spec.clone()) else {
+        diagnostics.push(diagnostic(
+            "invalid_loop_spec_json",
+            "materialized controller spec does not match the loop spec schema",
+            path("/spec"),
+        ));
+        return;
+    };
+    if let Err(error) = validate_repo_loop_artifact_references(&spec) {
+        diagnostics.push(diagnostic(
+            "invalid_artifact_references",
+            error.message,
+            path("/spec"),
+        ));
     }
 }
 
@@ -395,16 +385,6 @@ fn is_non_local_evidence_ref(reference: &str) -> bool {
         return true;
     }
     validated_public_url(reference).is_some()
-}
-
-fn diagnostic_code_for_compile_message(message: &str) -> &'static str {
-    if message.contains("join over fan-out") {
-        "unsupported_join"
-    } else if message.contains("gates") || message.contains("metrics") {
-        "unsupported_gate"
-    } else {
-        "unsupported_controller_semantics"
-    }
 }
 
 fn diagnostic(
@@ -599,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_validation_surfaces_materialized_join_and_gate_diagnostics() {
+    fn proof_validation_accepts_materialized_controller_gates_and_metrics() {
         let report = validate_proof_value(json!({
             "schema": "homeboy/agent-task-loop-spec-materialization/v1",
             "spec": {
@@ -617,20 +597,15 @@ mod tests {
                         "workflow_id": "publish_site",
                         "prompt": "publish site",
                         "consumes": ["page_blocks"],
-                        "gates": ["review"]
+                        "gates": ["review"],
+                        "metrics": ["fallback_blocks"]
                     }
                 ]
             }
         }));
 
-        assert!(!report.valid);
-        let codes: Vec<&str> = report
-            .diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.code.as_str())
-            .collect();
-        assert!(codes.contains(&"unsupported_join"));
-        assert!(codes.contains(&"unsupported_gate"));
+        assert!(report.valid, "{report:?}");
+        assert!(report.diagnostics.is_empty());
     }
 
     #[test]
