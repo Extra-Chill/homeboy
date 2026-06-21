@@ -55,13 +55,14 @@ const diagnosticResult = spawnSync(process.execPath, [script], {
 
 assert.notEqual(diagnosticResult.status, 0);
 assert.match(diagnosticResult.stderr, /WP Codebox recipe builder export buildWordPressPhpunitRecipe is unavailable/);
-assert.match(diagnosticResult.stderr, /--setting wp_codebox_core_module=\/path\/to\/wp-codebox\/packages\/runtime-core\/dist\/recipe-builders\.js/);
+assert.match(diagnosticResult.stderr, /--setting wp_codebox_core_module=@automattic\/wp-codebox-core\/recipe-builders/);
 assert.match(diagnosticResult.stderr, /no longer falls back to bundled WP Codebox recipe builders/);
 assert.match(diagnosticResult.stderr, /HOMEBOY_WP_CODEBOX_CORE_MODULE/);
 assert.match(diagnosticResult.stderr, /\/missing\/wp-codebox-core\.mjs/);
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-workspace-'));
-const discoveredModule = path.join(workspaceRoot, 'wp-codebox', 'packages', 'runtime-core', 'dist', 'index.js');
+const installRoot = path.join(workspaceRoot, 'wp-codebox-install');
+const discoveredModule = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
 fs.mkdirSync(path.dirname(discoveredModule), { recursive: true });
 fs.copyFileSync(fixtureCoreModule, discoveredModule);
 
@@ -71,7 +72,7 @@ const discoveredResult = spawnSync(process.execPath, [script], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WORKSPACE_ROOT: workspaceRoot,
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: installRoot,
 		HOMEBOY_WP_CODEBOX_CORE_MODULE: '',
 	},
 });

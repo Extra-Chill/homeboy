@@ -1,12 +1,11 @@
 'use strict';
 
 const path = require('node:path');
-const { existsSync, readdirSync } = require('node:fs');
+const { existsSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
 
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
-const RUNTIME_CORE_ENTRY = 'packages/runtime-core/dist/index.js';
 const RUNTIME_CONTRACT_MANIFEST_SCHEMA = 'wp-codebox/runtime-contract-manifest/v1';
 
 const FALLBACK_RUNTIME_CONTRACT_SCHEMAS = {
@@ -178,60 +177,29 @@ function coreModuleCandidates(options = {}) {
       candidates.push(candidate);
     }
   }
-  for (const root of workspaceRoots(options)) {
-    for (const repoPath of codeboxRepoCandidates(root)) {
-      const runtimeCore = path.resolve(repoPath, RUNTIME_CORE_ENTRY);
-      if (existsSync(runtimeCore) && !candidates.includes(runtimeCore)) {
-        candidates.push(runtimeCore);
-      }
-    }
-  }
-
   return candidates.map(normalizeCoreModuleSpecifier);
 }
 
 function setupCacheCoreModuleCandidates(options = {}) {
   const installRoot = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.resolve(homedir(), '.cache/homeboy/wp-codebox');
   return [
-    path.resolve(installRoot, 'source', RUNTIME_CORE_ENTRY),
-    path.resolve(installRoot, 'release/wp-codebox-cli', RUNTIME_CORE_ENTRY),
     path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
     path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
   ];
-}
-
-function workspaceRoots(options = {}) {
-	const repoRoot = path.resolve(__dirname, '..', '..', '..', '..');
-  return [...new Set([
-    options.workspaceRoot,
-    process.env.HOMEBOY_WORKSPACE_ROOT,
-    process.env.HOMEBOY_DEVELOPER_WORKSPACE,
-    path.dirname(repoRoot),
-  ].filter(Boolean))];
-}
-
-function codeboxRepoCandidates(root) {
-  const exact = path.resolve(root, 'wp-codebox');
-  const candidates = existsSync(exact) ? [exact] : [];
-  try {
-    candidates.push(...readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && entry.name.startsWith('wp-codebox@'))
-      .map((entry) => path.resolve(root, entry.name))
-      .sort());
-  } catch {
-    // A missing or unreadable workspace root simply contributes no candidates.
-  }
-  return candidates;
 }
 
 function normalizeCoreModuleSpecifier(specifier) {
   if (!specifier || specifier.startsWith('file:') || specifier.startsWith('node:')) {
     return specifier;
   }
-  if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(path.sep)) {
+  if (isPathSpecifier(specifier)) {
     return pathToFileURL(path.resolve(specifier)).href;
   }
   return specifier;
+}
+
+function isPathSpecifier(specifier) {
+  return specifier.startsWith('.') || path.isAbsolute(specifier) || specifier.startsWith('~') || specifier.includes('\\') || existsSync(path.resolve(specifier));
 }
 
 function clone(value) {

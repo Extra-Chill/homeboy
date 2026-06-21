@@ -42,8 +42,8 @@ case "${args[*]}" in
         touch "${prefix}/npm-install-ran"
         ;;
     "run build")
-        mkdir -p "${prefix}/packages/cli/dist"
-        printf '%s\n' 'built' > "${prefix}/packages/cli/dist/index.js"
+        mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
+        printf '%s\n' 'built' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
         ;;
     *)
         echo "unexpected npm args: ${args[*]}" >&2
@@ -70,7 +70,7 @@ UPDATED_SHA="$(git -C "$SOURCE_WORK" rev-parse HEAD)"
 git -C "$SOURCE_WORK" tag fixture-ref
 git -C "$SOURCE_WORK" push --quiet origin HEAD:main fixture-ref
 
-OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR")"
+OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref "$INITIAL_SHA" --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${INITIAL_SHA}"*) ;;
     *)
@@ -80,9 +80,9 @@ case "$OUTPUT" in
         ;;
 esac
 [ -f "${CACHE_DIR}/npm-install-ran" ] || { echo "npm install marker missing" >&2; exit 1; }
-[ -f "${CACHE_DIR}/packages/cli/dist/index.js" ] || { echo "build artifact missing" >&2; exit 1; }
+[ -f "${CACHE_DIR}/node_modules/@automattic/wp-codebox-core/dist/index.js" ] || { echo "core package artifact missing" >&2; exit 1; }
 
-OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR")"
+OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --cache-dir "$CACHE_DIR" --npm "${FAKE_BIN}/npm")"
 case "$OUTPUT" in
     *"WP Codebox cache SHA: ${UPDATED_SHA}"*) ;;
     *)
@@ -94,9 +94,9 @@ esac
 
 DRY_RUN_OUTPUT="$("$SCRIPT" --runner homeboy-lab --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
 case "$DRY_RUN_OUTPUT" in
-    *"# Target: homeboy-lab"*"REQUESTED_REF='fixture-ref'"*) ;;
+    *"Fetching WP Codebox ref"*) ;;
     *)
-        echo "Dry-run output did not include target and ref" >&2
+        echo "Dry-run output did not include cache update script" >&2
         echo "$DRY_RUN_OUTPUT" >&2
         exit 1
         ;;

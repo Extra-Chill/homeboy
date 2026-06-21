@@ -15,7 +15,7 @@ MISSING_RELEASE_GITHUB_ENV_FILE="${TMPDIR}/missing-release-github-env"
 ARTIFACT_ROOT="${TMPDIR}/artifact-root"
 ARTIFACT_PATH="${TMPDIR}/wp-codebox-cli-linux-x64.tar.gz"
 
-mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/packages/runtime-core/dist"
+mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist"
 
 cat > "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox" <<'SH'
 #!/usr/bin/env bash
@@ -23,7 +23,7 @@ set -euo pipefail
 printf '%s\n' 'wp-codebox release stub'
 SH
 chmod +x "${ARTIFACT_ROOT}/wp-codebox-cli/bin/wp-codebox"
-printf '%s\n' 'export const fixture = true;' > "${ARTIFACT_ROOT}/wp-codebox-cli/packages/runtime-core/dist/index.js"
+printf '%s\n' 'export const fixture = true;' > "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"
 tar -czf "${ARTIFACT_PATH}" -C "${ARTIFACT_ROOT}" wp-codebox-cli
 
 cat > "${FAKE_BIN}/curl" <<SH
@@ -91,9 +91,17 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         run)
-            mkdir -p "${prefix}/packages/cli/dist" "${prefix}/packages/runtime-core/dist"
-            printf '%s\n' 'console.log("wp-codebox source stub")' > "${prefix}/packages/cli/dist/index.js"
-            printf '%s\n' 'export const fixture = true;' > "${prefix}/packages/runtime-core/dist/index.js"
+            mkdir -p "${prefix}/node_modules/@automattic/wp-codebox-core/dist"
+            printf '%s\n' 'export const fixture = true;' > "${prefix}/node_modules/@automattic/wp-codebox-core/dist/index.js"
+            exit 0
+            ;;
+        exec)
+            shift
+            if [ "${1:-}" != "--" ] || [ "${2:-}" != "wp-codebox" ]; then
+                printf 'unexpected npm exec invocation: %s\n' "$*" >&2
+                exit 1
+            fi
+            printf '%s\n' 'wp-codebox source stub'
             exit 0
             ;;
         *)
@@ -150,7 +158,7 @@ fi
 source_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${SOURCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 source_wp_codebox_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${SOURCE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 
-if [ "$("${source_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
+if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${source_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected source fallback wrapper to execute built CLI" >&2
     exit 1
 fi
@@ -163,7 +171,7 @@ fi
 # Cold-cache regression: a later CI step picks up a cached wp-codebox CLI via
 # HOMEBOY_WP_CODEBOX_BIN, but HOMEBOY_WP_CODEBOX_CORE_MODULE did not survive the
 # step/process boundary. The runtime-core module is still on disk from the
-# earlier install. Setup must re-derive the core module from the known install
+# earlier install. Setup must re-derive the core package module from the known install
 # locations instead of leaving it unset (which made the recipe loader hard-fail
 # with "@automattic/wp-codebox-core not found" and "No tests ran"). The CLI bin
 # is already present, so this path must NOT trigger a network install.
@@ -174,14 +182,14 @@ COLD_BIN="${COLD_HOME}/.local/bin/wp-codebox"
 
 mkdir -p \
     "${COLD_HOME}/.local/bin" \
-    "${COLD_INSTALL_DIR}/source/packages/runtime-core/dist"
+    "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist"
 
 cat > "${COLD_BIN}" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' 'wp-codebox cached stub'
 SH
 chmod +x "${COLD_BIN}"
-printf '%s\n' 'export const fixture = true;' > "${COLD_INSTALL_DIR}/source/packages/runtime-core/dist/index.js"
+printf '%s\n' 'export const fixture = true;' > "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js"
 
 # A network would be a hard failure here: the bin already exists, so no curl/git
 # install should run. Point curl/git at stubs that fail loudly if invoked.
@@ -209,8 +217,8 @@ if ! grep -q '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${COLD_GITHUB_ENV_FILE}"; then
 fi
 
 cold_core_module="$(grep '^HOMEBOY_WP_CODEBOX_CORE_MODULE=' "${COLD_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
-if [ "${cold_core_module}" != "${COLD_INSTALL_DIR}/source/packages/runtime-core/dist/index.js" ]; then
-    echo "Expected cold-cache setup to resolve the on-disk runtime core module, got: ${cold_core_module}" >&2
+if [ "${cold_core_module}" != "${COLD_INSTALL_DIR}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" ]; then
+    echo "Expected cold-cache setup to resolve the on-disk core package module, got: ${cold_core_module}" >&2
     exit 1
 fi
 
@@ -235,7 +243,7 @@ fi
 
 missing_release_wp_codebox_bin="$(grep '^HOMEBOY_WP_CODEBOX_BIN=' "${MISSING_RELEASE_GITHUB_ENV_FILE}" | tail -n 1 | cut -d= -f2-)"
 
-if [ "$("${missing_release_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
+if [ "$(PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" "${missing_release_wp_codebox_bin}")" != "wp-codebox source stub" ]; then
     echo "Expected missing release artifact to fall back to built CLI" >&2
     exit 1
 fi

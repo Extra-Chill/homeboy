@@ -47,9 +47,7 @@ install_wp_codebox() {
         local candidate
         for candidate in \
             "${HOMEBOY_WP_CODEBOX_CORE_MODULE:-}" \
-            "${probe_root}/source/packages/runtime-core/dist/index.js" \
             "${probe_root}/source/node_modules/@automattic/wp-codebox-core/dist/index.js" \
-            "${probe_root}/release/wp-codebox-cli/packages/runtime-core/dist/index.js" \
             "${probe_root}/release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; do
             if [ -n "${candidate}" ] && configure_core_module "${candidate}"; then
                 return 0
@@ -124,8 +122,7 @@ EOF
             write_github_env "PATH" "${bin_dir}:${PATH}"
 
             echo "WP Codebox installed: ${bin_path}"
-            if configure_core_module "${extract_dir}/wp-codebox-cli/packages/runtime-core/dist/index.js" || \
-                configure_core_module "${extract_dir}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; then
+            if configure_core_module "${extract_dir}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js"; then
                 return 0
             fi
 
@@ -156,14 +153,14 @@ EOF
     npm --prefix "${repo_dir}" install --quiet --no-fund --no-audit --omit=optional
     npm --prefix "${repo_dir}" run build --silent
 
-    configure_core_module "${repo_dir}/packages/runtime-core/dist/index.js" || {
-        echo "Built WP Codebox source did not contain packages/runtime-core/dist/index.js" >&2
+    configure_core_module "${repo_dir}/node_modules/@automattic/wp-codebox-core/dist/index.js" || {
+        echo "Built WP Codebox source did not contain the @automattic/wp-codebox-core package entrypoint" >&2
         exit 1
     }
 
     cat > "${bin_path}" <<EOF
 #!/usr/bin/env bash
-exec node "${repo_dir}/packages/cli/dist/index.js" "\$@"
+exec npm --prefix "${repo_dir}" exec -- wp-codebox "\$@"
 EOF
     chmod +x "${bin_path}"
 
