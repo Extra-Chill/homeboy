@@ -1,7 +1,7 @@
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
@@ -371,6 +371,8 @@ fn command_output_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
     let mut child = command.spawn().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -542,6 +544,19 @@ mod tests {
             parse_cli_version_output("homeboy 0.158.0").as_deref(),
             Some("0.158.0")
         );
+    }
+
+    #[test]
+    fn command_output_with_timeout_captures_child_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'homeboy 0.247.5'; printf 'warn' >&2"]);
+
+        let output = command_output_with_timeout(&mut command, Duration::from_secs(5))
+            .expect("command output");
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "homeboy 0.247.5");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "warn");
     }
 
     #[test]
