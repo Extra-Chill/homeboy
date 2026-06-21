@@ -1,6 +1,6 @@
-//! Shared predicates for recognizing idiomatic Rust / PHP shape — names that
-//! are expected to have boilerplate bodies and test names that describe
-//! behavior rather than literally repeat the production method name.
+//! Shared predicates for recognizing idiomatic code shape — names that are
+//! expected to have boilerplate bodies and test names that describe behavior
+//! rather than literally repeat the production method name.
 //!
 //! Two distinct concerns live here, both about "don't punish idiomatic code":
 //!
@@ -10,6 +10,14 @@
 //! `into`, `clone`, `fmt`, `as_str`, `to_string`, etc. — are **expected** to
 //! have boilerplate-shaped bodies across unrelated types. That's the language
 //! and stdlib doing what they're designed to do, not a code-smell.
+//!
+//! The concrete ecosystem literals are **not** hardcoded here: callers pass the
+//! effective name/prefix sets (extension-config-declared, or the builtin
+//! agnostic fallback resolved via
+//! [`crate::core::extension::TestMappingConfig`] /
+//! [`crate::core::code_audit::conventions::Language`]). This predicate only
+//! implements the generic membership/prefix test, keeping language names out of
+//! the audit detector layer.
 //!
 //! - **test_coverage**: don't expect a dedicated test for a method whose name
 //!   is universally idiomatic. `len`/`is_empty`/`fmt` get tested transitively.
@@ -33,69 +41,33 @@
 //!   method is exercised by a behavior-describing test, even when the test
 //!   name doesn't literally start with `test_<methodname>`.
 
-/// Method names that are universally idiomatic-shape across types.
+/// Whether `name` is a universally idiomatic-shape method name, given the
+/// effective idiomatic name and prefix sets.
 ///
 /// Returns true if the name is either:
-/// - in a curated list of stdlib-trait / common-accessor / lifecycle method
-///   names that are expected to look the same across unrelated types, or
-/// - prefixed with `get_`, `is_`, or `has_` (simple getters / predicates).
-pub(super) fn is_trivial_method(name: &str) -> bool {
-    let trivial = [
-        // Rust core trait methods
-        "new",
-        "default",
-        "from",
-        "into",
-        "clone",
-        "fmt",
-        "display",
-        "eq",
-        "hash",
-        "drop",
-        // Rust common conversions
-        "as_str",
-        "as_ref",
-        "as_mut",
-        "to_string",
-        "to_str",
-        "to_owned",
-        // Rust common accessors
-        "is_empty",
-        "len",
-        "iter",
-        // Serde
-        "serialize",
-        "deserialize",
-        // Builder pattern
-        "build",
-        "builder",
-        // PHP magic methods
-        "__construct",
-        "__destruct",
-        "__toString",
-        "__clone",
-        "get_instance",
-        "getInstance",
-        // Test lifecycle methods (PHPUnit / WP_UnitTestCase)
-        // These are optional overrides inherited from the base test class —
-        // not every test class needs to define them.
-        "set_up",
-        "tear_down",
-        "set_up_before_class",
-        "tear_down_after_class",
-        "setUp",
-        "tearDown",
-        "setUpBeforeClass",
-        "tearDownAfterClass",
-    ];
-    if trivial.contains(&name) {
+/// - an exact member of `trivial_names` (stdlib-trait / common-accessor /
+///   lifecycle method names that look the same across unrelated types), or
+/// - starts with any entry in `trivial_prefixes` (simple getters / predicates).
+///
+/// The `trivial_names`/`trivial_prefixes` sets are supplied by the caller —
+/// resolved from extension config or the builtin agnostic fallback — so the
+/// concrete ecosystem literals never live in this detector helper.
+pub(super) fn is_trivial_method<N, P>(name: &str, trivial_names: N, trivial_prefixes: P) -> bool
+where
+    N: IntoIterator,
+    N::Item: AsRef<str>,
+    P: IntoIterator,
+    P::Item: AsRef<str>,
+{
+    if trivial_names
+        .into_iter()
+        .any(|candidate| candidate.as_ref() == name)
+    {
         return true;
     }
-    // Prefix-based rules: simple getters/accessors/predicates
-    if name.starts_with("get_") || name.starts_with("is_") || name.starts_with("has_") {
-        return true;
-    }
-    false
+    trivial_prefixes
+        .into_iter()
+        .any(|prefix| name.starts_with(prefix.as_ref()))
 }
 
 /// Check if `test_name` covers `source_method` under the configured prefix.
@@ -162,6 +134,19 @@ fn is_word_byte(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::code_audit::conventions::Language;
+
+    fn names() -> &'static [&'static str] {
+        Language::builtin_trivial_method_names()
+    }
+
+    fn prefixes() -> &'static [&'static str] {
+        Language::builtin_trivial_method_prefixes()
+    }
+
+    fn trivial(name: &str) -> bool {
+        is_trivial_method(name, names().iter().copied(), prefixes().iter().copied())
+    }
 
     #[test]
     fn is_trivial_method_recognizes_collection_idioms() {
@@ -169,17 +154,17 @@ mod tests {
         // Every Vec/HashMap/String wrapper in the ecosystem looks the same
         // for these names, and Clippy's `len_without_is_empty` lint requires
         // them paired.
-        assert!(is_trivial_method("len"));
-        assert!(is_trivial_method("is_empty"));
-        assert!(is_trivial_method("iter"));
+        assert!(trivial("len"));
+        assert!(trivial("is_empty"));
+        assert!(trivial("iter"));
     }
 
     #[test]
     fn is_trivial_method_recognizes_prefix_rules() {
         // Simple getters / predicates / capability checks.
-        assert!(is_trivial_method("get_foo"));
-        assert!(is_trivial_method("is_bar"));
-        assert!(is_trivial_method("has_baz"));
+        assert!(trivial("get_foo"));
+        assert!(trivial("is_bar"));
+        assert!(trivial("has_baz"));
     }
 
     #[test]
@@ -187,26 +172,49 @@ mod tests {
         // Domain methods with substantive bodies should not be considered
         // trivial — they carry real logic that's worth testing and worth
         // flagging if duplicated.
-        assert!(!is_trivial_method("compute_fixability"));
-        assert!(!is_trivial_method("from_snapshot"));
+        assert!(!trivial("compute_fixability"));
+        assert!(!trivial("from_snapshot"));
     }
 
     #[test]
     fn is_trivial_method_recognizes_stdlib_trait_methods() {
         // Core trait methods on the curated list.
-        assert!(is_trivial_method("new"));
-        assert!(is_trivial_method("default"));
-        assert!(is_trivial_method("from"));
-        assert!(is_trivial_method("into"));
-        assert!(is_trivial_method("clone"));
-        assert!(is_trivial_method("fmt"));
+        assert!(trivial("new"));
+        assert!(trivial("default"));
+        assert!(trivial("from"));
+        assert!(trivial("into"));
+        assert!(trivial("clone"));
+        assert!(trivial("fmt"));
     }
 
     #[test]
     fn is_trivial_method_recognizes_php_magic_methods() {
-        assert!(is_trivial_method("__construct"));
-        assert!(is_trivial_method("__toString"));
-        assert!(is_trivial_method("getInstance"));
+        assert!(trivial("__construct"));
+        assert!(trivial("__toString"));
+        assert!(trivial("getInstance"));
+    }
+
+    #[test]
+    fn is_trivial_method_honors_caller_supplied_sets() {
+        // The predicate is driven entirely by the caller-supplied sets — no
+        // hardcoded ecosystem literals. A custom config can opt a name in or
+        // out independently of the builtin agnostic set.
+        assert!(is_trivial_method(
+            "custom_trivial",
+            ["custom_trivial"],
+            std::iter::empty::<&str>(),
+        ));
+        assert!(is_trivial_method(
+            "fetch_record",
+            std::iter::empty::<&str>(),
+            ["fetch_"],
+        ));
+        // Builtin trivial name is NOT trivial under an empty custom set.
+        assert!(!is_trivial_method(
+            "len",
+            std::iter::empty::<&str>(),
+            std::iter::empty::<&str>(),
+        ));
     }
 
     // ========================================================================

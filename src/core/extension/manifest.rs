@@ -143,6 +143,51 @@ pub struct TestMappingConfig {
     /// language markers supplied here; when absent, vacuity detection is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vacuity: Option<TestVacuityPolicy>,
+    /// Method names that are universally idiomatic for this ecosystem (e.g.
+    /// stdlib/trait methods, common accessors, framework lifecycle/magic
+    /// methods). Methods whose name matches are not expected to carry a
+    /// dedicated test. When empty, core falls back to its builtin agnostic set.
+    /// Extension manifests own the concrete ecosystem literals so core stays
+    /// language-agnostic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trivial_method_names: Vec<String>,
+    /// Method-name prefixes that mark a method as a simple getter / predicate
+    /// (e.g. `get_`, `is_`, `has_`). Methods whose name starts with one are
+    /// treated as idiomatic and not expected to carry a dedicated test. When
+    /// empty, core falls back to its builtin agnostic set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trivial_method_prefixes: Vec<String>,
+}
+
+impl TestMappingConfig {
+    /// Resolve the effective set of universally-idiomatic method names for this
+    /// config, falling back to the builtin agnostic set when the extension
+    /// declared none. Returned as owned `String`s so callers can blend config
+    /// and builtin defaults without core embedding the literals.
+    pub fn effective_trivial_method_names(&self) -> Vec<String> {
+        if self.trivial_method_names.is_empty() {
+            crate::core::code_audit::conventions::Language::builtin_trivial_method_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            self.trivial_method_names.clone()
+        }
+    }
+
+    /// Resolve the effective set of idiomatic getter/predicate prefixes for this
+    /// config, falling back to the builtin agnostic set when the extension
+    /// declared none.
+    pub fn effective_trivial_method_prefixes(&self) -> Vec<String> {
+        if self.trivial_method_prefixes.is_empty() {
+            crate::core::code_audit::conventions::Language::builtin_trivial_method_prefixes()
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            self.trivial_method_prefixes.clone()
+        }
+    }
 }
 
 /// Name fragments that indicate a behavior/scenario-describing test name.
@@ -1047,4 +1092,44 @@ pub struct RuntimeRequirementsConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRequirementConfig {
     pub version: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_trivial_method_names_falls_back_to_builtin_set() {
+        // No config-declared idiomatic names → core uses the builtin agnostic
+        // set so existing behavior is preserved without the detector embedding
+        // the literals.
+        let config = TestMappingConfig::default();
+        let names = config.effective_trivial_method_names();
+        assert!(names.iter().any(|n| n == "len"));
+        assert!(names.iter().any(|n| n == "__construct"));
+
+        let prefixes = config.effective_trivial_method_prefixes();
+        assert!(prefixes.iter().any(|p| p == "get_"));
+        assert!(prefixes.iter().any(|p| p == "is_"));
+    }
+
+    #[test]
+    fn effective_trivial_method_names_honors_configured_policy() {
+        // A project/extension-declared policy fully replaces the builtin set —
+        // language/ecosystem conventions live in config, not in core.
+        let config = TestMappingConfig {
+            trivial_method_names: vec!["only_this".to_string()],
+            trivial_method_prefixes: vec!["fetch_".to_string()],
+            ..Default::default()
+        };
+
+        let names = config.effective_trivial_method_names();
+        assert_eq!(names, vec!["only_this".to_string()]);
+        // Builtin literals are not silently merged in.
+        assert!(!names.iter().any(|n| n == "len"));
+
+        let prefixes = config.effective_trivial_method_prefixes();
+        assert_eq!(prefixes, vec!["fetch_".to_string()]);
+        assert!(!prefixes.iter().any(|p| p == "get_"));
+    }
 }
