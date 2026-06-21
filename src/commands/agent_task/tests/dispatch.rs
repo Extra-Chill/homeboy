@@ -1,6 +1,11 @@
 //! Agent-task command from-spec dispatch defaults and controller dispatch arg tests.
 
 use super::support::*;
+use clap::Parser;
+
+use crate::cli_surface::{Cli, Commands};
+
+use super::super::AgentTaskCommand;
 
 #[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {
@@ -292,6 +297,59 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
         plan.metadata["workspace_root"].as_str(),
         Some(repo_path.as_str())
     );
+}
+
+#[test]
+fn dispatch_provider_id_alias_maps_to_selector() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "dispatch",
+        "--backend",
+        "sample-backend",
+        "--dispatch-provider-id",
+        "sample-provider",
+        "--prompt",
+        "cook",
+    ])
+    .expect("dispatch provider id alias parses");
+
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Dispatch(args) = agent_task.command else {
+        panic!("expected dispatch command");
+    };
+
+    assert_eq!(args.selector.as_deref(), Some("sample-provider"));
+    assert_eq!(args.model, None);
+}
+
+#[test]
+fn controller_dispatch_provider_id_alias_maps_to_dispatch_selector() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "controller",
+        "from-spec",
+        "@controller.json",
+        "--dispatch-provider-id",
+        "sample-provider",
+    ])
+    .expect("controller dispatch provider id alias parses");
+
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Controller(controller) = agent_task.command else {
+        panic!("expected controller command");
+    };
+    let super::super::AgentTaskControllerCommand::FromSpec(args) = controller.command else {
+        panic!("expected controller from-spec command");
+    };
+
+    assert_eq!(args.dispatch_selector.as_deref(), Some("sample-provider"));
+    assert_eq!(args.dispatch_model, None);
 }
 
 #[test]

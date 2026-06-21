@@ -1514,6 +1514,9 @@ fn fixture_artifact(id: &str, kind: &str, path: &PathBuf, mime: Option<&str>) ->
         name: path
             .file_name()
             .map(|name| name.to_string_lossy().to_string()),
+        label: None,
+        role: None,
+        semantic_key: None,
         path: Some(path.display().to_string()),
         url: None,
         mime: mime.map(str::to_string),
@@ -2588,6 +2591,9 @@ fn normalize_provider_runtime_artifact(
             .or_else(|| mapping.artifact_type.clone())
             .unwrap_or_else(|| mapping.name.clone()),
         name: Some(mapping.name.clone()),
+        label: None,
+        role: None,
+        semantic_key: None,
         path,
         url,
         mime: mapping.mime.clone(),

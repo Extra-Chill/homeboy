@@ -78,8 +78,12 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Optional provider selector/id when more than one backend provider exists.
-    #[arg(long, value_name = "SELECTOR")]
+    /// Optional provider id when more than one provider exists for the backend.
+    #[arg(
+        long,
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
     pub selector: Option<String>,
 
     /// Optional model override passed through to the provider.
@@ -385,6 +389,9 @@ mod tests {
                         id: "patch-1".to_string(),
                         kind: "patch".to_string(),
                         name: Some("changes.patch".to_string()),
+                        label: None,
+                        role: None,
+                        semantic_key: None,
                         path: Some(self.patch_path.display().to_string()),
                         url: None,
                         mime: None,
@@ -399,6 +406,9 @@ mod tests {
                         id: "transcript-1".to_string(),
                         kind: "transcript".to_string(),
                         name: Some("transcript.log".to_string()),
+                        label: None,
+                        role: None,
+                        semantic_key: None,
                         path: Some(self.transcript_path.display().to_string()),
                         url: None,
                         mime: None,

@@ -88,6 +88,7 @@ pub struct RunnerWorkspaceSyncOutput {
     pub runner_id: String,
     pub local_path: String,
     pub remote_path: String,
+    pub current_workspace: RunnerWorkspaceCurrentSummary,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
     pub files: usize,
@@ -96,6 +97,20 @@ pub struct RunnerWorkspaceSyncOutput {
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
     pub validation_dependencies: Vec<RunnerValidationDependencySyncOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerWorkspaceCurrentSummary {
+    pub local_path: String,
+    pub remote_path: String,
+    pub sync_mode: RunnerWorkspaceSyncMode,
+    pub materialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_dirty: Option<bool>,
 }
 
 pub fn sync_workspace(
@@ -154,6 +169,12 @@ pub fn sync_workspace(
                     &remote_path,
                     &excludes,
                 )?;
+            let current_workspace = current_workspace_summary(
+                &local_path,
+                &remote_path,
+                RunnerWorkspaceSyncMode::Snapshot,
+                true,
+            );
             Ok((
                 RunnerWorkspaceSyncOutput {
                     variant: "workspace_sync",
@@ -161,6 +182,7 @@ pub fn sync_workspace(
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),
                     remote_path,
+                    current_workspace,
                     sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                     snapshot_identity: snapshot,
                     files: stats.files,
@@ -226,6 +248,12 @@ pub fn sync_workspace(
                     &remote_path,
                     &excludes,
                 )?;
+            let current_workspace = current_workspace_summary(
+                &local_path,
+                &remote_path,
+                RunnerWorkspaceSyncMode::Git,
+                true,
+            );
             Ok((
                 RunnerWorkspaceSyncOutput {
                     variant: "workspace_sync",
@@ -233,6 +261,7 @@ pub fn sync_workspace(
                     runner_id: runner.id,
                     local_path: local_path.display().to_string(),
                     remote_path,
+                    current_workspace,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
                     files: 0,
@@ -249,6 +278,47 @@ pub fn sync_workspace(
                 0,
             ))
         }
+    }
+}
+
+fn current_workspace_summary(
+    local_path: &Path,
+    remote_path: &str,
+    sync_mode: RunnerWorkspaceSyncMode,
+    materialized: bool,
+) -> RunnerWorkspaceCurrentSummary {
+    let git_state = local_git_state(local_path);
+    RunnerWorkspaceCurrentSummary {
+        local_path: local_path.display().to_string(),
+        remote_path: remote_path.to_string(),
+        sync_mode,
+        materialized,
+        source_commit: git_state.commit,
+        source_ref: git_state.ref_name,
+        source_dirty: git_state.dirty,
+    }
+}
+
+#[derive(Default)]
+struct LocalGitState {
+    commit: Option<String>,
+    ref_name: Option<String>,
+    dirty: Option<bool>,
+}
+
+fn local_git_state(local_path: &Path) -> LocalGitState {
+    let commit = git_output(local_path, &["rev-parse", "HEAD"]).ok();
+    let ref_name = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .filter(|value| value != "HEAD");
+    let dirty = git_output(local_path, &["status", "--porcelain=v1"])
+        .ok()
+        .map(|status| !status.trim().is_empty());
+
+    LocalGitState {
+        commit,
+        ref_name,
+        dirty,
     }
 }
 
@@ -1296,6 +1366,16 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+            assert_eq!(output.current_workspace.local_path, output.local_path);
+            assert_eq!(output.current_workspace.remote_path, output.remote_path);
+            assert_eq!(
+                output.current_workspace.sync_mode,
+                RunnerWorkspaceSyncMode::Snapshot
+            );
+            assert!(output.current_workspace.materialized);
+            assert_eq!(output.current_workspace.source_commit, None);
+            assert_eq!(output.current_workspace.source_ref, None);
+            assert_eq!(output.current_workspace.source_dirty, None);
             assert_eq!(output.files, 4);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
             assert!(Path::new(&output.remote_path)
@@ -1386,6 +1466,18 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(output.current_workspace.local_path, output.local_path);
+            assert_eq!(output.current_workspace.remote_path, output.remote_path);
+            assert_eq!(
+                output.current_workspace.sync_mode,
+                RunnerWorkspaceSyncMode::Git
+            );
+            assert!(output.current_workspace.materialized);
+            assert_eq!(
+                output.current_workspace.source_commit,
+                Some(output.snapshot_identity.clone())
+            );
+            assert_eq!(output.current_workspace.source_dirty, Some(false));
             let remote = Path::new(&output.remote_path);
             assert_eq!(
                 git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
@@ -1522,6 +1614,22 @@ mod tests {
 
             assert_eq!(exit_code, 0);
             assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+            assert_eq!(output.current_workspace.local_path, output.local_path);
+            assert_eq!(output.current_workspace.remote_path, output.remote_path);
+            assert_eq!(
+                output.current_workspace.sync_mode,
+                RunnerWorkspaceSyncMode::Git
+            );
+            assert!(output.current_workspace.materialized);
+            assert_eq!(
+                output.current_workspace.source_commit,
+                Some(output.snapshot_identity.clone())
+            );
+            assert_eq!(
+                output.current_workspace.source_ref.as_deref(),
+                Some("fix/source-upgrade")
+            );
+            assert_eq!(output.current_workspace.source_dirty, Some(false));
             let remote = Path::new(&output.remote_path);
             assert_eq!(
                 git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),

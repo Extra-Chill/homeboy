@@ -350,6 +350,73 @@ fn controller_materialize_rejects_non_object_policy_result_fields() {
 }
 
 #[test]
+fn controller_from_spec_doctor_reports_missing_provider_before_resume() {
+    let (value, status) = controller_from_spec(AgentTaskControllerFromSpecArgs {
+        spec: serde_json::to_string(&json!({
+            "loop_id": "doctor-missing-provider-loop",
+            "workflows": [
+                { "workflow_id": "brief", "prompt": "Draft the brief." }
+            ]
+        }))
+        .expect("spec json"),
+        resume: false,
+        doctor: true,
+        dispatch_backend: Some("missing-provider".to_string()),
+        dispatch_selector: None,
+        dispatch_model: None,
+    })
+    .expect("doctor report");
+
+    assert_eq!(status, 1);
+    assert_eq!(
+        value["schema"],
+        "homeboy/agent-task-loop-controller-doctor-result/v1"
+    );
+    assert_eq!(value["ok"], false);
+    assert!(value["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .any(|check| check["id"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".provider")
+            && check["status"] == "error"
+            && check["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("missing-provider")));
+}
+
+#[test]
+fn controller_from_spec_doctor_accepts_fixture_provider() {
+    let (value, status) = controller_from_spec(AgentTaskControllerFromSpecArgs {
+        spec: serde_json::to_string(&json!({
+            "loop_id": "doctor-fixture-provider-loop",
+            "workflows": [
+                { "workflow_id": "brief", "prompt": "Draft the brief." }
+            ]
+        }))
+        .expect("spec json"),
+        resume: false,
+        doctor: true,
+        dispatch_backend: Some("fixture".to_string()),
+        dispatch_selector: None,
+        dispatch_model: None,
+    })
+    .expect("doctor report");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["ok"], true);
+    assert!(value["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .any(|check| check["message"]
+            == "Fixture provider is available for deterministic local execution"));
+}
+
+#[test]
 fn compile_loop_command_rejects_undeclared_workflow_artifacts() {
     let error = loop_definition::compile_loop(CompileLoopArgs {
         definition: serde_json::to_string(&json!({
