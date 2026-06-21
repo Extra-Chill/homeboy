@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::core::extension::{self, ExtensionCapability};
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
@@ -126,16 +127,30 @@ pub struct FuzzListOutput {
 
 #[derive(Serialize)]
 pub struct FuzzRunOutput {
+    pub kind: String,
     pub command: String,
     pub component: String,
     pub rig_id: Option<String>,
     pub status: String,
     pub workload_id: Option<String>,
+    pub workload_path: Option<String>,
     pub run_id: Option<String>,
     pub seed: Option<String>,
     pub max_duration: Option<String>,
     pub passthrough_args: Vec<String>,
+    pub execution: Option<FuzzExecutionOutput>,
     pub runner_contract: FuzzRunnerContract,
+}
+
+#[derive(Serialize)]
+pub struct FuzzExecutionOutput {
+    pub kind: String,
+    pub extension_id: String,
+    pub exit_code: i32,
+    pub success: bool,
+    pub run_dir: String,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -144,6 +159,7 @@ pub struct FuzzWorkloadOutput {
     pub label: Option<String>,
     pub description: Option<String>,
     pub source: String,
+    pub manifest_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -156,8 +172,14 @@ pub struct FuzzRunnerContract {
 pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
     match args.command {
         Some(FuzzCommand::List(list_args)) => Ok((FuzzOutput::List(run_list(list_args)?), 0)),
-        Some(FuzzCommand::Run(run_args)) => Ok((FuzzOutput::Run(run_run(run_args)?), 0)),
-        None => Ok((FuzzOutput::Run(run_run(args.run)?), 0)),
+        Some(FuzzCommand::Run(run_args)) => {
+            let (output, exit) = run_run(run_args)?;
+            Ok((FuzzOutput::Run(output), exit))
+        }
+        None => {
+            let (output, exit) = run_run(args.run)?;
+            Ok((FuzzOutput::Run(output), exit))
+        }
     }
 }
 
@@ -190,7 +212,7 @@ fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
     })
 }
 
-fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<FuzzRunOutput> {
+fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     let rig_context = load_rig(args.rig.as_deref())?;
     let effective_id = resolve_component_id(
         &args.comp,
@@ -209,31 +231,101 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<FuzzRunOutput> {
         rig_context.as_ref(),
         ctx.extension_id.as_deref(),
     );
-    if let Some(workload_id) = args.workload_id.as_ref() {
-        validate_workload_id(&workloads, workload_id)?;
+    let selected_workload = select_workload(&workloads, args.workload_id.as_deref())?;
+    let run_dir = RunDir::create()?;
+    let runner_output = run_fuzz_extension_script(&ctx, &args, selected_workload, &run_dir)?;
+    let exit_code = runner_output.exit_code;
+    let success = runner_output.success;
+
+    Ok((
+        FuzzRunOutput {
+            kind: "fuzz".to_string(),
+            command: "fuzz.run".to_string(),
+            component: ctx.component_id,
+            rig_id: rig_context.map(|context| context.spec.id),
+            status: if success { "passed" } else { "failed" }.to_string(),
+            workload_id: selected_workload
+                .map(|workload| workload.id.clone())
+                .or(args.workload_id),
+            workload_path: selected_workload.and_then(|workload| workload.manifest_path.clone()),
+            run_id: args.run_id,
+            seed: args.seed,
+            max_duration: args.max_duration,
+            passthrough_args: args.args,
+            execution: Some(FuzzExecutionOutput {
+                kind: "fuzz".to_string(),
+                extension_id: ctx.extension_id.unwrap_or_default(),
+                exit_code,
+                success,
+                run_dir: run_dir.path().to_string_lossy().to_string(),
+                stdout: runner_output.stdout,
+                stderr: runner_output.stderr,
+            }),
+            runner_contract: FuzzRunnerContract {
+                capability: "fuzz".to_string(),
+                extension_script_required: true,
+                env: vec![
+                    "HOMEBOY_FUZZ_WORKLOAD_ID",
+                    "HOMEBOY_FUZZ_WORKLOAD_PATH",
+                    "HOMEBOY_FUZZ_RUN_ID",
+                    "HOMEBOY_FUZZ_SEED",
+                    "HOMEBOY_FUZZ_MAX_DURATION",
+                ],
+            },
+        },
+        exit_code,
+    ))
+}
+
+fn run_fuzz_extension_script(
+    ctx: &execution_context::ExecutionContext,
+    args: &FuzzRunArgs,
+    workload: Option<&FuzzWorkloadOutput>,
+    run_dir: &RunDir,
+) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
+    let execution_context =
+        extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    let mut runner = ExtensionRunner::for_context(execution_context)
+        .component(ctx.component.clone())
+        .settings(&args.setting_args.setting)
+        .settings_json(&args.setting_args.setting_json)
+        .path_override(args.comp.path.clone())
+        .with_run_dir(run_dir)
+        .script_args(&args.args);
+
+    let env = fuzz_runner_env(args, workload);
+    for (key, value) in env {
+        runner = runner.env(&key, &value);
     }
 
-    Ok(FuzzRunOutput {
-        command: "fuzz.run".to_string(),
-        component: ctx.component_id,
-        rig_id: rig_context.map(|context| context.spec.id),
-        status: "planned".to_string(),
-        workload_id: args.workload_id,
-        run_id: args.run_id,
-        seed: args.seed,
-        max_duration: args.max_duration,
-        passthrough_args: args.args,
-        runner_contract: FuzzRunnerContract {
-            capability: "fuzz".to_string(),
-            extension_script_required: true,
-            env: vec![
-                "HOMEBOY_FUZZ_WORKLOAD_ID",
-                "HOMEBOY_FUZZ_RUN_ID",
-                "HOMEBOY_FUZZ_SEED",
-                "HOMEBOY_FUZZ_MAX_DURATION",
-            ],
-        },
-    })
+    runner.run()
+}
+
+fn fuzz_runner_env(
+    args: &FuzzRunArgs,
+    workload: Option<&FuzzWorkloadOutput>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(workload) = workload {
+        env.push(("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), workload.id.clone()));
+        if let Some(path) = workload.manifest_path.as_ref() {
+            env.push(("HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(), path.clone()));
+        }
+    }
+    push_opt_env(&mut env, "HOMEBOY_FUZZ_RUN_ID", args.run_id.as_ref());
+    push_opt_env(&mut env, "HOMEBOY_FUZZ_SEED", args.seed.as_ref());
+    push_opt_env(
+        &mut env,
+        "HOMEBOY_FUZZ_MAX_DURATION",
+        args.max_duration.as_ref(),
+    );
+    env
+}
+
+fn push_opt_env(env: &mut Vec<(String, String)>, key: &str, value: Option<&String>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        env.push((key.to_string(), value.clone()));
+    }
 }
 
 struct FuzzRigContext {
@@ -374,6 +466,7 @@ fn fuzz_workloads(
             label: None,
             description: None,
             source: "component.scripts.fuzz".to_string(),
+            manifest_path: None,
         })
         .collect();
 
@@ -399,6 +492,7 @@ fn fuzz_workloads(
                         label: workload.label.clone(),
                         description: workload.description.clone(),
                         source: format!("extension:{extension_id}"),
+                        manifest_path: None,
                     }
                 }));
             }
@@ -422,23 +516,38 @@ fn fuzz_workload_from_path(extension_id: &str, path: &Path) -> FuzzWorkloadOutpu
             .map(str::to_string),
         description: None,
         source: format!("rig_workloads:{extension_id}:{}", path.to_string_lossy()),
+        manifest_path: Some(path.to_string_lossy().to_string()),
     }
 }
 
-fn validate_workload_id(
-    workloads: &[FuzzWorkloadOutput],
-    workload_id: &str,
-) -> homeboy::core::Result<()> {
-    if workloads.iter().any(|workload| workload.id == workload_id) {
-        return Ok(());
+fn select_workload<'a>(
+    workloads: &'a [FuzzWorkloadOutput],
+    workload_id: Option<&str>,
+) -> homeboy::core::Result<Option<&'a FuzzWorkloadOutput>> {
+    if let Some(workload_id) = workload_id {
+        return workloads
+            .iter()
+            .find(|workload| workload.id == workload_id)
+            .map(Some)
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "workload",
+                    format!("Unknown fuzz workload '{workload_id}'. Run `homeboy fuzz list` to inspect declared workloads."),
+                    None,
+                    None,
+                )
+            });
     }
 
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "workload",
-        format!("Unknown fuzz workload '{workload_id}'. Run `homeboy fuzz list` to inspect declared workloads."),
-        None,
-        None,
-    ))
+    let mut path_workloads = workloads
+        .iter()
+        .filter(|workload| workload.manifest_path.is_some());
+    let first = path_workloads.next();
+    if first.is_some() && path_workloads.next().is_none() {
+        return Ok(first);
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -459,7 +568,7 @@ mod tests {
             "run",
             "component-a",
             "--rig",
-            "wordpress-plugin-fuzz",
+            "package-fuzz",
             "--workload",
             "parser",
             "--run-id",
@@ -476,7 +585,7 @@ mod tests {
         match cli.args.command {
             Some(FuzzCommand::Run(run)) => {
                 assert_eq!(run.comp.component.as_deref(), Some("component-a"));
-                assert_eq!(run.rig.as_deref(), Some("wordpress-plugin-fuzz"));
+                assert_eq!(run.rig.as_deref(), Some("package-fuzz"));
                 assert_eq!(run.workload_id.as_deref(), Some("parser"));
                 assert_eq!(run.run_id.as_deref(), Some("proof-1"));
                 assert_eq!(run.seed.as_deref(), Some("1234"));
@@ -500,15 +609,18 @@ mod tests {
         assert_eq!(list["variant"], "list");
 
         let run = serde_json::to_value(FuzzOutput::Run(FuzzRunOutput {
+            kind: "fuzz".to_string(),
             command: "fuzz.run".to_string(),
             component: "component-a".to_string(),
-            rig_id: Some("wordpress-plugin-fuzz".to_string()),
-            status: "planned".to_string(),
+            rig_id: Some("package-fuzz".to_string()),
+            status: "passed".to_string(),
             workload_id: Some("parser".to_string()),
+            workload_path: None,
             run_id: None,
             seed: None,
             max_duration: None,
             passthrough_args: Vec::new(),
+            execution: None,
             runner_contract: FuzzRunnerContract {
                 capability: "fuzz".to_string(),
                 extension_script_required: true,
@@ -517,54 +629,57 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(run["variant"], "run");
-        assert_eq!(run["rig_id"], "wordpress-plugin-fuzz");
+        assert_eq!(run["kind"], "fuzz");
+        assert_eq!(run["rig_id"], "package-fuzz");
     }
 
     #[test]
     fn fuzz_workloads_include_rig_declared_paths() {
         let spec: RigSpec = serde_json::from_value(serde_json::json!({
-            "id": "wordpress-plugin-fuzz",
+            "id": "package-fuzz",
             "components": {
-                "plugin": {
-                    "path": "/tmp/plugin",
+                "package": {
+                    "path": "/tmp/package",
                     "extensions": {
-                        "wordpress": {
+                        "generic": {
                             "settings": {}
                         }
                     }
                 }
             },
             "fuzz": {
-                "default_component": "plugin"
+                "default_component": "package"
             },
             "fuzz_workloads": {
-                "wordpress": [
+                "generic": [
                     { "path": "${package.root}/fuzz/checkout-create-order.json" }
                 ]
             }
         }))
         .expect("parse rig spec");
-        let component = rig_component_for_fuzz(&spec, "plugin").expect("rig component");
+        let component = rig_component_for_fuzz(&spec, "package").expect("rig component");
         let context = FuzzRigContext {
             spec,
-            package_root: Some(PathBuf::from("/tmp/homeboy-rigs/woocommerce")),
+            package_root: Some(PathBuf::from("/tmp/homeboy-rigs/package")),
         };
 
-        let workloads = fuzz_workloads(&component, Some(&context), Some("wordpress"));
+        let workloads = fuzz_workloads(&component, Some(&context), Some("generic"));
 
         assert!(workloads.iter().any(|workload| {
             workload.id == "checkout-create-order"
+                && workload.manifest_path.as_deref()
+                    == Some("/tmp/homeboy-rigs/package/fuzz/checkout-create-order.json")
                 && workload.source
-                    == "rig_workloads:wordpress:/tmp/homeboy-rigs/woocommerce/fuzz/checkout-create-order.json"
+                    == "rig_workloads:generic:/tmp/homeboy-rigs/package/fuzz/checkout-create-order.json"
         }));
     }
 
     #[test]
     fn resolve_component_id_uses_fuzz_default_component() {
         let spec: RigSpec = serde_json::from_value(serde_json::json!({
-            "id": "wordpress-plugin-fuzz",
+            "id": "package-fuzz",
             "fuzz": {
-                "default_component": "plugin"
+                "default_component": "package"
             }
         }))
         .expect("parse rig spec");
@@ -575,7 +690,53 @@ mod tests {
 
         assert_eq!(
             resolve_component_id(&comp, Some(&spec)).expect("resolve component"),
-            "plugin"
+            "package"
         );
+    }
+
+    #[test]
+    fn fuzz_runner_env_includes_selected_workload_path_and_generic_contract() {
+        let args = FuzzRunArgs {
+            comp: PositionalComponentArgs {
+                component: Some("component-a".to_string()),
+                path: None,
+            },
+            rig: None,
+            extension_override: ExtensionOverrideArgs { extensions: vec![] },
+            setting_args: SettingArgs {
+                setting: vec![],
+                setting_json: vec![],
+            },
+            workload_id: Some("parser".to_string()),
+            run_id: Some("proof-1".to_string()),
+            seed: Some("1234".to_string()),
+            max_duration: Some("60s".to_string()),
+            args: vec![],
+        };
+        let workload = FuzzWorkloadOutput {
+            id: "parser".to_string(),
+            label: None,
+            description: None,
+            source: "rig_workloads:generic:/tmp/fuzz/parser.json".to_string(),
+            manifest_path: Some("/tmp/fuzz/parser.json".to_string()),
+        };
+
+        let env = fuzz_runner_env(&args, Some(&workload));
+
+        assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
+        assert!(env.contains(&(
+            "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
+            "/tmp/fuzz/parser.json".to_string()
+        )));
+        assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
+        assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
+        assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    }
+
+    #[test]
+    fn fuzz_command_tests_keep_core_fixtures_product_neutral() {
+        let source = include_str!("fuzz.rs").to_ascii_lowercase();
+        let forbidden = ["word", "press"].concat();
+        assert!(!source.contains(&forbidden));
     }
 }
