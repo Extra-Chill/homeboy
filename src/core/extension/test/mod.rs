@@ -247,6 +247,19 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             continue;
         }
 
+        // A changed `src/**/tests/**` inline-test module that defines no test
+        // functions (e.g. a shared `support.rs`/fixture helper) would compile a
+        // cargo filter that matches zero tests. The runner treats "ran 0 tests"
+        // as a failure, producing a spurious test-phase failure with no counts.
+        // Fall back to the full suite instead of emitting an empty filter.
+        if is_inline_test_support_file(component, test_file) {
+            fallback_message = Some(
+                "Changed files include an inline test support module without test functions; running the full test command."
+                    .to_string(),
+            );
+            continue;
+        }
+
         module_path = module_path.replace('/', "::");
         if !module_path.is_empty() {
             filter_args.push(module_path);
@@ -321,6 +334,57 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
     }
 
     Vec::new()
+}
+
+/// Returns `true` when `test_file` is an inline test module (lives under a
+/// `tests/` directory inside `src/`) that defines no test functions and would
+/// therefore produce a cargo filter matching zero tests.
+///
+/// Only files that exist on disk and contain no `#[test]`/`#[*::test]` attribute
+/// are treated as support modules; if the file is missing or cannot be read we
+/// conservatively return `false` so normal filter routing is preserved.
+fn is_inline_test_support_file(component: &Component, test_file: &str) -> bool {
+    // Restrict to inline test modules: `src/.../tests/....rs`. Integration
+    // tests under the top-level `tests/` dir are handled separately above.
+    let Some(relative) = test_file.strip_prefix("src/") else {
+        return false;
+    };
+    if !relative.ends_with(".rs") {
+        return false;
+    }
+    let is_inline_test_module = relative
+        .split('/')
+        .any(|segment| segment == "tests" || segment == "test");
+    if !is_inline_test_module {
+        return false;
+    }
+
+    let path = component_source_path(component).join(test_file);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+
+    !file_declares_test_function(&contents)
+}
+
+/// Detects whether Rust source `contents` declares at least one test function
+/// via a `#[test]` or `#[<path>::test]` (e.g. `#[tokio::test]`) attribute.
+fn file_declares_test_function(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let Some(attr) = trimmed.strip_prefix("#[") else {
+            return false;
+        };
+        let attr = attr.trim_start();
+        // Match `#[test]`, `#[test(...)]`, and `#[<path>::test]` /
+        // `#[<path>::test(...)]` such as `#[tokio::test]`.
+        let head = attr
+            .split(|c| c == '(' || c == ']' || c == ',')
+            .next()
+            .unwrap_or("")
+            .trim();
+        head == "test" || head.rsplit("::").next() == Some("test")
+    })
 }
 
 fn exclusive_changed_test_env(
@@ -649,6 +713,81 @@ mod tests {
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
             "--\ncore::daemon".to_string()
         )));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_falls_back_when_inline_support_module_has_no_tests() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let support_rel = "src/commands/agent_task/tests/support.rs";
+        let support_path = dir.path().join(support_rel);
+        std::fs::create_dir_all(support_path.parent().expect("parent dir"))
+            .expect("create support module dirs");
+        std::fs::write(
+            &support_path,
+            "//! Shared helpers for the agent-task command tests.\n\npub(crate) fn fixture() {}\n",
+        )
+        .expect("write support module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[support_rel.to_string()]);
+
+        assert!(env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())));
+        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_filter_when_inline_module_declares_tests() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let test_rel = "src/commands/agent_task/tests/lifecycle.rs";
+        let test_path = dir.path().join(test_rel);
+        std::fs::create_dir_all(test_path.parent().expect("parent dir"))
+            .expect("create test module dirs");
+        std::fs::write(
+            &test_path,
+            "#[test]\nfn runs() { assert!(true); }\n\n#[tokio::test]\nasync fn runs_async() {}\n",
+        )
+        .expect("write inline test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            format!("{}_{}", "rust", "filter")
+        )));
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+            "--\ncommands::agent_task::tests::lifecycle".to_string()
+        )));
+    }
+
+    #[test]
+    fn file_declares_test_function_detects_attribute_variants() {
+        assert!(file_declares_test_function("#[test]\nfn a() {}"));
+        assert!(file_declares_test_function("    #[test]\n    fn a() {}"));
+        assert!(file_declares_test_function(
+            "#[tokio::test]\nasync fn a() {}"
+        ));
+        assert!(file_declares_test_function(
+            "#[test(flavor = \"x\")]\nfn a() {}"
+        ));
+        assert!(!file_declares_test_function("pub fn helper() {}"));
+        assert!(!file_declares_test_function(
+            "#[derive(Debug)]\nstruct Latest;"
+        ));
+        assert!(!file_declares_test_function("// #[test] in a comment"));
     }
 
     #[test]
