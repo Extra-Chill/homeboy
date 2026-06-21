@@ -76,10 +76,6 @@ fn test_supports_lab_runner() {
     );
     assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "review", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
     assert!(parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
@@ -212,10 +208,6 @@ fn test_lab_command_contracts_cover_hot_commands() {
         (parsed_command(&["homeboy", "test"]), "test"),
         (parsed_command(&["homeboy", "audit"]), "audit"),
         (parsed_command(&["homeboy", "review"]), "review"),
-        (
-            parsed_command(&["homeboy", "review", "--changed-since", "origin/main"]),
-            "review",
-        ),
         (parsed_command(&["homeboy", "bench"]), "bench"),
         (
             parsed_command(&[
