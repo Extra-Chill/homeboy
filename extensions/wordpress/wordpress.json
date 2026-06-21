@@ -996,11 +996,39 @@
       "description": "Backend-neutral WordPress workload declarations passed to the selected runtime adapter after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata."
     },
     {
+      "id": "wordpress_runtime_prepare_steps",
+      "label": "WordPress runtime prepare steps",
+      "type": "array",
+      "default": [],
+      "description": "Backend-neutral recipe steps to run before the measured WordPress runtime bench step. Each step is a runtime command object with command, args, and optional allowFailure/advisory flags. Use for generic pre-bench runtime evidence or setup that belongs outside measured workloads."
+    },
+    {
+      "id": "wordpress_runtime_post_steps",
+      "label": "WordPress runtime post steps",
+      "type": "array",
+      "default": [],
+      "description": "Backend-neutral recipe steps to run after the measured WordPress runtime bench step in the same disposable runtime. Use for generic post-bench browser probes, browser actions, or reviewer-facing evidence capture after workloads mutate WordPress state."
+    },
+    {
       "id": "wp_codebox_workloads",
       "label": "Bench workloads",
       "type": "array",
       "default": [],
       "description": "Legacy compatibility alias for wordpress_runtime_workloads. Prefer wordpress_runtime_workloads for new configuration."
+    },
+    {
+      "id": "wp_codebox_recipe_prepare_steps",
+      "label": "WP Codebox recipe prepare steps",
+      "type": "array",
+      "default": [],
+      "description": "Legacy compatibility alias for wordpress_runtime_prepare_steps. Prefer wordpress_runtime_prepare_steps for new configuration."
+    },
+    {
+      "id": "wp_codebox_recipe_post_steps",
+      "label": "WP Codebox recipe post steps",
+      "type": "array",
+      "default": [],
+      "description": "Legacy compatibility alias for wordpress_runtime_post_steps. Prefer wordpress_runtime_post_steps for new configuration."
     },
     {
       "id": "wp_codebox_bootstrap_files",

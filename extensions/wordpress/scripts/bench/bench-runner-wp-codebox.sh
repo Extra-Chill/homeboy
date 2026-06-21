@@ -81,6 +81,10 @@ homeboy_wp_codebox_validate_bench_settings() {
             ["wordpress_runtime_workloads", "array"],
             ["wp_codebox_workloads", "array"],
             ["playground_workloads", "array"],
+            ["wordpress_runtime_prepare_steps", "array"],
+            ["wordpress_runtime_post_steps", "array"],
+            ["wp_codebox_recipe_prepare_steps", "array"],
+            ["wp_codebox_recipe_post_steps", "array"],
             ["wp_codebox_file_mounts", "array"],
             ["playground_file_mounts", "array"],
             ["wp_codebox_extra_plugins", "array"],
@@ -951,10 +955,14 @@ fi
 WP_CONFIG_DEFINES_JSON="{}"
 BENCH_ENV_JSON="{}"
 WP_CODEBOX_WORKLOADS_JSON="[]"
+WP_CODEBOX_RECIPE_PREPARE_STEPS_JSON="[]"
+WP_CODEBOX_RECIPE_POST_STEPS_JSON="[]"
 if [ "$settings_json" != "{}" ]; then
     WP_CONFIG_DEFINES_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     BENCH_ENV_JSON=$(printf '%s' "$settings_json" | jq -c '.bench_env // {}' 2>/dev/null || echo "{}")
     WP_CODEBOX_WORKLOADS_JSON=$(printf '%s' "$settings_json" | jq -c '.wordpress_runtime_workloads // .wp_codebox_workloads // .playground_workloads // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_RECIPE_PREPARE_STEPS_JSON=$(printf '%s' "$settings_json" | jq -c '.wordpress_runtime_prepare_steps // .wp_codebox_recipe_prepare_steps // []' 2>/dev/null || echo "[]")
+    WP_CODEBOX_RECIPE_POST_STEPS_JSON=$(printf '%s' "$settings_json" | jq -c '.wordpress_runtime_post_steps // .wp_codebox_recipe_post_steps // []' 2>/dev/null || echo "[]")
 fi
 WP_CODEBOX_WORKLOADS_JSON=$(jq -nc --argjson declared "$WP_CODEBOX_WORKLOADS_JSON" --argjson scenarios "$SCENARIO_MANIFEST_WORKLOADS_JSON" '$declared + $scenarios')
 homeboy_wp_codebox_append_extra_bench_workloads_configured_json
@@ -1387,6 +1395,8 @@ homeboy_wp_codebox_emit_dependency_provenance() {
                 has_bench_env: (($settings.bench_env // null) != null),
                 has_wp_config_defines: (($settings.wp_config_defines // null) != null),
                 has_configured_workloads: ((($settings.wordpress_runtime_workloads // $settings.wp_codebox_workloads // $settings.playground_workloads // []) | length) > 0),
+                has_recipe_prepare_steps: ((($settings.wordpress_runtime_prepare_steps // $settings.wp_codebox_recipe_prepare_steps // []) | length) > 0),
+                has_recipe_post_steps: ((($settings.wordpress_runtime_post_steps // $settings.wp_codebox_recipe_post_steps // []) | length) > 0),
                 has_scenario_manifests: ((($settings.wp_codebox_scenario_manifests // $settings.scenario_manifests // []) | length) > 0)
             }
         }' > "$provenance_file"
@@ -1409,6 +1419,8 @@ jq -n \
     --argjson dependencySlugs "$(printf '%s\n' "$DEPENDENCY_SLUGS_CSV" | jq -R 'split(",") | map(select(. != ""))')" \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
+    --argjson prepareSteps "$WP_CODEBOX_RECIPE_PREPARE_STEPS_JSON" \
+    --argjson postSteps "$WP_CODEBOX_RECIPE_POST_STEPS_JSON" \
     --argjson pluginRuntime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" \
     --argjson diagnostics "$WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON" \
     '({
@@ -1426,7 +1438,9 @@ jq -n \
             wpConfigDefines: $wpConfigDefines,
             pluginRuntime: $pluginRuntime,
             bootstrapFiles: $bootstrapFiles,
-            workloads: $workloads
+            workloads: $workloads,
+            prepareSteps: $prepareSteps,
+            postSteps: $postSteps
         } + (if $wp == "" then {} else {wordpressVersion: $wp} end))
     } | .options += (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
