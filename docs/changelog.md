@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.248.0] - 2026-06-21
+
+### Added
+- highlight key artifacts in summaries
+
+### Changed
+- clear remaining structural finding (#5577)
+- split god-files and high-item-count files to clear structural findings (partial, #5577)
+
+### Fixed
+- fix(agent-task): report provider selector mismatches
+- clear remaining field-pattern and intra-method-dup findings (#5576, #5583)
+- repair tests broken by structural module splits (#5599)
+- summarize regression threshold metadata
+- fix(agent-task): validate command envelope proofs
+- surface bench prepare failure details
+- remove dead code findings (#5581)
+- fix(agent-task): summarize controller resume failures
+
 ## [0.247.6] - 2026-06-21
 
 ### Changed
