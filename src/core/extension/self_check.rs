@@ -357,6 +357,7 @@ mod tests {
             test: Vec::new(),
             build: Vec::new(),
             bench: Vec::new(),
+            fuzz: Vec::new(),
             trace: Vec::new(),
             deps: Vec::new(),
         });
@@ -396,6 +397,7 @@ mod tests {
             test: Vec::new(),
             build: Vec::new(),
             bench: Vec::new(),
+            fuzz: Vec::new(),
             trace: Vec::new(),
             deps: Vec::new(),
         });
@@ -433,6 +435,7 @@ mod tests {
             test: Vec::new(),
             build: Vec::new(),
             bench: Vec::new(),
+            fuzz: Vec::new(),
             trace: Vec::new(),
             deps: Vec::new(),
         });

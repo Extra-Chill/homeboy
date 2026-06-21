@@ -406,6 +406,7 @@ mod tests {
             lint: None,
             test: None,
             bench: None,
+            fuzz: None,
             trace: None,
             autofix_verify: None,
             structured_sidecars: Default::default(),

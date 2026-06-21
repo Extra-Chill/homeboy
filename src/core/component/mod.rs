@@ -160,6 +160,8 @@ pub struct ComponentScriptsConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bench: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fuzz: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
@@ -704,6 +706,7 @@ impl Component {
                 crate::core::extension::ExtensionCapability::Test => &scripts.test,
                 crate::core::extension::ExtensionCapability::Build => &scripts.build,
                 crate::core::extension::ExtensionCapability::Bench => &scripts.bench,
+                crate::core::extension::ExtensionCapability::Fuzz => &scripts.fuzz,
                 crate::core::extension::ExtensionCapability::Trace => &scripts.trace,
                 crate::core::extension::ExtensionCapability::Deps => &scripts.deps,
             };

@@ -21,6 +21,7 @@ pub enum ExtensionCapability {
     Test,
     Build,
     Bench,
+    Fuzz,
     Trace,
     Deps,
 }
@@ -59,6 +60,11 @@ impl ExtensionCapability {
                 label: "bench",
                 has_manifest_support: ExtensionManifest::has_bench,
                 script_path: ExtensionManifest::bench_script,
+            },
+            ExtensionCapability::Fuzz => ExtensionCapabilityDescriptor {
+                label: "fuzz",
+                has_manifest_support: ExtensionManifest::has_fuzz,
+                script_path: ExtensionManifest::fuzz_script,
             },
             ExtensionCapability::Trace => ExtensionCapabilityDescriptor {
                 label: "trace",
