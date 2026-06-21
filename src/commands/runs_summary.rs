@@ -54,9 +54,9 @@ fn render_run_detail(run: &Value) -> String {
 
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
-        lines.extend(super::bench_summary::bench_coverage_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
     }
+    lines.extend(super::bench_summary::bench_coverage_lines(run));
     lines.extend(key_artifact_lines(run, run_id));
     lines.extend(artifact_lines(run, run_id));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
@@ -319,6 +319,72 @@ mod tests {
         assert!(summary.contains("  Coverage gaps: 3\n"));
         assert!(summary.contains("    api: 2\n"));
         assert!(summary.contains("    cli: 1\n"));
+    }
+
+    #[test]
+    fn fuzz_show_summary_surfaces_generic_coverage_and_case_artifacts() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "fuzz-run-7",
+                    "kind": "fuzz",
+                    "status": "fail",
+                    "metadata": {
+                        "coverage_summary": {
+                            "surface_count": 12,
+                            "exercised_count": 9,
+                            "failed_count": 2,
+                            "coverage_gaps": [
+                                "parser::unicode",
+                                "parser::empty",
+                                "serializer::nested"
+                            ]
+                        }
+                    },
+                    "artifacts": [
+                        {
+                            "id": "seed-1",
+                            "run_id": "fuzz-run-7",
+                            "kind": "failing_case",
+                            "type": "file",
+                            "path": "/tmp/fuzz/failing-case.json"
+                        },
+                        {
+                            "id": "repro-1",
+                            "run_id": "fuzz-run-7",
+                            "name": "repro-case",
+                            "type": "file",
+                            "path": "/tmp/fuzz/repro.txt"
+                        },
+                        {
+                            "id": "coverage-report",
+                            "run_id": "fuzz-run-7",
+                            "kind": "coverage",
+                            "type": "file",
+                            "path": "/tmp/fuzz/coverage.json"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Run fuzz-run-7 (fuzz)\n"));
+        assert!(summary.contains("Coverage:\n"));
+        assert!(summary.contains("  Surfaces: discovered=12 exercised=9 failed=2\n"));
+        assert!(summary.contains("  Coverage gaps: 3\n"));
+        assert!(summary.contains("    parser: 2\n"));
+        assert!(summary.contains("    serializer: 1\n"));
+        assert!(summary.contains("Key artifacts:\n"));
+        assert!(summary.contains("  global/seed-1: /tmp/fuzz/failing-case.json\n"));
+        assert!(summary.contains("  global/repro-case: /tmp/fuzz/repro.txt\n"));
+        assert!(summary.contains("  global/coverage-report: /tmp/fuzz/coverage.json\n"));
+        assert!(
+            summary.contains("    get: homeboy runs artifact get fuzz-run-7 seed-1 -o <path>\n")
+        );
     }
 
     #[test]

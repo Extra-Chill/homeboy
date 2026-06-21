@@ -6,7 +6,14 @@ const KEY_ARTIFACT_MARKERS: &[&str] = &[
     "admin_page_coverage",
     "route_inventory",
     "coverage",
+    "case_artifact",
+    "failing_case",
+    "failure_case",
+    "fuzz_case",
+    "key_case",
+    "minimal_repro",
     "raw_result",
+    "repro_case",
 ];
 
 pub(crate) fn key_artifact_lines(
