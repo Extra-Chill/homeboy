@@ -14,11 +14,12 @@ const path = require('node:path');
  */
 const {
   ADAPTER_ID,
-  loadWpCodeboxArtifactBundle,
   verifyWpCodeboxPayload,
+  loadArtifactBundle,
+  runAgentTask,
   wpCodeboxApplyRequestFromBundle,
   wpCodeboxChangeArtifactFromBundle,
-} = require('./wp-codebox-apply-adapter');
+} = require('./codebox-provider-adapter');
 const {
   executeFanoutReconcileRun,
 } = require('./fanout-reconcile-runner');
@@ -28,12 +29,11 @@ const {
   TASK_SCHEMA,
   createWpCodeboxTaskRequest,
   executeWpCodeboxTaskRequest,
-  executeWpCodeboxTaskRequestAsync,
   pullRequestUrls,
   sandboxSessionId,
   taskOutcome,
   taskOutcomeSucceeded,
-} = require('./audit-wp-codebox-runtime-provider');
+} = require('./codebox-provider-adapter');
 
 const PLAN_SCHEMA = 'homeboy/audit-wp-codebox-fanout/v1';
 const IMPLEMENTATION_SCOPE = Object.freeze({
@@ -155,7 +155,7 @@ function explicitApprovedFiles(artifactEntry) {
 }
 
 function createApplyBackMetadata(taskRequest, artifactEntry, options) {
-  const bundle = loadWpCodeboxArtifactBundle(artifactEntry.bundle_path);
+  const bundle = loadArtifactBundle(artifactEntry.bundle_path);
   const approvedFiles = explicitApprovedFiles(artifactEntry);
   const verified = verifyWpCodeboxPayload({
     artifact_id: bundle.id,
@@ -236,7 +236,7 @@ function createApplyBackMetadata(taskRequest, artifactEntry, options) {
 }
 
 function createIssueReport(taskRequest, artifactEntry, options) {
-  const bundle = artifactEntry.bundle_path ? loadWpCodeboxArtifactBundle(artifactEntry.bundle_path) : null;
+  const bundle = artifactEntry.bundle_path ? loadArtifactBundle(artifactEntry.bundle_path) : null;
   const issueUrl = options.issue_url || taskRequest.orchestrator.issue_url || '';
   const disposition = artifactEntry.disposition || (artifactEntry.false_positive ? 'false_positive' : 'rejected_artifact');
   const reason = artifactEntry.reason || artifactEntry.false_positive_reason || artifactEntry.rejection_reason || '';
@@ -364,7 +364,7 @@ async function executeAuditWpCodeboxFanout(input) {
     include_summary: false,
     include_reconciliation: false,
     runs_output_path: input.runsOutputPath,
-    execute_task_request: (taskRequest) => executeWpCodeboxTaskRequestAsync(taskRequest, input),
+    execute_task_request: (taskRequest) => runAgentTask(taskRequest, input),
     classify_outcome: (record) => record.outcome,
     reconcile: () => ({
       apply_back: plan.apply_back || [],
