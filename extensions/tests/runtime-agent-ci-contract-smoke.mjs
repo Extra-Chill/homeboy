@@ -53,11 +53,14 @@ const genericConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   ignoredWorkspacePaths: ['.cache', 'tmp'],
   ability: 'example/run-task',
   abilityInput: { prompt: 'Cook.' },
+  workload: { schema: 'wp-codebox/workload/v1', id: 'cook-workload', label: 'Cook workload' },
+  toolPolicy: { schema: 'wp-codebox/tool-policy/v1', tools: { workspace_read: true } },
   abilityTools: [{ name: 'example_tool' }],
   runtimeOutputProjections: { packet_url: 'metadata.artifacts.packet.url' },
   callbackData: { initial: { seed: 'value' } },
   evidenceProjections: [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }],
   artifactSlots: [{ name: 'packet', required: true }],
+  artifactDeclarations: [{ schema: 'wp-codebox/artifact-declaration/v1', name: 'packet', required: true }],
   transcriptSlots: [{ name: 'main', required: true }],
   runtimeInvocation: { operations: ['workspaceCommand'] },
 });
@@ -67,12 +70,15 @@ assert.equal(genericConfig.runtime_profile, 'example-agent-ci');
 assert.deepEqual(genericConfig.runtime_component_paths, { agent_runtime: '/workspace/components/example-runtime' });
 assert.deepEqual(genericConfig.ignored_workspace_paths, ['.cache', 'tmp']);
 assert.deepEqual(genericConfig.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
+assert.deepEqual(genericConfig.workload, { schema: 'wp-codebox/workload/v1', id: 'cook-workload', label: 'Cook workload' });
+assert.deepEqual(genericConfig.sandbox_tool_policy, { schema: 'wp-codebox/tool-policy/v1', tools: { workspace_read: true } });
 assert.deepEqual(genericConfig.ability_requirements, ['example/run-task', 'example/read-state']);
 assert.deepEqual(genericConfig.ability_tools, [{ name: 'example_tool' }]);
 assert.deepEqual(genericConfig.runtime_output_projections, { packet_url: 'metadata.artifacts.packet.url' });
 assert.deepEqual(genericConfig.callback_data, { initial: { seed: 'value' } });
 assert.deepEqual(genericConfig.evidence_projections, [{ operation: 'workspacePublish', outputs: { pr_url: 'result.pr.url' } }]);
 assert.deepEqual(genericConfig.artifact_slots, [{ name: 'packet', required: true }]);
+assert.deepEqual(genericConfig.artifact_declarations, [{ schema: 'wp-codebox/artifact-declaration/v1', name: 'packet', required: true }]);
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
 assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
 
@@ -110,6 +116,17 @@ assert.equal(genericBundleConfig.runtime_task.input.source, '/workspace/example-
 assert.deepEqual(genericBundleConfig.runtime_task.input.workflow, { name: 'materialize-artifact' });
 assert.equal(genericBundleConfig.runtime_task.input.prompt, 'Cook a packet.');
 assert.equal(genericBundleConfig.runtime_execution.kind, 'bundle');
+
+const emptyCodeboxDtoConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  ability: 'example/run-task',
+  toolPolicy: {},
+  workload: {},
+});
+assert.equal(emptyCodeboxDtoConfig.sandbox_tool_policy, undefined);
+assert.equal(emptyCodeboxDtoConfig.workload, undefined);
+
 const genericPackageConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
   runtimeProfile: runtimeProfile.id,
   runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },

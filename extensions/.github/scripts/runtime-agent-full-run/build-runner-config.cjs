@@ -15,6 +15,9 @@ const {
 } = require('./lib/common.cjs');
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
+  normalizeCodeboxArtifactDeclaration,
+} = require('../../../agent-runtimes/wp-codebox/lib/codebox-artifact-contract');
+const {
   runtimeAgentCiFirstNonEmptyArray,
   runtimeAgentCiFirstNonEmptyObject,
   runtimeAgentCiTaskFromRequest,
@@ -61,6 +64,8 @@ function buildConfig(env) {
 
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
+  const workload = codeboxWorkloadFromEnv(env, workloadId);
+  const toolPolicy = parseJsonInput('tool_policy', env.TOOL_POLICY || '{}', 'object', {});
   const runtimeOutputProjections = runtimeAgentCiFirstNonEmptyObject(
     parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {}),
     parseJsonInput('engine_data_outputs', env.ENGINE_DATA_OUTPUTS || '{}', 'object', {})
@@ -109,8 +114,9 @@ function buildConfig(env) {
     _configPath: path.join(runnerTemp, 'runtime-agent-full-run-config.json'),
     component_id: componentId,
     component_path: componentPath,
-    workload_id: workloadId,
-    workload_label: env.WORKLOAD_LABEL || `Run ${workloadId}`,
+    workload_id: workload.id || workloadId,
+    workload_label: workload.label || workload.name || env.WORKLOAD_LABEL || `Run ${workloadId}`,
+    workload,
     validation_dependencies: validationDependencies.paths,
     runtime_id: runtime.id,
     runtime_profile: runtimeProfile,
@@ -159,7 +165,8 @@ function buildConfig(env) {
     step_budget: Number(env.STEP_BUDGET || 16),
     time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
-    artifact_declarations: parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []),
+    artifact_declarations: artifactDeclarationsFromEnv(env, runtime),
+    sandbox_tool_policy: isCodeboxRuntime(runtime) && Object.keys(toolPolicy).length > 0 ? toolPolicy : undefined,
     output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
     runtime_output_projections: runtimeOutputProjections,
     component_contracts: componentContracts,
@@ -200,6 +207,21 @@ function buildConfig(env) {
       ...providerBenchEnv,
     },
   };
+}
+
+function codeboxWorkloadFromEnv(env, fallbackId) {
+  const workload = parseJsonInput('workload', env.WORKLOAD || '{}', 'object', {});
+  return Object.keys(workload).length > 0 ? workload : { id: fallbackId };
+}
+
+function artifactDeclarationsFromEnv(env, runtime) {
+  const declarations = parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []);
+  if (!isCodeboxRuntime(runtime)) {
+    return declarations;
+  }
+  return declarations
+    .map((declaration, index) => normalizeCodeboxArtifactDeclaration(`artifact_${index + 1}`, declaration))
+    .filter(Boolean);
 }
 
 function validationPaths(workspace, providerPlugin, provider) {

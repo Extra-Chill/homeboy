@@ -99,6 +99,14 @@ name: Runtime Agent Full Run (reusable)
         description: JSON object describing a generic ability, bundle, or workflow execution.
         type: string
         default: '{}'
+      workload:
+        description: JSON Codebox workload DTO forwarded to the runtime config. Falls back to workload_id/workload_label when empty.
+        type: string
+        default: '{}'
+      tool_policy:
+        description: JSON Codebox sandbox tool-policy DTO forwarded to the runtime config.
+        type: string
+        default: '{}'
       ability_request:
         description: JSON object shorthand for runtime_task.
         type: string
@@ -168,7 +176,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '[]'
       artifact_declarations:
-        description: JSON array of typed artifact declarations.
+        description: JSON array of Codebox artifact declaration DTOs.
         type: string
         default: '[]'
       transcript_artifact_name:
@@ -501,6 +509,8 @@ jobs:
           EXECUTION_KIND: ${{ inputs.execution_kind }}
           RUNTIME_TASK: ${{ inputs.runtime_task }}
           RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
+          WORKLOAD: ${{ inputs.workload }}
+          TOOL_POLICY: ${{ inputs.tool_policy }}
           ABILITY_REQUEST: ${{ inputs.ability_request }}
           ABILITY_INPUT: ${{ inputs.ability_input }}
           OUTPUT_MAPPINGS: ${{ inputs.output_mappings }}

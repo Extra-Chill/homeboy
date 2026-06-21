@@ -62,6 +62,16 @@ on:
         required: false
         type: string
         default: '{}'
+      workload:
+        description: JSON Codebox workload DTO forwarded to the runtime config.
+        required: false
+        type: string
+        default: '{}'
+      tool_policy:
+        description: JSON Codebox sandbox tool-policy DTO forwarded to the runtime config.
+        required: false
+        type: string
+        default: '{}'
       runtime_output_projections:
         description: JSON map of output names to provider runtime result paths.
         required: false
@@ -84,6 +94,11 @@ on:
         default: '[]'
       artifact_slots:
         description: JSON array/object declaring expected artifact slots.
+        required: false
+        type: string
+        default: '[]'
+      artifact_declarations:
+        description: JSON array of Codebox artifact declaration DTOs.
         required: false
         type: string
         default: '[]'
@@ -124,11 +139,14 @@ jobs:
           IGNORED_WORKSPACE_PATHS: ${{ inputs.ignored_workspace_paths }}
           RUNTIME_TASK: ${{ inputs.runtime_task }}
           RUNTIME_EXECUTION: ${{ inputs.runtime_execution }}
+          WORKLOAD: ${{ inputs.workload }}
+          TOOL_POLICY: ${{ inputs.tool_policy }}
           RUNTIME_OUTPUT_PROJECTIONS: ${{ inputs.runtime_output_projections }}
           EVIDENCE_PROJECTIONS: ${{ inputs.evidence_projections }}
           ABILITY_REQUIREMENTS: ${{ inputs.ability_requirements }}
           ABILITY_TOOLS: ${{ inputs.ability_tools }}
           ARTIFACT_SLOTS: ${{ inputs.artifact_slots }}
+          ARTIFACT_DECLARATIONS: ${{ inputs.artifact_declarations }}
           TRANSCRIPT_SLOTS: ${{ inputs.transcript_slots }}
           TASK_TIMEOUT_SECONDS: ${{ inputs.task_timeout_seconds }}
         run: |
@@ -163,6 +181,8 @@ jobs:
             runtimeComponentPaths: parseJson('RUNTIME_COMPONENT_PATHS', {}),
             ignoredWorkspacePaths: parseJson('IGNORED_WORKSPACE_PATHS', []),
             runtimeExecution: parseJson('RUNTIME_EXECUTION', {}),
+            workload: parseJson('WORKLOAD', {}),
+            toolPolicy: parseJson('TOOL_POLICY', {}),
             runtimeOutputProjections: parseJson('RUNTIME_OUTPUT_PROJECTIONS', {}),
             evidenceProjections: parseJson('EVIDENCE_PROJECTIONS', []),
             abilityInput: runtimeTask.input || {},
@@ -170,6 +190,7 @@ jobs:
             abilityRequirements: parseJson('ABILITY_REQUIREMENTS', []),
             abilityTools: parseJson('ABILITY_TOOLS', []),
             artifactSlots: parseJson('ARTIFACT_SLOTS', []),
+            artifactDeclarations: parseJson('ARTIFACT_DECLARATIONS', []),
             transcriptSlots: parseJson('TRANSCRIPT_SLOTS', []),
             taskTimeoutSeconds: Number(process.env.TASK_TIMEOUT_SECONDS || 900),
           });

@@ -90,6 +90,8 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
   const runtimeProvider = options.runtime || options.runtimeId || options.runtime_id || options.runtimeProvider || options.runtime_provider;
   const runtimeExecution = normalizeRuntimeExecutionDescriptor(options.runtimeExecution || options.runtime_execution, runtimeProfile);
   const runtimeTaskInput = runtimeExecution?.input || options.abilityInput || options.ability_input || {};
+  const workload = nonEmptyObject(options.workload);
+  const toolPolicy = nonEmptyObject(options.toolPolicy || options.tool_policy || options.sandboxToolPolicy || options.sandbox_tool_policy);
   const runtimeTask = stripUndefined({
     ability: runtimeExecution?.ability || options.ability || runtimeProfile.runtime_task_ability,
     input: runtimeTaskInput,
@@ -107,9 +109,12 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     agent_bundles: options.agentBundles || options.agent_bundles,
     ignored_workspace_paths: options.ignoredWorkspacePaths || options.ignored_workspace_paths,
     runtime_task: runtimeTask,
+    workload,
+    sandbox_tool_policy: toolPolicy,
     ability_tools: options.abilityTools || options.ability_tools,
     ability_requirements: options.abilityRequirements || options.ability_requirements || runtimeProfile.ability_requirements,
     artifact_slots: options.artifactSlots || options.artifact_slots,
+    artifact_declarations: options.artifactDeclarations || options.artifact_declarations,
     transcript_slots: options.transcriptSlots || options.transcript_slots,
     runtime_execution: runtimeExecution,
     runtime_output_projections: options.runtimeOutputProjections || options.runtime_output_projections,
@@ -240,6 +245,10 @@ function stripUndefined(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined)
   );
+}
+
+function nonEmptyObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0 ? value : undefined;
 }
 
 module.exports = {
