@@ -27,6 +27,7 @@ const {
 const fallbackManifest = runtimeContractManifest();
 assert.equal(fallbackManifest.schema, 'wp-codebox/runtime-contract-manifest/v1');
 assert.equal(fallbackManifest.schemas.runtimeBoundary.profile, 'wp-codebox/runtime-profile/v1');
+assert.equal(fallbackManifest.schemas.runtimeBoundary.browserSessionProductDto, 'wp-codebox/browser-session-product-dto/v1');
 assert.equal(fallbackManifest.schemas.artifact.resultEnvelope, 'wp-codebox/artifact-result-envelope/v1');
 assert.deepEqual(fallbackManifest.providerRuntime, providerRuntimeInvocationContract());
 

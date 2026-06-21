@@ -24,7 +24,7 @@ const FALLBACK_RUNTIME_CONTRACT_SCHEMAS = {
     previewLease: 'wp-codebox/preview-lease/v1',
     browserContainedSiteStatus: 'wp-codebox/browser-contained-site-status/v1',
     browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1',
-    browserSessionProductDto: 'wp-codebox/browser-session-product/v1',
+    browserSessionProductDto: 'wp-codebox/browser-session-product-dto/v1',
     browserPreviewBootConfig: 'wp-codebox/browser-preview-boot-config/v1',
   },
   artifact: {
