@@ -23,6 +23,85 @@ pub use auth::{
     AgentTaskAuthRemoveArgs, AgentTaskAuthSetConfigArgs, AgentTaskAuthSetKeychainArgs,
     AgentTaskAuthSetKeychainBundleArgs, AgentTaskAuthStatusArgs,
 };
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutArgs {
+    #[command(subcommand)]
+    pub command: AgentTaskFanoutCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentTaskFanoutCommand {
+    /// Compile generic task/finding packets or an existing plan into an AgentTaskPlan.
+    Plan(AgentTaskFanoutPlanArgs),
+    /// Persist a compiled fanout plan and return durable status/log/artifact commands.
+    Submit(AgentTaskFanoutSubmitArgs),
+    /// Run a fanout plan immediately through extension-declared executor providers.
+    RunPlan(AgentTaskFanoutRunPlanArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AgentTaskFanoutInputArgs {
+    /// Fanout spec JSON file, @file, inline JSON, or - for stdin.
+    #[arg(long = "input", value_name = "SPEC")]
+    pub input: String,
+
+    /// Fanout id to use when the input is a packet list. Defaults to a generated id.
+    #[arg(long = "fanout-id", value_name = "ID")]
+    pub fanout_id: Option<String>,
+
+    /// Fanout plane for packet inputs.
+    #[arg(long = "plane", default_value = "isolated-tasks", value_enum)]
+    pub plane: AgentTaskFanoutPlaneArg,
+
+    /// Default executor backend for packet inputs without an executor object.
+    #[arg(long = "backend", value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Default executor provider selector for packet inputs without one.
+    #[arg(
+        long = "selector",
+        visible_alias = "provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub selector: Option<String>,
+
+    /// Default model override for packet inputs without one.
+    #[arg(long = "model", value_name = "MODEL")]
+    pub model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutPlanArgs {
+    #[command(flatten)]
+    pub input: AgentTaskFanoutInputArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutSubmitArgs {
+    #[command(flatten)]
+    pub input: AgentTaskFanoutInputArgs,
+
+    /// Optional durable run id. Generated when omitted.
+    #[arg(long = "run-id", value_name = "ID")]
+    pub run_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutRunPlanArgs {
+    #[command(flatten)]
+    pub input: AgentTaskFanoutInputArgs,
+
+    /// Also persist the completed run lifecycle record under this id.
+    #[arg(long = "record-run-id", value_name = "ID")]
+    pub record_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AgentTaskFanoutPlaneArg {
+    IsolatedTasks,
+    Workflow,
+}
 pub use controller::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
@@ -73,6 +152,8 @@ pub enum AgentTaskCommand {
     Resume(StatusArgs),
     /// Lifecycle: submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
+    /// Lifecycle: compile, submit, or run generic provider-neutral fanout inputs.
+    Fanout(AgentTaskFanoutArgs),
     /// Review: build a durable aggregate envelope from run state, logs, artifacts, and promotion hints.
     Review(ReviewArgs),
     /// Review: promote a completed generic patch artifact into a managed worktree.

@@ -14,6 +14,7 @@ pub mod auth;
 pub mod contract;
 pub mod controller;
 pub mod doctor;
+pub mod fanout;
 pub mod loop_definition;
 pub mod review;
 pub mod run;
@@ -26,7 +27,9 @@ pub use args::{
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
-    AgentTaskDoctorArgs, AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs,
+    AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
+    AgentTaskFanoutPlanArgs, AgentTaskFanoutPlaneArg, AgentTaskFanoutRunPlanArgs,
+    AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs,
     ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs,
     ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
@@ -61,6 +64,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
+        AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(promote_args),
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
