@@ -824,20 +824,12 @@ fn run_list(args: &BenchListArgs) -> CmdResult<BenchOutput> {
     Ok((BenchOutput::List(output), 0))
 }
 
-struct ListRigContext {
-    spec: RigSpec,
-    package_root: Option<PathBuf>,
-}
+type ListRigContext = rig::RigSourceContext;
 
 fn load_list_rig(args: &BenchListArgs) -> homeboy::core::Result<Option<ListRigContext>> {
     match args.rig.as_slice() {
         [] => Ok(None),
-        [rig_id] => {
-            let spec = rig::load(rig_id)?;
-            let package_root = rig::read_source_metadata(&spec.id)
-                .map(|metadata| PathBuf::from(metadata.package_path));
-            Ok(Some(ListRigContext { spec, package_root }))
-        }
+        [rig_id] => Ok(Some(rig::RigSourceContext::load(rig_id)?)),
         _ => Err(homeboy::core::Error::validation_invalid_argument(
             "--rig",
             "bench list accepts exactly one rig id",

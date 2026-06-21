@@ -45,26 +45,22 @@ pub(crate) struct TypedCommandAdapter<Args> {
 }
 
 pub(crate) struct BoundCommandAdapter {
-    execution: BoundCommandExecution,
-}
-
-enum BoundCommandExecution {
-    Fleet {
-        args: fleet::FleetArgs,
-        execute_json: JsonCommandExecutor<fleet::FleetArgs>,
-    },
-    Version {
-        args: version::VersionArgs,
-        execute_json: JsonCommandExecutor<version::VersionArgs>,
-    },
+    run: Box<dyn FnOnce(&GlobalArgs) -> JsonCommandRun>,
 }
 
 impl BoundCommandAdapter {
-    pub fn execute_json(self, global: &GlobalArgs) -> JsonCommandRun {
-        match self.execution {
-            BoundCommandExecution::Fleet { args, execute_json } => execute_json(args, global),
-            BoundCommandExecution::Version { args, execute_json } => execute_json(args, global),
+    /// Bind already-parsed arguments to their typed executor, capturing both in a
+    /// single delegation closure. This keeps the adapter thin: every command's
+    /// real work lives behind its own `execute_json` executor, and binding adds
+    /// no per-command dispatch arms here — only argument-to-executor pairing.
+    fn bind<Args: 'static>(args: Args, executor: JsonCommandExecutor<Args>) -> Self {
+        Self {
+            run: Box::new(move |global| executor(args, global)),
         }
+    }
+
+    pub fn run(self, global: &GlobalArgs) -> JsonCommandRun {
+        (self.run)(global)
     }
 }
 
@@ -94,26 +90,16 @@ pub(crate) fn command_adapter(
 ) -> Result<BoundCommandAdapter, Commands> {
     match command {
         Commands::Fleet(args) => {
-            let adapter = fleet::adapter(output_file_mode);
-            Ok(BoundCommandAdapter {
-                execution: BoundCommandExecution::Fleet {
-                    args,
-                    execute_json: adapter
-                        .execute_json
-                        .expect("fleet adapter supports JSON execution"),
-                },
-            })
+            let executor = fleet::adapter(output_file_mode)
+                .execute_json
+                .expect("fleet adapter supports JSON execution");
+            Ok(BoundCommandAdapter::bind(args, executor))
         }
         Commands::Version(args) => {
-            let adapter = version::adapter(output_file_mode);
-            Ok(BoundCommandAdapter {
-                execution: BoundCommandExecution::Version {
-                    args,
-                    execute_json: adapter
-                        .execute_json
-                        .expect("version adapter supports JSON execution"),
-                },
-            })
+            let executor = version::adapter(output_file_mode)
+                .execute_json
+                .expect("version adapter supports JSON execution");
+            Ok(BoundCommandAdapter::bind(args, executor))
         }
         command => Err(command),
     }

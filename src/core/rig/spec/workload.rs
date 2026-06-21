@@ -28,17 +28,18 @@ impl WorkloadSpec {
     }
 
     pub fn trace_phase_preset(&self, name: &str) -> Option<&[String]> {
-        self.trace_phase_presets
+        self.trace
+            .trace_phase_presets
             .get(name)
             .map(|phases| phases.as_slice())
     }
 
     pub fn trace_span_metadata(&self) -> &HashMap<String, TraceSpanMetadata> {
-        &self.trace_span_metadata
+        &self.trace.trace_span_metadata
     }
 
     pub fn trace_default_phase_preset(&self) -> Option<&str> {
-        self.trace_default_phase_preset.as_deref()
+        self.trace.trace_default_phase_preset.as_deref()
     }
 
     pub fn trace_variants(&self) -> &HashMap<String, TraceVariantSpec> {

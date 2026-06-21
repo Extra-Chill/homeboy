@@ -69,7 +69,7 @@ pub use spec::{
     ComponentSpec, DiscoverSpec, ExecutableRequirementSpec, FilesystemAssertionKind,
     FilesystemAssertionSpec, NewerThanSpec, PatchOp, PipelineStep, RigRequirementsSpec,
     RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
-    SymlinkSpec, TimeSource, TraceDependencySpec, TraceExperimentArtifactSpec,
+    SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
     TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
     TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
     TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
@@ -208,6 +208,34 @@ fn stale_source_error(id: &str, config_path: &Path) -> Option<Error> {
 /// Load a rig spec by ID from `~/.config/homeboy/rigs/{id}.json`.
 pub fn load(id: &str) -> Result<RigSpec> {
     read_config(id).map(|(spec, _)| spec)
+}
+
+/// A loaded rig spec paired with the resolved on-disk package root of its
+/// installed source, when one is recorded.
+///
+/// Command modules repeatedly need both the parsed [`RigSpec`] and the
+/// `package_root` derived from the rig's source metadata, so this bundles the
+/// pair (and its resolution) in one place instead of re-deriving the same
+/// `{ spec, package_root }` field group in every command context.
+#[derive(Debug, Clone)]
+pub struct RigSourceContext {
+    pub spec: RigSpec,
+    pub package_root: Option<std::path::PathBuf>,
+}
+
+impl RigSourceContext {
+    /// Build a source context from an already-loaded spec, resolving the
+    /// package root from the rig's recorded source metadata.
+    pub fn from_spec(spec: RigSpec) -> Self {
+        let package_root = read_source_metadata(&spec.id)
+            .map(|metadata| std::path::PathBuf::from(metadata.package_path));
+        Self { spec, package_root }
+    }
+
+    /// Load a rig spec by ID and resolve its package root.
+    pub fn load(id: &str) -> Result<Self> {
+        Ok(Self::from_spec(load(id)?))
+    }
 }
 
 /// Return the JSON-declared rig ID when it differs from the installed ID.

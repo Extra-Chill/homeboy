@@ -3,7 +3,8 @@
 
 use crate::core::rig::{
     FilesystemAssertionKind, PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec,
-    ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec, TraceVariantSpec, WorkloadSpec,
+    ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec, TraceConfig, TraceVariantSpec,
+    WorkloadSpec,
 };
 
 /// Canonical fixture matching the studio-playground-dev shape used as the
@@ -485,12 +486,14 @@ fn workload_with_trace_metadata() -> WorkloadSpec {
         check_groups: Some(vec!["desktop-app".to_string()]),
         port_range_size: None,
         named_leases: Vec::new(),
-        trace_phase_presets: std::collections::HashMap::from([(
-            "startup".to_string(),
-            vec!["boot:runner.boot".to_string()],
-        )]),
-        trace_span_metadata: std::collections::HashMap::new(),
-        trace_default_phase_preset: Some("startup".to_string()),
+        trace: TraceConfig {
+            trace_phase_presets: std::collections::HashMap::from([(
+                "startup".to_string(),
+                vec!["boot:runner.boot".to_string()],
+            )]),
+            trace_span_metadata: std::collections::HashMap::new(),
+            trace_default_phase_preset: Some("startup".to_string()),
+        },
         trace_variants: std::collections::HashMap::from([(
             "fresh-install-mode".to_string(),
             TraceVariantSpec {

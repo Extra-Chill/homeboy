@@ -21,10 +21,19 @@ use super::{BenchRunArgs, CmdResult};
 
 struct RigBenchContext {
     id: String,
-    spec: RigSpec,
-    package_root: Option<PathBuf>,
+    source: rig::RigSourceContext,
     snapshot: RigStateSnapshot,
     _lease: Option<ActiveRigRunLease>,
+}
+
+impl RigBenchContext {
+    fn spec(&self) -> &RigSpec {
+        &self.source.spec
+    }
+
+    fn package_root(&self) -> Option<&std::path::Path> {
+        self.source.package_root.as_deref()
+    }
 }
 
 fn prepare_rig_bench_context(
@@ -46,12 +55,10 @@ fn prepare_rig_bench_context(
         }
     }
     let snapshot = rig::snapshot_state(&declared_spec);
-    let package_root =
-        rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
+    let id = spec.id.clone();
     Ok(RigBenchContext {
-        id: spec.id.clone(),
-        spec,
-        package_root,
+        id,
+        source: rig::RigSourceContext::from_spec(spec),
         snapshot,
         _lease: lease,
     })
@@ -425,7 +432,7 @@ pub(super) fn run_single_rig(
     let matrix_components = if let Some(explicit) = args.comp.id() {
         vec![explicit.to_string()]
     } else {
-        rig_bench_components(&context.spec)
+        rig_bench_components(context.spec())
     };
 
     if matrix_components.len() <= 1 {
@@ -537,7 +544,7 @@ fn run_component_with_rig_context(
     component_override: Option<String>,
     shared_state_override: Option<PathBuf>,
 ) -> CmdResult<BenchCommandOutput> {
-    let rig_spec = rig_context.map(|context| &context.spec);
+    let rig_spec = rig_context.map(|context| context.spec());
     let rig_id = rig_context.map(|context| context.id.clone());
     let mut rig_snapshot = rig_context.map(|context| context.snapshot.clone());
     let default_component_id = rig_spec.and_then(|spec| {
@@ -720,7 +727,7 @@ fn rig_workload_runtime_inputs(
         return (Vec::new(), InvocationRequirements::default());
     };
 
-    let package_root = rig_context.and_then(|context| context.package_root.as_deref());
+    let package_root = rig_context.and_then(|context| context.package_root());
     (
         rig::workloads_for_extension(
             spec,

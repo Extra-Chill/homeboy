@@ -126,7 +126,7 @@ fn dispatch(command: Commands, global: &GlobalArgs) -> (homeboy::core::Result<Va
         command,
         crate::command_contract::CommandOutputFileMode::None,
     ) {
-        Ok(adapter) => return adapter.execute_json(global),
+        Ok(adapter) => return adapter.run(global),
         Err(command) => command,
     };
 
