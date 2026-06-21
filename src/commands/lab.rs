@@ -844,7 +844,7 @@ Installing declared dependencies...
     fn lab_extension_sync_accepts_named_refs_resolved_by_install() {
         assert!(revision_matches("main", "941bf8c"));
         assert!(revision_matches(
-            "fix/provider-bundled-agents-api",
+            "fix/provider-bundled-shared-runtime",
             "9d17a58a"
         ));
         assert!(!revision_matches("main", ""));

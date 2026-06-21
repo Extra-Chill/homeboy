@@ -1232,7 +1232,7 @@ mod tests {
             assert_eq!(deployable_ids, vec!["active"]);
 
             // Bundled/retired components are suppressed (not a hard error, not
-            // deployable) — exactly the agents-api scenario from #3489.
+            // deployable), matching the generic bundled dependency scenario.
             assert!(loaded.skipped.contains(&"bundled".to_string()));
             assert!(loaded.skipped.contains(&"retired".to_string()));
         });
