@@ -51,6 +51,12 @@ runner provides it, and fetch commands for recorded artifacts such as failing
 cases, repro cases, and coverage reports. Use `homeboy runs artifact get` for
 artifact bytes that are stored locally or mirrored from a runner.
 
+Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
+`fuzz-results.json` in the command run directory. When a runner writes a
+`homeboy/fuzz-campaign/v1` campaign object there, `homeboy fuzz run` parses it
+and returns it as `results` in the JSON envelope. Malformed JSON fails the run
+instead of being treated as proof.
+
 Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
 reason codes; and case/manifest artifacts. Treat missing `proven` counts or
@@ -109,3 +115,7 @@ Rigs can add private fuzz workloads keyed by extension id:
 
 Both `list` and `run` return JSON envelopes with stable `variant` values:
 `list` and `run`.
+
+`run.execution.results_file` is the path advertised to the runner through
+`HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote
+a valid campaign result file.

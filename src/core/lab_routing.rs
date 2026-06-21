@@ -36,6 +36,7 @@ pub struct LabRoutingRequest<'a> {
     pub mutation_flag: Option<&'a str>,
     pub timeout: Option<Duration>,
     pub active_run_id: Option<&'a str>,
+    pub detach_after_handoff: bool,
 }
 
 pub(crate) fn route_lab_offload(
@@ -54,6 +55,7 @@ pub(crate) fn route_lab_offload(
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         capture_patch: request.capture_patch,
         mutation_flag: request.mutation_flag,
+        detach_after_handoff: request.detach_after_handoff,
     })
 }
 
@@ -396,6 +398,7 @@ fn execute_lab_offload_with_timeout(
     let capture_patch = request.capture_patch;
     let active_run_id = request.active_run_id.map(str::to_string);
     let mutation_flag = request.mutation_flag.map(str::to_string);
+    let detach_after_handoff = request.detach_after_handoff;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -407,6 +410,7 @@ fn execute_lab_offload_with_timeout(
             allow_dirty_lab_workspace,
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
+            detach_after_handoff,
         });
         let _ = tx.send(result);
     });
@@ -566,6 +570,7 @@ mod tests {
             mutation_flag: None,
             timeout: None,
             active_run_id: None,
+            detach_after_handoff: false,
         })
         .unwrap();
 
@@ -733,6 +738,7 @@ mod tests {
                 mutation_flag: None,
                 timeout: None,
                 active_run_id: None,
+                detach_after_handoff: false,
             },
             None,
             observer,

@@ -80,7 +80,7 @@ pub use evidence::{
 };
 pub(crate) use execution::{
     daemon_api_get, execute_runner_process_until_cancelled, prepare_daemon_local_process,
-    RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV,
+    RunnerProcessRequest, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
 };
 pub use execution::{
     daemon_api_post, exec, runner_exec_failure_error, runner_job_cancel, RunnerExecDiagnostics,

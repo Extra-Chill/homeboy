@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use super::outcome::{
     artifact_matches_required_artifact, event, evidence_matches_required_artifact,
-    mark_generated_from_outputs, missing_required_typed_artifacts, missing_typed_artifacts_failure,
+    invalid_required_typed_artifacts, mark_generated_from_outputs,
+    missing_required_typed_artifacts, missing_typed_artifacts_failure,
     nested_failed_executor_status, provider_run_result_is_empty_incomplete, render_template_string,
     render_template_value, runtime_result_is_materializable, typed_artifact_from_artifact,
     typed_artifact_from_evidence, typed_artifact_from_outcome,
@@ -477,6 +478,7 @@ impl AgentTaskScheduleSupport {
             Self::normalize_required_typed_artifacts(&mut outcome, &running.request);
             Self::recover_missing_typed_artifacts_wrapper_failure(&mut outcome, &running.request);
             Self::classify_missing_required_typed_artifacts(&mut outcome, &running.request);
+            Self::classify_invalid_required_typed_artifacts(&mut outcome, &running.request);
         }
 
         Self::classify_failed_nested_executor_status(&mut outcome);
@@ -621,6 +623,54 @@ impl AgentTaskScheduleSupport {
             class: "agent_task.required_typed_artifacts_missing".to_string(),
             message,
             data: serde_json::json!({ "missing": missing }),
+        });
+    }
+
+    pub(super) fn classify_invalid_required_typed_artifacts(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        if outcome.status != AgentTaskOutcomeStatus::Succeeded {
+            return;
+        }
+
+        let invalid = invalid_required_typed_artifacts(outcome, request);
+        if invalid.is_empty() {
+            return;
+        }
+
+        let labels = invalid
+            .iter()
+            .map(|artifact| {
+                let location = artifact
+                    .path
+                    .as_deref()
+                    .or(artifact.url.as_deref())
+                    .or(artifact.artifact_id.as_deref())
+                    .unwrap_or("unknown location");
+                format!("{} ({location}: {})", artifact.name, artifact.reason)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!("agent task produced invalid required typed artifacts: {labels}.");
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        outcome.summary = Some(message.clone());
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.required_typed_artifacts_invalid".to_string(),
+            message,
+            data: serde_json::json!({
+                "invalid": invalid.iter().map(|artifact| serde_json::json!({
+                    "task_id": artifact.task_id,
+                    "name": artifact.name,
+                    "type": artifact.artifact_type,
+                    "artifact_id": artifact.artifact_id,
+                    "path": artifact.path,
+                    "url": artifact.url,
+                    "size_bytes": artifact.size_bytes,
+                    "reason": artifact.reason,
+                })).collect::<Vec<_>>()
+            }),
         });
     }
 

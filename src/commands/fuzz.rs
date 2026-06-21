@@ -7,6 +7,7 @@ use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
+use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
@@ -140,6 +141,7 @@ pub struct FuzzRunOutput {
     pub max_duration: Option<String>,
     pub passthrough_args: Vec<String>,
     pub execution: Option<FuzzExecutionOutput>,
+    pub results: Option<FuzzCampaign>,
     pub runner_contract: FuzzRunnerContract,
     pub evidence_followups: Vec<String>,
 }
@@ -151,6 +153,7 @@ pub struct FuzzExecutionOutput {
     pub exit_code: i32,
     pub success: bool,
     pub run_dir: String,
+    pub results_file: String,
     pub stdout: String,
     pub stderr: String,
 }
@@ -237,6 +240,12 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     let selected_workload = select_workload(&workloads, args.workload_id.as_deref())?;
     let run_dir = RunDir::create()?;
     let runner_output = run_fuzz_extension_script(&ctx, &args, selected_workload, &run_dir)?;
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+    let results = if results_path.exists() {
+        Some(parse_fuzz_results_file(&results_path)?)
+    } else {
+        None
+    };
     let exit_code = runner_output.exit_code;
     let success = runner_output.success;
     let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
@@ -262,13 +271,16 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
                 exit_code,
                 success,
                 run_dir: run_dir.path().to_string_lossy().to_string(),
+                results_file: results_path.to_string_lossy().to_string(),
                 stdout: runner_output.stdout,
                 stderr: runner_output.stderr,
             }),
+            results,
             runner_contract: FuzzRunnerContract {
                 capability: "fuzz".to_string(),
                 extension_script_required: true,
                 env: vec![
+                    "HOMEBOY_FUZZ_RESULTS_FILE",
                     "HOMEBOY_FUZZ_WORKLOAD_ID",
                     "HOMEBOY_FUZZ_WORKLOAD_PATH",
                     "HOMEBOY_FUZZ_RUN_ID",
@@ -665,6 +677,7 @@ mod tests {
             max_duration: None,
             passthrough_args: Vec::new(),
             execution: None,
+            results: None,
             runner_contract: FuzzRunnerContract {
                 capability: "fuzz".to_string(),
                 extension_script_required: true,
@@ -768,6 +781,9 @@ mod tests {
 
         let env = fuzz_runner_env(&args, Some(&workload));
 
+        assert!(env
+            .iter()
+            .all(|(key, _)| key != "HOMEBOY_FUZZ_RESULTS_FILE"));
         assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
         assert!(env.contains(&(
             "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
@@ -776,6 +792,71 @@ mod tests {
         assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    }
+
+    #[test]
+    fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
+        let results = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            workloads: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+            thresholds: Vec::new(),
+            provenance: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+        let run = serde_json::to_value(FuzzOutput::Run(FuzzRunOutput {
+            kind: "fuzz".to_string(),
+            command: "fuzz.run".to_string(),
+            component: "component-a".to_string(),
+            rig_id: None,
+            status: "passed".to_string(),
+            workload_id: None,
+            workload_path: None,
+            run_id: None,
+            seed: None,
+            max_duration: None,
+            passthrough_args: Vec::new(),
+            execution: Some(FuzzExecutionOutput {
+                kind: "fuzz".to_string(),
+                extension_id: "generic".to_string(),
+                exit_code: 0,
+                success: true,
+                run_dir: "/tmp/homeboy-run".to_string(),
+                results_file: "/tmp/homeboy-run/fuzz-results.json".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+            results: Some(results),
+            runner_contract: FuzzRunnerContract {
+                capability: "fuzz".to_string(),
+                extension_script_required: true,
+                env: vec!["HOMEBOY_FUZZ_RESULTS_FILE"],
+            },
+            evidence_followups: Vec::new(),
+        }))
+        .unwrap();
+
+        assert_eq!(
+            run["execution"]["results_file"],
+            "/tmp/homeboy-run/fuzz-results.json"
+        );
+        assert_eq!(
+            run["results"]["schema"],
+            homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA
+        );
+        assert_eq!(run["results"]["id"], "campaign-1");
+        assert_eq!(
+            run["runner_contract"]["env"][0],
+            "HOMEBOY_FUZZ_RESULTS_FILE"
+        );
     }
 
     #[test]

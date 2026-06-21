@@ -48,11 +48,29 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook-loop retry or stop decision. |
 
+## Lab Guardrails
+
+Use global `--lab-only` (alias `--no-local-execution`) with long-running or
+patch-producing `agent-task cook` / `agent-task loop` waves that must not execute
+provider processes on the controller. If Lab routing cannot select or prepare a
+runner, Homeboy fails before local execution instead of falling back.
+
+Use global `--detach-after-handoff` with `--runner <runner-id>` when the Lab job is
+expected to outlive the local shell. Homeboy returns after the runner daemon
+accepts the job and prints follow/cancel commands instead of waiting for remote
+provider completion.
+
+`--force-hot --allow-local-hot` is safe only when local execution on this
+controller is intentional. For agent-task waves with concurrency greater than 1
+or multiple tasks, Homeboy prints `HOMEBOY_LOCAL_FANOUT_WARNING` before provider
+processes start. Compact `agent-task status` includes `execution_location` as
+`local` or `runner:<id>`.
+
 ### Provider
 
 | Subcommand | Purpose |
 |---|---|
-| `providers` | List extension-declared executor providers and optional secret readiness. |
+| `providers` | List extension-declared executor providers and optional secret/backend readiness. |
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
 
@@ -320,6 +338,13 @@ that metadata, or import the matching `homeboy::core::agent_tasks::provider`
 constants, instead of copying schema strings into downstream code. Provider
 manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
 defaults them to the current core contract ids.
+
+Use `homeboy agent-task providers --backend <backend> --validate-readiness` to
+fail fast when the selected backend is registered but its declared runner
+readiness is not usable in the current environment. Lab offload runs this check
+on the selected runner before dispatching `agent-task cook` or `agent-task
+dispatch`, so a missing provider executable/config blocks the run before a
+multi-cell task wave is queued.
 
 ## Repo-Local Gate Tasks
 

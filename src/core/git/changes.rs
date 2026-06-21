@@ -290,6 +290,38 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     }
 }
 
+/// Ensure a ref's merge base with HEAD is reachable, then return it.
+///
+/// Handles shallow CI clones by progressively deepening the repository
+/// (the same strategy as [`get_files_changed_since`]). Returns the resolved
+/// merge-base SHA on success, or an error if the ancestry cannot be made
+/// reachable. Callers that want a deterministic "fall back to full scope"
+/// behavior should treat the error as a signal to skip changed-since scoping
+/// rather than aborting.
+pub fn resolve_merge_base(path: &str, git_ref: &str) -> Result<String> {
+    ensure_ancestry_for_ref(path, git_ref)?;
+
+    let output = execute_git(path, &["merge-base", git_ref, "HEAD"])
+        .map_err(|e| Error::git_command_failed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::git_command_failed(format!(
+            "git merge-base {git_ref} HEAD failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let merge_base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if merge_base.is_empty() {
+        return Err(Error::git_command_failed(format!(
+            "git merge-base {git_ref} HEAD returned no commit"
+        )));
+    }
+
+    Ok(merge_base)
+}
+
 /// Get all dirty files in the working tree (modified, new, deleted).
 /// Returns repo-relative paths. Useful for detecting what changed between
 /// operations on the working tree.

@@ -62,7 +62,16 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     };
 
     let mut command = command_prefix.to_vec();
-    command.extend(["agent-task".to_string(), "providers".to_string()]);
+    command.extend([
+        "agent-task".to_string(),
+        "providers".to_string(),
+        "--backend".to_string(),
+        selection.backend.clone(),
+        "--validate-readiness".to_string(),
+    ]);
+    if let Some(selector) = &selection.selector {
+        command.extend(["--selector".to_string(), selector.clone()]);
+    }
     // The probe argv is a fixed `agent-task providers` listing built from the
     // runner command prefix, not forwarded caller args — but assert the same
     // path-translation contract the offload dispatch site enforces so no
@@ -261,6 +270,7 @@ fn probe_agent_task_providers_on_runner(
             capability_preflight,
             required_extensions,
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
 

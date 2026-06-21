@@ -31,6 +31,10 @@ pub(super) struct NestedAgentResultFailedExecutor;
 
 pub(super) struct SuccessMissingRequiredArtifactsExecutor;
 
+pub(super) struct SuccessEmptyRequiredTypedArtifactExecutor {
+    pub(super) artifact_path: std::path::PathBuf,
+}
+
 impl AgentTaskExecutorAdapter for RetryOnceExecutor {
     fn execute(
         &self,
@@ -233,6 +237,45 @@ impl AgentTaskExecutorAdapter for SuccessMissingRequiredArtifactsExecutor {
         _context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+    }
+}
+
+impl AgentTaskExecutorAdapter for SuccessEmptyRequiredTypedArtifactExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+        let artifact = AgentTaskArtifact {
+            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "empty-patch".to_string(),
+            kind: "patch".to_string(),
+            name: Some("patch.diff".to_string()),
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some(self.artifact_path.display().to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(0),
+            sha256: None,
+            metadata: json!({ "role": "patch" }),
+        };
+        outcome.typed_artifacts.push(AgentTaskTypedArtifact {
+            name: "patch".to_string(),
+            artifact_type: Some("file".to_string()),
+            artifact_schema: None,
+            payload: json!({
+                "artifact_id": artifact.id.clone(),
+                "kind": artifact.kind.clone(),
+                "path": artifact.path.clone(),
+                "size_bytes": artifact.size_bytes,
+            }),
+            artifact: Some(artifact),
+            metadata: Value::Null,
+        });
+        outcome
     }
 }
 

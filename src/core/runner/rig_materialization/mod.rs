@@ -230,6 +230,7 @@ pub(super) fn sync_lab_offload_rigs(
                 capability_preflight: Some(rig_install_capability_preflight()),
                 required_extensions: Vec::new(),
                 require_paths: Vec::new(),
+                detach_after_handoff: false,
             },
         )?;
 

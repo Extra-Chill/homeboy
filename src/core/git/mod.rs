@@ -19,7 +19,7 @@ mod operation_tests;
 
 pub use changes::{
     discard_worktree_changes, get_diff, get_dirty_files, get_files_changed_since, get_range_diff,
-    get_uncommitted_changes, UncommittedChanges,
+    get_uncommitted_changes, resolve_merge_base, UncommittedChanges,
 };
 pub(crate) use commits::extract_version_from_tag;
 pub use commits::{

@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use homeboy::core::ci_plan::{self, CiEventContext, CiPlan};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
+use homeboy::core::ci_scope::{
+    self, GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest,
+};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::refactor::auto::transaction::{
     self, CiContext, TransactionOutcome, TransactionRequest, AUTOFIX_COMMIT_PREFIX,
@@ -38,6 +41,48 @@ pub enum CiCommand {
     /// re-implementing branch/commit/push orchestration in shell. It assumes
     /// the working tree already contains the autofix changes to commit.
     Autofix(CiAutofixArgs),
+    /// Resolve a CI event context into the Homeboy scope (changed vs full)
+    /// and the per-command `--changed-since` flags.
+    ///
+    /// This is the core-owned translation the action calls instead of
+    /// deriving event-context → scope in shell (`scripts/scope/*.sh`). With
+    /// `--github-actions` the context is read from the standard GitHub
+    /// Actions environment; explicit flags override individual fields.
+    Scope(CiScopeArgs),
+}
+
+#[derive(Args)]
+pub struct CiScopeArgs {
+    /// Read the event context from the GitHub Actions environment
+    /// (`GITHUB_EVENT_NAME`, `BASE_SHA`, `PR_HEAD_REPO`, `GITHUB_REPOSITORY`).
+    #[arg(long)]
+    pub github_actions: bool,
+
+    /// Override the event name (e.g. `pull_request`, `push`, `schedule`).
+    #[arg(long)]
+    pub event_name: Option<String>,
+
+    /// Override the PR base SHA used for changed-file diffs.
+    #[arg(long)]
+    pub base_sha: Option<String>,
+
+    /// Override the PR head repository (`owner/repo`) for fork detection.
+    #[arg(long)]
+    pub head_repo: Option<String>,
+
+    /// Override the base repository (`owner/repo`).
+    #[arg(long)]
+    pub base_repo: Option<String>,
+
+    /// Checkout to resolve the merge base against (deepens shallow clones).
+    /// When omitted, the supplied base ref is trusted verbatim.
+    #[arg(long)]
+    pub repo_path: Option<String>,
+
+    /// Emit `--changed-since` flags for this command in addition to the
+    /// resolved scope. May be repeated.
+    #[arg(long = "for")]
+    pub for_commands: Vec<String>,
 }
 
 #[derive(Args)]
@@ -134,6 +179,18 @@ pub enum CiOutput {
     Plan(CiPlanCommandOutput),
     Run(CiRunCommandOutput),
     Autofix(CiAutofixCommandOutput),
+    Scope(CiScopeCommandOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CiScopeCommandOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub scope: ResolvedScope,
+    /// `--changed-since` flags keyed by the requested base command (only
+    /// present when `--for` was supplied).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub command_flags: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +225,7 @@ pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
         CiCommand::Plan(args) => run_plan(args, global),
         CiCommand::Run(args) => run_ci(args, global),
         CiCommand::Autofix(args) => run_autofix(args, global),
+        CiCommand::Scope(args) => run_scope(args, global),
     }
 }
 
@@ -179,6 +237,54 @@ fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
         CiOutput::Plan(CiPlanCommandOutput {
             command: "ci.plan",
             plan,
+        }),
+        0,
+    ))
+}
+
+fn run_scope(args: CiScopeArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+    // Build the GitHub Actions context: start from the environment when
+    // `--github-actions` is set, then apply any explicit overrides.
+    let mut ctx = if args.github_actions {
+        GithubActionsContext::from_env()
+    } else {
+        GithubActionsContext::default()
+    };
+    if args.event_name.is_some() {
+        ctx.event_name = args.event_name.clone();
+    }
+    if args.base_sha.is_some() {
+        ctx.base_sha = args.base_sha.clone();
+    }
+    if args.head_repo.is_some() {
+        ctx.head_repo = args.head_repo.clone();
+    }
+    if args.base_repo.is_some() {
+        ctx.base_repo = args.base_repo.clone();
+    }
+
+    let request: ScopeRequest = ctx.to_request();
+    let resolver = match args.repo_path.as_deref() {
+        Some(path) => MergeBaseResolver::Git { path },
+        None => MergeBaseResolver::TrustBaseRef,
+    };
+    let scope = ci_scope::resolve_scope(&request, resolver)?;
+
+    let mut command_flags = std::collections::BTreeMap::new();
+    for command in &args.for_commands {
+        let base_cmd = command
+            .split_whitespace()
+            .next()
+            .unwrap_or(command)
+            .to_string();
+        command_flags.insert(base_cmd, scope.command_flags(command));
+    }
+
+    Ok((
+        CiOutput::Scope(CiScopeCommandOutput {
+            command: "ci.scope",
+            scope,
+            command_flags,
         }),
         0,
     ))
@@ -394,6 +500,60 @@ mod tests {
 
         assert_eq!(args.commands, "audit,lint,test");
         assert_eq!(args.context, "pr");
+    }
+
+    #[test]
+    fn parses_ci_scope_github_actions_and_for() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "ci",
+            "scope",
+            "--github-actions",
+            "--event-name",
+            "pull_request",
+            "--base-sha",
+            "abc123",
+            "--for",
+            "lint",
+            "--for",
+            "test",
+        ])
+        .expect("parse cli");
+
+        let crate::cli_surface::Commands::Ci(args) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommand::Scope(args) = args.command else {
+            panic!("expected ci scope");
+        };
+
+        assert!(args.github_actions);
+        assert_eq!(args.event_name.as_deref(), Some("pull_request"));
+        assert_eq!(args.base_sha.as_deref(), Some("abc123"));
+        assert_eq!(args.for_commands, vec!["lint", "test"]);
+    }
+
+    #[test]
+    fn ci_scope_pr_override_resolves_changed_flags() {
+        let args = CiScopeArgs {
+            github_actions: false,
+            event_name: Some("pull_request".to_string()),
+            base_sha: Some("base123".to_string()),
+            head_repo: None,
+            base_repo: None,
+            repo_path: None,
+            for_commands: vec!["lint".to_string()],
+        };
+
+        let (output, exit) = run_scope(args, &GlobalArgs {}).expect("scope resolves");
+        assert_eq!(exit, 0);
+        let CiOutput::Scope(scope) = output else {
+            panic!("expected scope output");
+        };
+        assert_eq!(
+            scope.command_flags.get("lint"),
+            Some(&vec!["--changed-since".to_string(), "base123".to_string()])
+        );
     }
 
     #[test]

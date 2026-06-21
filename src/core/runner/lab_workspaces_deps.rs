@@ -455,6 +455,7 @@ pub(super) fn bootstrap_source_cli_node_dependencies(
             capability_preflight: Some(source_cli_bootstrap_capability_preflight()),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
     if exit_code == 0 {

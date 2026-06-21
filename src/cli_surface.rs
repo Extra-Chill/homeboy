@@ -32,6 +32,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_local_hot: bool,
 
+    /// Require Lab routing and fail instead of executing locally.
+    #[arg(long, visible_alias = "no-local-execution", global = true)]
+    pub lab_only: bool,
+
+    /// Return after a runner daemon accepts the job instead of waiting for remote completion.
+    #[arg(long, global = true)]
+    pub detach_after_handoff: bool,
+
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]
@@ -142,7 +150,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
-    /// Discover Lab routing and benchmark offload commands
+    /// Compatibility shortcut for Lab routing helpers; use `runner` for discovery.
+    #[command(hide = true)]
     Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
@@ -525,6 +534,7 @@ fn docs_path(path: &[String]) -> Option<String> {
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
     command
         .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| CommandSurfaceEntry {
             name: subcommand.get_name().to_string(),
             visible_aliases: subcommand
@@ -650,12 +660,18 @@ mod tests {
     fn command_safety_manifest_records_clap_visibility_metadata() {
         let manifest = current_command_safety_manifest();
 
-        let hidden_list = manifest.find_path(&["list"]).unwrap();
-        assert!(hidden_list.hidden);
+        assert!(manifest.find_path(&["list"]).is_none());
+        assert!(manifest.find_path(&["lab"]).is_none());
 
         let visible_status = manifest.find_path(&["status"]).unwrap();
         assert!(!visible_status.hidden);
         assert!(visible_status.aliases.is_empty());
+    }
+
+    #[test]
+    fn hidden_lab_shortcut_still_parses() {
+        Cli::try_parse_from(["homeboy", "lab", "status"])
+            .expect("hidden Lab compatibility shortcut should keep parsing");
     }
 
     #[test]

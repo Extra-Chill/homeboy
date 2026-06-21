@@ -755,6 +755,85 @@ pub fn dependency_failure_patterns() -> Vec<AgentTaskProviderDependencyFailurePa
         .collect()
 }
 
+pub fn validate_provider_runner_readiness_for_backend(
+    backend: &str,
+    selector: Option<&str>,
+) -> crate::core::Result<()> {
+    let providers = discover_agent_task_executor_providers();
+    validate_provider_runner_readiness_for_backend_with_providers(&providers, backend, selector)
+}
+
+fn validate_provider_runner_readiness_for_backend_with_providers(
+    providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> crate::core::Result<()> {
+    let provider = match resolve_provider_for_backend(providers, backend, selector) {
+        ProviderResolution::Resolved(provider) => provider,
+        ProviderResolution::NotFound => {
+            return Err(Error::validation_invalid_argument(
+                "backend",
+                format!("no extension agent-task provider found for backend '{backend}'"),
+                Some(backend.to_string()),
+                Some(vec![
+                    "Run `homeboy agent-task providers` on the same machine/runner to inspect registered providers.".to_string(),
+                    "Install or sync the extension/runtime that declares the requested backend, or pass --backend with a registered backend.".to_string(),
+                ]),
+            ));
+        }
+        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
+            return Err(Error::validation_invalid_argument(
+                "backend",
+                format!(
+                    "backend '{backend}' matches multiple extension agent-task providers; pass --selector with one provider id"
+                ),
+                Some(backend.to_string()),
+                Some(vec![format!(
+                    "Available provider ids for selector: {}.",
+                    candidate_ids.join(", ")
+                )]),
+            ));
+        }
+        ProviderResolution::SelectorMismatch { available_ids } => {
+            return Err(Error::validation_invalid_argument(
+                "selector",
+                format!(
+                    "no extension agent-task provider for backend '{backend}' matched selector '{}'",
+                    selector.unwrap_or("")
+                ),
+                selector.map(str::to_string),
+                Some(vec![format!(
+                    "Available provider ids for backend '{backend}': {}.",
+                    available_ids.join(", ")
+                )]),
+            ));
+        }
+    };
+
+    provider_executable_env(provider).map_err(|error| {
+        Error::validation_invalid_argument(
+            "backend",
+            format!(
+                "agent-task backend '{backend}' is registered but runner readiness failed for provider '{}': {}",
+                provider.id,
+                error.message()
+            ),
+            Some(backend.to_string()),
+            Some(vec![
+                format!(
+                    "Selected provider: {} (backend '{}', selector '{}').",
+                    provider.id,
+                    provider.backend,
+                    selector.unwrap_or("<default>")
+                ),
+                "Fix the executable/env on this machine or runner before dispatching the task wave.".to_string(),
+            ]),
+        )
+    })?;
+
+    Ok(())
+}
+
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
     ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
 }
@@ -3249,6 +3328,44 @@ mod tests {
             outcome.failure_classification,
             Some(AgentTaskFailureClassification::Unknown)
         );
+    }
+
+    #[test]
+    fn readiness_validation_fails_before_execution_when_provider_executable_is_missing() {
+        let (_request, mut provider) = request("task-readiness", "minimal-provider".to_string());
+        provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
+            id: "test.executable".to_string(),
+            label: "Test executable".to_string(),
+            secret_env: Vec::new(),
+            env_path: None,
+            executable: Some(AgentTaskProviderExecutableReadiness {
+                env: vec!["HOMEBOY_TEST_PROVIDER_COMMAND".to_string()],
+                candidates: vec![format!(
+                    "homeboy-definitely-missing-provider-{}",
+                    std::process::id()
+                )],
+                version_command: Vec::new(),
+                install_hint: Some("Install the test provider".to_string()),
+                extra: BTreeMap::new(),
+            }),
+            remediation: None,
+            extra: BTreeMap::new(),
+        }];
+
+        let err = validate_provider_runner_readiness_for_backend_with_providers(
+            &[provider],
+            "test",
+            None,
+        )
+        .expect_err("missing provider executable should block preflight");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("backend 'test' is registered"));
+        assert!(err
+            .message
+            .contains("provider runner executable 'Test executable'"));
+        assert!(err.message.contains("HOMEBOY_TEST_PROVIDER_COMMAND"));
+        assert!(err.message.contains("Install the test provider"));
     }
 
     #[test]
