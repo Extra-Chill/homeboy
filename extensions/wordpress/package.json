@@ -6,6 +6,7 @@
   "exports": {
     ".": "./index.js",
     "./admin-page-scenarios": "./lib/admin-page-scenarios.js",
+    "./admin-page-fuzz-surfaces": "./lib/admin-page-fuzz-surfaces.js",
     "./page-profiler": "./lib/page-profiler.js",
     "./rest-route-matrix": "./lib/rest-route-matrix.js",
     "./wordpress-route-latency": "./lib/wordpress-route-latency.js",
@@ -49,6 +50,7 @@
   "scripts": {
     "lint:js": "eslint",
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
+    "test:admin-page-fuzz-surfaces": "node tests/admin-page-fuzz-surfaces-smoke.js",
     "test:page-profiler": "node tests/page-profiler-smoke.js",
     "test:rest-route-matrix": "node tests/rest-route-matrix-smoke.js",
     "test:rest-request-case-generation": "node tests/rest-request-case-generation-smoke.js",
