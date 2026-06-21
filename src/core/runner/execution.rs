@@ -101,8 +101,6 @@ pub struct RunnerExecOutput {
     pub capture: Option<CommandCaptureMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_context: Option<RunnerExecFailureContext>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -122,6 +120,17 @@ pub struct RunnerExecFailureContext {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+struct RunnerExecFailureContextInput<'a> {
+    runner_id: &'a str,
+    job_id: Option<&'a str>,
+    persisted_run_id: Option<&'a str>,
+    command: &'a [String],
+    exit_code: i32,
+    result: Option<&'a Value>,
+    stdout: &'a str,
+    stderr: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -420,7 +429,8 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     if let Some(runner_error) = runner_error {
         details["runner_error"] = runner_error;
     }
-    if let Some(failure_context) = output.failure_context.as_ref() {
+    let failure_context = runner_exec_failure_context_from_output(output);
+    if let Some(failure_context) = failure_context.as_ref() {
         details["failure_context"] = serde_json::to_value(failure_context).unwrap_or(Value::Null);
     }
 
@@ -576,16 +586,6 @@ fn exec_via_reverse_broker(
         mirror_run_id.as_deref(),
         DaemonJobHandoffState::Terminal(job.status),
     );
-    let failure_context = runner_exec_failure_context(
-        &runner.id,
-        Some(&job.id.to_string()),
-        mirror_run_id.as_deref(),
-        &command,
-        exit_code,
-        Some(&result),
-        &stdout,
-        &stderr,
-    );
 
     Ok((
         RunnerExecOutput {
@@ -608,7 +608,6 @@ fn exec_via_reverse_broker(
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
-            failure_context,
         },
         exit_code,
     ))
@@ -740,16 +739,6 @@ fn exec_via_daemon(
         mirror_run_id.as_deref(),
         DaemonJobHandoffState::Terminal(job.status),
     );
-    let failure_context = runner_exec_failure_context(
-        &runner.id,
-        Some(&job.id.to_string()),
-        mirror_run_id.as_deref(),
-        &command,
-        exit_code,
-        Some(&result),
-        &stdout,
-        &stderr,
-    );
 
     Ok((
         RunnerExecOutput {
@@ -772,7 +761,6 @@ fn exec_via_daemon(
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
-            failure_context,
         },
         exit_code,
     ))
@@ -2057,9 +2045,6 @@ fn exec_output(
         redaction_env,
         secret_env_names,
     );
-    let failure_context = runner_exec_failure_context(
-        &runner.id, None, None, &command, exit_code, None, &stdout, &stderr,
-    );
     (
         RunnerExecOutput {
             variant: "exec",
@@ -2081,7 +2066,6 @@ fn exec_output(
             metrics: output.metrics,
             capture: output.capture,
             diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
-            failure_context,
         },
         exit_code,
     )
@@ -2278,24 +2262,33 @@ fn string_field(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn runner_exec_failure_context(
-    runner_id: &str,
-    job_id: Option<&str>,
-    persisted_run_id: Option<&str>,
-    command: &[String],
-    exit_code: i32,
-    result: Option<&Value>,
-    stdout: &str,
-    stderr: &str,
+pub(crate) fn runner_exec_failure_context_from_output(
+    output: &RunnerExecOutput,
 ) -> Option<RunnerExecFailureContext> {
-    if exit_code == 0 {
+    runner_exec_failure_context(RunnerExecFailureContextInput {
+        runner_id: &output.runner_id,
+        job_id: output.job_id.as_deref(),
+        persisted_run_id: output.mirror_run_id.as_deref(),
+        command: &output.argv,
+        exit_code: output.exit_code,
+        result: None,
+        stdout: &output.stdout,
+        stderr: &output.stderr,
+    })
+}
+
+fn runner_exec_failure_context(
+    input: RunnerExecFailureContextInput<'_>,
+) -> Option<RunnerExecFailureContext> {
+    if input.exit_code == 0 {
         return None;
     }
 
-    let runner_error = result
+    let runner_error = input
+        .result
         .and_then(find_homeboy_error_in_result_value)
-        .or_else(|| find_homeboy_error_in_text(stdout))
-        .or_else(|| find_homeboy_error_in_text(stderr));
+        .or_else(|| find_homeboy_error_in_text(input.stdout))
+        .or_else(|| find_homeboy_error_in_text(input.stderr));
     let contract_field = runner_error
         .as_ref()
         .and_then(error_contract_field)
@@ -2313,17 +2306,17 @@ fn runner_exec_failure_context(
     let reason = error_message
         .clone()
         .or_else(|| error_code.clone())
-        .or_else(|| first_non_empty_line(stderr).map(str::to_string))
-        .or_else(|| first_non_empty_line(stdout).map(str::to_string))
+        .or_else(|| first_non_empty_line(input.stderr).map(str::to_string))
+        .or_else(|| first_non_empty_line(input.stdout).map(str::to_string))
         .unwrap_or_else(|| "runner command exited non-zero".to_string());
 
     Some(RunnerExecFailureContext {
         schema: "homeboy/runner-exec-failure-context/v1",
-        runner_id: runner_id.to_string(),
-        job_id: job_id.map(str::to_string),
-        persisted_run_id: persisted_run_id.map(str::to_string),
-        command: command.to_vec(),
-        exit_code,
+        runner_id: input.runner_id.to_string(),
+        job_id: input.job_id.map(str::to_string),
+        persisted_run_id: input.persisted_run_id.map(str::to_string),
+        command: input.command.to_vec(),
+        exit_code: input.exit_code,
         contract_field,
         reason,
         error_code,
@@ -2332,7 +2325,7 @@ fn runner_exec_failure_context(
 }
 
 fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> String {
-    let Some(context) = output.failure_context.as_ref() else {
+    let Some(context) = runner_exec_failure_context_from_output(output) else {
         return "Canonical failed command context was unavailable; inspect error.details.execution for raw runner evidence.".to_string();
     };
     let field = context
@@ -2584,7 +2577,6 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
-            failure_context: None,
         }
     }
 
@@ -2680,7 +2672,7 @@ mod tests {
             Some("/srv/homeboy/project")
         );
         assert_eq!(err.details["exit_code"].as_i64(), Some(2));
-        assert_eq!(err.details["failure_context"], Value::Null);
+        assert_eq!(err.details["failure_context"]["contract_field"], "source");
         assert_eq!(
             err.details["execution"]["stdout"].as_str(),
             Some(output.stdout.as_str())
@@ -2694,16 +2686,6 @@ mod tests {
             "",
         );
         output.mirror_run_id = Some("runner-exec-lab-job-123".to_string());
-        output.failure_context = runner_exec_failure_context(
-            &output.runner_id,
-            output.job_id.as_deref(),
-            output.mirror_run_id.as_deref(),
-            &output.argv,
-            output.exit_code,
-            None,
-            &output.stdout,
-            &output.stderr,
-        );
 
         let err = runner_exec_failure_error(&output).expect("runner failure error");
 

@@ -27,7 +27,9 @@ use crate::core::{Error, ErrorCode, Result};
 
 use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::daemon_health::runner_daemon_health_failure;
-use super::super::execution::{lab_offload_handoff_hints, DaemonJobHandoffState};
+use super::super::execution::{
+    lab_offload_handoff_hints, runner_exec_failure_context_from_output, DaemonJobHandoffState,
+};
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args, inline_agent_task_prompt_files_in_args,
@@ -2086,7 +2088,7 @@ fn append_runner_failure_context_summary(
     stderr: &mut String,
     exec_output: &crate::core::runner::RunnerExecOutput,
 ) {
-    let Some(context) = exec_output.failure_context.as_ref() else {
+    let Some(context) = runner_exec_failure_context_from_output(exec_output) else {
         return;
     };
     let job = context.job_id.as_deref().unwrap_or("unknown runner job");
@@ -2145,9 +2147,8 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerExecFailureContext, RunnerExecMode, RunnerExecOutput, RunnerRequiredTool,
-        RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
-        RunnerWorkspaceSyncOutput,
+        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
+        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -3310,7 +3311,6 @@ mod tests {
                 stderr: CaptureMetadata::default(),
             }),
             diagnostics: None,
-            failure_context: None,
         };
 
         let err = ensure_lab_offload_streams_not_truncated(&exec_output)
@@ -3335,7 +3335,7 @@ mod tests {
             remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
             exit_code: 2,
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Missing required field: cwd","details":{"field":"cwd"}}}"#.to_string(),
             source_snapshot: None,
             job: None,
             job_id: Some("job-123".to_string()),
@@ -3345,18 +3345,6 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
-            failure_context: Some(RunnerExecFailureContext {
-                schema: "homeboy/runner-exec-failure-context/v1",
-                runner_id: "lab-default".to_string(),
-                job_id: Some("job-123".to_string()),
-                persisted_run_id: Some("runner-exec-lab-default-job-123".to_string()),
-                command: vec!["homeboy".to_string(), "test".to_string()],
-                exit_code: 2,
-                contract_field: Some("cwd".to_string()),
-                reason: "Missing required field: cwd".to_string(),
-                error_code: Some("validation.invalid_argument".to_string()),
-                error_message: Some("Missing required field: cwd".to_string()),
-            }),
         };
         let mut stderr = String::new();
 
@@ -3398,7 +3386,6 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
-            failure_context: None,
         };
 
         let err = missing_mutation_patch_error(

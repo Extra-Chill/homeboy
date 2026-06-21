@@ -1634,7 +1634,6 @@ fn runner_exec_dry_run(
                 required_paths: require_paths,
                 hints: vec!["dry run only; no runner command was executed".to_string()],
             }),
-            failure_context: None,
         },
         0,
     ))
@@ -1867,7 +1866,6 @@ mod tests {
                 metrics: None,
                 capture: None,
                 diagnostics: None,
-                failure_context: None,
             },
             7,
         );
