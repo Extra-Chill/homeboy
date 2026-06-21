@@ -1,5 +1,9 @@
 # Lab Command
 
+Compatibility shortcut for Lab routing helpers. Keep using `homeboy lab ...`
+when you already know the shortcut; use [`homeboy runner`](runner.md) for the
+discoverable runner and Lab offload surface.
+
 Inspect and use configured Lab runners for remote benchmark execution and
 managed follow-up work.
 
@@ -13,9 +17,10 @@ homeboy lab extension-sync --runner <runner-id> --source <url-or-path> --id <ext
 
 ## Description
 
-The `lab` command surfaces Lab runner availability, benchmark routing, and the
-Homeboy-managed follow-up commands to use when a Lab run needs diagnosis or
-replay. For normal benchmark runs, prefer `homeboy bench <component>`: Homeboy
+The `lab` command remains a compatibility shortcut for Lab runner availability,
+benchmark routing, and the Homeboy-managed follow-up commands to use when a Lab
+run needs diagnosis or replay. For normal benchmark runs, prefer
+`homeboy bench <component>`: Homeboy
 automatically selects a Lab runner when the component declares
 `lab.preferred_runner` or when exactly one Lab runner is configured.
 
