@@ -20,7 +20,6 @@ $descriptor = homeboy_bench_write_json_artifact('Scenario One', 'step-series', a
 $expected_descriptor = array(
 	'path' => 'artifacts/scenario-one/step-series.json',
 	'kind' => 'json',
-	'name' => 'step-series',
 );
 if ( $expected_descriptor !== $descriptor ) {
 	fwrite(STDERR, "Expected standard artifact descriptor.\n");
