@@ -903,6 +903,72 @@ assert.deepEqual(recipePackRequest.recipe, {
   secret_env: ['EXAMPLE_RECIPE_TOKEN'],
 });
 
+const roleMatrixRecipeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'role-matrix-recipe-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      recipe_pack: 'example-codebox-recipes',
+      recipe: 'role-matrix-runtime',
+      runtime_profile: {
+        role_matrix: [
+          { name: 'admin', role: 'administrator', capabilities: ['manage_options'] },
+          { name: 'editor', role: 'editor', capabilities: ['edit_posts'], session: 'editor-rest' },
+        ],
+      },
+    },
+  },
+  inputs: {
+    recipe_inputs: {
+      fixture: 'role-matrix',
+      fixtureUsers: [{ name: 'admin', username: 'explicit-admin', role: 'administrator' }],
+      userSessions: [{ name: 'admin-session', user: 'admin' }],
+    },
+  },
+});
+assert.deepEqual(roleMatrixRecipeRequest.recipe.inputs, {
+  fixture: 'role-matrix',
+  fixtureUsers: [
+    { name: 'admin', username: 'explicit-admin', role: 'administrator' },
+    { name: 'editor', username: 'fixture-editor', role: 'editor', metadata: { capabilities: ['edit_posts'] } },
+  ],
+  userSessions: [
+    { name: 'admin-session', user: 'admin' },
+    { name: 'editor-rest', user: 'editor', metadata: { role: 'editor', capabilities: ['edit_posts'] } },
+  ],
+});
+
+const capabilityMatrixRecipeRequest = codeboxTaskRequestFromAgentTaskRequest({
+  ...request,
+  task_id: 'capability-matrix-recipe-task-123',
+  executor: {
+    backend: 'codebox',
+    model: 'gpt-5.5',
+    config: {
+      recipe_pack: 'example-codebox-recipes',
+      recipe: 'capability-matrix-runtime',
+      runtime_requirements: {
+        capability_matrix: {
+          shop_manager: ['manage_woocommerce', 'view_woocommerce_reports'],
+        },
+      },
+    },
+  },
+});
+assert.deepEqual(capabilityMatrixRecipeRequest.recipe.inputs.fixtureUsers, [{
+  name: 'shop_manager',
+  username: 'fixture-shop_manager',
+  role: 'shop_manager',
+  metadata: { capabilities: ['manage_woocommerce', 'view_woocommerce_reports'] },
+}]);
+assert.deepEqual(capabilityMatrixRecipeRequest.recipe.inputs.userSessions, [{
+  name: 'shop_manager-session',
+  user: 'shop_manager',
+  metadata: { role: 'shop_manager', capabilities: ['manage_woocommerce', 'view_woocommerce_reports'] },
+}]);
+
 const codexAgentRequest = {
   ...request,
   task_id: 'codex-task-123',
