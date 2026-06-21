@@ -173,6 +173,7 @@ function providerContract(options = {}) {
     runner_readiness: runtimeRunnerReadiness(options),
     workspace_tools: runtimeWorkspaceTools(options),
     component_path_defaults: runtimeComponentPathDefaults(options),
+    provider_metadata: runtimeExecutorManifest().provider_metadata,
     provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
     provider_preflight: runtimeProviderPreflight(),
     provider_credential_boundary: providerCredentialBoundary(),
