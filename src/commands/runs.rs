@@ -1297,21 +1297,10 @@ mod tests {
                             "algorithm": "sha256",
                             "value": "abc123"
                         },
-                        "viewer": {
-                            "kind": "wordpress-playground-blueprint",
-                            "base": "https://playground.wordpress.net/",
-                            "query": {
-                                "parameter": "blueprint-url",
-                                "value": {
-                                    "source": "public-artifact-url"
-                                },
-                                "encoding": "url"
-                            },
-                            "replay": {
+                        "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(Some(serde_json::json!({
                                 "status": "partial",
                                 "limitations": ["fixture limitation"]
-                            }
-                        }
+                        })))
                     }]
                 })
                 .to_string(),
@@ -1394,15 +1383,7 @@ mod tests {
                     "bench_artifact",
                     &artifact_path,
                     serde_json::json!({
-                        "viewer": {
-                            "kind": "wordpress-playground-blueprint",
-                            "base": "https://playground.wordpress.net/",
-                            "query": {
-                                "parameter": "blueprint-url",
-                                "value": { "source": "public-artifact-url" },
-                                "encoding": "url"
-                            }
-                        }
+                        "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None)
                     }),
                 )
                 .expect("record artifact");
