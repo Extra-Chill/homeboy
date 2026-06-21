@@ -52,11 +52,18 @@ const {
   WP_CODEBOX_ROLE_ALIASES,
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
+  WP_CODEBOX_WORKSPACE_MOUNT_KIND,
+  WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
+  wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
+  wpCodeboxLegacyRuntimeComponentAliasValues,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
 const {
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
+  isCodeboxLegacyAgentTaskRunResult,
+  legacyAgentTaskRunEvidenceRefs,
+  legacyAgentTaskRunSessionArtifacts,
 } = require('./codebox-run-agent-task-contract');
 const {
   assertProviderCredentialBoundaryNamesOnly,
@@ -67,8 +74,6 @@ const {
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
-const WP_CODEBOX_WORKSPACE_MOUNT_KIND = 'homeboy-runtime-workspace';
-const WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND = ['homeboy', 'dmc', 'workspace'].join('-');
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -312,7 +317,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertProviderCredentialBoundaryNamesOnly(request.inputs || {});
   const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
-  const compatibilityDiagnostics = legacyRuntimeComponentAliasDiagnostics(config);
+  const compatibilityDiagnostics = wpCodeboxLegacyRuntimeComponentAliasDiagnostics(config);
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
   const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
@@ -1072,7 +1077,7 @@ function runtimeComponentPaths(config, options = {}) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || [], options);
   const aliases = runtimeComponentPathAliases(options);
-  const legacyAliases = legacyRuntimeComponentAliasValues(config);
+  const legacyAliases = wpCodeboxLegacyRuntimeComponentAliasValues(config);
   const resolved = {
     ...contractPaths,
     agents_api: config.agents_api || config.agents_api_path || options.agentsApi,
@@ -1096,36 +1101,6 @@ function runtimeComponentPaths(config, options = {}) {
   }
 
   return Object.fromEntries(Object.entries(resolved).filter(([, value]) => value !== undefined && value !== ''));
-}
-
-function legacyRuntimeComponentAliasFields() {
-  const prefix = ['data', 'machine'].join('_');
-  return {
-    agent_runtime: [prefix, `${prefix}_path`],
-    agent_runtime_tools: [`${prefix}_code`, `${prefix}_code_path`],
-  };
-}
-
-function legacyRuntimeComponentAliasValues(config = {}) {
-  const fields = legacyRuntimeComponentAliasFields();
-  return Object.fromEntries(Object.entries(fields).map(([canonical, aliases]) => [
-    canonical,
-    firstValue(...aliases.map((alias) => config[alias])),
-  ]));
-}
-
-function legacyRuntimeComponentAliasDiagnostics(config = {}) {
-  return Object.entries(legacyRuntimeComponentAliasFields()).flatMap(([canonical, aliases]) => aliases
-    .filter((alias) => config[alias] !== undefined)
-    .map((alias) => ({
-      class: 'codebox.compat.deprecated_runtime_component_alias',
-      message: `Deprecated runtime component alias "${alias}" was accepted for compatibility; use "${canonical}" instead.`,
-      data: {
-        alias,
-        replacement: canonical,
-        compatibility: 'accepted-for-current-callers',
-      },
-    })));
 }
 
 function componentPathCandidateValue(candidate, sources) {
@@ -2826,27 +2801,9 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
     recipeSummary.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(normalizedArtifacts, artifact));
   }
 
-  if (result?.schema === 'wp-codebox/agent-task-run/v1') {
+  if (isCodeboxLegacyAgentTaskRunResult(result)) {
     const artifacts = [...normalizedArtifacts];
-    if (typeof result.artifacts === 'string' && result.artifacts) {
-      artifacts.push({
-        id: result.session?.artifacts?.bundle_id || 'wp-codebox-artifacts',
-        kind: 'codebox-artifact-directory',
-        path: result.artifacts,
-        metadata: {
-          session_id: result.session?.id,
-          preview_url: result.session?.artifacts?.preview_url,
-        },
-      });
-    }
-    if (result.session?.artifacts && typeof result.session.artifacts === 'object') {
-      artifacts.push({
-        id: result.session.artifacts.bundle_id || `wp-codebox-session-artifacts-${artifacts.length + 1}`,
-        kind: 'codebox-session-artifacts',
-        url: result.session.artifacts.preview_url,
-        metadata: result.session.artifacts,
-      });
-    }
+    legacyAgentTaskRunSessionArtifacts(result).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
     if (Array.isArray(result.artifacts)) {
       result.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
     }
@@ -2878,19 +2835,8 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
 
 function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) {
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
-  if (result?.schema === 'wp-codebox/agent-task-run/v1') {
-    const refs = [
-      result.session?.artifacts?.preview_url ? {
-        kind: 'codebox-preview',
-        uri: result.session.artifacts.preview_url,
-        label: 'WP Codebox preview',
-      } : null,
-      typeof result.artifacts === 'string' && result.artifacts ? {
-        kind: 'codebox-artifact-directory',
-        uri: result.artifacts,
-        label: 'WP Codebox artifacts',
-      } : null,
-    ].filter(Boolean);
+  if (isCodeboxLegacyAgentTaskRunResult(result)) {
+    const refs = legacyAgentTaskRunEvidenceRefs(result);
     for (const artifact of artifactResult?.artifactRefs || []) {
       appendUniqueEvidenceRef(refs, {
         kind: artifact.kind,

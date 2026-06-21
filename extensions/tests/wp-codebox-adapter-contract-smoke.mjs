@@ -14,9 +14,15 @@ const {
 	WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES,
 	WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
 	WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+	WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
 	WP_CODEBOX_ROLE_ALIASES,
 	WP_CODEBOX_TASK_REQUEST_SCHEMA,
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
+	WP_CODEBOX_WORKSPACE_MOUNT_KIND,
+	WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
+	wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
+	wpCodeboxLegacyRuntimeComponentAliasFields,
+	wpCodeboxLegacyRuntimeComponentAliasValues,
 	wpCodeboxProviderRuntimeInvocationContract,
 	wpCodeboxProviderRuntimeOperationConfig,
 	wpCodeboxProviderRuntimeOperationEntry,
@@ -27,6 +33,9 @@ assert.equal(WP_CODEBOX_PROVIDER_ID, 'wordpress.codebox-agent-task-executor');
 assert.equal(WP_CODEBOX_PROVIDER_LABEL, 'WP Codebox agent task executor');
 assert.equal(WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA, 'wp-codebox/provider-credential-boundary/v1');
 assert.equal(WP_CODEBOX_TASK_REQUEST_SCHEMA, 'wp-codebox/task-input/v1');
+assert.equal(WP_CODEBOX_RECIPE_RUN_CLI_COMMAND, 'recipe-run');
+assert.equal(WP_CODEBOX_WORKSPACE_MOUNT_KIND, 'homeboy-runtime-workspace');
+assert.equal(WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND, ['homeboy', 'dmc', 'workspace'].join('-'));
 
 const invocationContract = wpCodeboxProviderRuntimeInvocationContract();
 assert.equal(invocationContract.schema, 'wp-codebox/provider-runtime-invocation-contract/v1');
@@ -72,6 +81,23 @@ assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) =>
 assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
 	'consume_canonical_envelope_with_legacy_package_fallback'
+);
+
+const legacyRuntimeAliasPrefix = ['data', 'machine'].join('_');
+assert.deepEqual(wpCodeboxLegacyRuntimeComponentAliasFields(), {
+	agent_runtime: [legacyRuntimeAliasPrefix, `${legacyRuntimeAliasPrefix}_path`],
+	agent_runtime_tools: [`${legacyRuntimeAliasPrefix}_code`, `${legacyRuntimeAliasPrefix}_code_path`],
+});
+assert.deepEqual(wpCodeboxLegacyRuntimeComponentAliasValues({
+	[legacyRuntimeAliasPrefix]: '/runtime',
+	[`${legacyRuntimeAliasPrefix}_code_path`]: '/runtime-tools',
+}), {
+	agent_runtime: '/runtime',
+	agent_runtime_tools: '/runtime-tools',
+});
+assert.deepEqual(
+	wpCodeboxLegacyRuntimeComponentAliasDiagnostics({ [`${legacyRuntimeAliasPrefix}_path`]: '/runtime' }).map((diagnostic) => diagnostic.data.replacement),
+	['agent_runtime']
 );
 
 console.log('wp-codebox adapter contract smoke passed');

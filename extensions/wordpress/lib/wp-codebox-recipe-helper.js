@@ -9,6 +9,9 @@ const path = require('node:path');
 const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
+const {
+  WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
+} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-adapter-contract');
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 50;
 const DEFAULT_EVENT_SOURCE = 'wp_codebox';
 const DEFAULT_EVENT_PREFIX = 'recipe';
@@ -140,7 +143,7 @@ async function runWpCodeboxRecipe({
   const { command, args } = wpCodeboxCommand(resolvedBin);
   const commandArgs = [
     ...args,
-    'recipe-run',
+    WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
     '--recipe',
     recipeFile,
     '--artifacts',

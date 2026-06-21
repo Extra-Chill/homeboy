@@ -6,6 +6,9 @@ const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
 const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = 'wp-codebox/provider-runtime-invocation-contract/v1';
 const WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA = 'wp-codebox/provider-credential-boundary/v1';
+const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = 'recipe-run';
+const WP_CODEBOX_WORKSPACE_MOUNT_KIND = 'homeboy-runtime-workspace';
+const WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND = ['homeboy', 'dmc', 'workspace'].join('-');
 
 const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
   workspaceCapture: 'wp-codebox.runner-workspace.capture',
@@ -193,6 +196,36 @@ function wpCodeboxProviderRuntimeOperationConfig(key, operation) {
   });
 }
 
+function wpCodeboxLegacyRuntimeComponentAliasFields() {
+  const prefix = ['data', 'machine'].join('_');
+  return {
+    agent_runtime: [prefix, `${prefix}_path`],
+    agent_runtime_tools: [`${prefix}_code`, `${prefix}_code_path`],
+  };
+}
+
+function wpCodeboxLegacyRuntimeComponentAliasValues(config = {}) {
+  const fields = wpCodeboxLegacyRuntimeComponentAliasFields();
+  return Object.fromEntries(Object.entries(fields).map(([canonical, aliases]) => [
+    canonical,
+    firstValue(...aliases.map((alias) => config[alias])),
+  ]));
+}
+
+function wpCodeboxLegacyRuntimeComponentAliasDiagnostics(config = {}) {
+  return Object.entries(wpCodeboxLegacyRuntimeComponentAliasFields()).flatMap(([canonical, aliases]) => aliases
+    .filter((alias) => config[alias] !== undefined)
+    .map((alias) => ({
+      class: 'codebox.compat.deprecated_runtime_component_alias',
+      message: `Deprecated runtime component alias "${alias}" was accepted for compatibility; use "${canonical}" instead.`,
+      data: {
+        alias,
+        replacement: canonical,
+        compatibility: 'accepted-for-current-callers',
+      },
+    })));
+}
+
 function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
@@ -215,9 +248,15 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES,
   WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+  WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
   WP_CODEBOX_ROLE_ALIASES,
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
+  WP_CODEBOX_WORKSPACE_MOUNT_KIND,
+  WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
+  wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
+  wpCodeboxLegacyRuntimeComponentAliasFields,
+  wpCodeboxLegacyRuntimeComponentAliasValues,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,
