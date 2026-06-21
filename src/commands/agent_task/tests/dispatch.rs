@@ -186,7 +186,11 @@ fn from_spec_dispatch_defaults_replace_stale_workspace_cwd() {
         initial_event: None,
     };
 
-    apply_from_spec_dispatch_defaults_with_cwd(&mut spec, "-", || Some(repo.path().to_path_buf()));
+    homeboy::core::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
+        &mut spec,
+        "-",
+        || Some(repo.path().to_path_buf()),
+    );
     let expected_root = std::fs::canonicalize(repo.path()).expect("canonical repo path");
 
     assert_eq!(
@@ -227,9 +231,11 @@ fn from_spec_dispatch_defaults_replace_stale_cwd_in_snapshot_workspace() {
         initial_event: None,
     };
 
-    apply_from_spec_dispatch_defaults_with_cwd(&mut spec, "-", || {
-        Some(workspace.path().to_path_buf())
-    });
+    homeboy::core::agent_tasks::controller_service::apply_spec_dispatch_defaults_with_cwd(
+        &mut spec,
+        "-",
+        || Some(workspace.path().to_path_buf()),
+    );
     let expected_root = std::fs::canonicalize(workspace.path()).expect("canonical workspace path");
 
     assert_eq!(
