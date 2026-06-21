@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.9.4] - 2026-06-21
+
+### Fixed
+- emit valid bench artifact refs
+
 ## [3.9.3] - 2026-06-21
 
 ### Changed
