@@ -9,6 +9,7 @@ REPO="$DEFAULT_REPO"
 HOMEBOY_BIN="homeboy"
 EXTENSIONS="$DEFAULT_EXTENSIONS"
 DRY_RUN=0
+REPLACE_EXISTING=0
 
 usage() {
     cat <<'USAGE'
@@ -24,7 +25,10 @@ Options:
   --repo <url-or-path>        Extension monorepo URL or path.
                              Default: https://github.com/Extra-Chill/homeboy-extensions.
   --homeboy <command>         Homeboy executable on the target.
-                             Default: homeboy.
+                              Default: homeboy.
+  --replace-existing          Replace existing extension installs with managed
+                              installs from --repo. Use for explicit runner
+                              repair; linked source checkouts are preserved.
   --dry-run                  Print the target script without executing it.
   -h, --help                 Show this help.
 
@@ -57,6 +61,10 @@ while [ "$#" -gt 0 ]; do
             DRY_RUN=1
             shift
             ;;
+        --replace-existing)
+            REPLACE_EXISTING=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -84,18 +92,7 @@ if [ -z "$HOMEBOY_BIN" ]; then
     exit 2
 fi
 
-RUNNER_ID="${TARGET:-local}"
-RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "HOMEBOY_BIN=$HOMEBOY_BIN" --env "REPO=$REPO" --env "EXTENSIONS=$EXTENSIONS")
-
-if [ -n "$TARGET" ]; then
-    RUNNER_ARGS+=(--ssh)
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
-    RUNNER_ARGS+=(--dry-run)
-fi
-
-"$HOMEBOY_BIN" "${RUNNER_ARGS[@]}" <<'REMOTE_SCRIPT'
+REMOTE_SCRIPT_CONTENT="$(cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 command -v "$HOMEBOY_BIN" >/dev/null 2>&1 || {
@@ -105,10 +102,40 @@ command -v "$HOMEBOY_BIN" >/dev/null 2>&1 || {
 
 for EXTENSION_ID in $EXTENSIONS; do
     echo "Installing Homeboy extension: $EXTENSION_ID"
-    "$HOMEBOY_BIN" extension install "$REPO" --id "$EXTENSION_ID"
+    INSTALL_ARGS=(extension install "$REPO" --id "$EXTENSION_ID")
+    if [ "${REPLACE_EXISTING:-0}" = "1" ]; then
+        INSTALL_ARGS+=(--replace)
+    fi
+    "$HOMEBOY_BIN" "${INSTALL_ARGS[@]}"
     "$HOMEBOY_BIN" extension show "$EXTENSION_ID" >/dev/null
 done
 
 echo "Installed Homeboy extensions:"
 "$HOMEBOY_BIN" extension list
 REMOTE_SCRIPT
+)"
+
+if [ -n "$TARGET" ]; then
+    RUNNER_ID="$TARGET"
+    CONTROLLER_HOMEBOY_BIN="${HOMEBOY_CONTROLLER_BIN:-homeboy}"
+    RUNNER_ARGS=(runner exec "$RUNNER_ID" --script-file - --raw --env "HOMEBOY_BIN=$HOMEBOY_BIN" --env "REPO=$REPO" --env "EXTENSIONS=$EXTENSIONS" --env "REPLACE_EXISTING=$REPLACE_EXISTING" --ssh)
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        RUNNER_ARGS+=(--dry-run)
+    fi
+
+    printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | "$CONTROLLER_HOMEBOY_BIN" "${RUNNER_ARGS[@]}"
+    exit $?
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    printf '# Target: local\n'
+    printf "HOMEBOY_BIN='%s'\n" "$HOMEBOY_BIN"
+    printf "REPO='%s'\n" "$REPO"
+    printf "EXTENSIONS='%s'\n" "$EXTENSIONS"
+    printf "REPLACE_EXISTING='%s'\n" "$REPLACE_EXISTING"
+    printf '%s\n' "$REMOTE_SCRIPT_CONTENT"
+    exit 0
+fi
+
+printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | HOMEBOY_BIN="$HOMEBOY_BIN" REPO="$REPO" EXTENSIONS="$EXTENSIONS" REPLACE_EXISTING="$REPLACE_EXISTING" bash

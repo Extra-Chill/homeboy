@@ -86,6 +86,12 @@ homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id
 
 Local path installs are linked installs. The active extension code is whatever the installed symlink target points at, so updating the primary `homeboy-extensions` checkout does not update an extension linked to another checkout or feature worktree. Avoid linking installed extensions to short-lived worktrees unless you are intentionally testing that branch.
 
+To repair a runner that was accidentally left linked to a stale or dirty checkout, use the standard bootstrap script with `--replace-existing`. For linked installs, Homeboy removes only the installed symlink, preserves the linked checkout, and installs a managed extracted copy from the configured repository URL:
+
+```bash
+scripts/bootstrap-standard-extensions.sh --target homeboy-lab --extensions "wordpress" --replace-existing
+```
+
 Inspect the current state before debugging extension behavior:
 
 ```bash

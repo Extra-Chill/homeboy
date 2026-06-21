@@ -57,6 +57,26 @@ Preview the exact target script without changing anything:
 scripts/bootstrap-standard-extensions.sh --target homeboy-lab --dry-run
 ```
 
+## Repair Existing Installs
+
+Default bootstrap is non-destructive: it installs missing extensions and leaves
+existing installs alone. If a runner extension is already linked to a stale or
+dirty checkout, repair it explicitly with `--replace-existing`:
+
+```bash
+scripts/bootstrap-standard-extensions.sh \
+    --target homeboy-lab \
+    --extensions "wordpress" \
+    --replace-existing
+```
+
+This runs `homeboy extension install <repo> --id <extension-id> --replace` on the
+runner. For linked installs, Homeboy removes only the installed symlink and
+preserves the linked source checkout, then installs a managed extracted copy from
+the configured repository URL. For copied installs, replacement removes the
+managed installed copy, so use this flag only for an intentional repair or
+refresh pass.
+
 ## Install A Subset
 
 Use `--extensions` for narrow runners or repair passes:
@@ -94,7 +114,14 @@ ssh homeboy-lab 'readlink ~/.config/homeboy/extensions/rust || true'
 ```
 
 If a linked install is stale, reinstall from the GitHub monorepo URL with the
-matching `--id`.
+matching `--id` and `--replace`, or use the bootstrap repair mode:
+
+```bash
+scripts/bootstrap-standard-extensions.sh \
+    --target homeboy-lab \
+    --extensions "rust" \
+    --replace-existing
+```
 
 ## Custom Homeboy Binary Or Source
 

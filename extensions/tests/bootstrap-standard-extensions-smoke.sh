@@ -11,48 +11,21 @@ if [ ! -f "$SCRIPT" ]; then
     exit 1
 fi
 
-OUTPUT="$($SCRIPT --target runner.example --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy /opt/homeboy/bin/homeboy --dry-run)"
+OUTPUT="$($SCRIPT --target local --extensions "nodejs rust" --repo "https://example.com/extensions.git" --homeboy /opt/homeboy/bin/homeboy --dry-run)"
 
 case "$OUTPUT" in
-    *"# Target: runner.example"*) ;;
-    *)
-        echo "Dry-run output did not include target" >&2
-        echo "$OUTPUT" >&2
-        exit 1
-        ;;
-esac
-
-case "$OUTPUT" in
-    *"HOMEBOY_BIN='/opt/homeboy/bin/homeboy'"*) ;;
-    *)
-        echo "Dry-run output did not include quoted Homeboy binary" >&2
-        echo "$OUTPUT" >&2
-        exit 1
-        ;;
-esac
-
-case "$OUTPUT" in
-    *"REPO='https://example.com/extensions.git'"*) ;;
-    *)
-        echo "Dry-run output did not include quoted repo" >&2
-        echo "$OUTPUT" >&2
-        exit 1
-        ;;
-esac
-
-case "$OUTPUT" in
-    *"EXTENSIONS='nodejs rust'"*) ;;
-    *)
-        echo "Dry-run output did not include selected extensions" >&2
-        echo "$OUTPUT" >&2
-        exit 1
-        ;;
-esac
-
-case "$OUTPUT" in
-    *'"$HOMEBOY_BIN" extension install "$REPO" --id "$EXTENSION_ID"'*) ;;
+    *'INSTALL_ARGS=(extension install "$REPO" --id "$EXTENSION_ID")'*'"$HOMEBOY_BIN" "${INSTALL_ARGS[@]}"'*) ;;
     *)
         echo "Dry-run output did not include install command" >&2
+        echo "$OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+case "$OUTPUT" in
+    *'if [ "${REPLACE_EXISTING:-0}" = "1" ]; then'*'INSTALL_ARGS+=(--replace)'*) ;;
+    *)
+        echo "Dry-run output did not include conditional replace mode" >&2
         echo "$OUTPUT" >&2
         exit 1
         ;;
@@ -69,7 +42,7 @@ esac
 
 HELP_OUTPUT="$($SCRIPT --help)"
 case "$HELP_OUTPUT" in
-    *"--target <ssh-host>"*"--dry-run"*) ;;
+    *"--target <runner-id>"*"--replace-existing"*"--dry-run"*) ;;
     *)
         echo "Help output is missing expected options" >&2
         echo "$HELP_OUTPUT" >&2
@@ -105,6 +78,24 @@ EOF
 
 if ! cmp -s "$EXPECTED_LOG" "$LOG_FILE"; then
     echo "Local bootstrap did not call Homeboy as expected" >&2
+    echo "Expected:" >&2
+    sed 's/^/  /' "$EXPECTED_LOG" >&2
+    echo "Actual:" >&2
+    sed 's/^/  /' "$LOG_FILE" >&2
+    exit 1
+fi
+
+: > "$LOG_FILE"
+HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --extensions "wordpress" --repo "https://example.com/extensions.git" --homeboy "$FAKE_HOMEBOY" --replace-existing >/dev/null
+
+cat > "$EXPECTED_LOG" <<EOF
+extension install https://example.com/extensions.git --id wordpress --replace
+extension show wordpress
+extension list
+EOF
+
+if ! cmp -s "$EXPECTED_LOG" "$LOG_FILE"; then
+    echo "Repair bootstrap did not call Homeboy with --replace" >&2
     echo "Expected:" >&2
     sed 's/^/  /' "$EXPECTED_LOG" >&2
     echo "Actual:" >&2
