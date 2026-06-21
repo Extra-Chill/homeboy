@@ -139,7 +139,11 @@ pub struct AgentTaskArtifactRef {
     pub kind: String,
     pub uri: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
 }
@@ -1161,7 +1165,9 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
                         task_id: outcome.task_id.clone(),
                         kind: artifact.kind.clone(),
                         uri: uri.to_string(),
-                        label: artifact.name.clone(),
+                        role: artifact.declared_role().map(str::to_string),
+                        label: artifact.display_label().map(str::to_string),
+                        semantic_key: artifact.declared_semantic_key().map(str::to_string),
                         size_bytes: artifact.size_bytes,
                     },
                 )
@@ -1177,7 +1183,9 @@ fn artifact_refs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskArt
                             task_id: outcome.task_id.clone(),
                             kind: evidence.kind.clone(),
                             uri: uri.to_string(),
+                            role: None,
                             label: evidence.label.clone(),
+                            semantic_key: None,
                             size_bytes: None,
                         }
                     })
@@ -2048,6 +2056,9 @@ mod tests {
                         id: "patch".to_string(),
                         kind: "patch".to_string(),
                         name: Some("patch.diff".to_string()),
+                        label: None,
+                        role: None,
+                        semantic_key: None,
                         path: Some("/tmp/patch.diff".to_string()),
                         url: None,
                         mime: None,
@@ -2524,6 +2535,9 @@ mod tests {
             id: id.to_string(),
             kind: kind.to_string(),
             name: Some(format!("{kind} artifact")),
+            label: None,
+            role: None,
+            semantic_key: None,
             path: path.map(str::to_string),
             url: url.map(str::to_string),
             mime: None,

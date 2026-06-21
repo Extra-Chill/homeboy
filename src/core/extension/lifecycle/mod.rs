@@ -134,6 +134,53 @@ pub fn install_for_component(
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct RefreshResult {
+    pub extension_id: String,
+    pub url: String,
+    pub path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub source_revision: Option<String>,
+    /// Whether a previous install was removed before reinstalling. False on a
+    /// first-time install (nothing to uninstall).
+    pub uninstalled_previous: bool,
+}
+
+/// Refresh a single extension from a source: uninstall any existing install,
+/// then reinstall from the given source/revision.
+///
+/// This is the core-owned replacement for CI's hardcoded
+/// "uninstall (if present) then install" shell sequence. It is idempotent and
+/// safe to re-run: a missing prior install is not an error.
+pub fn refresh(
+    source: &str,
+    id_override: Option<&str>,
+    revision: Option<&str>,
+) -> Result<RefreshResult> {
+    let extension_id = match id_override {
+        Some(id) => slugify_id(id)?,
+        None => derive_id_from_url(source)?,
+    };
+
+    let uninstalled_previous = if load_extension(&extension_id).is_ok() {
+        uninstall(&extension_id)?;
+        true
+    } else {
+        false
+    };
+
+    let installed = install_with_revision(source, Some(&extension_id), revision)?;
+
+    Ok(RefreshResult {
+        extension_id: installed.extension_id,
+        url: installed.url,
+        path: installed.path,
+        manifest_path: installed.manifest_path,
+        source_revision: installed.source_revision,
+        uninstalled_previous,
+    })
+}
+
 mod install_sources;
 use install_sources::{install_configured_extension, install_from_path, install_from_url};
 pub(crate) use install_sources::{
@@ -176,7 +223,7 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, read_source_revision, source_metadata, update,
+        load_extension, read_source_revision, refresh, source_metadata, update,
     };
     use crate::core::component;
     use crate::core::extension::update_all;
@@ -506,6 +553,51 @@ exec '{}' "$@"
 
             assert_eq!(result.component_id, "multi-extension-component");
             assert_eq!(result.installed.len(), 2);
+        });
+    }
+
+    #[test]
+    fn refresh_installs_first_time_without_uninstalling() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source");
+            write_extension_fixture(&source, "alpha");
+
+            let result = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
+                .expect("first-time refresh should install");
+
+            assert_eq!(result.extension_id, "alpha");
+            assert!(
+                !result.uninstalled_previous,
+                "first-time refresh has nothing to uninstall"
+            );
+            assert!(load_extension("alpha").is_ok());
+        });
+    }
+
+    #[test]
+    fn refresh_is_idempotent_and_reinstalls_existing() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source");
+            write_extension_fixture_with_version(&source, "alpha", "1.0.0");
+
+            install(&source.join("alpha").to_string_lossy(), Some("alpha")).expect("pre-install");
+
+            // Update the source, then refresh — the reinstall should pick it up
+            // without erroring on the pre-existing install.
+            write_extension_fixture_with_version(&source, "alpha", "2.0.0");
+            let result = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
+                .expect("refresh over existing install should succeed");
+
+            assert!(
+                result.uninstalled_previous,
+                "refresh should remove the prior install before reinstalling"
+            );
+            assert_eq!(
+                load_extension("alpha").expect("reinstalled").version,
+                "2.0.0"
+            );
         });
     }
 

@@ -77,6 +77,20 @@ enum ExtensionCommand {
         #[arg(long)]
         replace: bool,
     },
+    /// Refresh an extension: uninstall any existing install, then reinstall
+    ///
+    /// Idempotent core-owned replacement for CI's hardcoded uninstall/install
+    /// sequence. Safe to re-run; a missing prior install is not an error.
+    Refresh {
+        /// Git URL or local path to extension directory
+        source: String,
+        /// Override extension id
+        #[arg(long)]
+        id: Option<String>,
+        /// Git ref to check out for URL installs (branch, tag, or commit)
+        #[arg(long = "ref")]
+        revision: Option<String>,
+    },
     /// Relink an installed symlinked extension to a new local source path
     Relink {
         /// Extension ID
@@ -181,6 +195,11 @@ pub fn run(
             revision,
             replace,
         } => install_extension(&source, id, revision, replace),
+        ExtensionCommand::Refresh {
+            source,
+            id,
+            revision,
+        } => refresh_extension(&source, id.as_deref(), revision.as_deref()),
         ExtensionCommand::Relink {
             extension_id,
             source,
@@ -248,6 +267,17 @@ pub enum ExtensionOutput {
         path: String,
         manifest_path: String,
         linked: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_revision: Option<String>,
+    },
+    #[serde(rename = "extension.refresh")]
+    Refresh {
+        extension_id: String,
+        source: String,
+        path: String,
+        manifest_path: String,
+        linked: bool,
+        uninstalled_previous: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_revision: Option<String>,
     },
@@ -576,6 +606,28 @@ fn install_extension(
             path: result.path.to_string_lossy().to_string(),
             manifest_path: result.manifest_path.to_string_lossy().to_string(),
             linked,
+            source_revision: result.source_revision,
+        },
+        0,
+    ))
+}
+
+fn refresh_extension(
+    source: &str,
+    id: Option<&str>,
+    revision: Option<&str>,
+) -> CmdResult<ExtensionOutput> {
+    let result = homeboy::core::extension::refresh(source, id, revision)?;
+    let linked = is_extension_linked(&result.extension_id);
+
+    Ok((
+        ExtensionOutput::Refresh {
+            extension_id: result.extension_id,
+            source: result.url,
+            path: result.path.to_string_lossy().to_string(),
+            manifest_path: result.manifest_path.to_string_lossy().to_string(),
+            linked,
+            uninstalled_previous: result.uninstalled_previous,
             source_revision: result.source_revision,
         },
         0,

@@ -106,6 +106,7 @@ fn render_failure_digest(context: &FailureDigestContext) -> String {
         render_bench_section(&mut out, &context.output_dir, &context.run_url);
     }
 
+    render_failure_origin_section(&mut out, context);
     render_autofix_section(&mut out, context);
     render_tooling_section(&mut out, &context.tooling);
 
@@ -177,6 +178,13 @@ fn read_command_json(output_dir: &Path, command: &str) -> Option<Value> {
     let path = output_dir.join(format!("{command}.json"));
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+fn read_json_file(path: &Path) -> Result<Value, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("failed to parse {}: {}", path.display(), error))
 }
 
 fn envelope_parts(value: Option<Value>) -> (Map<String, Value>, Map<String, Value>) {
@@ -385,6 +393,180 @@ fn render_autofix_section(out: &mut String, context: &FailureDigestContext) {
         }
     }
     out.push('\n');
+}
+
+fn render_failure_origin_section(out: &mut String, context: &FailureDigestContext) {
+    let failed = failed_commands(&context.results);
+    if failed.is_empty() {
+        return;
+    }
+
+    out.push_str("### Failure origin classification\n");
+    for command in failed {
+        let head_path = context.output_dir.join(format!("{command}.json"));
+        let head = match read_json_file(&head_path) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(
+                    out,
+                    "- `{}`: **indeterminate** (head artifact unavailable: {})",
+                    command, error
+                );
+                continue;
+            }
+        };
+        let Some((baseline_path, baseline_result)) =
+            read_baseline_command_json(&context.output_dir, &command)
+        else {
+            let _ = writeln!(
+                out,
+                "- `{}`: **indeterminate** (baseline artifact unavailable)",
+                command
+            );
+            continue;
+        };
+        let baseline = match baseline_result {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = writeln!(
+                    out,
+                    "- `{}`: **indeterminate** (baseline artifact `{}` unavailable: {})",
+                    command,
+                    baseline_path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+
+        let head_failures = failure_fingerprints(&head);
+        let baseline_failures = failure_fingerprints(&baseline);
+        let classification = classify_failure_origin(&head_failures, &baseline_failures);
+        let _ = writeln!(
+            out,
+            "- `{}`: **{}** (head: {}, baseline: {}, shared: {})",
+            command,
+            classification.label(),
+            head_failures.len(),
+            baseline_failures.len(),
+            head_failures.intersection(&baseline_failures).count()
+        );
+    }
+    out.push('\n');
+}
+
+fn read_baseline_command_json(
+    output_dir: &Path,
+    command: &str,
+) -> Option<(PathBuf, Result<Value, String>)> {
+    baseline_command_paths(output_dir, command)
+        .into_iter()
+        .find(|path| path.exists())
+        .map(|path| {
+            let value = read_json_file(&path);
+            (path, value)
+        })
+}
+
+fn baseline_command_paths(output_dir: &Path, command: &str) -> Vec<PathBuf> {
+    vec![
+        output_dir.join(format!("baseline-{command}.json")),
+        output_dir.join(format!("{command}-baseline.json")),
+        output_dir.join("baseline").join(format!("{command}.json")),
+    ]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FailureOriginClassification {
+    BranchIntroduced,
+    BaselinePresent,
+    Indeterminate,
+}
+
+impl FailureOriginClassification {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::BranchIntroduced => "branch-introduced",
+            Self::BaselinePresent => "baseline-present",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+fn classify_failure_origin(
+    head: &BTreeSet<String>,
+    baseline: &BTreeSet<String>,
+) -> FailureOriginClassification {
+    if head.is_empty() || baseline.is_empty() {
+        return FailureOriginClassification::Indeterminate;
+    }
+    if head.is_subset(baseline) {
+        FailureOriginClassification::BaselinePresent
+    } else if head.is_disjoint(baseline) {
+        FailureOriginClassification::BranchIntroduced
+    } else {
+        FailureOriginClassification::Indeterminate
+    }
+}
+
+fn failure_fingerprints(value: &Value) -> BTreeSet<String> {
+    let (data, error) = envelope_parts(Some(value.clone()));
+    let mut fingerprints = BTreeSet::new();
+    collect_failure_fingerprints_from_map(&data, &mut fingerprints);
+    collect_failure_fingerprints_from_map(&error, &mut fingerprints);
+    fingerprints
+}
+
+fn collect_failure_fingerprints_from_map(map: &Map<String, Value>, out: &mut BTreeSet<String>) {
+    for key in [
+        "findings",
+        "failures",
+        "test_failures",
+        "errors",
+        "budget_findings",
+    ] {
+        if let Some(items) = map.get(key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(fingerprint) = failure_fingerprint(item) {
+                    out.insert(fingerprint);
+                }
+            }
+        }
+    }
+}
+
+fn failure_fingerprint(item: &Value) -> Option<String> {
+    let obj = item.as_object()?;
+    for key in ["fingerprint", "id"] {
+        if let Some(value) = string_value(obj, key) {
+            return Some(format!("{key}:{value}"));
+        }
+    }
+
+    let metadata = object_value(obj, "metadata");
+    let test_name = string_value(&metadata, "test_name").or_else(|| string_value(obj, "name"));
+    let tool = string_value(obj, "tool").unwrap_or_default();
+    let rule = string_value(obj, "rule").unwrap_or_default();
+    let file = string_value(obj, "file").unwrap_or_default();
+    let line = string_value(obj, "line").unwrap_or_default();
+    let message = string_value(obj, "message").or_else(|| string_value(obj, "detail"));
+
+    let parts = [
+        tool,
+        rule,
+        file,
+        line,
+        test_name.unwrap_or_default(),
+        message.unwrap_or_default(),
+    ]
+    .into_iter()
+    .map(|part| part.trim().to_string())
+    .collect::<Vec<_>>();
+    if parts.iter().all(String::is_empty) {
+        None
+    } else {
+        Some(parts.join("|"))
+    }
 }
 
 fn render_tooling_section(out: &mut String, tooling: &Map<String, Value>) {

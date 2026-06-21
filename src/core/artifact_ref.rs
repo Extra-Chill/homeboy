@@ -108,6 +108,10 @@ pub struct ArtifactRef {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
 }
 
 impl ArtifactRef {
@@ -121,6 +125,8 @@ impl ArtifactRef {
             path: artifact.path.clone(),
             url: artifact.url.clone(),
             public_url: artifact.public_url.clone(),
+            role: None,
+            semantic_key: None,
         }
     }
 
@@ -139,6 +145,10 @@ pub struct EvidenceRef {
     pub target: String,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<ArtifactRef>,
 }
 
@@ -153,6 +163,8 @@ impl EvidenceRef {
             kind: kind.into(),
             target: target.into(),
             label: label.into(),
+            role: None,
+            semantic_key: None,
             artifact: None,
         }
     }
@@ -164,6 +176,8 @@ impl EvidenceRef {
             kind: artifact.kind.clone(),
             target,
             label: artifact.kind.clone(),
+            role: artifact.role.clone(),
+            semantic_key: artifact.semantic_key.clone(),
             artifact: Some(artifact),
         })
     }
@@ -225,6 +239,8 @@ mod tests {
             path: "summary.json".to_string(),
             url: None,
             public_url: Some("https://example.test/summary.json".to_string()),
+            role: Some("summary".to_string()),
+            semantic_key: Some("run.summary".to_string()),
         };
 
         assert_eq!(
@@ -236,7 +252,9 @@ mod tests {
                 "kind": "summary",
                 "type": "file",
                 "path": "summary.json",
-                "public_url": "https://example.test/summary.json"
+                "public_url": "https://example.test/summary.json",
+                "role": "summary",
+                "semantic_key": "run.summary"
             })
         );
     }
@@ -252,11 +270,15 @@ mod tests {
             path: "https://example.test/review".to_string(),
             url: None,
             public_url: None,
+            role: Some("review".to_string()),
+            semantic_key: Some("run.review".to_string()),
         };
 
         let evidence = EvidenceRef::from_artifact(artifact).expect("evidence ref");
         assert_eq!(evidence.schema, EVIDENCE_REF_SCHEMA);
         assert_eq!(evidence.target, "https://example.test/review");
+        assert_eq!(evidence.role.as_deref(), Some("review"));
+        assert_eq!(evidence.semantic_key.as_deref(), Some("run.review"));
         assert_eq!(
             evidence.artifact.expect("artifact").schema,
             ARTIFACT_REF_SCHEMA

@@ -1,7 +1,7 @@
 use homeboy::commands::lint::{run as run_lint, LintArgs};
 use homeboy::commands::test::{run as run_test, TestArgs};
 use homeboy::commands::utils::args::{
-    BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
+    BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
 use homeboy::commands::GlobalArgs;
 use std::fs;
@@ -56,9 +56,7 @@ fn lint_args(root: &Path) -> LintArgs {
         changed_since: None,
         precomputed_changed_files: None,
         ci_job: None,
-        errors_only: false,
-        sniffs: None,
-        exclude_sniffs: None,
+        sniff_filters: LintSniffArgs::default(),
         category: None,
         fix: false,
         force: false,

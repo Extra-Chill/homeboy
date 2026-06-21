@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -115,7 +115,11 @@ pub struct AgentTaskLoopArtifactRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -708,6 +712,8 @@ pub struct AgentTaskLoopControllerDiagnostics {
     pub summary: AgentTaskLoopControllerDiagnosticSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_actions: Vec<AgentTaskLoopPendingActionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_gates: Vec<AgentTaskLoopAcceptanceGateDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -715,6 +721,34 @@ pub struct AgentTaskLoopControllerDiagnosticSummary {
     pub pending_action_count: usize,
     pub stale_pending_action_count: usize,
     pub orphaned_pending_action_count: usize,
+    pub acceptance_gate_count: usize,
+    pub missing_acceptance_gate_count: usize,
+    pub failed_acceptance_gate_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopAcceptanceGateStatus {
+    Satisfied,
+    Missing,
+    Failed,
+    Warning,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskLoopAcceptanceGateDiagnostic {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    pub status: AgentTaskLoopAcceptanceGateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_status: Option<AgentTaskGateBundleStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1556,6 +1590,15 @@ where
     let mut pending_actions = Vec::new();
     let mut stale_pending_action_count = 0;
     let mut orphaned_pending_action_count = 0;
+    let acceptance_gates = acceptance_gate_diagnostics(record);
+    let missing_acceptance_gate_count = acceptance_gates
+        .iter()
+        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Missing)
+        .count();
+    let failed_acceptance_gate_count = acceptance_gates
+        .iter()
+        .filter(|gate| gate.status == AgentTaskLoopAcceptanceGateStatus::Failed)
+        .count();
 
     for action in record
         .next_actions
@@ -1584,7 +1627,7 @@ where
             problems.push("referenced run record is missing".to_string());
         }
         let recovery_commands = if stale || orphaned {
-            recovery_commands_for(record, runner_id.as_deref())
+            recovery_commands_for(record, action)
         } else {
             Vec::new()
         };
@@ -1617,9 +1660,80 @@ where
             pending_action_count: pending_actions.len(),
             stale_pending_action_count,
             orphaned_pending_action_count,
+            acceptance_gate_count: acceptance_gates.len(),
+            missing_acceptance_gate_count,
+            failed_acceptance_gate_count,
         },
         pending_actions,
+        acceptance_gates,
     })
+}
+
+fn acceptance_gate_diagnostics(
+    record: &AgentTaskLoopControllerRecord,
+) -> Vec<AgentTaskLoopAcceptanceGateDiagnostic> {
+    let mut declared = BTreeSet::new();
+    for action in &record.next_actions {
+        if let AgentTaskLoopPolicyAction::RunGates {
+            bundle_id,
+            entity_id,
+        } = &action.action
+        {
+            declared.insert((bundle_id.clone(), entity_id.clone()));
+        }
+    }
+    for result in &record.gate_results {
+        declared.insert((result.bundle_id.clone(), result.entity_id.clone()));
+    }
+    for bundle in &record.gate_bundles {
+        if !declared
+            .iter()
+            .any(|(bundle_id, _)| bundle_id == &bundle.bundle_id)
+        {
+            declared.insert((bundle.bundle_id.clone(), None));
+        }
+    }
+
+    declared
+        .into_iter()
+        .map(|(bundle_id, entity_id)| {
+            let result = record
+                .gate_results
+                .iter()
+                .rev()
+                .find(|result| result.bundle_id == bundle_id && result.entity_id == entity_id);
+            let status = match result.map(|result| result.status) {
+                Some(AgentTaskGateBundleStatus::Passed) => {
+                    AgentTaskLoopAcceptanceGateStatus::Satisfied
+                }
+                Some(AgentTaskGateBundleStatus::Failed) => {
+                    AgentTaskLoopAcceptanceGateStatus::Failed
+                }
+                Some(AgentTaskGateBundleStatus::Warn) => AgentTaskLoopAcceptanceGateStatus::Warning,
+                None => AgentTaskLoopAcceptanceGateStatus::Missing,
+            };
+            let problems = match status {
+                AgentTaskLoopAcceptanceGateStatus::Missing => {
+                    vec!["acceptance gate has no recorded result".to_string()]
+                }
+                AgentTaskLoopAcceptanceGateStatus::Failed => {
+                    vec!["acceptance gate recorded a failed result".to_string()]
+                }
+                AgentTaskLoopAcceptanceGateStatus::Satisfied
+                | AgentTaskLoopAcceptanceGateStatus::Warning => Vec::new(),
+            };
+
+            AgentTaskLoopAcceptanceGateDiagnostic {
+                bundle_id,
+                entity_id,
+                status,
+                result_id: result.map(|result| result.result_id.clone()),
+                result_status: result.map(|result| result.status),
+                recorded_at: result.map(|result| result.recorded_at.clone()),
+                problems,
+            }
+        })
+        .collect()
 }
 
 pub fn create_controller(
@@ -1891,24 +2005,90 @@ fn parse_timestamp(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
 
 fn recovery_commands_for(
     record: &AgentTaskLoopControllerRecord,
-    runner_id: Option<&str>,
+    action: &AgentTaskLoopPolicyActionRecord,
 ) -> Vec<String> {
     let loop_id = shell_arg(&record.loop_id);
-    let mut commands = Vec::new();
-    if let Some(runner_id) = runner_id {
-        commands.push(format!(
-            "homeboy agent-task controller run {loop_id} --runner {}",
-            shell_arg(runner_id)
-        ));
-        commands.push(format!(
-            "homeboy agent-task controller resume {loop_id} --runner {}",
-            shell_arg(runner_id)
-        ));
-    } else {
-        commands.push(format!("homeboy agent-task controller run {loop_id}"));
-        commands.push(format!("homeboy agent-task controller resume {loop_id}"));
+    let dispatch_flags = recovery_dispatch_flags(record, action);
+    vec![
+        format!("homeboy agent-task controller run {loop_id}{dispatch_flags}"),
+        format!("homeboy agent-task controller resume {loop_id}{dispatch_flags}"),
+    ]
+}
+
+fn recovery_dispatch_flags(
+    record: &AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+) -> String {
+    let action_value = action_value(action);
+    let mut flags = Vec::new();
+    if let Some(value) = first_dispatch_backend(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-backend {}", shell_arg(&value)));
     }
-    commands
+    if let Some(value) = first_dispatch_selector(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-selector {}", shell_arg(&value)));
+    }
+    if let Some(value) = first_dispatch_model(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-model {}", shell_arg(&value)));
+    }
+    if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", flags.join(" "))
+    }
+}
+
+fn first_dispatch_backend(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(|value| first_string_at_keys(value, &["dispatch_backend", "backend"]))
+        .or_else(|| first_string_at_keys(metadata, &["dispatch_backend", "backend"]))
+}
+
+fn first_dispatch_selector(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(first_provider_selector)
+        .or_else(|| first_provider_selector(metadata))
+}
+
+fn first_dispatch_model(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(|value| first_string_at_keys(value, &["dispatch_model", "model"]))
+        .or_else(|| first_string_at_keys(metadata, &["dispatch_model", "model"]))
+}
+
+fn first_provider_selector(value: &Value) -> Option<String> {
+    first_string_at_keys(
+        value,
+        &[
+            "dispatch_selector",
+            "provider_selector",
+            "provider_id",
+            "provider",
+        ],
+    )
+    .or_else(|| first_executor_string_at_keys(value, &["selector", "provider_id", "provider"]))
+}
+
+fn first_executor_string_at_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(executor) = map.get("executor") {
+                if let Some(value) = first_string_at_keys(executor, keys) {
+                    return Some(value);
+                }
+            }
+            if let Some(dispatch) = map.get("dispatch") {
+                if let Some(value) = first_executor_string_at_keys(dispatch, keys) {
+                    return Some(value);
+                }
+            }
+            map.values()
+                .find_map(|value| first_executor_string_at_keys(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| first_executor_string_at_keys(value, keys)),
+        _ => None,
+    }
 }
 
 fn shell_arg(value: &str) -> String {
@@ -2242,8 +2422,92 @@ mod tests {
         assert!(action
             .problems
             .contains(&"pending action is older than stale threshold".to_string()));
-        assert!(action.recovery_commands.iter().any(|command| command
-            .contains("homeboy agent-task controller run loop --runner lab-runner")));
+        assert!(action
+            .recovery_commands
+            .contains(&"homeboy agent-task controller run loop".to_string()));
+        assert!(action
+            .recovery_commands
+            .contains(&"homeboy agent-task controller resume loop".to_string()));
+    }
+
+    #[test]
+    fn status_diagnostics_resume_commands_preserve_generic_dispatch_flags() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.metadata = json!({
+            "dispatch_backend": "remote runner",
+            "dispatch_selector": "provider'one",
+            "dispatch_model": "gpt 5",
+            "secret_env": ["SHOULD_NOT_APPEAR"]
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({ "task": "repair" }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-09T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:00:01Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        let commands = &diagnostics.pending_actions[0].recovery_commands;
+        assert_eq!(
+            commands[0],
+            "homeboy agent-task controller run loop --dispatch-backend 'remote runner' --dispatch-selector 'provider'\\''one' --dispatch-model 'gpt 5'"
+        );
+        assert_eq!(
+            commands[1],
+            "homeboy agent-task controller resume loop --dispatch-backend 'remote runner' --dispatch-selector 'provider'\\''one' --dispatch-model 'gpt 5'"
+        );
+        assert!(!commands.join("\n").contains("SHOULD_NOT_APPEAR"));
+    }
+
+    #[test]
+    fn status_diagnostics_resume_commands_use_action_executor_selector() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({
+                    "mode": "run_plan",
+                    "plan": {
+                        "tasks": [{
+                            "executor": {
+                                "backend": "generic-backend",
+                                "selector": "generic-provider",
+                                "model": "generic-model"
+                            }
+                        }]
+                    },
+                    "payload": { "selector": ".not-a-provider-selector" }
+                }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-09T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:00:01Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(
+            diagnostics.pending_actions[0].recovery_commands[1],
+            "homeboy agent-task controller resume loop --dispatch-backend generic-backend --dispatch-selector generic-provider --dispatch-model generic-model"
+        );
     }
 
     #[test]
@@ -2284,6 +2548,67 @@ mod tests {
         assert!(action
             .problems
             .contains(&"referenced run record is missing".to_string()));
+    }
+
+    #[test]
+    fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "verify", "v1");
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "required-artifacts".to_string(),
+            description: "required artifact contract".to_string(),
+            checks: Vec::new(),
+        });
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "quality".to_string(),
+            description: "quality contract".to_string(),
+            checks: Vec::new(),
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunGates {
+                bundle_id: "quality".to_string(),
+                entity_id: Some("artifact:summary".to_string()),
+            },
+            "run quality gate",
+        );
+        record.gate_results.push(AgentTaskGateBundleResult {
+            result_id: "gate-result-1".to_string(),
+            bundle_id: "quality".to_string(),
+            entity_id: Some("artifact:summary".to_string()),
+            run_id: None,
+            status: AgentTaskGateBundleStatus::Failed,
+            checks: Vec::new(),
+            recorded_at: "2026-06-11T00:00:00Z".to_string(),
+        });
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:05:00Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(diagnostics.summary.acceptance_gate_count, 2);
+        assert_eq!(diagnostics.summary.missing_acceptance_gate_count, 1);
+        assert_eq!(diagnostics.summary.failed_acceptance_gate_count, 1);
+        assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+            gate.bundle_id == "required-artifacts"
+                && gate.entity_id.is_none()
+                && gate.status == AgentTaskLoopAcceptanceGateStatus::Missing
+                && gate
+                    .problems
+                    .contains(&"acceptance gate has no recorded result".to_string())
+        }));
+        assert!(diagnostics.acceptance_gates.iter().any(|gate| {
+            gate.bundle_id == "quality"
+                && gate.entity_id.as_deref() == Some("artifact:summary")
+                && gate.status == AgentTaskLoopAcceptanceGateStatus::Failed
+                && gate.result_id.as_deref() == Some("gate-result-1")
+                && gate
+                    .problems
+                    .contains(&"acceptance gate recorded a failed result".to_string())
+        }));
     }
 
     #[test]
@@ -2806,7 +3131,9 @@ mod tests {
             lineage: vec![AgentTaskLoopArtifactRef {
                 uri: "artifact://candidate/site".to_string(),
                 kind: Some("static_site_candidate".to_string()),
+                role: None,
                 label: Some("candidate".to_string()),
+                semantic_key: None,
             }],
             payload: json!({ "selector": ".hero" }),
         };
@@ -2935,7 +3262,9 @@ mod tests {
         AgentTaskLoopArtifactRef {
             uri: uri.to_string(),
             kind: Some("artifact".to_string()),
+            role: None,
             label: None,
+            semantic_key: None,
         }
     }
 }

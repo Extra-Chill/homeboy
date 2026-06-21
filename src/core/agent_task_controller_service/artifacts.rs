@@ -508,7 +508,9 @@ fn artifact_ref_from_artifact(artifact: &AgentTaskArtifact) -> AgentTaskLoopArti
             .or_else(|| artifact.path.clone())
             .unwrap_or_else(|| format!("artifact:{}", artifact.id)),
         kind: Some(artifact.kind.clone()),
-        label: Some(artifact.name.clone().unwrap_or_else(|| artifact.id.clone())),
+        role: artifact.declared_role().map(str::to_string),
+        label: artifact.display_label().map(str::to_string),
+        semantic_key: artifact.declared_semantic_key().map(str::to_string),
     }
 }
 
@@ -516,7 +518,9 @@ fn artifact_ref_from_evidence_ref(evidence_ref: &AgentTaskEvidenceRef) -> AgentT
     AgentTaskLoopArtifactRef {
         uri: evidence_ref.uri.clone(),
         kind: Some(evidence_ref.kind.clone()),
+        role: None,
         label: evidence_ref.label.clone(),
+        semantic_key: None,
     }
 }
 
@@ -531,7 +535,20 @@ fn artifact_ref_from_typed_artifact(
         .unwrap_or_else(|| AgentTaskLoopArtifactRef {
             uri: format!("typed-artifact:{task_id}:{}", typed_artifact.name),
             kind: typed_artifact.artifact_type.clone(),
+            role: typed_artifact
+                .metadata
+                .get("role")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
             label: Some(typed_artifact.name.clone()),
+            semantic_key: typed_artifact
+                .metadata
+                .get("semantic_key")
+                .or_else(|| typed_artifact.metadata.get("semanticKey"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
         })
 }
 
@@ -551,7 +568,9 @@ fn push_artifact_ref_once(
     if target.iter().any(|existing| {
         existing.uri == artifact_ref.uri
             && existing.kind == artifact_ref.kind
+            && existing.role == artifact_ref.role
             && existing.label == artifact_ref.label
+            && existing.semantic_key == artifact_ref.semantic_key
     }) {
         return;
     }
