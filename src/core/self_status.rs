@@ -435,7 +435,7 @@ pub fn build_runtime_view(
         version: Some(controller.version.clone()),
         build_identity: Some(controller.build_identity.display.clone()),
         binary_path: controller.binary_path.clone(),
-        install_method: Some(controller.install_method.clone()),
+        install_method: Some(controller.install_method),
         source_checkout: controller.source_checkout.clone(),
         connected: true,
         relation_to_controller: VersionRelation::Current,

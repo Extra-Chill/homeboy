@@ -155,7 +155,7 @@ pub struct FuzzExecutionOutput {
     pub stderr: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FuzzWorkloadOutput {
     pub id: String,
     pub label: Option<String>,
