@@ -68,6 +68,11 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bench: Option<BenchSpec>,
 
+    /// Fuzz composition settings (`homeboy fuzz --rig <id>`). Optional — only
+    /// populated when the rig is meant to drive fuzz workloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuzz: Option<FuzzSpec>,
+
     /// Out-of-tree bench workloads keyed by extension id.
     ///
     /// These are private, rig-owned workloads that should run alongside the
@@ -87,6 +92,15 @@ pub struct RigSpec {
     /// `${package.root}` for rigs installed from a package source.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_workloads: HashMap<String, Vec<WorkloadSpec>>,
+
+    /// Out-of-tree fuzz workloads keyed by extension id.
+    ///
+    /// These are private, rig-owned workloads that should run alongside the
+    /// component's in-tree fuzz discovery when `homeboy fuzz --rig <id>` is
+    /// invoked. Values support the same expansion rules as bench/trace
+    /// workloads, including `${package.root}` for package-installed rigs.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub fuzz_workloads: HashMap<String, Vec<WorkloadSpec>>,
 
     /// Extension-scoped defaults applied to every trace workload entry for the
     /// same extension id. Defaults only fill omitted scalar fields and prepend
@@ -385,6 +399,16 @@ pub struct BenchSpec {
     /// scenario ids; values map metric names to pass/fail conditions.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metric_gates: BTreeMap<String, BTreeMap<String, BenchMetricGateCondition>>,
+}
+
+/// Fuzz composition for a rig. Pins which component `homeboy fuzz --rig <id>`
+/// targets when no explicit component is passed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FuzzSpec {
+    /// Component ID to fuzz when `homeboy fuzz --rig <id>` is invoked without a
+    /// positional component.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_component: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
