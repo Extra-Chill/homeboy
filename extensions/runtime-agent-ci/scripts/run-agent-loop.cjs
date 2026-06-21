@@ -16,6 +16,7 @@ try {
   const runtime = resolveRuntimeProvider(plan.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox', {
     repoRoot,
     workspace: plan.component_path || process.cwd(),
+    executor: plan.executor || {},
   });
   const result = runGenericAgentLoop({
     plan,

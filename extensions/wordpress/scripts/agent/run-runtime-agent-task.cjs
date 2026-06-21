@@ -37,7 +37,7 @@ function readJson(filePath) {
 try {
   const configPath = readConfigPath();
   const config = readJson(configPath);
-  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd() });
+  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || 'wp-codebox', { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd(), executor: config.executor || {} });
   const result = runGenericAgentLoop({
     plan: config,
     runtime,

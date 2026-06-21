@@ -118,7 +118,7 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		setupCommands: normalizeCommands(materialization.setup_commands || []),
 		buildCommands: normalizeCommands(materialization.build_commands || []),
 		paths: resolvePaths(materialization.paths || {}, workspace),
-		executor: resolveExecutor(manifest, options.repoRoot || repoRootFromHere()),
+		executor: resolveExecutor(manifest, options.repoRoot || repoRootFromHere(), options),
 	};
 }
 
@@ -152,13 +152,153 @@ function resolvePaths(paths, workspace) {
 	]));
 }
 
-function resolveExecutor(manifest, repoRoot) {
-	const provider = Array.isArray(manifest.agent_task_executors) ? manifest.agent_task_executors[0] : null;
+function resolveExecutor(manifest, repoRoot, options = {}) {
+	const provider = selectExecutor(manifest, executorSelectionFromOptions(options));
 	const scriptArg = executorScriptArg(provider);
 	return {
+		id: provider.id || '',
 		backend: provider?.backend || '',
+		status: provider?.status || '',
+		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities : [],
 		path: scriptArg ? scriptArg.replace('{{runtime_path}}', path.join(repoRoot, 'agent-runtimes', manifest.id)) : '',
 	};
+}
+
+function executorSelectionFromOptions(options = {}) {
+	const env = options.env || process.env;
+	const executor = objectOption(options.executor) || objectOption(options.executorSelection) || {};
+	return {
+		id: firstString(
+			executor.id,
+			executor.executor_id,
+			options.executorId,
+			options.executor_id,
+			env.EXECUTOR_ID,
+			env.AGENT_TASK_EXECUTOR_ID
+		),
+		backend: firstString(
+			executor.backend,
+			options.executorBackend,
+			options.executor_backend,
+			env.EXECUTOR_BACKEND,
+			env.AGENT_TASK_EXECUTOR_BACKEND
+		),
+		capabilities: normalizeCapabilities(
+			executor.capabilities,
+			executor.capability,
+			options.executorCapabilities,
+			options.executor_capabilities,
+			options.executorCapability,
+			options.executor_capability,
+			env.EXECUTOR_CAPABILITIES,
+			env.EXECUTOR_CAPABILITY,
+			env.AGENT_TASK_EXECUTOR_CAPABILITIES,
+			env.AGENT_TASK_EXECUTOR_CAPABILITY
+		),
+		status: firstString(
+			executor.status,
+			options.executorStatus,
+			options.executor_status,
+			env.EXECUTOR_STATUS,
+			env.AGENT_TASK_EXECUTOR_STATUS
+		),
+	};
+}
+
+function objectOption(value) {
+	return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function firstString(...values) {
+	for (const value of values) {
+		if (typeof value === 'string' && value.trim() !== '') {
+			return value.trim();
+		}
+	}
+	return '';
+}
+
+function normalizeCapabilities(...values) {
+	const capabilities = [];
+	for (const value of values) {
+		if (Array.isArray(value)) {
+			capabilities.push(...value.filter((entry) => typeof entry === 'string'));
+			continue;
+		}
+		if (typeof value === 'string' && value.trim() !== '') {
+			capabilities.push(...value.split(',').map((entry) => entry.trim()).filter(Boolean));
+		}
+	}
+	return [...new Set(capabilities)];
+}
+
+function selectExecutor(manifest, selection) {
+	const providers = Array.isArray(manifest.agent_task_executors)
+		? manifest.agent_task_executors.filter((provider) => provider && typeof provider === 'object' && !Array.isArray(provider))
+		: [];
+	if (providers.length === 0) {
+		throw new Error(`Runtime ${manifest.id} does not declare any agent_task_executors.`);
+	}
+
+	const requestedStatus = selection.status || 'active';
+	const candidates = providers.filter((provider) => {
+		if (selection.id && provider.id !== selection.id) {
+			return false;
+		}
+		if (selection.backend && provider.backend !== selection.backend) {
+			return false;
+		}
+		if (requestedStatus && !executorStatusMatches(provider, requestedStatus)) {
+			return false;
+		}
+		if (!selection.capabilities.every((capability) => Array.isArray(provider.capabilities) && provider.capabilities.includes(capability))) {
+			return false;
+		}
+		return true;
+	});
+
+	if (candidates.length === 1) {
+		return candidates[0];
+	}
+
+	const criteria = executorSelectionDescription({ ...selection, status: requestedStatus });
+	if (candidates.length === 0) {
+		throw new Error(`No agent_task_executors for runtime ${manifest.id} match ${criteria}. Available executors: ${executorList(providers)}.`);
+	}
+	throw new Error(`Ambiguous agent_task_executors for runtime ${manifest.id} match ${criteria}: ${executorList(candidates)}. Select executor.id, backend, capability, or status explicitly.`);
+}
+
+function executorStatusMatches(provider, requestedStatus) {
+	if (requestedStatus === 'active' && !provider.status) {
+		return true;
+	}
+	return provider.status === requestedStatus;
+}
+
+function executorSelectionDescription(selection) {
+	const parts = [];
+	if (selection.id) {
+		parts.push(`id=${selection.id}`);
+	}
+	if (selection.backend) {
+		parts.push(`backend=${selection.backend}`);
+	}
+	if (selection.capabilities.length > 0) {
+		parts.push(`capabilities=${selection.capabilities.join(',')}`);
+	}
+	if (selection.status) {
+		parts.push(`status=${selection.status}`);
+	}
+	return parts.join(' ') || 'the default active executor selection';
+}
+
+function executorList(providers) {
+	return providers.map((provider) => {
+		const id = provider.id || '(missing id)';
+		const backend = provider.backend || '(missing backend)';
+		const status = provider.status || '(no status)';
+		return `${id} [backend=${backend}, status=${status}]`;
+	}).join(', ');
 }
 
 function executorScriptArg(provider) {
