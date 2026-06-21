@@ -21,9 +21,11 @@ assert.equal(typeof wordpress.validateFullSurfaceCoverageArtifacts, 'function');
 assert.equal(typeof wordpress.wpCodebox, 'object');
 assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
+assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipe, 'function');
 
 assert.equal(typeof wordpress.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.runWpCodeboxRecipe, 'function');
+assert.equal(typeof wordpress.buildWpCodeboxFuzzPlanRecipe, 'function');
 assert.equal(typeof wordpress.applyApprovedWpCodeboxArtifact, 'function');
 assert.equal(wordpress.compareCodeboxMemoryResults, undefined);
 
