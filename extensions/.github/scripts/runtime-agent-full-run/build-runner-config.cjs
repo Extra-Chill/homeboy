@@ -42,7 +42,7 @@ function buildConfig(env) {
   const runtimeProfiles = parseJsonInput('runtime_profiles', env.RUNTIME_PROFILES || '{}', 'object', {});
   const runtime = resolveRuntimeProvider(runtimeId, { workspace, env });
   const runtimeBin = runtime.paths.runtime_bin;
-  if (runtimePathRequired(runtime, 'runtime_bin') && (!runtimeBin || !fs.existsSync(runtimeBin))) {
+  if (runtimePathRequired(runtime, 'runtime_bin') && (!runtimeBin || !runtimeExecutableAvailable(runtimeBin, env))) {
     throw new Error(`Runtime CLI build missing at ${runtimeBin || 'runtime.paths.runtime_bin'}`);
   }
 
@@ -256,6 +256,24 @@ function runtimeTaskFromEnv(env) {
 function runtimePathRequired(runtime, pathName) {
   const requiredPaths = runtime?.manifest?.ci_materialization?.required_paths;
   return Array.isArray(requiredPaths) && requiredPaths.includes(pathName);
+}
+
+function runtimeExecutableAvailable(command, env = process.env) {
+  if (typeof command !== 'string' || command.trim() === '') {
+    return false;
+  }
+  if (isPathLikeExecutable(command)) {
+    return fs.existsSync(command);
+  }
+  return executableInPath(command, env.PATH || process.env.PATH || '');
+}
+
+function isPathLikeExecutable(command) {
+  return command.startsWith('.') || path.isAbsolute(command) || command.includes('/') || command.includes('\\');
+}
+
+function executableInPath(command, searchPath) {
+  return searchPath.split(path.delimiter).filter(Boolean).some((dir) => fs.existsSync(path.join(dir, command)));
 }
 
 function projectRuntimeConfig({ env, runtime, workspace, componentId, componentPath, workloadId, runnerWorkspaceGuestCheckout }) {

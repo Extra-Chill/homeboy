@@ -46,8 +46,10 @@ assert.deepEqual(genericProjection.runtime_fields, { runtime_example_version: '1
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-projection-'));
 const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-projection-runner-'));
-fs.mkdirSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist'), { recursive: true });
-fs.writeFileSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js'), '#!/usr/bin/env node\n');
+const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-bin-'));
+const wpCodeboxBin = path.join(binDir, 'wp-codebox');
+fs.writeFileSync(wpCodeboxBin, '#!/usr/bin/env sh\nexit 0\n');
+fs.chmodSync(wpCodeboxBin, 0o755);
 
 const codeboxConfig = buildConfig({
   GITHUB_WORKSPACE: workspace,
@@ -56,6 +58,7 @@ const codeboxConfig = buildConfig({
   COMPONENT_ID: 'example',
   TARGET_REPO: 'Extra-Chill/example',
   RUNTIME: 'wp-codebox',
+  PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
   PROFILE: 'codebox-profile',
   ARTIFACT_DECLARATIONS: JSON.stringify([
     { name: 'packet', kind: 'application/vnd.example.packet+json', required: true },

@@ -12,8 +12,10 @@ const { buildConfig } = require(path.join(repoRoot, '.github/scripts/runtime-age
 
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-inputs-'));
 const runnerTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-runner-'));
-fs.mkdirSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist'), { recursive: true });
-fs.writeFileSync(path.join(workspace, '.ci/wp-codebox/packages/cli/dist/index.js'), '#!/usr/bin/env node\n');
+const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-bin-'));
+const wpCodeboxBin = path.join(binDir, 'wp-codebox');
+fs.writeFileSync(wpCodeboxBin, '#!/usr/bin/env sh\nexit 0\n');
+fs.chmodSync(wpCodeboxBin, 0o755);
 
 const config = buildConfig({
   GITHUB_WORKSPACE: workspace,
@@ -22,6 +24,7 @@ const config = buildConfig({
   WORKLOAD_LABEL: 'Legacy workload label',
   TARGET_REPO: 'Extra-Chill/example',
   RUNTIME: 'wp-codebox',
+  PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
   PROFILE: 'codebox-profile',
   RUNTIME_PROFILES: JSON.stringify({
     'codebox-profile': {
@@ -75,6 +78,7 @@ const legacyToolPolicyConfig = buildConfig({
   WORKLOAD_ID: 'legacy-tool-policy',
   TARGET_REPO: 'Extra-Chill/example',
   RUNTIME: 'wp-codebox',
+  PATH: `${binDir}${path.delimiter}${process.env.PATH || ''}`,
   PROFILE: 'codebox-profile',
   RUNTIME_PROFILES: JSON.stringify({
     'codebox-profile': {

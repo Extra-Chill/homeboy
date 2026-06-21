@@ -117,7 +117,7 @@ function resolveRuntimeProvider(runtimeId = DEFAULT_RUNTIME_ID, options = {}) {
 		checkout,
 		setupCommands: normalizeCommands(materialization.setup_commands || []),
 		buildCommands: normalizeCommands(materialization.build_commands || []),
-		paths: resolvePaths(materialization.paths || {}, workspace),
+		paths: resolvePaths(materialization.paths || {}, workspace, options.env || process.env),
 		executor: resolveExecutor(manifest, options.repoRoot || repoRootFromHere(), options),
 	};
 }
@@ -145,11 +145,33 @@ function normalizeCommands(commands) {
 	});
 }
 
-function resolvePaths(paths, workspace) {
+function resolvePaths(paths, workspace, env = process.env) {
 	return Object.fromEntries(Object.entries(paths).map(([key, value]) => [
 		key,
-		typeof value === 'string' && value.length > 0 ? path.join(workspace, value) : value,
+		resolvePathValue(value, workspace, env),
 	]));
+}
+
+function resolvePathValue(value, workspace, env = process.env) {
+	if (typeof value === 'string') {
+		return value.length > 0 && isWorkspaceRelativePath(value) ? path.join(workspace, value) : value;
+	}
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return value;
+	}
+	if (value.type === 'executable') {
+		for (const envName of Array.isArray(value.env) ? value.env : []) {
+			if (typeof envName === 'string' && env[envName]) {
+				return env[envName];
+			}
+		}
+		return value.default || value.command || '';
+	}
+	return value.value || value.path || '';
+}
+
+function isWorkspaceRelativePath(value) {
+	return value.startsWith('.') || value.includes('/') || value.includes('\\');
 }
 
 function resolveExecutor(manifest, repoRoot, options = {}) {

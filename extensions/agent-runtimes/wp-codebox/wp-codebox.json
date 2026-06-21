@@ -46,9 +46,13 @@
     ],
     "paths": {
       "checkout": ".ci/wp-codebox",
-      "runtime_bin": ".ci/wp-codebox/packages/cli/dist/index.js",
+      "runtime_bin": {
+        "type": "executable",
+        "env": ["HOMEBOY_WP_CODEBOX_BIN", "WP_CODEBOX_BIN"],
+        "default": "wp-codebox"
+      },
       "runtime_component": ".ci/wp-codebox/packages/wordpress-plugin",
-      "runtime_core_module": ".ci/wp-codebox/packages/runtime-core/dist/index.js"
+      "runtime_core_module": "@automattic/wp-codebox-core"
     },
     "required_paths": ["runtime_bin"]
   },
