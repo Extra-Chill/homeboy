@@ -18,9 +18,9 @@ const MIN_MATCHES: usize = 2;
 ///
 /// Consumes the in-memory `(path, content)` view built once during discovery
 /// instead of re-walking and re-reading the tree. Behavior is preserved: the
-/// snapshot is a superset of the `.rs` files this detector previously walked,
-/// so filtering to Rust source files here yields the identical input set in
-/// walk order.
+/// snapshot is a superset of the files this detector previously walked, so
+/// filtering to the same file-extension subset here yields the identical input
+/// set in walk order.
 pub(in crate::core::code_audit) fn run(snapshot: &CodebaseSnapshot) -> Vec<Finding> {
     let root = snapshot.root();
     let mut files = Vec::new();
