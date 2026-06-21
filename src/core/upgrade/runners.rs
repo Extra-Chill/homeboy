@@ -415,6 +415,16 @@ fn upgrade_runner_with_executor(
             );
         }
     }
+    let local_version_drift = runner_local_version_drift(
+        &runner.id,
+        &homeboy_path,
+        previous_version.as_deref(),
+        new_version.as_deref(),
+    );
+    if path_drift.is_none() {
+        path_drift = local_version_drift;
+    }
+
     defer_extension_failures_for_path_drift(
         path_drift.as_deref(),
         &mut extensions_skipped,
@@ -452,6 +462,8 @@ fn upgrade_runner_with_executor(
         && path_drift.is_none()
         && extensions_failed.is_empty()
         && stale_daemon.is_none();
+    let detail =
+        runner_version_report_detail(detail, previous_version.as_deref(), new_version.as_deref());
     let detail = runner_upgrade_final_detail(
         &runner.id,
         detail,
@@ -1402,10 +1414,48 @@ fn runner_set_homeboy_path_command(runner_id: &str, homeboy_path: &str) -> Strin
 }
 
 fn runner_upgrade_recovery_commands(runner_id: &str) -> Vec<String> {
-    vec![format!(
-        "homeboy upgrade --force --upgrade-runner {}",
-        shell_arg(runner_id)
-    )]
+    vec![
+        format!(
+            "homeboy runner exec {} -- homeboy upgrade --no-restart",
+            shell_arg(runner_id)
+        ),
+        format!(
+            "homeboy upgrade --force --upgrade-runner {}",
+            shell_arg(runner_id)
+        ),
+    ]
+}
+
+fn runner_local_version_drift(
+    runner_id: &str,
+    homeboy_path: &str,
+    previous_version: Option<&str>,
+    new_version: Option<&str>,
+) -> Option<String> {
+    let local_version = current_version();
+    let runner_version = new_version?;
+    if !version_is_newer(local_version, runner_version) {
+        return None;
+    }
+
+    Some(format!(
+        "configured runner executable `{homeboy_path}` reports {runner_version}, but local/current reports {local_version}; runner before was {}; remediate with `{}`",
+        previous_version.unwrap_or("unknown"),
+        runner_upgrade_recovery_commands(runner_id)[0]
+    ))
+}
+
+fn runner_version_report_detail(
+    detail: String,
+    previous_version: Option<&str>,
+    new_version: Option<&str>,
+) -> String {
+    format!(
+        "{detail}\nrunner version check: local/current {}; runner before {}; runner after {}",
+        current_version(),
+        previous_version.unwrap_or("unknown"),
+        new_version.unwrap_or("unknown")
+    )
 }
 
 fn runner_extension_recovery_commands(runner: &Runner, homeboy_path: &str) -> Vec<String> {
@@ -2176,6 +2226,56 @@ mod tests {
             .detail
             .contains("PATH-visible `homeboy` repaired"));
         assert!(!updated[0].detail.contains("runner PATH drift detected"));
+    }
+
+    #[test]
+    fn fails_when_configured_runner_path_remains_older_than_local_after_successful_upgrade() {
+        let runner = ssh_runner("homeboy-lab", Some("/home/user/.cargo/bin/homeboy"));
+        let mut commands = Vec::new();
+
+        let (updated, skipped) = upgrade_runners_with_executor(
+            &[runner],
+            true,
+            None,
+            None,
+            &[],
+            |runner_id, options| {
+                commands.push(options.command.clone());
+                let stdout = match commands.len() {
+                    1 => "homeboy 0.0.1\n",
+                    2 => "{\"success\":true,\"message\":\"upgrade completed\"}\n",
+                    3 => "homeboy 0.0.1\n",
+                    4 => "homeboy 0.0.1\n",
+                    _ => "",
+                };
+                Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+            },
+            runner_status,
+        );
+
+        assert!(updated.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert!(!skipped[0].success);
+        assert_eq!(skipped[0].previous_version.as_deref(), Some("0.0.1"));
+        assert_eq!(skipped[0].new_version.as_deref(), Some("0.0.1"));
+        assert!(skipped[0]
+            .path_drift
+            .as_deref()
+            .unwrap()
+            .contains("but local/current reports"));
+        assert!(skipped[0].recovery_commands.contains(
+            &"homeboy runner exec homeboy-lab -- homeboy upgrade --no-restart".to_string()
+        ));
+        assert!(skipped[0]
+            .detail
+            .contains("runner version check: local/current"));
+        assert!(skipped[0].detail.contains("runner before 0.0.1"));
+        assert!(skipped[0].detail.contains("runner after 0.0.1"));
+        assert!(skipped[0]
+            .detail
+            .contains("homeboy runner exec homeboy-lab -- homeboy upgrade --no-restart"));
+        assert_eq!(commands[1][0], "/home/user/.cargo/bin/homeboy");
+        assert!(commands[1].contains(&"--force".to_string()));
     }
 
     #[test]
