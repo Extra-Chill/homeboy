@@ -223,9 +223,25 @@ pub struct AgentTaskControllerArgs {
 
 #[derive(Args, Debug)]
 pub struct ProvidersArgs {
+    /// Executor backend to validate against this machine/runner's provider readiness.
+    #[arg(long = "backend", value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Provider id to disambiguate when more than one provider exists for the backend.
+    #[arg(
+        long = "selector",
+        visible_alias = "provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub selector: Option<String>,
+
     /// Secret environment variable name to check without exposing its value. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
+
+    /// Fail non-zero when the selected provider is registered but not executable here.
+    #[arg(long = "validate-readiness")]
+    pub validate_readiness: bool,
 }
 
 /// Arguments for `agent-task doctor`: the single preflight/repair path for cook
