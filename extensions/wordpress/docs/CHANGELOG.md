@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.8.1] - 2026-06-21
+
+### Changed
+- Resolve object dependencies before preflight
+
 ## [3.8.0] - 2026-06-21
 
 ### Added
