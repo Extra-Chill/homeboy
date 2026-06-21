@@ -66,6 +66,9 @@ const {
   legacyAgentTaskRunSessionArtifacts,
 } = require('./codebox-run-agent-task-contract');
 const {
+  wpCodeboxBin,
+} = require('./wp-codebox-adapter-descriptor');
+const {
   assertProviderCredentialBoundaryNamesOnly,
   providerCredentialBoundary,
   providerCredentialRequestFields,
@@ -422,7 +425,13 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     component_contracts: componentContracts,
     homeboy_path: config.homeboy || config.homeboy_path || runtimeOptions.homeboy || '',
     homeboy_extensions_path: config.homeboy_extensions || config.homeboy_extensions_path || runtimeOptions.homeboyExtensions || '',
-    wp_codebox_bin: firstValue(config.runtime_bin, config.wp_codebox_bin, config.wpCodeboxBin, runtimeOptions.wpCodeboxBin, defaults.wpCodeboxBin, ''),
+    wp_codebox_bin: wpCodeboxBin({
+      runtime_bin: config.runtime_bin,
+      wp_codebox_bin: config.wp_codebox_bin,
+      wpCodeboxBin: config.wpCodeboxBin || runtimeOptions.wpCodeboxBin || defaults.wpCodeboxBin,
+      env: {},
+      executable: '',
+    }),
     wp: config.runtime_wordpress_version || config.wordpress_runtime_version || config.wordpress_version || config.wp_codebox_wordpress_version || config.wpCodeboxWordpressVersion || config.wp || runtimeOptions.wpCodeboxWordpressVersion || '',
     artifacts_path: config.artifacts || config.artifacts_path || runtimeOptions.artifacts || '',
     max_turns: config.max_turns || runtimeOptions.maxTurns,
@@ -1185,7 +1194,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     provider,
     model,
     secretEnv: defaultSecretEnv(config, options, settings, providerConfig),
-    wpCodeboxBin: firstValue(settings.wp_codebox_bin, settings.wpCodeboxBin, process.env.HOMEBOY_WP_CODEBOX_BIN, ''),
+    wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
     runtimeEnv: defaultRuntimeEnv(settings),

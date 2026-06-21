@@ -8,6 +8,11 @@ const {
 } = require('./wp-codebox-runtime-contract-source');
 
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+const {
+  isCodeboxLegacyAgentTaskRunResult,
+  legacyAgentTaskRunEvidenceRefs,
+  legacyAgentTaskRunSessionArtifacts,
+} = require('./codebox-legacy-result-adapter');
 
 const WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runRequest;
 const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runResult;
@@ -65,55 +70,6 @@ function codeboxRunAgentTaskInvocation(options = {}) {
     result_schema: useStableRunAgentTask ? WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA : WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
     result_key: 'agent_task_run_result',
   };
-}
-
-function isCodeboxLegacyAgentTaskRunResult(result) {
-  return result?.schema === WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA;
-}
-
-function legacyAgentTaskRunSessionArtifacts(result = {}) {
-  if (!isCodeboxLegacyAgentTaskRunResult(result)) {
-    return [];
-  }
-  const artifacts = [];
-  if (typeof result.artifacts === 'string' && result.artifacts) {
-    artifacts.push({
-      id: result.session?.artifacts?.bundle_id || 'wp-codebox-artifacts',
-      kind: 'codebox-artifact-directory',
-      path: result.artifacts,
-      metadata: {
-        session_id: result.session?.id,
-        preview_url: result.session?.artifacts?.preview_url,
-      },
-    });
-  }
-  if (result.session?.artifacts && typeof result.session.artifacts === 'object') {
-    artifacts.push({
-      id: result.session.artifacts.bundle_id || `wp-codebox-session-artifacts-${artifacts.length + 1}`,
-      kind: 'codebox-session-artifacts',
-      url: result.session.artifacts.preview_url,
-      metadata: result.session.artifacts,
-    });
-  }
-  return artifacts;
-}
-
-function legacyAgentTaskRunEvidenceRefs(result = {}) {
-  if (!isCodeboxLegacyAgentTaskRunResult(result)) {
-    return [];
-  }
-  return [
-    result.session?.artifacts?.preview_url ? {
-      kind: 'codebox-preview',
-      uri: result.session.artifacts.preview_url,
-      label: 'WP Codebox preview',
-    } : null,
-    typeof result.artifacts === 'string' && result.artifacts ? {
-      kind: 'codebox-artifact-directory',
-      uri: result.artifacts,
-      label: 'WP Codebox artifacts',
-    } : null,
-  ].filter(Boolean);
 }
 
 function firstValue(...values) {

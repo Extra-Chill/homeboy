@@ -27,6 +27,11 @@ const {
 	wpCodeboxProviderRuntimeOperationConfig,
 	wpCodeboxProviderRuntimeOperationEntry,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-contract.js'));
+const {
+	wpCodeboxBin,
+	wpCodeboxCliDescriptor,
+	wpCodeboxCommand,
+} = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-descriptor.js'));
 
 assert.equal(WP_CODEBOX_BACKEND, 'codebox');
 assert.equal(WP_CODEBOX_PROVIDER_ID, 'wordpress.codebox-agent-task-executor');
@@ -36,6 +41,18 @@ assert.equal(WP_CODEBOX_TASK_REQUEST_SCHEMA, 'wp-codebox/task-input/v1');
 assert.equal(WP_CODEBOX_RECIPE_RUN_CLI_COMMAND, 'recipe-run');
 assert.equal(WP_CODEBOX_WORKSPACE_MOUNT_KIND, 'homeboy-runtime-workspace');
 assert.equal(WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND, ['homeboy', 'dmc', 'workspace'].join('-'));
+
+const cliDescriptor = wpCodeboxCliDescriptor();
+assert.equal(cliDescriptor.schema, 'wp-codebox/cli-descriptor/v1');
+assert.deepEqual(cliDescriptor.commands, {
+	run_agent_task: 'run-agent-task',
+	legacy_agent_task_run: 'agent-task-run',
+	recipe_run: 'recipe-run',
+});
+assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: '/usr/local/bin/wp-codebox' } }), '/usr/local/bin/wp-codebox');
+assert.equal(wpCodeboxBin({ settings: { wp_codebox_bin: '/settings/wp-codebox' } }), '/settings/wp-codebox');
+assert.equal(wpCodeboxBin({ executable: '' }), undefined);
+assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.mjs'), { command: process.execPath, args: ['/tmp/wp-codebox.mjs'] });
 
 const invocationContract = wpCodeboxProviderRuntimeInvocationContract();
 assert.equal(invocationContract.schema, 'wp-codebox/provider-runtime-invocation-contract/v1');
@@ -82,6 +99,7 @@ assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
 	'consume_canonical_envelope_with_legacy_package_fallback'
 );
+assert.doesNotMatch(JSON.stringify(cliDescriptor), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 
 const legacyRuntimeAliasPrefix = ['data', 'machine'].join('_');
 assert.deepEqual(wpCodeboxLegacyRuntimeComponentAliasFields(), {
