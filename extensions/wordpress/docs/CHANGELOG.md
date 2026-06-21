@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.3] - 2026-06-21
+
+### Changed
+- Add WordPress runtime surface discovery helper
+
+### Fixed
+- adapt WordPress fuzz runner to Codebox suites
+
 ## [3.12.2] - 2026-06-21
 
 ### Fixed
