@@ -19,6 +19,7 @@ use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
+use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
 use super::super::agent_task_dispatch::{DispatchArgs, DispatchCoreArgs};
 use super::super::CmdResult;
@@ -168,6 +169,9 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         )
     })?;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
+    if args.doctor {
+        return controller_from_spec_doctor(spec, &args);
+    }
     let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
     if !args.resume {
         return Ok((command_json_value(report)?, 0));
@@ -186,6 +190,246 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         }),
         exit_code,
     ))
+}
+
+fn controller_from_spec_doctor(
+    spec: AgentTaskRepoLoopSpec,
+    args: &AgentTaskControllerFromSpecArgs,
+) -> CmdResult<Value> {
+    let plan = agent_task_controller_service::plan_from_spec(ControllerPlanRequest { spec })?;
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let mut checks = vec![doctor_check(
+        "controller.spec",
+        "ok",
+        "Controller spec parsed and compiled without writing state",
+        None,
+        serde_json::json!({ "loop_id": plan.loop_id, "action_count": plan.actions.len() }),
+    )];
+    let defaults = ControllerDispatchDefaults::from_from_spec_args(args);
+
+    for action in &plan.actions {
+        match &action.action {
+            AgentTaskLoopPolicyAction::SpawnTask { request, .. } => {
+                checks.extend(doctor_dispatch_request_checks(
+                    &action.action_id,
+                    request,
+                    &defaults,
+                    &executor,
+                ));
+            }
+            AgentTaskLoopPolicyAction::FanOut {
+                request_template, ..
+            } => {
+                checks.extend(doctor_dispatch_request_checks(
+                    &action.action_id,
+                    request_template,
+                    &defaults,
+                    &executor,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let ok = checks
+        .iter()
+        .all(|check| check.get("status").and_then(Value::as_str) != Some("error"));
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-doctor-result/v1",
+            "ok": ok,
+            "loop_id": plan.loop_id,
+            "checks": checks,
+            "run_command": format!("homeboy agent-task controller from-spec {} --resume", args.spec),
+        }),
+        if ok { 0 } else { 1 },
+    ))
+}
+
+fn doctor_dispatch_request_checks(
+    action_id: &str,
+    request: &Value,
+    defaults: &ControllerDispatchDefaults,
+    executor: &ExtensionProviderAgentTaskExecutor,
+) -> Vec<Value> {
+    let mut checks = Vec::new();
+    let mode = request
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("dispatch");
+    if mode != "dispatch" {
+        checks.push(doctor_check(
+            format!("controller.action.{action_id}.dispatch"),
+            "warning",
+            format!("Controller action uses unsupported preflight mode '{mode}'"),
+            Some("Only generic dispatch-mode controller actions are preflighted by this doctor"),
+            serde_json::json!({ "action_id": action_id, "mode": mode }),
+        ));
+        return checks;
+    }
+
+    let mut dispatch_args = match dispatch_args_from_controller_request(request) {
+        Ok(args) => args,
+        Err(error) => {
+            checks.push(doctor_check(
+                format!("controller.action.{action_id}.dispatch.parse"),
+                "error",
+                format!("Controller dispatch request is invalid: {}", error.message),
+                Some("Fix the action's generic dispatch request shape in the controller spec"),
+                serde_json::json!({ "action_id": action_id, "details": error.details }),
+            ));
+            return checks;
+        }
+    };
+    defaults.apply(&mut dispatch_args);
+
+    let command: dispatch_service::AgentTaskDispatchCommand = dispatch_args.into();
+    let dispatch_request = match dispatch_service::resolve_dispatch_request(command) {
+        Ok(request) => request,
+        Err(error) => {
+            checks.push(doctor_check(
+                format!("controller.action.{action_id}.dispatch.resolve"),
+                "error",
+                format!("Dispatch prerequisites are incomplete: {}", error.message),
+                Some("Declare a generic dispatch backend/default backend, selector, workspace, and prompt inputs before running the controller"),
+                serde_json::json!({ "action_id": action_id, "details": error.details }),
+            ));
+            return checks;
+        }
+    };
+
+    match dispatch_service::build_dispatch_plan(&dispatch_request) {
+        Ok(mut dispatch_plan) => {
+            homeboy::core::agent_task_provider::apply_provider_runner_secret_env_contracts(
+                &mut dispatch_plan,
+            );
+            if let Err(error) = dispatch_service::preflight_dispatch_provider_secrets(&dispatch_plan)
+            {
+                checks.push(doctor_check(
+                    format!("controller.action.{action_id}.dispatch.secrets"),
+                    "error",
+                    format!("Required provider secrets are missing: {}", error.message),
+                    Some("Configure the declared secret env values or remove the generic secret requirement from the provider/config"),
+                    serde_json::json!({ "action_id": action_id, "details": error.details }),
+                ));
+            }
+            checks.push(provider_availability_check(
+                action_id,
+                &dispatch_request.backend,
+                dispatch_request.selector.as_deref(),
+                &dispatch_request.required_capabilities,
+                executor,
+            ));
+        }
+        Err(error) => checks.push(doctor_check(
+            format!("controller.action.{action_id}.dispatch.plan"),
+            "error",
+            format!("Dispatch plan could not be built: {}", error.message),
+            Some("Fix generic workspace/materialization inputs such as cwd, workspace, repo, provider config, or task prompt inputs"),
+            serde_json::json!({ "action_id": action_id, "details": error.details }),
+        )),
+    }
+
+    checks
+}
+
+fn provider_availability_check(
+    action_id: &str,
+    backend: &str,
+    selector: Option<&str>,
+    required_capabilities: &[String],
+    executor: &ExtensionProviderAgentTaskExecutor,
+) -> Value {
+    if backend == "fixture" {
+        return doctor_check(
+            format!("controller.action.{action_id}.provider"),
+            "ok",
+            "Fixture provider is available for deterministic local execution",
+            None,
+            serde_json::json!({ "action_id": action_id, "backend": backend }),
+        );
+    }
+
+    let matches: Vec<_> = executor
+        .providers()
+        .iter()
+        .filter(|provider| {
+            provider.backend == backend || provider.extension_id.as_deref() == Some(backend)
+        })
+        .collect();
+    let selected = selector
+        .and_then(|selector| {
+            matches
+                .iter()
+                .find(|provider| provider.id == selector)
+                .copied()
+        })
+        .or_else(|| (matches.len() == 1).then(|| matches[0]));
+
+    let Some(provider) = selected else {
+        let available_provider_ids: Vec<_> =
+            matches.iter().map(|provider| provider.id.clone()).collect();
+        let remediation = if matches.is_empty() {
+            "Install or enable a generic agent-task provider for this backend, or pass --dispatch-backend with an available backend"
+        } else {
+            "Pass --dispatch-selector with one of the available provider ids"
+        };
+        return doctor_check(
+            format!("controller.action.{action_id}.provider"),
+            "error",
+            format!("No selectable provider found for backend '{backend}'"),
+            Some(remediation),
+            serde_json::json!({
+                "action_id": action_id,
+                "backend": backend,
+                "selector": selector,
+                "available_provider_ids": available_provider_ids,
+            }),
+        );
+    };
+
+    let missing_capabilities: Vec<_> = required_capabilities
+        .iter()
+        .filter(|capability| !provider.capabilities.contains(capability))
+        .cloned()
+        .collect();
+    if !missing_capabilities.is_empty() {
+        return doctor_check(
+            format!("controller.action.{action_id}.provider.capabilities"),
+            "error",
+            format!(
+                "Provider '{}' is missing required capabilities: {}",
+                provider.id,
+                missing_capabilities.join(", ")
+            ),
+            Some("Choose a provider with the declared generic capabilities or adjust the workflow capability declaration"),
+            serde_json::json!({ "action_id": action_id, "provider": provider.id, "missing_capabilities": missing_capabilities }),
+        );
+    }
+
+    doctor_check(
+        format!("controller.action.{action_id}.provider"),
+        "ok",
+        format!("Provider '{}' is selectable", provider.id),
+        None,
+        serde_json::json!({ "action_id": action_id, "backend": backend, "selector": selector, "provider": provider.id }),
+    )
+}
+
+fn doctor_check(
+    id: impl Into<String>,
+    status: &str,
+    message: impl Into<String>,
+    remediation: Option<&str>,
+    details: Value,
+) -> Value {
+    serde_json::json!({
+        "id": id.into(),
+        "status": status,
+        "message": message.into(),
+        "remediation": remediation,
+        "details": details,
+    })
 }
 
 /// Bridge controller spawn-task `"dispatch"` requests into the CLI dispatch path.
