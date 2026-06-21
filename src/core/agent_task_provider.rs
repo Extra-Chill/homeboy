@@ -2117,6 +2117,7 @@ fn provider_preflight_digest(
         "program": program,
         "path": std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
         "runtime_path_provenance": runtime_path_provenance(provider),
+        "missing_secret_env": missing_secret_env,
         "secret_env_status": secret_status,
         "failures": failures,
     });
@@ -4725,10 +4726,7 @@ process.stdout.write(JSON.stringify({
                 provider,
             ]));
 
-        let aggregate = scheduler.run(AgentTaskPlan::new(
-            "plan-selector-mismatch",
-            vec![request],
-        ));
+        let aggregate = scheduler.run(AgentTaskPlan::new("plan-selector-mismatch", vec![request]));
 
         assert_eq!(aggregate.totals.failed, 1);
         assert_eq!(
