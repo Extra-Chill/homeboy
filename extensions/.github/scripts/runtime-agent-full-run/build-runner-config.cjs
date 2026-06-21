@@ -127,6 +127,8 @@ function buildConfig(env) {
     workload_run_before: parseJsonInput('workload_run_before', env.WORKLOAD_RUN_BEFORE || '[]', 'array', []),
     workload_run_after: parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []),
     required_abilities: parseJsonInput('required_abilities', env.REQUIRED_ABILITIES || '[]', 'array', []),
+    success_requires_pr: env.SUCCESS_REQUIRES_PR !== 'false',
+    success_completion_outcomes: parseJsonInput('success_completion_outcomes', env.SUCCESS_COMPLETION_OUTCOMES || '[]', 'array', []),
     provider: env.PROVIDER || '',
     model: env.MODEL || '',
     provider_register_function: providerPlugin.register_function || '',

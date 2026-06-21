@@ -4,6 +4,12 @@
   "name": "WP Codebox",
   "version": "1.2.0",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
+  "agent_loop": {
+    "outcome_adapter": {
+      "module": "agent-runtimes/wp-codebox/lib/runtime-agent-outcome-adapter.js",
+      "export": "scenarioResultsFromOutcome"
+    }
+  },
   "ci_materialization": {
     "checkout": {
       "repo": "Automattic/wp-codebox",
