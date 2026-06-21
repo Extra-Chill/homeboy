@@ -3,6 +3,7 @@
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
 const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = 'wp-codebox/artifact-result-envelope/v1';
+const WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA = 'wp-codebox/case-artifact-index/v1';
 
 const ARTIFACT_ROLE_FALLBACK_PATTERNS = [
   ['patch', /patch|diff/i],
@@ -67,6 +68,211 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
 
   return Object.assign({}, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, workload)
     .map((candidate) => normalizeTypedArtifacts(candidate, options)));
+}
+
+function caseArtifactIndexFromCodeboxResult(result, options = {}) {
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+  return normalizeCaseArtifactIndex({
+    schema: WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
+    caseRefs: [
+      ...caseRefsFromCaseArtifactCandidates(result),
+      ...caseRefsFromCaseArtifactCandidates(result?.outputs),
+      ...caseRefsFromCaseArtifactCandidates(result?.run),
+      ...caseRefsFromCaseArtifactCandidates(result?.run?.agentResult),
+      ...caseRefsFromCaseArtifactCandidates(result?.agentResult),
+      ...caseRefsFromCaseArtifactCandidates(result?.agent_result),
+      ...caseRefsFromCaseArtifactCandidates(result?.metadata),
+      ...caseRefsFromCaseArtifactCandidates(result?.metadata?.agent_runtime?.result),
+      ...caseRefsFromCaseArtifactCandidates(artifactResult),
+      ...caseRefsFromCaseArtifactCandidates(artifactResult?.result),
+      ...caseRefsFromCaseArtifactCandidates(artifactResult?.result?.outputs),
+    ],
+    metadata: plainObject(options.metadata) ? options.metadata : undefined,
+  });
+}
+
+function normalizeCaseArtifactIndex(value = {}) {
+  if (!plainObject(value)) {
+    return {
+      schema: WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
+      caseRefs: [],
+    };
+  }
+  const candidateRefs = [
+    ...(Array.isArray(value.caseRefs) ? value.caseRefs : []),
+    ...(Array.isArray(value.case_refs) ? value.case_refs : []),
+    ...caseRefsFromFuzzResults(value),
+  ];
+  return cleanObject({
+    schema: WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
+    caseRefs: dedupeCaseArtifactRefs(candidateRefs.map(normalizeCaseArtifactRef).filter(Boolean)),
+    metadata: plainObject(value.metadata) ? value.metadata : undefined,
+  });
+}
+
+function caseRefsFromCaseArtifactCandidates(value) {
+  if (!plainObject(value)) {
+    return [];
+  }
+  const directIndex = value.schema === WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA ? normalizeCaseArtifactIndex(value).caseRefs : [];
+  return [
+    ...directIndex,
+    ...caseRefsFromFuzzResults(value),
+    ...caseRefsFromFuzzResults(value.fuzz_results),
+    ...caseRefsFromFuzzResults(value.fuzzResults),
+    ...caseRefsFromFuzzResults(value.benchmark_artifacts),
+    ...caseRefsFromFuzzResults(value.benchmarkArtifacts),
+    ...caseRefsFromFuzzResults(value.artifacts),
+  ];
+}
+
+function caseRefsFromFuzzResults(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry, index) => caseRefsFromScenario(entry, { caseIndex: index }));
+  }
+  if (!plainObject(value)) {
+    return [];
+  }
+  if (Array.isArray(value.results)) {
+    return value.results.flatMap((result) => caseRefsFromBenchmarkResult(result));
+  }
+  if (Array.isArray(value.scenarios)) {
+    return value.scenarios.flatMap((scenario) => caseRefsFromScenario(scenario, {
+      componentId: value.component_id || value.componentId,
+    }));
+  }
+  if (Array.isArray(value.cases) || Array.isArray(value.steps)) {
+    return caseRefsFromScenario(value, {
+      componentId: value.component_id || value.componentId,
+      scenarioId: value.scenario_id || value.scenarioId || value.id,
+    });
+  }
+  return [];
+}
+
+function caseRefsFromBenchmarkResult(result) {
+  if (!plainObject(result)) {
+    return [];
+  }
+  const componentId = result.component_id || result.componentId;
+  return normalizeArray(result.scenarios).flatMap((scenario) => caseRefsFromScenario(scenario, { componentId }));
+}
+
+function caseRefsFromScenario(scenario, context = {}) {
+  if (!plainObject(scenario)) {
+    return [];
+  }
+  const componentId = scenario.component_id || scenario.componentId || context.componentId;
+  const scenarioId = scenario.scenario_id || scenario.scenarioId || scenario.id || context.scenarioId;
+  const scenarioArtifactRefs = artifactRefsFromValue(scenario.artifactRefs || scenario.artifact_refs || scenario.artifacts);
+  const caseCandidates = [
+    ...normalizeArray(scenario.cases),
+    ...caseCandidatesFromSteps(scenario.steps),
+  ];
+  if (caseCandidates.length === 0 && (scenario.case_id || scenario.caseId || scenario.name || scenarioArtifactRefs.length > 0)) {
+    caseCandidates.push(scenario);
+  }
+  return caseCandidates.map((candidate, index) => normalizeCaseArtifactRef({
+    component_id: componentId,
+    scenario_id: scenarioId,
+    case_id: candidate?.case_id || candidate?.caseId || candidate?.id || candidate?.name || context.caseId,
+    index: candidate?.index ?? candidate?.case_index ?? candidate?.caseIndex ?? context.caseIndex ?? index,
+    status: candidate?.status,
+    artifactRefs: [
+      ...scenarioArtifactRefs,
+      ...artifactRefsFromValue(candidate?.artifactRefs || candidate?.artifact_refs || candidate?.artifacts),
+    ],
+    metadata: plainObject(candidate?.metadata) ? candidate.metadata : undefined,
+  })).filter((caseRef) => caseRef && (caseRef.case_id || caseRef.artifactRefs.length > 0));
+}
+
+function caseCandidatesFromSteps(steps) {
+  return normalizeArray(steps)
+    .filter((step) => plainObject(step) && (step.case_id || step.caseId || typeof step.rest_request_case_index === 'number' || typeof step.case_index === 'number'))
+    .map((step) => ({
+      ...step,
+      case_id: step.case_id || step.caseId,
+      index: step.rest_request_case_index ?? step.case_index ?? step.caseIndex,
+    }));
+}
+
+function normalizeCaseArtifactRef(ref) {
+  if (!plainObject(ref)) {
+    return null;
+  }
+  const artifactRefs = artifactRefsFromValue(ref.artifactRefs || ref.artifact_refs);
+  return cleanObject({
+    component_id: ref.component_id || ref.componentId,
+    scenario_id: ref.scenario_id || ref.scenarioId,
+    case_id: ref.case_id || ref.caseId || ref.id,
+    index: typeof ref.index === 'number' ? ref.index : undefined,
+    status: ref.status,
+    artifactRefs: dedupeArtifactRefs(artifactRefs),
+    metadata: plainObject(ref.metadata) ? ref.metadata : undefined,
+  });
+}
+
+function artifactRefsFromValue(value) {
+  if (Array.isArray(value)) {
+    return value.flatMap(artifactRefsFromValue);
+  }
+  if (typeof value === 'string') {
+    return [normalizeCaseArtifactFileRef({ path: value })];
+  }
+  if (!plainObject(value)) {
+    return [];
+  }
+  if (typeof value.path === 'string' || typeof value.uri === 'string' || typeof value.url === 'string') {
+    return [normalizeCaseArtifactFileRef(value)].filter(Boolean);
+  }
+  return Object.entries(value).flatMap(([name, artifact]) => artifactRefsFromValueWithName(name, artifact));
+}
+
+function artifactRefsFromValueWithName(name, value) {
+  return artifactRefsFromValue(value).map((ref) => cleanObject({ name, ...ref }));
+}
+
+function normalizeCaseArtifactFileRef(ref) {
+  if (!plainObject(ref)) {
+    return null;
+  }
+  const digest = plainObject(ref.digest) ? ref.digest : {};
+  return cleanObject({
+    path: ref.path || ref.uri,
+    uri: ref.uri,
+    url: ref.url,
+    kind: ref.kind || ref.type,
+    contentType: ref.contentType || ref.content_type || ref.mime,
+    sha256: ref.sha256 || digest.value,
+    source: ref.source,
+    name: ref.name,
+    metric: ref.metric,
+    sampleIndex: ref.sampleIndex ?? ref.sample_index,
+  });
+}
+
+function dedupeCaseArtifactRefs(refs) {
+  const seen = new Set();
+  return refs.filter((ref) => {
+    const key = `${ref.component_id || ''}:${ref.scenario_id || ''}:${ref.case_id || ''}:${ref.index ?? ''}:${JSON.stringify(ref.artifactRefs || [])}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeArtifactRefs(refs) {
+  const seen = new Set();
+  return refs.filter((ref) => {
+    const key = `${ref.path || ''}:${ref.uri || ''}:${ref.url || ''}:${ref.kind || ''}:${ref.name || ''}:${ref.sha256 || ''}:${ref.sampleIndex ?? ''}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) {
@@ -363,13 +569,16 @@ module.exports = {
   TYPED_ARTIFACT_SCHEMA,
   WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
   WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
+  WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
   artifactResultEnvelopeFromCodeboxResult,
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
+  caseArtifactIndexFromCodeboxResult,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
   normalizeArtifactResultEnvelope,
+  normalizeCaseArtifactIndex,
   normalizeTypedArtifactEntry,
   normalizeTypedArtifacts,
   typedArtifactsFromCodeboxResult,
