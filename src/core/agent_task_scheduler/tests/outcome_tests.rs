@@ -6,6 +6,7 @@ use super::super::outcome::{
 use super::super::*;
 use super::fixtures::*;
 use serde_json::json;
+use std::fs;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -108,6 +109,46 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["missing"],
         json!(["import_validation_result", "visual_parity_artifact"])
+    );
+}
+
+#[test]
+fn empty_required_typed_artifact_fails_with_operator_pointer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let patch_path = temp.path().join("patch.diff");
+    fs::write(&patch_path, "").expect("empty patch");
+    let scheduler = AgentTaskScheduler::new(SuccessEmptyRequiredTypedArtifactExecutor {
+        artifact_path: patch_path.clone(),
+    });
+
+    let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
+
+    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(aggregate.totals.failed, 1);
+    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+    assert_eq!(
+        aggregate.outcomes[0].failure_classification,
+        Some(AgentTaskFailureClassification::ExecutionFailed)
+    );
+    let diagnostic = aggregate.outcomes[0]
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid")
+        .expect("invalid required typed artifact diagnostic");
+    assert_eq!(diagnostic.data["invalid"][0]["task_id"], json!("task-1"));
+    assert_eq!(diagnostic.data["invalid"][0]["name"], json!("patch"));
+    assert_eq!(
+        diagnostic.data["invalid"][0]["artifact_id"],
+        json!("empty-patch")
+    );
+    assert_eq!(
+        diagnostic.data["invalid"][0]["path"],
+        json!(patch_path.display().to_string())
+    );
+    assert_eq!(diagnostic.data["invalid"][0]["size_bytes"], json!(0));
+    assert_eq!(
+        diagnostic.data["invalid"][0]["reason"],
+        json!("declared artifact size is zero bytes")
     );
 }
 
