@@ -619,7 +619,7 @@ homeboy_preflight_declared_validation_dependency_paths() {
     while IFS= read -r dependency; do
         [ -n "$dependency" ] || continue
         if _homeboy_validation_dependency_entry_is_object "$dependency"; then
-            dependency=$(_homeboy_validation_dependency_entry_token "$dependency" || true)
+            dependency=$(_homeboy_resolve_validation_dependency_entry_path "$dependency" || true)
             [ -n "$dependency" ] || continue
         fi
         case "$dependency" in

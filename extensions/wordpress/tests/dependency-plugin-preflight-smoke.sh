@@ -146,6 +146,17 @@ if [ "$MONOREPO_RESOLVED" != "${MONOREPO_DEP}/php-transformer" ]; then
     exit 1
 fi
 
+HOMEBOY_SETTINGS_JSON=$(jq -nc --arg source "$MONOREPO_DEP" '{validation_dependencies: [{source: $source, plugin_slug: "blocks-engine-php-transformer", package_path: "php-transformer"}]}')
+export HOMEBOY_SETTINGS_JSON
+MONOREPO_PREFLIGHT_ARTIFACTS="${TMP_ROOT}/monorepo-object-preflight-artifacts"
+homeboy_preflight_declared_validation_dependency_paths "${MONOREPO_PREFLIGHT_ARTIFACTS}" "bench"
+if [ -f "${MONOREPO_PREFLIGHT_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" ]; then
+    echo "ERROR: object dependency preflight should resolve package_path before path validation." >&2
+    jq '.' "${MONOREPO_PREFLIGHT_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagnostics.json" >&2 || true
+    exit 1
+fi
+unset HOMEBOY_SETTINGS_JSON
+
 SANITIZE_KEY_DEP="${TMP_ROOT}/sanitize-key-plugin"
 mkdir -p "$SANITIZE_KEY_DEP"
 cat > "${SANITIZE_KEY_DEP}/sanitize-key-plugin.php" <<'PHP'
