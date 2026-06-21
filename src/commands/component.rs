@@ -138,6 +138,27 @@ enum ComponentCommand {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Prepare a component for build/test: install its declared extensions and
+    /// install its dependencies through detected providers.
+    ///
+    /// Core-owned replacement for hardcoded CI install/refresh + composer/npm/
+    /// pnpm/yarn dependency setup. The package manager is chosen by detection
+    /// and manifest config, never by shell literals. CI calls this instead of
+    /// orchestrating the sequence itself.
+    Setup {
+        /// Component ID (optional when --path is provided)
+        id: Option<String>,
+        /// Discover component from a directory's homeboy.json
+        #[arg(long)]
+        path: Option<String>,
+        /// Source (git URL or local path) to install the component's configured
+        /// extensions from. Omit to skip extension install (deps only).
+        #[arg(long)]
+        source: Option<String>,
+        /// Skip the dependency install step (extensions only).
+        #[arg(long)]
+        skip_dependencies: bool,
+    },
     /// Add a version target to a component
     AddVersionTarget {
         /// Component ID
@@ -342,6 +363,17 @@ pub fn run(
         ComponentCommand::Projects { id } => projects(&id),
         ComponentCommand::Shared { id } => shared(id.as_deref()),
         ComponentCommand::Env { id, path } => env::env(id.as_deref(), path.as_deref()),
+        ComponentCommand::Setup {
+            id,
+            path,
+            source,
+            skip_dependencies,
+        } => setup_component(
+            id.as_deref(),
+            path.as_deref(),
+            source.as_deref(),
+            skip_dependencies,
+        ),
         ComponentCommand::AddVersionTarget { id, file, pattern } => {
             add_version_target(&id, &file, &pattern)
         }
@@ -387,6 +419,43 @@ fn artifacts(id: Option<&str>, path: Option<&str>, apply: bool) -> CmdResult<Com
             })?),
             hint,
             updated_fields,
+            ..Default::default()
+        },
+        0,
+    ))
+}
+
+fn setup_component(
+    id: Option<&str>,
+    path: Option<&str>,
+    source: Option<&str>,
+    skip_dependencies: bool,
+) -> CmdResult<ComponentOutput> {
+    let result = homeboy::core::setup::component_setup(
+        id,
+        path,
+        &homeboy::core::setup::ComponentSetupOptions {
+            extension_source: source,
+            skip_dependencies,
+        },
+    )
+    .map_err(|e| e.with_contextual_hint())?;
+
+    let component_id = result.component_id.clone();
+    let entity = serde_json::to_value(&result).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "component.setup",
+            "Failed to serialize component setup result",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+
+    Ok((
+        ComponentOutput {
+            command: "component.setup".to_string(),
+            id: Some(component_id),
+            entity: Some(entity),
             ..Default::default()
         },
         0,

@@ -65,6 +65,16 @@ pub struct DependencyCommandResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DependencyInstallResult {
+    pub component_id: String,
+    pub component_path: String,
+    pub package_manager: String,
+    /// One entry per dependency provider that ran an install. Providers that
+    /// report nothing to install (e.g. no manifest detected) are omitted.
+    pub installs: Vec<DependencyCommandResult>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DependencyUpdateOptions {
     pub install: bool,
@@ -128,6 +138,74 @@ pub fn update(
         Some(package.to_string()),
         None,
     ))
+}
+
+/// Install a component's dependencies through its resolved dependency providers.
+///
+/// This is the detection/config-driven replacement for hardcoded
+/// "composer install / npm install / pnpm install / yarn install" CI policy:
+/// the package manager(s) are chosen by [`provider::resolve_dependency_providers`]
+/// based on the files present in the workspace (composer.json, package.json,
+/// lockfiles) and the component/extension manifest — not by shell literals in
+/// the calling environment. CI (or any caller) runs `homeboy component setup`
+/// or `homeboy deps install` and lets core own the policy.
+pub fn install(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+) -> Result<DependencyInstallResult> {
+    let (component, path) = resolve_component_path(component_id, path_override)?;
+    // Reuse the command-facing resolver so a dependency-less component returns
+    // the same actionable "no provider" error as `deps status`/`deps update`.
+    provider::resolve_dependency_providers(&component, &path)?;
+    Ok(
+        install_for_resolved(&component, &path)?.unwrap_or_else(|| DependencyInstallResult {
+            component_id: component.id.clone(),
+            component_path: path.display().to_string(),
+            package_manager: String::new(),
+            installs: Vec::new(),
+        }),
+    )
+}
+
+/// Run dependency installs for an already-resolved component/workspace pair.
+///
+/// Shared by [`install`] and the higher-level `component setup` orchestrator so
+/// the provider-resolution and best-effort install policy lives in exactly one
+/// place.
+///
+/// Returns `None` when the workspace exposes no dependency provider (nothing to
+/// install) so callers can treat a dependency-less component as a no-op.
+pub fn install_for_resolved(
+    component: &Component,
+    path: &Path,
+) -> Result<Option<DependencyInstallResult>> {
+    let providers = provider::resolve_dependency_providers_optional(component, path)?;
+    if providers.is_empty() {
+        return Ok(None);
+    }
+
+    let mut installs = Vec::new();
+    let mut package_managers = Vec::new();
+    for provider in providers {
+        let status = provider.status(component, path, None)?;
+        if let Some(result) = provider.install(component, path)? {
+            package_managers.push(status.package_manager);
+            installs.push(result);
+        }
+    }
+
+    let package_manager = match package_managers.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        many => many.join(","),
+    };
+
+    Ok(Some(DependencyInstallResult {
+        component_id: component.id.clone(),
+        component_path: path.display().to_string(),
+        package_manager,
+        installs,
+    }))
 }
 
 fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCommandResult> {

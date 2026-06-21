@@ -230,7 +230,7 @@ fn is_git_checkout(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
+pub fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
     let mut names = Vec::new();
     for task in &plan.tasks {
         for name in &task.executor.secret_env {

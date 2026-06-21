@@ -34,7 +34,10 @@ pub(crate) struct DependencyProviderSnapshot {
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
     Npm(NpmDependencyProvider),
-    Extension(ExtensionDependencyProvider),
+    // Boxed: `ExtensionDependencyProvider` carries a full execution context and
+    // is far larger than the other (zero-sized) variants, so storing it inline
+    // would bloat every `DependencyProvider` value (clippy::large_enum_variant).
+    Extension(Box<ExtensionDependencyProvider>),
     ComponentScript(ComponentScriptDependencyProvider),
 }
 
@@ -107,6 +110,34 @@ pub(crate) fn resolve_dependency_providers(
     component: &Component,
     path: &Path,
 ) -> Result<Vec<DependencyProvider>> {
+    let providers = resolve_dependency_providers_optional(component, path)?;
+
+    if providers.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            format!("No dependency provider found for {}", path.display()),
+            None,
+            Some(vec![
+                "Link an extension with deps support, or use a component with a supported dependency provider".to_string(),
+                "Package managers are resolved through dependency providers, not core command orchestration".to_string(),
+            ]),
+        ));
+    }
+
+    Ok(providers)
+}
+
+/// Resolve the dependency providers a component/workspace exposes, returning an
+/// empty vector when none are detected instead of erroring.
+///
+/// Setup orchestration treats "no provider" as a no-op (a component with no
+/// composer.json/package.json/deps script simply has nothing to install), so it
+/// needs the empty case without the actionable error that the command-facing
+/// [`resolve_dependency_providers`] raises.
+pub(crate) fn resolve_dependency_providers_optional(
+    component: &Component,
+    path: &Path,
+) -> Result<Vec<DependencyProvider>> {
     let mut providers = Vec::new();
 
     if ComposerDependencyProvider::supports(path) {
@@ -130,26 +161,12 @@ pub(crate) fn resolve_dependency_providers(
         .unwrap_or(false)
     {
         match extension::resolve_execution_context(component, ExtensionCapability::Deps) {
-            Ok(context) => {
-                providers.push(DependencyProvider::Extension(ExtensionDependencyProvider {
-                    context,
-                }))
-            }
+            Ok(context) => providers.push(DependencyProvider::Extension(Box::new(
+                ExtensionDependencyProvider { context },
+            ))),
             Err(err) if providers.is_empty() => return Err(err),
             Err(_) => {}
         }
-    }
-
-    if providers.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "dependency_provider",
-            format!("No dependency provider found for {}", path.display()),
-            None,
-            Some(vec![
-                "Link an extension with deps support, or use a component with a supported dependency provider".to_string(),
-                "Package managers are resolved through dependency providers, not core command orchestration".to_string(),
-            ]),
-        ));
     }
 
     Ok(providers)

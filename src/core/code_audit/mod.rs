@@ -685,6 +685,76 @@ fn audit_internal(
     // or similar implementations across convention-following files are correct behavior.
     let convention_methods =
         build_convention_method_set(&discovered_conventions, &all_fingerprints);
+
+    // Phase 4b2: In scoped (--changed-since) mode, compute the touched-file scope
+    // ONCE up front so per-file detectors only walk the fingerprints they could
+    // possibly emit reportable findings for. Whole-tree detector runs are the
+    // root cause of the changed-scope timeout: every per-file content scanner
+    // (comment hygiene, deprecation age, dead guards, source/boundary policy,
+    // env guards, redirect/resource/config-key checks) re-scanned the entire
+    // repository even though out-of-scope findings are discarded by the Phase 4p
+    // scope filter anyway. These detectors emit findings keyed strictly to the
+    // file they inspect, so restricting their input to the scoped fingerprint
+    // subset is behavior-preserving while avoiding O(repo) work per detector.
+    //
+    // Cross-file detectors (duplication, dead code) still receive the full
+    // corpus below because their correctness for an in-scope file depends on
+    // evidence from out-of-scope files (matching bodies, external references).
+    let scoped_fingerprints: Option<(HashSet<String>, Vec<&fingerprint::FileFingerprint>)> =
+        scoped_execution.file_filter.map(|filter| {
+            let scope_started = std::time::Instant::now();
+            let scope_files: HashSet<String> = if let Some(ref_str) = git_ref {
+                let (expanded_scope, affected) =
+                    impact::expand_scope(source_path, ref_str, filter, &all_fingerprints);
+                if !affected.is_empty() {
+                    log_status!(
+                        "audit",
+                        "Impact: {} affected call-site file(s) added to scope",
+                        affected.len()
+                    );
+                    for af in &affected {
+                        let reason_strs: Vec<String> =
+                            af.reasons.iter().map(|r| r.to_string()).collect();
+                        log_status!(
+                            "audit",
+                            "  {} → {} ({})",
+                            af.source_file,
+                            af.file,
+                            reason_strs.join(", ")
+                        );
+                    }
+                }
+                expanded_scope
+            } else {
+                scoped_execution.changed_files.clone()
+            };
+            let subset: Vec<&fingerprint::FileFingerprint> = all_fingerprints
+                .iter()
+                .copied()
+                .filter(|fp| {
+                    scope_files
+                        .iter()
+                        .any(|scope| fp.relative_path.contains(scope.as_str()))
+                })
+                .collect();
+            log_status!(
+                "audit",
+                "Scoped detectors: {} of {} fingerprint(s) in touched scope ({} scoped file(s))",
+                subset.len(),
+                all_fingerprints.len(),
+                scope_files.len()
+            );
+            timing.push_ok("scope.fingerprints", scope_started.elapsed());
+            (scope_files, subset)
+        });
+
+    // Per-file detector input: the scoped subset when in changed-scope mode,
+    // else the full corpus. Cross-file detectors keep using `all_fingerprints`.
+    let per_file_fingerprints: &[&fingerprint::FileFingerprint] = scoped_fingerprints
+        .as_ref()
+        .map(|(_, subset)| subset.as_slice())
+        .unwrap_or(all_fingerprints.as_slice());
+
     let detector_context = DetectorRunContext {
         root,
         audit_config: &audit_config,
@@ -812,7 +882,7 @@ fn audit_internal(
         &mut timing,
         "detector.comment_hygiene",
         plan.run_comment_hygiene(),
-        || comment_hygiene::run(&all_fingerprints, &audit_config.detector_profile),
+        || comment_hygiene::run(per_file_fingerprints, &audit_config.detector_profile),
         Vec::new,
     );
     if !comment_findings.is_empty() {
@@ -990,7 +1060,7 @@ fn audit_internal(
         &mut timing,
         "detector.dead_guard",
         plan.run_dead_guard(),
-        || dead_guard::run(&all_fingerprints, root, &audit_config),
+        || dead_guard::run(per_file_fingerprints, root, &audit_config),
         Vec::new,
     );
     if !dead_guard_findings.is_empty() {
@@ -1041,7 +1111,7 @@ fn audit_internal(
         &mut timing,
         "detector.output_capture",
         plan.run_output_capture(),
-        || unbounded_output_capture::run(&all_fingerprints),
+        || unbounded_output_capture::run(per_file_fingerprints),
         Vec::new,
     );
     if !output_capture_findings.is_empty() {
@@ -1058,7 +1128,7 @@ fn audit_internal(
         &mut timing,
         "detector.core_boundary_leaks",
         plan.run_core_boundary_leaks(),
-        || core_boundary_leak::run(&all_fingerprints, &audit_config.core_boundary_leaks),
+        || core_boundary_leak::run(per_file_fingerprints, &audit_config.core_boundary_leaks),
         Vec::new,
     );
     if !core_boundary_findings.is_empty() {
@@ -1075,7 +1145,7 @@ fn audit_internal(
         &mut timing,
         "detector.source_policy",
         plan.run_source_policy(),
-        || source_policy::run(&all_fingerprints, &audit_config.source_policies),
+        || source_policy::run(per_file_fingerprints, &audit_config.source_policies),
         Vec::new,
     );
     if !source_policy_findings.is_empty() {
@@ -1092,7 +1162,12 @@ fn audit_internal(
         &mut timing,
         "detector.mutating_resource_access",
         plan.run_mutating_resource_access(),
-        || mutating_resource_access::run(&all_fingerprints, &audit_config.mutating_resource_access),
+        || {
+            mutating_resource_access::run(
+                per_file_fingerprints,
+                &audit_config.mutating_resource_access,
+            )
+        },
         Vec::new,
     );
     if !mutating_access_findings.is_empty() {
@@ -1109,7 +1184,7 @@ fn audit_internal(
         &mut timing,
         "detector.redirect_validation",
         plan.run_redirect_validation(),
-        || redirect_validation::run(&all_fingerprints, &audit_config.redirect_validation),
+        || redirect_validation::run(per_file_fingerprints, &audit_config.redirect_validation),
         Vec::new,
     );
     if !redirect_validation_findings.is_empty() {
@@ -1304,44 +1379,14 @@ fn audit_internal(
     timing.push_ok("detectors", detectors_started.elapsed());
 
     // Phase 4p: Impact-scoped filtering — when auditing changed files only,
-    // expand scope to include call sites affected by symbol changes, then
-    // filter findings to that expanded scope.
-    //
-    // With git_ref: diff fingerprints against base ref, find affected call sites,
-    //   report findings in changed files + affected files.
-    // Without git_ref: fall back to simple filename filter (changed files only).
-    if let Some(filter) = scoped_execution.file_filter {
+    // filter findings down to the touched scope (changed files + impact call
+    // sites). The scope set and its impact expansion were already computed once
+    // in Phase 4b2; reuse it here instead of re-running the O(repo) impact diff,
+    // and to guarantee the per-file detector input and the finding filter agree
+    // on the same scope.
+    if let Some((scope_files, _)) = scoped_fingerprints.as_ref() {
         let scope_started = std::time::Instant::now();
         let before = all_findings.len();
-
-        let scope_files: std::collections::HashSet<String> = if let Some(ref_str) = git_ref {
-            let (expanded_scope, affected) =
-                impact::expand_scope(source_path, ref_str, filter, &all_fingerprints);
-
-            if !affected.is_empty() {
-                log_status!(
-                    "audit",
-                    "Impact: {} affected call-site file(s) added to scope",
-                    affected.len()
-                );
-                for af in &affected {
-                    let reason_strs: Vec<String> =
-                        af.reasons.iter().map(|r| r.to_string()).collect();
-                    log_status!(
-                        "audit",
-                        "  {} → {} ({})",
-                        af.source_file,
-                        af.file,
-                        reason_strs.join(", ")
-                    );
-                }
-            }
-
-            expanded_scope
-        } else {
-            // No git ref — simple filename filter (legacy behavior)
-            scoped_execution.changed_files.clone()
-        };
 
         log_status!(
             "audit",
@@ -1437,6 +1482,10 @@ fn audit_internal(
     }
     timing.push_ok("report", report_started.elapsed());
 
+    // Release the scoped fingerprint subset (borrows from `all_fingerprints`)
+    // before dropping the owning corpus. `per_file_fingerprints` is just a
+    // borrowed view, so its borrow ends here via NLL.
+    drop(scoped_fingerprints);
     drop(all_fingerprints);
     let analysis = AuditAnalysisContext {
         fingerprints: discovery
