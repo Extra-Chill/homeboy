@@ -37,6 +37,21 @@ runner needs to be explicit. Supported values: `wp-codebox` (default).
 HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy test <component-id>
 ```
 
+## WP Codebox command diagnostics
+
+Recipe plan inputs can request command diagnostics capture by setting
+`diagnosticsCapture`, `captureDiagnostics`, `commandDiagnostics`, or
+`diagnostics` on the recipe generator options. A boolean value requests the
+default evidence set, `queries` and `errors`; an array limits capture to the
+listed evidence types.
+
+Homeboy settings can pass the same plan through `wp_codebox_command_diagnostics`
+or `command_diagnostics`.
+
+Supported WordPress recipe commands receive the normalized plan on the step as
+`diagnostics.capture`, allowing WP Codebox to attach query/error evidence to the
+command result without Homeboy depending on product-specific behavior.
+
 ## Requirements
 
 A component needs:
