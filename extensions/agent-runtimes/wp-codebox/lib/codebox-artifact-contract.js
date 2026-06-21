@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
 const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = 'wp-codebox/artifact-result-envelope/v1';
@@ -501,6 +504,145 @@ function artifactPath(root, relativePath) {
   return `${String(root).replace(/\/$/, '')}/${String(relativePath).replace(/^\//, '')}`;
 }
 
+function discoverCodeboxArtifactRefs(artifactsRoot, options = {}) {
+  const filesystem = options.fs || fs;
+  const maxArtifacts = Number.isFinite(options.maxArtifacts) ? options.maxArtifacts : 200;
+  const maxDepth = Number.isFinite(options.maxDepth) ? options.maxDepth : 4;
+  if (!artifactsRoot || !filesystem.existsSync(artifactsRoot)) {
+    return { artifacts: [], evidenceRefs: [], runtimeId: '', lastKnownPhase: '', lastHeartbeat: null };
+  }
+
+  const discovered = [];
+  const queue = [{ filePath: artifactsRoot, depth: 0 }];
+  let lastKnownPhase = '';
+  let lastHeartbeat = null;
+  let runtimeId = '';
+
+  while (queue.length > 0 && discovered.length < maxArtifacts) {
+    const { filePath, depth } = queue.shift();
+    let stat;
+    try {
+      stat = filesystem.statSync(filePath);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      const manifestPath = path.join(filePath, 'manifest.json');
+      if (filePath !== artifactsRoot && filesystem.existsSync(manifestPath)) {
+        const manifest = readJsonIfAvailable(manifestPath, filesystem);
+        if (!runtimeId && plainObject(manifest)) {
+          runtimeId = manifest.runtime_id || manifest.runtimeId || manifest.runtime?.id || '';
+        }
+        discovered.push({
+          id: manifest?.id || manifest?.artifact_id || `codebox-artifact-bundle-${discovered.length + 1}`,
+          kind: 'codebox-artifact-bundle',
+          path: filePath,
+          size_bytes: directorySizeBytes(filePath, filesystem),
+          metadata: plainObject(manifest) ? {
+            schema: manifest.schema,
+            phase: manifest.phase || manifest.last_phase || manifest.current_phase,
+            runtime_id: manifest.runtime_id || manifest.runtimeId || manifest.runtime?.id,
+          } : {},
+        });
+      }
+      if (depth < maxDepth) {
+        for (const entry of filesystem.readdirSync(filePath).sort()) {
+          queue.push({ filePath: path.join(filePath, entry), depth: depth + 1 });
+        }
+      }
+      continue;
+    }
+
+    if (!stat.isFile()) {
+      continue;
+    }
+
+    const kind = codeboxArtifactKindFromPath(path.relative(artifactsRoot, filePath));
+    if (!kind) {
+      continue;
+    }
+    const payload = filePath.endsWith('.json') ? readJsonIfAvailable(filePath, filesystem) : null;
+    if (!lastKnownPhase && plainObject(payload)) {
+      lastKnownPhase = payload.phase || payload.last_phase || payload.lastKnownPhase || payload.current_phase || '';
+    }
+    if (!runtimeId && plainObject(payload)) {
+      runtimeId = payload.runtime_id || payload.runtimeId || payload.runtime?.id || '';
+    }
+    if (!lastHeartbeat && plainObject(payload) && /heartbeat|status/i.test(filePath)) {
+      lastHeartbeat = payload.heartbeat || payload.last_heartbeat || payload;
+    }
+    discovered.push({
+      id: `${kind}-${discovered.length + 1}`,
+      kind,
+      path: filePath,
+      size_bytes: stat.size,
+      metadata: plainObject(payload) ? {
+        schema: payload.schema,
+        phase: payload.phase || payload.last_phase || payload.current_phase,
+      } : {},
+    });
+  }
+
+  return {
+    artifacts: discovered,
+    evidenceRefs: discovered.map((artifact) => ({
+      kind: artifact.kind,
+      uri: artifact.path,
+      label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
+    })),
+    runtimeId,
+    lastKnownPhase,
+    lastHeartbeat,
+  };
+}
+
+function codeboxArtifactKindFromPath(filePath) {
+  const fileName = basename(filePath).toLowerCase();
+  if (fileName === 'manifest.json') {
+    return 'codebox-artifact-manifest';
+  }
+  if (fileName === 'runtime-reference-manifest.json') {
+    return 'codebox-runtime-reference-manifest';
+  }
+  const relative = String(filePath || '').replace(/\\/g, '/');
+  if (/transcript|conversation|messages/.test(relative)) {
+    return 'codebox-transcript';
+  }
+  if (/command|stdout|stderr|console|log/.test(relative)) {
+    return 'codebox-command-log';
+  }
+  if (/heartbeat|status/.test(relative)) {
+    return 'codebox-heartbeat';
+  }
+  if (/phase/.test(relative)) {
+    return 'codebox-phase';
+  }
+  return '';
+}
+
+function directorySizeBytes(directory, filesystem = fs) {
+  try {
+    return filesystem.readdirSync(directory, { withFileTypes: true }).reduce((total, entry) => {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        return total + directorySizeBytes(entryPath, filesystem);
+      }
+      return total + filesystem.statSync(entryPath).size;
+    }, 0);
+  } catch {
+    return undefined;
+  }
+}
+
+function readJsonIfAvailable(filePath, filesystem = fs) {
+  try {
+    return JSON.parse(filesystem.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 function artifactRoleFromCodeboxArtifact(artifact = {}, roleAliases = {}) {
   const labels = artifactLabels(artifact);
   const explicitRole = roleFromAliases(labels, roleAliases);
@@ -574,7 +716,9 @@ module.exports = {
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,
+  codeboxArtifactKindFromPath,
   caseArtifactIndexFromCodeboxResult,
+  discoverCodeboxArtifactRefs,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
   normalizeArtifactResultEnvelope,

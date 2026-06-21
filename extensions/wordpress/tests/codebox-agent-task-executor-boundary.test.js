@@ -9,6 +9,7 @@ const {
   agentTaskOutcomeFromCodeboxResult,
   artifactResultEnvelopeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
+  discoverCodeboxArtifactRefs,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
   providerContract,
@@ -116,6 +117,33 @@ assert.deepEqual(typedArtifactsFromCodeboxResult({ artifact_result: artifactResu
 assert.equal(normalizeCodeboxArtifactOutcome({ id: 'patch.diff', kind: 'codebox-patch' }, {}, {
   roleAliases: provider.role_aliases,
 }).role, 'patch');
+
+const artifactDiscoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-codebox-artifacts-'));
+const artifactBundleRoot = path.join(artifactDiscoveryRoot, 'bundle');
+fs.mkdirSync(path.join(artifactDiscoveryRoot, 'logs'), { recursive: true });
+fs.mkdirSync(artifactBundleRoot, { recursive: true });
+fs.writeFileSync(path.join(artifactBundleRoot, 'manifest.json'), JSON.stringify({
+  id: 'bundle-1',
+  runtime_id: 'wp-codebox',
+  phase: 'agent-task-run',
+}));
+fs.writeFileSync(path.join(artifactDiscoveryRoot, 'logs', 'heartbeat.json'), JSON.stringify({
+  runtime_id: 'wp-codebox',
+  current_phase: 'running',
+  heartbeat: { sequence: 3 },
+}));
+fs.writeFileSync(path.join(artifactDiscoveryRoot, 'transcript.json'), JSON.stringify({ schema: 'example/transcript/v1' }));
+const discoveredCodeboxArtifacts = discoverCodeboxArtifactRefs(artifactDiscoveryRoot);
+assert.equal(discoveredCodeboxArtifacts.runtimeId, 'wp-codebox');
+assert.equal(discoveredCodeboxArtifacts.lastKnownPhase, 'agent-task-run');
+assert.deepEqual(discoveredCodeboxArtifacts.lastHeartbeat, { sequence: 3 });
+assert.deepEqual(discoveredCodeboxArtifacts.artifacts.map((artifact) => artifact.kind).sort(), [
+  'codebox-artifact-bundle',
+  'codebox-artifact-manifest',
+  'codebox-command-log',
+  'codebox-transcript',
+]);
+assert.equal(discoveredCodeboxArtifacts.evidenceRefs.length, 4);
 
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'wordpress.json'), 'utf8'));
 assert.equal(manifest.agent_task_executors, undefined);

@@ -2571,6 +2571,9 @@ try {
   providerPluginValidation() { return null; },
   providerSecretEnv() { return []; },
 };\n`);
+  fs.writeFileSync(path.join(installedRuntime, 'lib', 'codebox-artifact-contract.js'), `module.exports = {
+  discoverCodeboxArtifactRefs() { return { artifacts: [], evidenceRefs: [], runtimeId: '', lastKnownPhase: '', lastHeartbeat: null }; },
+};\n`);
   fs.writeFileSync(path.join(installedLayoutRoot, 'extensions', 'wordpress', 'lib', 'wp-codebox-core-loader.js'), `module.exports = { async loadWpCodeboxCore() { return {}; } };\n`);
   const installedLayoutResult = spawnSync(process.execPath, [path.join(installedRuntime, 'scripts', 'agent', 'homeboy-codebox-agent-task-executor.cjs')], {
     encoding: 'utf8',
