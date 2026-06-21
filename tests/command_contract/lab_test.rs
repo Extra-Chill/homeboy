@@ -649,6 +649,43 @@ fn agent_task_git_checkout_policy_treats_workspace_like_cwd() {
 }
 
 #[test]
+fn agent_task_git_checkout_policy_covers_loop_dispatch_workspace() {
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "loop",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
+        "--cwd",
+        "/work/repo",
+        "--backend",
+        "generic-patch-provider",
+        "--selector",
+        "selected",
+        "--prompt",
+        "cook",
+    ]);
+    let Commands::AgentTask(ref args) = command else {
+        panic!("expected agent-task command");
+    };
+
+    assert!(agent_task_provider_requires_cwd_git_checkout_with(
+        &args.command,
+        || None,
+        |backend, selector| backend == "generic-patch-provider" && selector == Some("selected"),
+    ));
+    assert_eq!(
+        command
+            .lab_contract()
+            .expect("agent-task loop contract")
+            .workspace_mode_policy,
+        LabWorkspaceModePolicy::GitCheckoutRequired
+    );
+}
+
+#[test]
 fn agent_task_git_checkout_policy_covers_controller_from_spec_resume_backend() {
     let command = parsed_command(&[
         "homeboy",
