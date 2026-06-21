@@ -2,6 +2,33 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.8.0] - 2026-06-21
+
+### Added
+- normalize WordPress fuzz result artifacts
+- add WordPress fuzz runner bridge
+
+### Changed
+- Fail invalid Codebox typed artifacts
+- Support packaged WordPress dependency subdirs
+- Extract generic agent loop runner
+- Centralize agent task planning primitives
+- Add WP Codebox fuzz plan recipe adapter
+- Add WordPress hook surface discovery
+- Add WP Codebox command diagnostics planning
+- Add WordPress fuzz schema contracts
+- Add WP Codebox fuzz-run consumer
+- Add WordPress frontend URL surface discovery
+- Add WordPress AJAX action surface planning
+- Add Codebox role matrix recipe inputs
+- Add WordPress discovery inventory helper
+- Add WordPress admin fuzz surface discovery
+- Use Codebox plugin-state for fixture activation
+- Map WordPress fixture profiles to site seeds
+- Add WP Codebox checkpoint isolation to bench recipes
+- Add WordPress REST fuzz surface discovery adapter
+- Add WordPress fuzz coverage aggregation
+
 ## [3.7.62] - 2026-06-21
 
 ### Changed
