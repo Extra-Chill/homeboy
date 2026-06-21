@@ -15,10 +15,8 @@ pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskLoopArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
-    apply_controller_event, apply_from_spec_dispatch_defaults,
-    apply_from_spec_dispatch_defaults_with_cwd, controller_materialize,
-    controller_run_action_with_executor, controller_run_next_with_executor,
-    dispatch_args_from_controller_request,
+    apply_controller_event, controller_materialize, controller_run_action_with_executor,
+    controller_run_next_with_executor, dispatch_args_from_controller_request,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_loaded_plan, run_loop_with_executor, run_next_with_executor,
@@ -27,6 +25,10 @@ pub(in crate::commands::agent_task) use super::super::run::{
 pub(in crate::commands::agent_task) use super::super::status::{cancel, logs, status};
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
+};
+pub(crate) use homeboy::core::agent_tasks::controller_service::{
+    apply_spec_dispatch_defaults as apply_from_spec_dispatch_defaults,
+    apply_spec_dispatch_defaults_with_cwd as apply_from_spec_dispatch_defaults_with_cwd,
 };
 pub(crate) use homeboy::core::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,

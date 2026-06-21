@@ -54,6 +54,7 @@ pub const PLAN_RESULT_SCHEMA: &str = "homeboy/agent-task-loop-controller-plan-re
 mod action_state;
 mod actions;
 mod artifacts;
+mod dispatch_defaults;
 mod pr_ownership;
 mod reports;
 mod request;
@@ -63,6 +64,7 @@ mod spec_compile;
 use action_state::*;
 use actions::*;
 use artifacts::*;
+pub use dispatch_defaults::*;
 use pr_ownership::*;
 pub use reports::*;
 pub use request::*;

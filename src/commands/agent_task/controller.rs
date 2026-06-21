@@ -1,8 +1,6 @@
 //! `agent-task controller` handlers: durable multi-agent loop controller
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
-use std::path::{Path, PathBuf};
-
 use serde_json::Value;
 
 use homeboy::core::agent_task_loop_definition::{
@@ -18,7 +16,6 @@ use homeboy::core::agent_tasks::controller_service::{
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::AgentTaskExecutorAdapter;
 use homeboy::core::config;
-use homeboy::core::git;
 use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
@@ -103,7 +100,7 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
             None,
         )
     })?;
-    apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
+    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let run_inputs = match args.inputs {
         Some(inputs) => {
             serde_json::from_str(&config::read_json_spec_to_string(&inputs)?).map_err(|error| {
@@ -155,7 +152,7 @@ fn controller_plan(args: AgentTaskControllerPlanArgs) -> CmdResult<Value> {
             None,
         )
     })?;
-    apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
+    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let report = agent_task_controller_service::plan_from_spec(ControllerPlanRequest { spec })?;
     Ok((command_json_value(report)?, 0))
 }
@@ -170,7 +167,7 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
             None,
         )
     })?;
-    apply_from_spec_dispatch_defaults(&mut spec, &args.spec);
+    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
     if !args.resume {
         return Ok((command_json_value(report)?, 0));
@@ -189,96 +186,6 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         }),
         exit_code,
     ))
-}
-
-pub(super) fn apply_from_spec_dispatch_defaults(spec: &mut AgentTaskRepoLoopSpec, spec_arg: &str) {
-    apply_from_spec_dispatch_defaults_with_cwd(spec, spec_arg, || std::env::current_dir().ok());
-}
-
-pub(super) fn apply_from_spec_dispatch_defaults_with_cwd(
-    spec: &mut AgentTaskRepoLoopSpec,
-    spec_arg: &str,
-    current_dir: impl FnOnce() -> Option<PathBuf>,
-) {
-    let Some(root) = dispatch_root_for_spec(spec_arg, current_dir) else {
-        return;
-    };
-    apply_dispatch_defaults_for_root(spec, root);
-}
-
-fn dispatch_root_for_spec(
-    spec_arg: &str,
-    current_dir: impl FnOnce() -> Option<PathBuf>,
-) -> Option<PathBuf> {
-    let current_dir = current_dir();
-    let Some(spec_path) = spec_file_path(spec_arg) else {
-        return current_dir.and_then(|path| dispatch_root_for_current_dir(&path));
-    };
-    if let Some(root) = git_root_for_spec(&spec_path) {
-        return Some(root);
-    }
-    current_dir.and_then(|path| dispatch_root_for_current_dir(&path))
-}
-
-fn dispatch_root_for_current_dir(path: &Path) -> Option<PathBuf> {
-    git_root_for_path(path).or_else(|| {
-        path.is_dir()
-            .then(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
-    })
-}
-
-fn apply_dispatch_defaults_for_root(spec: &mut AgentTaskRepoLoopSpec, root: PathBuf) {
-    let repo = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_string();
-    if repo.is_empty() {
-        return;
-    }
-
-    let metadata = match &mut spec.metadata {
-        Value::Object(metadata) => metadata,
-        _ => {
-            spec.metadata = serde_json::json!({});
-            spec.metadata.as_object_mut().expect("metadata object")
-        }
-    };
-    let defaults = metadata
-        .entry("dispatch_defaults".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let Value::Object(defaults) = defaults else {
-        return;
-    };
-    let should_set_cwd = defaults
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(|cwd| !Path::new(cwd).is_dir())
-        .unwrap_or(true);
-    if should_set_cwd {
-        defaults.insert("cwd".to_string(), Value::String(root.display().to_string()));
-    }
-    defaults
-        .entry("repo".to_string())
-        .or_insert_with(|| Value::String(repo));
-}
-
-fn spec_file_path(spec_arg: &str) -> Option<PathBuf> {
-    if spec_arg == "-" || spec_arg.trim_start().starts_with('{') {
-        return None;
-    }
-    let path = spec_arg.strip_prefix('@').unwrap_or(spec_arg);
-    let path = PathBuf::from(path);
-    path.is_file().then_some(path)
-}
-
-fn git_root_for_spec(spec_path: &Path) -> Option<PathBuf> {
-    let dir = spec_path.parent()?;
-    git_root_for_path(dir)
-}
-
-fn git_root_for_path(path: &Path) -> Option<PathBuf> {
-    git::repo_root(path)
 }
 
 /// Bridge controller spawn-task `"dispatch"` requests into the CLI dispatch path.
