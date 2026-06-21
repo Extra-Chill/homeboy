@@ -25,6 +25,7 @@ assert.equal(typeof wordpress.createWordPressHookFuzzPlan, 'function');
 assert.equal(typeof wordpress.normalizeWordPressSurfaceDiscovery, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFuzzPlan, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFuzzResult, 'function');
+assert.equal(typeof wordpress.buildWordPressFuzzRunnerResult, 'function');
 assert.equal(typeof wordpress.wpCodebox, 'object');
 assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
