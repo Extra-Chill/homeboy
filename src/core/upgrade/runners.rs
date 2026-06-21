@@ -1426,13 +1426,31 @@ fn runner_upgrade_recovery_commands(runner_id: &str) -> Vec<String> {
     ]
 }
 
+/// Returns the local/current homeboy version used for runner drift comparisons.
+///
+/// In production this is the compiled crate version (`current_version()`). Tests
+/// override it via [`with_local_version_override`] so fixtures can pin a
+/// deterministic "local" version instead of coupling to the live crate version,
+/// which otherwise climbs past hardcoded fixture versions over time and makes
+/// the drift check fire spuriously.
+fn effective_local_version() -> String {
+    #[cfg(test)]
+    {
+        if let Some(version) = tests::local_version_override() {
+            return version;
+        }
+    }
+    current_version().to_string()
+}
+
 fn runner_local_version_drift(
     runner_id: &str,
     homeboy_path: &str,
     previous_version: Option<&str>,
     new_version: Option<&str>,
 ) -> Option<String> {
-    let local_version = current_version();
+    let local_version = effective_local_version();
+    let local_version = local_version.as_str();
     let runner_version = new_version?;
     if !version_is_newer(local_version, runner_version) {
         return None;
@@ -1452,7 +1470,7 @@ fn runner_version_report_detail(
 ) -> String {
     format!(
         "{detail}\nrunner version check: local/current {}; runner before {}; runner after {}",
-        current_version(),
+        effective_local_version(),
         previous_version.unwrap_or("unknown"),
         new_version.unwrap_or("unknown")
     )
@@ -1651,10 +1669,51 @@ mod tests {
         RunnerExecMode, RunnerExecOutput, RunnerSessionState, RunnerStaleDaemonWarning,
     };
     use crate::core::server::RunnerSettings;
+    use std::cell::RefCell;
     use std::collections::HashMap;
+
+    thread_local! {
+        static LOCAL_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Returns the thread-local local-version override, if one is active.
+    pub(super) fn local_version_override() -> Option<String> {
+        LOCAL_VERSION_OVERRIDE.with(|cell| cell.borrow().clone())
+    }
+
+    /// RAII guard that pins the local/current homeboy version for the current
+    /// thread, restoring the previous value on drop. Used by runner-upgrade
+    /// tests so their hardcoded fixture versions stay comparable against a
+    /// stable "local" version regardless of the live crate version.
+    struct LocalVersionGuard {
+        previous: Option<String>,
+    }
+
+    impl LocalVersionGuard {
+        fn set(version: &str) -> Self {
+            let previous =
+                LOCAL_VERSION_OVERRIDE.with(|cell| cell.borrow_mut().replace(version.to_string()));
+            Self { previous }
+        }
+    }
+
+    impl Drop for LocalVersionGuard {
+        fn drop(&mut self) {
+            LOCAL_VERSION_OVERRIDE.with(|cell| *cell.borrow_mut() = self.previous.take());
+        }
+    }
+
+    /// Pins the local version low enough that no fixture runner version below the
+    /// live crate version is treated as drift. Tests that mock a runner reporting
+    /// versions like `0.228.x` use this so the version-drift guard added in #5566
+    /// does not spuriously skip them once the crate version climbs higher.
+    fn pin_local_version_for_fixtures() -> LocalVersionGuard {
+        LocalVersionGuard::set("0.0.0")
+    }
 
     #[test]
     fn upgrades_configured_runner_with_homeboy_path_and_skip_runner_guard() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.local/bin/homeboy"));
         let mut commands = Vec::new();
         let (updated, skipped) = upgrade_runners_with_executor(
@@ -1710,6 +1769,7 @@ mod tests {
 
     #[test]
     fn materializes_forced_source_upgrade_path_before_forwarding_to_runner() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let source_path =
             Path::new("/Users/user/Developer/homeboy@fix-bench-selected-duplicate-validation-1266");
@@ -1771,6 +1831,7 @@ mod tests {
 
     #[test]
     fn reports_runner_upgrade_failure_without_stopping_other_runners() {
+        let _local_version = pin_local_version_for_fixtures();
         let runners = vec![ssh_runner("lab", None), ssh_runner("bench", None)];
         let mut calls = HashMap::<String, usize>::new();
         let (updated, skipped) = upgrade_runners_with_executor(
@@ -1821,6 +1882,7 @@ mod tests {
 
     #[test]
     fn syncs_extension_revisions_after_runner_upgrade() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![ExtensionUpgradeEntry {
             extension_id: "wordpress".to_string(),
@@ -1877,6 +1939,7 @@ mod tests {
 
     #[test]
     fn installs_missing_runner_extension_without_replace_flag() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![ExtensionUpgradeEntry {
             extension_id: "swift".to_string(),
@@ -1938,6 +2001,7 @@ mod tests {
 
     #[test]
     fn isolates_runner_extension_sync_failures_and_continues_later_extensions() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let extension_updates = vec![
             extension_update("swift", "98a61eda"),
@@ -1993,6 +2057,7 @@ mod tests {
 
     #[test]
     fn skips_runner_extensions_outside_supported_extension_policy() {
+        let _local_version = pin_local_version_for_fixtures();
         let mut runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         runner.policy.supported_extensions = vec!["wordpress".to_string()];
         let extension_updates = vec![
@@ -2122,6 +2187,7 @@ mod tests {
 
     #[test]
     fn upgrades_runner_binary_before_controller_scoped_extension_sync() {
+        let _local_version = pin_local_version_for_fixtures();
         let mut runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         runner.policy.supported_extensions = vec!["required-extension".to_string()];
         let extension_updates = vec![
@@ -2186,6 +2252,7 @@ mod tests {
 
     #[test]
     fn repairs_stale_bare_homeboy_after_configured_runner_upgrade() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner(
             "lab",
             Some("/home/user/Developer/_lab_workspaces/homeboy-current/target/release/homeboy"),
@@ -2327,6 +2394,7 @@ mod tests {
 
     #[test]
     fn updates_versioned_runner_homeboy_path_to_bare_homeboy_when_newer() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
         let extension_updates = vec![extension_update("required-extension", "48517ac3")];
         let mut commands = Vec::new();
@@ -2383,6 +2451,7 @@ mod tests {
 
     #[test]
     fn realigns_stale_lab_workspace_homeboy_path_after_upgrade_failure() {
+        let _local_version = pin_local_version_for_fixtures();
         let stale_path =
             "/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy";
         let runner = ssh_runner("lab", Some(stale_path));
@@ -2608,6 +2677,7 @@ mod tests {
 
     #[test]
     fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
@@ -2667,6 +2737,7 @@ mod tests {
 
     #[test]
     fn realigns_versioned_runner_homeboy_path_when_only_final_bare_probe_succeeds() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.5"));
         let mut commands = Vec::new();
         let mut path_updates = Vec::new();
@@ -2767,6 +2838,7 @@ mod tests {
 
     #[test]
     fn restarts_stale_connected_daemon_after_runner_upgrade() {
+        let _local_version = pin_local_version_for_fixtures();
         let runner = ssh_runner("lab", None);
         let mut reconnects = Vec::new();
 

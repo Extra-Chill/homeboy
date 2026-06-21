@@ -50,6 +50,9 @@ pub(crate) fn artifact_locator(artifact: &Value) -> Option<&str> {
         "public_url",
         "url",
     ] {
+        // Artifacts record absent locators as empty strings (e.g. a URL-only
+        // artifact still carries `"path": ""`). Skip blanks so the fallthrough
+        // reaches the populated locator key instead of rendering an empty one.
         if let Some(value) = string_value(artifact, &[key]).filter(|value| !value.is_empty()) {
             return Some(value);
         }
