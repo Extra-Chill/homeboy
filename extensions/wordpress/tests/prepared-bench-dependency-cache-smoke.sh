@@ -64,6 +64,8 @@ git -C "$SOURCE_REPO" -c user.name='Homeboy Smoke' -c user.email='homeboy-smoke@
 export PATH="${FAKE_BIN}:${PATH}"
 export COMPOSER_CALLS_FILE="$CALLS_FILE"
 export HOMEBOY_CACHE_DIR="$CACHE_DIR"
+export HOMEBOY_SETTINGS_JSON
+HOMEBOY_SETTINGS_JSON=$(jq -nc --arg sourceRepo "$SOURCE_REPO" '{validation_dependencies: [{type: "local", path: $sourceRepo, package_path: "plugins/generic-dep", plugin_slug: "declared-generic-dep", activate: true}]}')
 
 first_prepared=$(homeboy_prepare_validation_dependency_for_wp_codebox_bench "$PLUGIN_DIR" "${TMP_ROOT}/artifacts-one")
 second_prepared=$(homeboy_prepare_validation_dependency_for_wp_codebox_bench "$PLUGIN_DIR" "${TMP_ROOT}/artifacts-two")
@@ -75,6 +77,17 @@ fi
 
 if [ -d "${PLUGIN_DIR}/vendor" ]; then
     echo "ERROR: source dependency was mutated by Composer prepare." >&2
+    exit 1
+fi
+
+if ! jq -e 'length == 1 and .[0].slug == "declared-generic-dep" and .[0].activation_status == "active" and (.[0].mounted_plugin_dir | endswith("/declared-generic-dep"))' "${TMP_ROOT}/artifacts-one/prepared-bench-dependencies.json" >/dev/null; then
+    echo "ERROR: declared dependency plugin slug was not preserved in prepared metadata." >&2
+    jq '.' "${TMP_ROOT}/artifacts-one/prepared-bench-dependencies.json" >&2 || true
+    exit 1
+fi
+
+if [ "$(homeboy_get_prepared_validation_dependency_slug "$first_prepared" "${TMP_ROOT}/artifacts-one")" != "declared-generic-dep" ]; then
+    echo "ERROR: prepared dependency slug lookup did not return the declared plugin slug." >&2
     exit 1
 fi
 

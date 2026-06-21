@@ -973,7 +973,13 @@ DEPENDENCY_SLUGS=()
 if [ -n "$DEPENDENCY_PATHS" ]; then
     while IFS= read -r dep_path; do
         [ -n "$dep_path" ] || continue
-        dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
+        dep_slug=""
+        dep_slug_from_metadata=0
+        if type homeboy_get_prepared_validation_dependency_slug &>/dev/null; then
+            dep_slug="$(homeboy_get_prepared_validation_dependency_slug "$dep_path" "$ARTIFACTS_DIR" || true)"
+            [ -n "$dep_slug" ] && dep_slug_from_metadata=1
+        fi
+        [ -n "$dep_slug" ] || dep_slug="$(homeboy_get_validation_dependency_slug "$dep_path" || basename "$dep_path")"
         dep_plugin_file=""
         dep_plugin_relative_file=""
         dep_plugin_source="$dep_path"
@@ -983,7 +989,7 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
         if [ -n "$dep_plugin_file" ]; then
             dep_plugin_relative_file="${dep_plugin_file#"${dep_path%/}/"}"
             dep_plugin_basename="$(basename "$dep_plugin_file" .php)"
-            if [ -n "$dep_plugin_basename" ] && { [ "$dep_plugin_basename" != "$dep_slug" ] || [[ "$dep_plugin_relative_file" == packages/wordpress-plugin/* ]]; }; then
+            if [ "$dep_slug_from_metadata" -eq 0 ] && [ -n "$dep_plugin_basename" ] && { [ "$dep_plugin_basename" != "$dep_slug" ] || [[ "$dep_plugin_relative_file" == packages/wordpress-plugin/* ]]; }; then
                 dep_slug="$dep_plugin_basename"
             fi
             if [[ "$dep_plugin_relative_file" == packages/wordpress-plugin/* ]]; then

@@ -68,6 +68,14 @@ homeboy_find_validation_dependency_plugin_main_file() {
     fi
     return 1
 }
+homeboy_get_prepared_validation_dependency_slug() {
+    local dependency_path="${1:-}"
+    local artifacts_dir="${2:-}"
+    jq -er --arg dependencyPath "$dependency_path" '
+        map(select(.prepared_path == $dependencyPath or .package_root == $dependencyPath))
+        | .[-1].slug // empty
+    ' "${artifacts_dir}/prepared-bench-dependencies.json" 2>/dev/null
+}
 STUB
 
 CAPTURE_FILE="${TMP_ROOT}/capture.json"
@@ -376,6 +384,8 @@ mkdir -p "${DEPENDENCY_ROOT}/packages/wordpress-plugin"
 printf '<?php\n/**\n * Plugin Name: WP Codebox Fixture\n */\n' > "${DEPENDENCY_ROOT}/packages/wordpress-plugin/wp-codebox.php"
 
 DEPENDENCY_CAPTURE_FILE="${TMP_ROOT}/dependency-capture.json"
+mkdir -p "${TMP_ROOT}/dependency-artifacts"
+jq -nc --arg dependencyRoot "$DEPENDENCY_ROOT" '[{schema: "homeboy/prepared-wordpress-bench-dependency/v1", slug: "declared-wp-codebox", package_root: $dependencyRoot, prepared_path: $dependencyRoot}]' > "${TMP_ROOT}/dependency-artifacts/prepared-bench-dependencies.json"
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_HELPER" \
 HOMEBOY_RUNTIME_BENCH_HELPER_SH="$BENCH_HELPER" \
 HOMEBOY_WORDPRESS_DEPENDENCY_HELPER="$DEPENDENCY_HELPER" \
@@ -395,7 +405,7 @@ bash "$SCRIPT_DIR/bench-runner-wp-codebox.sh" >/dev/null
 jq -e --arg pluginRoot "$PLUGIN_ROOT" --arg dependencyRoot "${DEPENDENCY_ROOT}/packages/wordpress-plugin" '
     .recipe.inputs.extraPlugins == [
         {source: $pluginRoot, slug: "wp-site-generator", pluginFile: "wp-site-generator/plugin-main.php", activate: false},
-        {source: $dependencyRoot, slug: "wp-codebox", pluginFile: "wp-codebox/wp-codebox.php", activate: false}
+        {source: $dependencyRoot, slug: "declared-wp-codebox", pluginFile: "declared-wp-codebox/wp-codebox.php", activate: false}
     ]
 ' "$DEPENDENCY_CAPTURE_FILE" >/dev/null
 
@@ -406,8 +416,8 @@ if [ ! -s "$DEPENDENCY_PROVENANCE_FILE" ]; then
 fi
 jq -e --arg dependencyRoot "${DEPENDENCY_ROOT}/packages/wordpress-plugin" '
     .schema == "homeboy/wordpress-bench-dependency-provenance/v1"
-    and (.dependency_slugs == ["wp-codebox"])
-    and (.plugin_inputs[] | select(.source == $dependencyRoot and .slug == "wp-codebox" and .pluginFile == "wp-codebox/wp-codebox.php"))
+    and (.dependency_slugs == ["declared-wp-codebox"])
+    and (.plugin_inputs[] | select(.source == $dependencyRoot and .slug == "declared-wp-codebox" and .pluginFile == "declared-wp-codebox/wp-codebox.php"))
     and (.settings.has_bench_env == true)
 ' "$DEPENDENCY_PROVENANCE_FILE" >/dev/null
 
