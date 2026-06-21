@@ -7,6 +7,36 @@ const { isPlainObject } = require('./shared');
 
 const STATUS_ORDER = ['discovered', 'exercised', 'skipped', 'failed'];
 const STATUS_PRIORITY = Object.fromEntries(STATUS_ORDER.map((status, index) => [status, index]));
+const SURFACE_TYPE_ALIASES = new Map([
+	['admin', 'admin_page'],
+	['admin-page', 'admin_page'],
+	['admin_page', 'admin_page'],
+	['ajax', 'ajax_action'],
+	['ajax-action', 'ajax_action'],
+	['ajax_action', 'ajax_action'],
+	['block', 'block'],
+	['block-type', 'block'],
+	['db', 'db_table'],
+	['db-table', 'db_table'],
+	['db_table', 'db_table'],
+	['database', 'db_table'],
+	['database-table', 'db_table'],
+	['frontend', 'frontend_url'],
+	['frontend-url', 'frontend_url'],
+	['frontend_url', 'frontend_url'],
+	['rest', 'rest_route'],
+	['rest-route', 'rest_route'],
+	['rest_route', 'rest_route'],
+]);
+
+const COVERAGE_ID_PREFIXES = {
+	admin_page: 'admin',
+	ajax_action: 'ajax',
+	block: 'block',
+	db_table: 'db',
+	frontend_url: 'frontend',
+	rest_route: 'rest',
+};
 
 function stringValue(value, fallback = '') {
 	const normalized = String(value ?? '').trim();
@@ -61,6 +91,85 @@ function normalizeFuzzCoverageItem(raw, defaults = {}) {
 		count: numericValue(raw.count ?? raw.total ?? raw.value, 1),
 		detail: isPlainObject(raw.detail) ? raw.detail : {},
 	};
+}
+
+function normalizeCoverageSurfaceType(value, fallback = 'generic') {
+	const normalized = stringValue(value, fallback).toLowerCase().replace(/\s+/g, '-');
+	return SURFACE_TYPE_ALIASES.get(normalized) || normalized.replace(/-/g, '_');
+}
+
+function normalizeCoverageSurfaceValue(surface, type, index) {
+	return stringValue(
+		surface.coverage_id
+		|| surface.coverageId
+		|| surface.route
+		|| surface.path
+		|| surface.url
+		|| surface.action
+		|| surface.hook
+		|| surface.table
+		|| surface.block
+		|| surface.name
+		|| surface.slug
+		|| surface.id
+		|| surface.label,
+		`${type}-${index + 1}`
+	);
+}
+
+function normalizeCoverageSurfaceId(surface, type, index) {
+	const explicit = stringValue(surface.coverage_id || surface.coverageId || surface.id);
+	if (explicit && explicit.includes(':')) {
+		return explicit;
+	}
+	const prefix = COVERAGE_ID_PREFIXES[type] || type;
+	const value = explicit || normalizeCoverageSurfaceValue(surface, type, index);
+	return `${prefix}:${value}`;
+}
+
+function normalizeWordPressFuzzCoverageManifest(input = {}) {
+	const manifest = isPlainObject(input.manifest) ? input.manifest : input;
+	const surfaceInput = manifest.expectedSurfaces
+		|| manifest.expected_surfaces
+		|| manifest.surfaces
+		|| manifest.targets
+		|| [];
+	const rawSurfaces = normalizeCoverageSurfaceList(surfaceInput);
+	const surfaces = rawSurfaces
+		.filter(isPlainObject)
+		.map((surface, index) => {
+			const type = normalizeCoverageSurfaceType(surface.type || surface.kind || surface.category);
+			const id = normalizeCoverageSurfaceId(surface, type, index);
+			return {
+				id,
+				type,
+				label: stringValue(surface.label || surface.title || surface.name || surface.path || surface.url || surface.route || surface.action || surface.table || surface.block || id, id),
+				required: surface.required !== false,
+				metadata: isPlainObject(surface.metadata) ? surface.metadata : {},
+			};
+		})
+		.filter((surface) => surface.required);
+	return {
+		schema: 'homeboy/wordpress-fuzz-coverage-manifest/v1',
+		type: 'wordpress-fuzz-coverage-manifest',
+		surfaces,
+	};
+}
+
+function normalizeCoverageSurfaceList(surfaceInput) {
+	if (Array.isArray(surfaceInput)) {
+		return surfaceInput;
+	}
+	if (!isPlainObject(surfaceInput)) {
+		return [];
+	}
+	return Object.entries(surfaceInput).flatMap(([type, surfaces]) => {
+		const typedSurfaces = Array.isArray(surfaces) ? surfaces : [surfaces];
+		return typedSurfaces.map((surface) => ({
+			type,
+			...(isPlainObject(surface) ? surface : { label: surface }),
+		}));
+	});
 }
 
 function collectWordPressFuzzCoverageItems(input = {}, source = 'input') {
@@ -149,7 +258,12 @@ function appendCoverageGapItems(items, gaps, source) {
 }
 
 function aggregateWordPressFuzzCoverage(input = {}) {
-	const items = collectWordPressFuzzCoverageItems(input.artifacts || input.results || input.coverage || input);
+	const coverageManifest = normalizeWordPressFuzzCoverageManifest(input.coverage_manifest || input.coverageManifest || input.expected_coverage || input.expectedCoverage || input.discovery || input.manifest || {});
+	const expectedItems = coverageManifest.surfaces.map((surface) => normalizeFuzzCoverageItem(surface, { source: 'coverage-manifest', status: 'discovered' }));
+	const items = [
+		...expectedItems,
+		...collectWordPressFuzzCoverageItems(input.artifacts || input.results || input.coverage || input),
+	];
 	const byId = new Map();
 	for (const item of items) {
 		const existing = byId.get(item.id);
@@ -179,6 +293,7 @@ function aggregateWordPressFuzzCoverage(input = {}) {
 		schema: 'homeboy/wordpress-fuzz-coverage-aggregate/v1',
 		type: 'wordpress-fuzz-coverage-aggregate',
 		totals,
+		coverage_manifest: coverageManifest,
 		coverage_summary: coverageSummary,
 		coverage_gaps: coverageGaps,
 		byType: buildByType(coverageItems),
@@ -264,5 +379,6 @@ module.exports = {
 	aggregateWordPressFuzzCoverage,
 	collectWordPressFuzzCoverageItems,
 	formatWordPressFuzzCoverageMarkdownReport,
+	normalizeWordPressFuzzCoverageManifest,
 	normalizeWordPressFuzzCoverageItem: normalizeFuzzCoverageItem,
 };
