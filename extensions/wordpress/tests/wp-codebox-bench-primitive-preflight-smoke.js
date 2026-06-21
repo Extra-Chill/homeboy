@@ -90,6 +90,29 @@ homeboy_resolve_context() {
 	assert.match(runnerResult.stderr, /external-http-guardrail bench primitive is not available/);
 	assert.doesNotMatch(runnerResult.stderr, /process\.exit\(99\)/);
 
+	const overrideResult = spawnSync('bash', [path.join(extensionPath, 'scripts', 'bench', 'bench-runner.sh')], {
+		cwd: componentPath,
+		encoding: 'utf8',
+		env: {
+			...process.env,
+			HOMEBOY_BENCH_EXTRA_WORKLOADS: benchWorkload,
+			HOMEBOY_BENCH_ITERATIONS: '1',
+			HOMEBOY_BENCH_RESULTS_FILE: path.join(root, 'override-results.json'),
+			HOMEBOY_BENCH_WARMUP_ITERATIONS: '0',
+			HOMEBOY_COMPONENT_ID: 'primitive-fixture',
+			HOMEBOY_COMPONENT_PATH: componentPath,
+			HOMEBOY_EXTENSION_PATH: extensionPath,
+			HOMEBOY_RUNTIME_BASH_PREFLIGHT: preflightHelper,
+			HOMEBOY_RUNTIME_BENCH_HELPER_SH: benchHelper,
+			HOMEBOY_RUNTIME_RESOLVE_CONTEXT: resolveContextHelper,
+			HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: currentBin }),
+			HOMEBOY_WP_CODEBOX_BIN: staleBin,
+		},
+	});
+
+	assert.equal(overrideResult.status, 99);
+	assert.doesNotMatch(overrideResult.stderr, /external-http-guardrail bench primitive is not available/);
+
 	console.log('WP Codebox bench primitive preflight smoke passed');
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });

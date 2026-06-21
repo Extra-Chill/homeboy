@@ -18,9 +18,9 @@ function wpCodeboxBin(options = {}) {
   const settings = homeboySettings(env);
   return options.wpCodeboxBin
     || options.bin
-    || env.HOMEBOY_WP_CODEBOX_BIN
-    || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
     || settings.wp_codebox_bin
+    || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN
+    || env.HOMEBOY_WP_CODEBOX_BIN
     || env.WP_CODEBOX_BIN
     || 'wp-codebox';
 }
