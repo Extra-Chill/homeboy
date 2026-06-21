@@ -64,4 +64,3 @@ pub struct CiLocalContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
 }
-

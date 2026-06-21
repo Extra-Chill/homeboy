@@ -9,8 +9,9 @@ mod autofix_config;
 mod trace_config;
 pub use autofix_config::AutofixVerifyConfig;
 pub use trace_config::{
-    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
-    TraceBrowserSummaryAliasConfig, TraceConfig, TraceToolchainProvenanceConfig,
+    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
+    TraceToolchainProvenanceConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

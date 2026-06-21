@@ -8,7 +8,11 @@ use crate::core::error::Error;
 
 use super::runtime::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV;
 
-pub(super) fn invocation_dir_create_error(dir: &Path, runtime_root: &Path, error: io::Error) -> Error {
+pub(super) fn invocation_dir_create_error(
+    dir: &Path,
+    runtime_root: &Path,
+    error: io::Error,
+) -> Error {
     if error.kind() == io::ErrorKind::PermissionDenied {
         return Error::internal_unexpected(format!(
             "Homeboy cannot create invocation dir {} because runtime temp root {} is not writable by the current user ({}). {} Remediation: remove or chown the runtime temp root, or set {} to a writable short path.",
