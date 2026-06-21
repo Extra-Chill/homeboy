@@ -85,12 +85,6 @@ pub struct ReviewArgs {
     pub lab_changed_files_json: Option<String>,
 }
 
-impl ReviewArgs {
-    pub(crate) fn lab_contract(&self) -> LabCommandContract {
-        LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate()
-    }
-}
-
 const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
