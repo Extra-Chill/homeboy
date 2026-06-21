@@ -1588,7 +1588,7 @@ where
             problems.push("referenced run record is missing".to_string());
         }
         let recovery_commands = if stale || orphaned {
-            recovery_commands_for(record, runner_id.as_deref())
+            recovery_commands_for(record, action)
         } else {
             Vec::new()
         };
@@ -1895,24 +1895,90 @@ fn parse_timestamp(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
 
 fn recovery_commands_for(
     record: &AgentTaskLoopControllerRecord,
-    runner_id: Option<&str>,
+    action: &AgentTaskLoopPolicyActionRecord,
 ) -> Vec<String> {
     let loop_id = shell_arg(&record.loop_id);
-    let mut commands = Vec::new();
-    if let Some(runner_id) = runner_id {
-        commands.push(format!(
-            "homeboy agent-task controller run {loop_id} --runner {}",
-            shell_arg(runner_id)
-        ));
-        commands.push(format!(
-            "homeboy agent-task controller resume {loop_id} --runner {}",
-            shell_arg(runner_id)
-        ));
-    } else {
-        commands.push(format!("homeboy agent-task controller run {loop_id}"));
-        commands.push(format!("homeboy agent-task controller resume {loop_id}"));
+    let dispatch_flags = recovery_dispatch_flags(record, action);
+    vec![
+        format!("homeboy agent-task controller run {loop_id}{dispatch_flags}"),
+        format!("homeboy agent-task controller resume {loop_id}{dispatch_flags}"),
+    ]
+}
+
+fn recovery_dispatch_flags(
+    record: &AgentTaskLoopControllerRecord,
+    action: &AgentTaskLoopPolicyActionRecord,
+) -> String {
+    let action_value = action_value(action);
+    let mut flags = Vec::new();
+    if let Some(value) = first_dispatch_backend(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-backend {}", shell_arg(&value)));
     }
-    commands
+    if let Some(value) = first_dispatch_selector(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-selector {}", shell_arg(&value)));
+    }
+    if let Some(value) = first_dispatch_model(action_value.as_ref(), &record.metadata) {
+        flags.push(format!("--dispatch-model {}", shell_arg(&value)));
+    }
+    if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", flags.join(" "))
+    }
+}
+
+fn first_dispatch_backend(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(|value| first_string_at_keys(value, &["dispatch_backend", "backend"]))
+        .or_else(|| first_string_at_keys(metadata, &["dispatch_backend", "backend"]))
+}
+
+fn first_dispatch_selector(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(first_provider_selector)
+        .or_else(|| first_provider_selector(metadata))
+}
+
+fn first_dispatch_model(action: Option<&Value>, metadata: &Value) -> Option<String> {
+    action
+        .and_then(|value| first_string_at_keys(value, &["dispatch_model", "model"]))
+        .or_else(|| first_string_at_keys(metadata, &["dispatch_model", "model"]))
+}
+
+fn first_provider_selector(value: &Value) -> Option<String> {
+    first_string_at_keys(
+        value,
+        &[
+            "dispatch_selector",
+            "provider_selector",
+            "provider_id",
+            "provider",
+        ],
+    )
+    .or_else(|| first_executor_string_at_keys(value, &["selector", "provider_id", "provider"]))
+}
+
+fn first_executor_string_at_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(executor) = map.get("executor") {
+                if let Some(value) = first_string_at_keys(executor, keys) {
+                    return Some(value);
+                }
+            }
+            if let Some(dispatch) = map.get("dispatch") {
+                if let Some(value) = first_executor_string_at_keys(dispatch, keys) {
+                    return Some(value);
+                }
+            }
+            map.values()
+                .find_map(|value| first_executor_string_at_keys(value, keys))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| first_executor_string_at_keys(value, keys)),
+        _ => None,
+    }
 }
 
 fn shell_arg(value: &str) -> String {
@@ -2246,8 +2312,92 @@ mod tests {
         assert!(action
             .problems
             .contains(&"pending action is older than stale threshold".to_string()));
-        assert!(action.recovery_commands.iter().any(|command| command
-            .contains("homeboy agent-task controller run loop --runner lab-runner")));
+        assert!(action
+            .recovery_commands
+            .contains(&"homeboy agent-task controller run loop".to_string()));
+        assert!(action
+            .recovery_commands
+            .contains(&"homeboy agent-task controller resume loop".to_string()));
+    }
+
+    #[test]
+    fn status_diagnostics_resume_commands_preserve_generic_dispatch_flags() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.metadata = json!({
+            "dispatch_backend": "remote runner",
+            "dispatch_selector": "provider'one",
+            "dispatch_model": "gpt 5",
+            "secret_env": ["SHOULD_NOT_APPEAR"]
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({ "task": "repair" }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-09T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:00:01Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        let commands = &diagnostics.pending_actions[0].recovery_commands;
+        assert_eq!(
+            commands[0],
+            "homeboy agent-task controller run loop --dispatch-backend 'remote runner' --dispatch-selector 'provider'\\''one' --dispatch-model 'gpt 5'"
+        );
+        assert_eq!(
+            commands[1],
+            "homeboy agent-task controller resume loop --dispatch-backend 'remote runner' --dispatch-selector 'provider'\\''one' --dispatch-model 'gpt 5'"
+        );
+        assert!(!commands.join("\n").contains("SHOULD_NOT_APPEAR"));
+    }
+
+    #[test]
+    fn status_diagnostics_resume_commands_use_action_executor_selector() {
+        let mut record = AgentTaskLoopControllerRecord::new("loop", "repair", "v1");
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:abc:repair".to_string(),
+                entity_id: Some("finding:abc".to_string()),
+                request: json!({
+                    "mode": "run_plan",
+                    "plan": {
+                        "tasks": [{
+                            "executor": {
+                                "backend": "generic-backend",
+                                "selector": "generic-provider",
+                                "model": "generic-model"
+                            }
+                        }]
+                    },
+                    "payload": { "selector": ".not-a-provider-selector" }
+                }),
+            },
+            "finding emitted",
+        );
+        record.next_actions[0].created_at = "2026-06-09T00:00:00Z".to_string();
+
+        let diagnostics = controller_status_diagnostics_with(
+            &record,
+            DateTime::parse_from_rfc3339("2026-06-11T00:00:01Z")
+                .expect("now")
+                .with_timezone(&Utc),
+            |_| Ok(true),
+        )
+        .expect("diagnostics");
+
+        assert_eq!(
+            diagnostics.pending_actions[0].recovery_commands[1],
+            "homeboy agent-task controller resume loop --dispatch-backend generic-backend --dispatch-selector generic-provider --dispatch-model generic-model"
+        );
     }
 
     #[test]
