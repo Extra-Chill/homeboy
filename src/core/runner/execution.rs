@@ -811,6 +811,7 @@ fn detached_handoff_output(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: None,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -3933,6 +3934,7 @@ mod tests {
                 false,
                 None,
                 Vec::new(),
+                false,
             )
             .expect("reverse broker exec");
             worker.join().expect("worker joins");
@@ -4019,6 +4021,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            false,
         )
         .expect_err("daemon exec failure");
 
@@ -4103,6 +4106,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            false,
         )
         .expect_err("daemon exec failure");
 
