@@ -731,6 +731,68 @@ mod tests {
     }
 
     #[test]
+    fn generic_outcome_metrics_regress_against_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut baseline_metrics = BTreeMap::new();
+        baseline_metrics.insert("coverage_ratio".to_string(), 0.90);
+        baseline_metrics.insert("failure_rate".to_string(), 0.01);
+        baseline_metrics.insert("blocked_rate".to_string(), 0.02);
+        baseline_metrics.insert("critical_findings".to_string(), 0.0);
+        save_baseline(
+            dir.path(),
+            "demo",
+            &results(vec![metric_scenario("outcomes", baseline_metrics)]),
+            None,
+        )
+        .unwrap();
+        let baseline = load_baseline(dir.path(), None).unwrap();
+
+        let mut current_metrics = BTreeMap::new();
+        current_metrics.insert("coverage_ratio".to_string(), 0.85);
+        current_metrics.insert("failure_rate".to_string(), 0.03);
+        current_metrics.insert("blocked_rate".to_string(), 0.02);
+        current_metrics.insert("critical_findings".to_string(), 1.0);
+        let mut policies = BTreeMap::new();
+        for (metric, direction) in [
+            ("coverage_ratio", BenchMetricDirection::HigherIsBetter),
+            ("failure_rate", BenchMetricDirection::LowerIsBetter),
+            ("blocked_rate", BenchMetricDirection::LowerIsBetter),
+            ("critical_findings", BenchMetricDirection::LowerIsBetter),
+        ] {
+            policies.insert(
+                metric.to_string(),
+                BenchMetricPolicy {
+                    direction,
+                    regression_threshold_percent: Some(0.0),
+                    regression_threshold_absolute: Some(0.0),
+                    variance_aware: false,
+                    min_iterations_for_variance: None,
+                    regression_test: None,
+                    phase: None,
+                },
+            );
+        }
+
+        let comparison = compare(
+            &results_with_policies(vec![metric_scenario("outcomes", current_metrics)], policies),
+            &baseline,
+            5.0,
+        );
+
+        assert!(comparison.regression);
+        let regressions: Vec<_> = comparison.scenarios[0]
+            .metric_deltas
+            .iter()
+            .filter(|delta| delta.regression)
+            .map(|delta| delta.name.as_str())
+            .collect();
+        assert_eq!(
+            regressions,
+            vec!["coverage_ratio", "critical_findings", "failure_rate"]
+        );
+    }
+
+    #[test]
     fn custom_metric_policies_disable_implicit_p95_comparison() {
         let dir = tempfile::tempdir().unwrap();
         save_baseline(
