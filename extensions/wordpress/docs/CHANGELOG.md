@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.60] - 2026-06-21
+
+### Changed
+- Add Codebox provider adapter boundary
+
 ## [3.7.59] - 2026-06-21
 
 ### Changed
