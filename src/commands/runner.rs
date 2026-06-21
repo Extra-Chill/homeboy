@@ -1450,6 +1450,7 @@ fn exec(
             }),
             required_extensions: Vec::new(),
             require_paths,
+            detach_after_handoff: false,
         },
     )
 }
