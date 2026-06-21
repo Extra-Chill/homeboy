@@ -155,28 +155,26 @@ const caseArtifactIndex = caseArtifactIndexFromCodeboxResult({
   artifact_result: {
     schema: 'wp-codebox/artifact-result-envelope/v1',
     result: {
-      benchmark_artifacts: {
-        schema: 'wp-codebox/benchmark-artifacts/v1',
-        results: [{
-          component_id: 'plugin-under-test',
-          scenarios: [{
-            id: 'fuzz-rest-cases',
-            artifactRefs: [
-              { path: 'files/bench/plugin/fuzz-rest-cases-summary.json', kind: 'benchmark-rest-request-case-summary', sha256: 'summary-sha' },
-            ],
-            cases: [{
-              id: 'create-post',
-              status: 201,
-              artifacts: {
-                request: { path: 'files/fuzz/create-post-request.json', kind: 'request-evidence' },
-              },
-            }],
-            steps: [{
-              type: 'rest-request',
-              rest_request_case_index: 1,
-              case_id: 'update-post',
-              status: 200,
-            }],
+      fuzz_results: {
+        schema: 'wp-codebox/fuzz-results/v1',
+        component_id: 'plugin-under-test',
+        scenarios: [{
+          id: 'rest-cases',
+          artifactRefs: [
+            { path: 'files/fuzz/plugin/rest-cases-summary.json', kind: 'fuzz-rest-request-case-summary', sha256: 'summary-sha' },
+          ],
+          cases: [{
+            id: 'create-post',
+            status: 201,
+            artifacts: {
+              request: { path: 'files/fuzz/create-post-request.json', kind: 'request-evidence' },
+            },
+          }],
+          steps: [{
+            type: 'rest-request',
+            rest_request_case_index: 1,
+            case_id: 'update-post',
+            status: 200,
           }],
         }],
       },
@@ -188,10 +186,10 @@ assert.equal(caseArtifactIndex.schema, 'wp-codebox/case-artifact-index/v1');
 assert.equal(caseArtifactIndex.caseRefs.length, 2);
 assert.deepEqual(caseArtifactIndex.caseRefs.map((ref) => ref.case_id), ['create-post', 'update-post']);
 assert.deepEqual(caseArtifactIndex.caseRefs[0].artifactRefs, [
-  { path: 'files/bench/plugin/fuzz-rest-cases-summary.json', kind: 'benchmark-rest-request-case-summary', sha256: 'summary-sha' },
+  { path: 'files/fuzz/plugin/rest-cases-summary.json', kind: 'fuzz-rest-request-case-summary', sha256: 'summary-sha' },
   { name: 'request', path: 'files/fuzz/create-post-request.json', kind: 'request-evidence' },
 ]);
 assert.deepEqual(caseArtifactIndex.caseRefs[1].artifactRefs, [
-  { path: 'files/bench/plugin/fuzz-rest-cases-summary.json', kind: 'benchmark-rest-request-case-summary', sha256: 'summary-sha' },
+  { path: 'files/fuzz/plugin/rest-cases-summary.json', kind: 'fuzz-rest-request-case-summary', sha256: 'summary-sha' },
 ]);
 console.log('wp-codebox artifact contract smoke passed');

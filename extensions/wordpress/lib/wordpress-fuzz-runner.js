@@ -50,12 +50,12 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 	const codeboxPlanRecipe = buildCodeboxPlanRecipe(workload);
 	const codeboxResult = normalizeCodeboxResult(workload);
 	const coverage = aggregateCoverage(workload, codeboxResult);
-	const status = codeboxResult?.succeeded === false || hasCoverageFailures(coverage) ? 'failed' : (codeboxResult?.status || 'planned');
+	const status = normalizeRunnerStatus(codeboxResult, coverage);
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 		status,
-		succeeded: status === 'planned' ? undefined : !['failed', 'errored'].includes(String(status).toLowerCase()),
+		succeeded: !['failed', 'errored'].includes(String(status).toLowerCase()),
 		run_id: runId,
 		workload_id: workloadId,
 		seed,
@@ -138,6 +138,16 @@ function aggregateCoverage(workload, codeboxResult) {
 
 function hasCoverageFailures(coverage) {
 	return Number(coverage?.totals?.failed || 0) > 0;
+}
+
+function normalizeRunnerStatus(codeboxResult, coverage) {
+	if (!codeboxResult) {
+		return 'failed';
+	}
+	if (codeboxResult.succeeded === false || hasCoverageFailures(coverage)) {
+		return 'failed';
+	}
+	return codeboxResult.status || 'succeeded';
 }
 
 function readJsonFile(filePath) {
