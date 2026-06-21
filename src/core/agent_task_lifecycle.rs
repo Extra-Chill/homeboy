@@ -328,18 +328,16 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         ));
     }
 
-    if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task run '{}' is running under pid {}; provider live cancellation is not available through this durable record yet",
-                record.run_id,
-                record.owner_pid().unwrap_or_default()
-            ),
-            Some(record.run_id),
-            None,
-        ));
-    }
+    let live_cancellation = if record.state == AgentTaskRunState::Running {
+        match record.owner_pid() {
+            Some(owner_pid) if record.owner_process_is_running() => {
+                Some(crate::core::process::terminate_process_tree(owner_pid)?)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     let cancelled_at = now_timestamp();
     let was_stale_running = record.state == AgentTaskRunState::Running;
@@ -359,6 +357,18 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         "cancel_reason".to_string(),
         json!(reason.unwrap_or("cancel requested")),
     );
+    if let Some(cancellation) = live_cancellation {
+        metadata.insert(
+            "live_cancellation".to_string(),
+            json!({
+                "owner_pid": cancellation.owner_pid,
+                "descendant_pids": cancellation.descendant_pids,
+                "signalled_pids": cancellation.signalled_pids,
+                "signal": cancellation.signal,
+                "recovery_commands": cancellation.recovery_commands,
+            }),
+        );
+    }
     if was_stale_running {
         metadata.insert("cancelled_stale_running".to_string(), json!(true));
     }
@@ -2472,16 +2482,24 @@ mod tests {
     }
 
     #[test]
-    fn cancel_run_rejects_live_running_record() {
+    fn cancel_run_signals_live_running_record() {
         with_isolated_home(|_| {
             let plan = test_plan();
             submit_plan(&plan, Some("run-cancel-live")).expect("submitted");
             mark_running("run-cancel-live").expect("marked running");
 
-            let error = cancel_run("run-cancel-live", None).expect_err("live run rejected");
+            let cancelled = cancel_run("run-cancel-live", None).expect("live run cancelled");
 
-            assert!(error.message.contains("running under pid"));
-            assert!(error.message.contains("provider live cancellation"));
+            assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+            assert_eq!(
+                cancelled.metadata["live_cancellation"]["owner_pid"],
+                json!(std::process::id())
+            );
+            assert_eq!(
+                cancelled.metadata["live_cancellation"]["signal"],
+                json!("SIGTERM")
+            );
         });
     }
 
