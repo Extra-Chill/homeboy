@@ -391,7 +391,7 @@ fn enforce_path_budget_rejects_overlong_paths() {
 fn invocation_dir_permission_error_names_runtime_root_and_remediation() {
     let runtime_root = std::path::Path::new("/tmp/hb-owned-by-another-user");
     let dir = runtime_root.join("abc1234567");
-    let err = invocation_dir_create_error(
+    let err = super::errors::invocation_dir_create_error(
         &dir,
         runtime_root,
         std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),

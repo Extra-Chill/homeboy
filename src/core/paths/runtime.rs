@@ -20,7 +20,7 @@ pub fn daemon_jobs_file() -> Result<PathBuf> {
 }
 
 /// Runner connection session state directory (~/.config/homeboy/runner-sessions/).
-fn runner_sessions_dir() -> Result<PathBuf> {
+pub(crate) fn runner_sessions_dir() -> Result<PathBuf> {
     Ok(homeboy()?.join("runner-sessions"))
 }
 

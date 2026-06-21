@@ -220,7 +220,7 @@ impl HomeboyProofArtifactRef {
 mod tests {
     use super::*;
     use crate::core::gate::{HomeboyGateKind, HomeboyGateStatus};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn proof_scope_distinguishes_targeted_and_ci_equivalent_gates() {
