@@ -174,6 +174,22 @@ fn test_supports_lab_runner() {
         "cook"
     ])
     .supports_lab_runner());
+    let invalid_loop = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "loop",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--prompt",
+        "cook",
+    ]);
+    assert!(!invalid_loop.supports_lab_runner());
+    assert_eq!(
+        invalid_loop.lab_runner_unsupported_reason(),
+        Some(
+            "agent-task loop requires at least one deterministic --verify or --private-verify gate"
+        )
+    );
     assert!(
         !parsed_command(&["homeboy", "refactor", "rename", "--from", "old", "--to", "new",])
             .supports_lab_runner()

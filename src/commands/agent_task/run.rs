@@ -37,7 +37,7 @@ pub(super) fn run_loop_with_executor<E>(args: AgentTaskLoopArgs, executor: E) ->
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    if args.gates.verify.is_empty() && args.gates.private_verify.is_empty() {
+    if !args.gates.has_deterministic_gate() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
             "agent-task loop requires at least one deterministic --verify or --private-verify gate",
