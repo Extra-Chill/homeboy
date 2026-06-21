@@ -34,6 +34,7 @@ use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::utils::output::{write_output_file_atomically, OutputWriteOptions};
 use super::{audit, lint, test, CmdResult, GlobalArgs};
+use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 
 mod observation;
 pub(super) mod raw_output;
@@ -79,6 +80,18 @@ pub struct ReviewArgs {
 
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
+}
+
+const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
+
+impl ReviewArgs {
+    pub(crate) fn lab_contract(&self) -> LabCommandContract {
+        if self.changed_since.is_some() || self.changed_only {
+            LabCommandContract::local_only(REVIEW_LAB_LABEL, REVIEW_SCOPED_LAB_UNSUPPORTED_REASON)
+        } else {
+            LabCommandContract::portable(REVIEW_LAB_LABEL, None, true, &[]).release_gate()
+        }
+    }
 }
 
 /// True when the caller asked for a markdown PR-comment section instead of

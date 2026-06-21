@@ -90,6 +90,7 @@ const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
 pub(crate) const LINT_LAB_LABEL: &str = "lint";
 pub(crate) const TEST_LAB_LABEL: &str = "test";
 pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
+pub(crate) const REVIEW_LAB_LABEL: &str = "review";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
 pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
 const TRACE_LAB_LABEL: &str = "trace";
@@ -165,6 +166,12 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
         contract_labels: &[AUDIT_LAB_LABEL],
         message_label: AUDIT_LAB_LABEL,
         hint_label: AUDIT_LAB_LABEL,
+    },
+    LabSupportedCommandSummary {
+        #[cfg(test)]
+        contract_labels: &[REVIEW_LAB_LABEL],
+        message_label: REVIEW_LAB_LABEL,
+        hint_label: "full review",
     },
     LabSupportedCommandSummary {
         #[cfg(test)]
@@ -328,6 +335,7 @@ impl Commands {
             }
             Commands::Fleet(args) => args.lab_contract()?,
             Commands::Lint(args) => args.lab_contract()?,
+            Commands::Review(args) => args.lab_contract(),
             Commands::Refactor(args) if args.is_hot_resource_command() => {
                 LabCommandContract::portable(
                     "refactor",
@@ -607,6 +615,10 @@ impl Commands {
             Commands::Lint(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone())
             }
+            Commands::Review(args) => {
+                extension_ids.extend(args.extension_override.extensions.clone());
+                extension_ids.extend(review_lab_extension_ids(args)?);
+            }
             Commands::Test(args) => {
                 extension_ids.extend(args.extension_override.extensions.clone());
                 extension_ids.extend(test_lab_extension_ids(args)?);
@@ -662,6 +674,37 @@ fn test_lab_extension_ids(
         capability: Some(ExtensionCapability::Test),
         settings_overrides: args.setting_args.setting.clone(),
         settings_json_overrides: args.setting_args.setting_json.clone(),
+        extension_overrides: args.extension_override.extensions.clone(),
+    })?;
+
+    Ok(context.extension_id.into_iter().collect())
+}
+
+fn review_lab_extension_ids(
+    args: &crate::commands::review::ReviewArgs,
+) -> crate::core::Result<Vec<String>> {
+    let source_context = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: None,
+        settings_overrides: Vec::new(),
+        settings_json_overrides: Vec::new(),
+        extension_overrides: args.extension_override.extensions.clone(),
+    })?;
+
+    if source_context
+        .component
+        .has_script(ExtensionCapability::Test)
+    {
+        return Ok(Vec::new());
+    }
+
+    let context = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: Some(ExtensionCapability::Test),
+        settings_overrides: Vec::new(),
+        settings_json_overrides: Vec::new(),
         extension_overrides: args.extension_override.extensions.clone(),
     })?;
 
