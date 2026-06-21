@@ -17,6 +17,7 @@ pub(crate) mod agent_task_config_materialization;
 pub mod agent_task_contract;
 pub mod agent_task_controller_service;
 pub mod agent_task_cook_loop;
+pub mod agent_task_deterministic_loop;
 pub mod agent_task_dispatch_plan;
 pub mod agent_task_dispatch_service;
 pub mod agent_task_fanout;
