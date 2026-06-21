@@ -20,6 +20,13 @@ provider contract, task request mapping, runtime CLI, and normalized outcome
 conversion so the WordPress extension can depend on generic runtime capabilities
 instead of embedding the provider contract.
 
+Provider discovery lives in the runtime manifest's
+`provider_metadata` block. Operators and generic tooling should read that block to
+separate executor backend (`codebox`), runtime id (`wp-codebox`), provider id
+(`openai`, `codex`, `claude-code`, or another WordPress AI provider), and model
+selection (`executor.config.model` / `executor.model`). Homeboy core should treat
+provider ids and model names as opaque runtime metadata.
+
 Configure the Codex pair with task config, global settings, or environment variables:
 
 - `provider_plugin_paths`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`. Legacy compatibility aliases: `wp_codebox_provider_plugin_paths`, `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`.
