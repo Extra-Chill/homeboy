@@ -98,7 +98,7 @@ The release command:
 6. Finalizes changelog (`[Next]` → `[VERSION] - DATE`)
 7. Commits, creates an annotated tag, pushes, and creates a GitHub Release
 
-After the tag push, downstream build/publish jobs can pick it up (e.g. cargo-dist, npm publish).
+After the tag push, downstream build jobs can produce artifacts and then call Homeboy Action again with `release-head: 'true'` and `release-from-artifacts: <path>` to publish those artifacts through the native Homeboy release pipeline.
 
 ### Benchmarks
 
@@ -196,6 +196,11 @@ Use these outputs to gate downstream jobs:
 | `pr-policy-merge-method` | No | `squash` | Merge method for `pr-policy-merge`: `merge`, `squash`, or `rebase` |
 | `release-dry-run` | No | `false` | Preview the release without making changes |
 | `release-branch` | No | `main` | Branch that releases are allowed from |
+| `release-head` | No | `false` | Finish a release at the current HEAD/tag with `--head` |
+| `release-from-artifacts` | No | | Publish existing artifacts with `--from-artifacts <path>` |
+| `release-skip-publish` | No | `false` | Skip package and publish steps |
+| `release-skip-github-release` | No | `false` | Skip GitHub Release creation |
+| `release-verify-github-release` | No | `true` | Verify that a successful release has a GitHub Release |
 
 ## Outputs
 
@@ -455,11 +460,34 @@ jobs:
           extension: rust
           commands: release
 
-  # Build + publish (only if released)
+  # Build artifacts (only if released)
   build:
     needs: prepare
     if: needs.prepare.outputs.released == 'true'
-    # ... cargo-dist, crates.io, Homebrew
+    # ... cargo-dist, upload artifacts
+
+  # Publish prebuilt artifacts through Homeboy release.publish
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.release-tag }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          source: '.'
+          extension: rust
+          commands: release
+          release-head: 'true'
+          release-from-artifacts: artifacts
 ```
 
 ### Recommended CI Profile

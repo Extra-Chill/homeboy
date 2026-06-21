@@ -163,6 +163,9 @@ run_wrapper() {
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}" \
   RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
+  RELEASE_HEAD="${RELEASE_HEAD:-false}" \
+  RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  MOCK_BRANCH="${MOCK_BRANCH:-main}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
 }
@@ -218,6 +221,20 @@ ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
 assert_contains '--skip-publish' "${ARGS}" "release can opt out of package/publish steps"
 assert_contains '--no-github-release' "${ARGS}" "release can opt out of GitHub Release creation"
 unset RELEASE_SKIP_PUBLISH RELEASE_SKIP_GITHUB_RELEASE
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_HEAD="true"
+RELEASE_FROM_ARTIFACTS="artifacts"
+MOCK_BRANCH="HEAD"
+GH_TOKEN="secret123"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains '--head' "${ARGS}" "head release passes --head"
+assert_contains '--from-artifacts' "${ARGS}" "head release passes --from-artifacts"
+assert_contains 'artifacts' "${ARGS}" "head release passes artifact directory"
+assert_output_line 'released=true' "${OUTPUT_FILE}" "head release can run from detached HEAD"
+unset RELEASE_HEAD RELEASE_FROM_ARTIFACTS MOCK_BRANCH
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"
