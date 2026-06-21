@@ -8,7 +8,11 @@ const { spawnSync } = require('node:child_process');
 const {
 	wordpressRuntimeTaskPlan,
 	wordpressRuntimeTaskRequest,
+	wordpressRuntimeTaskRunnerSpec,
 } = require('../lib/wordpress-runtime-task-planner');
+const {
+	genericAgentTaskRequest,
+} = require('../../runtime-agent-ci/lib/generic-agent-task-plan');
 
 const contract = JSON.parse(fs.readFileSync(path.join(
 	__dirname,
@@ -83,6 +87,31 @@ assert.equal(request.schema, contract.schemas.request);
 assert.equal(request.task_id, 'single-runtime-task-smoke');
 assert.equal(request.instructions, 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.');
 assert.deepEqual(request.inputs.ability_input, { slug: 'example' });
+
+assert.deepEqual(
+	request,
+	genericAgentTaskRequest({
+		schema: contract.schemas.request,
+		taskId: 'single-runtime-task-smoke',
+		parentPlanId: undefined,
+		instructions: 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.',
+		inputs: {
+			ability: 'example/materialize-artifact',
+			ability_input: { slug: 'example' },
+		},
+		sourceRefs: [],
+		policy: { read: 'sandbox', write: 'sandbox', apply: 'review' },
+		metadata: {},
+		includeArtifactDeclarations: false,
+		runnerSpec: wordpressRuntimeTaskRunnerSpec({
+			taskId: 'single-runtime-task-smoke',
+			ability: 'example/materialize-artifact',
+			abilityInput: { slug: 'example' },
+			backend: 'codebox',
+			runtime: 'wp-codebox',
+		}),
+	})
+);
 
 const script = path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-wordpress-runtime-task-plan.cjs');
 const result = spawnSync(process.execPath, [

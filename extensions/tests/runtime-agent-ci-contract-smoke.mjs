@@ -8,11 +8,16 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const runtimeAgentCi = require(path.join(repoRoot, 'runtime-agent-ci/index.js'));
+const {
+  genericAgentTaskPlan,
+  genericAgentTaskRequest,
+} = require(path.join(repoRoot, 'runtime-agent-ci/lib/generic-agent-task-plan.js'));
 
 const genericBoundaryTerms = /Data Machine|DataMachine|datamachine|data-machine|wp-site-generator|WPSG|site-generator|site generator/;
 const genericFiles = [
   'runtime-agent-ci/index.js',
   'runtime-agent-ci/lib/runtime-agent-ci-plan.js',
+  'runtime-agent-ci/lib/generic-agent-task-plan.js',
   '.github/workflows/runtime-agent-ci.yml',
 ];
 
@@ -152,5 +157,47 @@ assert.equal(genericRequest.executor.backend, 'codebox');
 assert.equal(genericRequest.executor.runtime, 'wp-codebox');
 assert.deepEqual(genericRequest.expected_artifacts, ['packet']);
 assert.deepEqual(genericRequest.executor.config.runtime_task, { ability: 'example/run-task', input: { prompt: 'Cook.' } });
+
+assert.deepEqual(
+  runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
+    taskId: 'equivalent-task',
+    backend: 'codebox',
+    runtimeProvider: 'codebox',
+    runtimeProfile: runtimeProfile.id,
+    runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+    ability: 'example/run-task',
+    abilityInput: { prompt: 'Cook.' },
+    expectedArtifacts: ['packet'],
+  }),
+  genericAgentTaskRequest({
+    taskId: 'equivalent-task',
+    instructions: '',
+    inputs: {},
+    runnerSpec: runtimeAgentCi.runtimeAgentCiRunnerSpec({
+      backend: 'codebox',
+      runtimeProvider: 'codebox',
+      runtimeProfile: runtimeProfile.id,
+      runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+      ability: 'example/run-task',
+      abilityInput: { prompt: 'Cook.' },
+      expectedArtifacts: ['packet'],
+    }),
+  })
+);
+
+assert.deepEqual(
+  runtimeAgentCi.runtimeAgentCiPlan({
+    planId: 'equivalent-plan',
+    tasks: [genericRequest],
+    options: { concurrency: 1 },
+    metadata: { preset: 'runtime-agent-ci' },
+  }),
+  genericAgentTaskPlan({
+    planId: 'equivalent-plan',
+    tasks: [genericRequest],
+    options: { concurrency: 1 },
+    metadata: { preset: 'runtime-agent-ci' },
+  })
+);
 
 console.log('runtime agent CI contract smoke passed');

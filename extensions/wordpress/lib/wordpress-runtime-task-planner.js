@@ -9,14 +9,15 @@ const crypto = require('node:crypto');
  * Internal dependencies
  */
 const {
-	AGENT_TASK_REQUEST_SCHEMA,
-} = require('../../runtime-agent-ci/lib/agent-task-provider-contract');
-const {
-	agentTaskRequestFromRunnerSpec,
-	agentTaskRunnerSpec,
-} = require('../../runtime-agent-ci/lib/agent-task-runner-contract');
+	GENERIC_AGENT_TASK_PLAN_SCHEMA,
+	GENERIC_AGENT_TASK_REQUEST_SCHEMA,
+	genericAgentTaskPlan,
+	genericAgentTaskRequest,
+	genericAgentTaskRunnerSpec,
+} = require('../../runtime-agent-ci/lib/generic-agent-task-plan');
 
-const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
+const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
+const WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
 const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = 'codebox';
 const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME = 'wp-codebox';
 const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND;
@@ -43,7 +44,7 @@ function wordpressRuntimeTaskPlan(options = {}) {
 		fanout: taskOption.fanout || taskOption.matrix || taskOption.metadata?.fanout,
 	}));
 
-	return stripUndefined({
+	return genericAgentTaskPlan({
 		schema: WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
 		plan_id: planId,
 		tasks,
@@ -64,23 +65,20 @@ function wordpressRuntimeTaskRequest(options = {}) {
 	const taskId = requiredString(options.taskId || options.task_id, 'taskId');
 	const ability = requiredString(options.ability, 'ability');
 	const abilityInput = runtimeAbilityInput(options);
-	const runnerRequest = agentTaskRequestFromRunnerSpec({
-		runnerSpec: wordpressRuntimeTaskRunnerSpec({
-			...options,
-			ability,
-			abilityInput,
-		}),
+	const runnerSpec = wordpressRuntimeTaskRunnerSpec({
+		...options,
+		ability,
+		abilityInput,
 	});
 
-	return stripUndefined({
-		schema: AGENT_TASK_REQUEST_SCHEMA,
+	return genericAgentTaskRequest({
+		schema: WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA,
 		task_id: taskId,
 		group_key: options.groupKey || options.group_key,
 		parent_plan_id: options.parentPlanId || options.parent_plan_id || options.planId || options.plan_id,
 		cwd: options.cwd,
 		repo: options.repo,
 		workspace: options.workspace,
-		executor: runnerRequest.executor,
 		instructions: options.instructions || instructionsForAbility(ability),
 		inputs: stripUndefined({
 			...(options.inputs || {}),
@@ -89,18 +87,18 @@ function wordpressRuntimeTaskRequest(options = {}) {
 		}),
 		source_refs: normalizeArray(options.sourceRefs || options.source_refs),
 		policy: options.policy || WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY,
-		limits: runnerRequest.limits,
-		expected_artifacts: runnerRequest.expected_artifacts,
 		metadata: stripUndefined({
 			...(options.metadata || {}),
 			fanout: options.fanout,
 		}),
+		includeArtifactDeclarations: false,
+		runnerSpec,
 	});
 }
 
 function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	const config = wordpressRuntimeTaskExecutorConfig(options);
-	return agentTaskRunnerSpec({
+	return genericAgentTaskRunnerSpec({
 		backend: wordpressRuntimeTaskBackend(options),
 		runtime: wordpressRuntimeTaskRuntime(options),
 		config,
@@ -229,6 +227,7 @@ module.exports = {
 	WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY,
 	WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME,
 	WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
+	WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA,
 	wordpressRuntimeTaskBackend,
 	wordpressRuntimeTaskExecutorConfig,
 	wordpressRuntimeTaskPlan,
