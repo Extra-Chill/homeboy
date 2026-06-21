@@ -33,7 +33,7 @@ function homeboySettings(env) {
   try {
     const parsed = JSON.parse(env.HOMEBOY_SETTINGS_JSON);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch (_error) {
+  } catch {
     return {};
   }
 }
@@ -66,6 +66,47 @@ function parseWpCodeboxJson(stdout) {
   }
 
   return JSON.parse(trimmed);
+}
+
+function normalizePluginStateList(value, field) {
+  if (value === undefined || value === null || value === false) {
+    return [];
+  }
+  const items = Array.isArray(value) ? value : [value];
+  return items.map((item, index) => {
+    if (typeof item === 'string') {
+      const plugin = item.trim();
+      if (!plugin) {
+        throw new TypeError(`${field} plugin ${index + 1} must be non-empty.`);
+      }
+      return { plugin };
+    }
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new TypeError(`${field} plugin ${index + 1} must be a string or object.`);
+    }
+    let plugin = '';
+    if (typeof item.plugin === 'string' && item.plugin.trim()) {
+      plugin = item.plugin.trim();
+    } else if (typeof item.slug === 'string' && item.slug.trim()) {
+      plugin = item.slug.trim();
+    }
+    if (!plugin) {
+      throw new TypeError(`${field} plugin ${index + 1} requires plugin or slug.`);
+    }
+    return { ...item, plugin };
+  });
+}
+
+function wpCodeboxPluginStateStep(options = {}) {
+  const state = {
+    activate: normalizePluginStateList(options.activate, 'activate'),
+    deactivate: normalizePluginStateList(options.deactivate, 'deactivate'),
+    report: options.report !== false,
+  };
+  return {
+    command: 'wordpress.plugin-state',
+    args: [`plugin-state-json=${JSON.stringify(state)}`],
+  };
 }
 
 async function runWpCodeboxRecipe({
@@ -139,6 +180,7 @@ module.exports = {
   parseWpCodeboxJson,
   recipeEventName,
   runWpCodeboxRecipe,
+  wpCodeboxPluginStateStep,
   homeboySettings,
   wpCodeboxBin,
   wpCodeboxCommand,
