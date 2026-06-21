@@ -86,7 +86,7 @@ quarantined `audit-wp-codebox-fanout` module and CLI map grouped audit findings
 to `wp-codebox/task-input/v1`, execute those requests through Codebox-owned task
 runner contracts, and normalize Codebox artifacts/outcomes back into fanout
 records. Keep new executor-neutral extraction behavior in
-`generic-fanout-reconcile-workflow`; keep Codebox request/session/artifact
+`runtime-agent-ci/generic-fanout-reconcile-workflow`; keep Codebox request/session/artifact
 details inside the Codebox audit fanout lane.
 
 ## Static Site Fanout Adapter
