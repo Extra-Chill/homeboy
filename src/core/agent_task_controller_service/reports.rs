@@ -64,8 +64,31 @@ pub struct ControllerActionReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_summary: Option<ControllerActionFailureSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<Value>,
     pub controller: AgentTaskLoopControllerRecord,
+}
+
+/// Concise failed-action context for controller resume operators.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerActionFailureSummary {
+    pub action_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_phase: Option<String>,
+    pub diagnostic: String,
 }
 
 /// Typed report returned by `resume`.
