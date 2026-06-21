@@ -538,10 +538,8 @@ mod tests {
         );
 
         let aggregate_descriptor = scoped_lint.descriptor(false);
-        assert!(!aggregate_descriptor.supports_lab_runner);
-        assert!(aggregate_descriptor
-            .lab_runner_unsupported_reason
-            .is_some_and(|reason| reason.contains("Changed-scope lint")));
+        assert!(aggregate_descriptor.supports_lab_runner);
+        assert!(aggregate_descriptor.lab_runner_unsupported_reason.is_none());
     }
 
     #[test]

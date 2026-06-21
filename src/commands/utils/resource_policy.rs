@@ -495,11 +495,8 @@ mod tests {
         let changed_lint = Cli::parse_from(["homeboy", "lint", "--changed-since", "origin/main"]);
         let hot = hot_command(&changed_lint.command).expect("changed-scope lint is hot");
         assert_eq!(hot.label, "lint");
-        assert!(!hot.lab_offload_supported);
-        assert!(hot
-            .lab_offload_unsupported_reason
-            .expect("unsupported reason")
-            .contains("Changed-scope lint runs stay local"));
+        assert!(hot.lab_offload_supported);
+        assert!(hot.lab_offload_unsupported_reason.is_none());
 
         let file_lint = Cli::parse_from(["homeboy", "lint", "--file", "src/main.rs"]);
         assert!(hot_command(&file_lint.command).is_none());

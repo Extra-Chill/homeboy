@@ -27,8 +27,6 @@ use crate::command_contract::{
     LINT_LAB_LABEL,
 };
 
-const LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON: &str = "Changed-scope lint runs stay local because changed-file scopes are not represented in the current Lab portability contract yet.";
-
 #[derive(Args)]
 pub struct LintArgs {
     #[command(flatten)]
@@ -59,6 +57,9 @@ pub struct LintArgs {
 
     #[arg(skip)]
     pub precomputed_changed_files: Option<Vec<String>>,
+
+    #[arg(long, hide = true, value_name = "JSON")]
+    pub lab_changed_files_json: Option<String>,
 
     /// Run using env from a single extension-declared CI lint job.
     #[arg(long, value_name = "ID", conflicts_with = "fix")]
@@ -99,7 +100,7 @@ impl LintArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
-        if self.is_full_workspace_run() {
+        if self.is_full_workspace_run() || self.changed_since.is_some() || self.changed_only {
             return Some(
                 LabCommandContract::portable(
                     LINT_LAB_LABEL,
@@ -111,12 +112,7 @@ impl LintArgs {
             );
         }
 
-        (self.changed_since.is_some() || self.changed_only).then(|| {
-            LabCommandContract::local_only(
-                LINT_LAB_LABEL,
-                LINT_CHANGED_SCOPE_LAB_UNSUPPORTED_REASON,
-            )
-        })
+        None
     }
 
     pub fn is_full_workspace_run(&self) -> bool {
@@ -220,7 +216,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
             glob: args.glob.clone(),
             changed_only: args.changed_only,
             changed_since: args.changed_since.clone(),
-            precomputed_changed_files: args.precomputed_changed_files.clone(),
+            precomputed_changed_files: changed_files_from_args(&args)?,
             sniff_filters: args.sniff_filters.to_lint_sniff_filters(),
             category: args.category.clone(),
             ci_env: ci_profile::ci_job_env(ci_job.as_ref()),
@@ -239,6 +235,27 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
     ))
+}
+
+fn changed_files_from_args(args: &LintArgs) -> homeboy::core::Result<Option<Vec<String>>> {
+    if args.precomputed_changed_files.is_some() {
+        return Ok(args.precomputed_changed_files.clone());
+    }
+    args.lab_changed_files_json
+        .as_deref()
+        .map(parse_lab_changed_files_json)
+        .transpose()
+}
+
+fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+    serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "lab_changed_files_json",
+            format!("invalid Lab changed-file payload: {error}"),
+            None,
+            None,
+        )
+    })
 }
 
 struct LintObservationAdapter {

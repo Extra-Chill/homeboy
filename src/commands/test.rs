@@ -28,8 +28,6 @@ use crate::command_contract::{
 };
 use homeboy::core::validation_progress::validation_progress_metadata;
 
-const TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON: &str = "`test --changed-since` is not Lab-portable yet because changed-since test selection depends on git base refs that the current Lab workspace sync may not have fetched.";
-
 #[derive(Args)]
 pub struct TestArgs {
     #[command(flatten)]
@@ -76,6 +74,9 @@ pub struct TestArgs {
     #[arg(skip)]
     pub precomputed_changed_files: Option<Vec<String>>,
 
+    #[arg(long, hide = true, value_name = "JSON")]
+    pub lab_changed_files_json: Option<String>,
+
     /// Run using env and passthrough args from a single extension-declared CI test job.
     #[arg(long, value_name = "ID", conflicts_with = "drift")]
     pub ci_job: Option<String>,
@@ -101,15 +102,8 @@ impl TestArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
-        if self.changed_since.is_none() {
-            LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
-                .release_gate()
-        } else {
-            LabCommandContract::local_only(
-                TEST_LAB_LABEL,
-                TEST_CHANGED_SINCE_LAB_UNSUPPORTED_REASON,
-            )
-        }
+        LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
+            .release_gate()
     }
 }
 
@@ -226,7 +220,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
                 ratchet: args.baseline_args.ratchet,
             },
             changed_since: args.changed_since.clone(),
-            precomputed_changed_files: args.precomputed_changed_files.clone(),
+            precomputed_changed_files: changed_files_from_args(&args)?,
             json_summary: args.json_summary,
             ci_env: test_runner_ci_env(ci_job.as_ref()),
             passthrough_args: passthrough_args.clone(),
@@ -244,6 +238,27 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
         workflow,
         ci_profile::ci_context_for_job(ci_job.as_ref(), None),
     ))
+}
+
+fn changed_files_from_args(args: &TestArgs) -> homeboy::core::Result<Option<Vec<String>>> {
+    if args.precomputed_changed_files.is_some() {
+        return Ok(args.precomputed_changed_files.clone());
+    }
+    args.lab_changed_files_json
+        .as_deref()
+        .map(parse_lab_changed_files_json)
+        .transpose()
+}
+
+fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
+    serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "lab_changed_files_json",
+            format!("invalid Lab changed-file payload: {error}"),
+            None,
+            None,
+        )
+    })
 }
 
 fn ci_job_passthrough_args(job: Option<&CiResolvedJob>) -> Vec<String> {

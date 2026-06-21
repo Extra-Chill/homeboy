@@ -38,6 +38,7 @@ fn test_command_args(root: &Path) -> TestArgs {
         since: "HEAD~10".to_string(),
         changed_since: None,
         precomputed_changed_files: None,
+        lab_changed_files_json: None,
         ci_job: None,
         setting_args: SettingArgs::default(),
         args: Vec::new(),
