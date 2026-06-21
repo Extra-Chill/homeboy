@@ -34,7 +34,10 @@ pub(crate) struct DependencyProviderSnapshot {
 pub(crate) enum DependencyProvider {
     Composer(ComposerDependencyProvider),
     Npm(NpmDependencyProvider),
-    Extension(ExtensionDependencyProvider),
+    // Boxed: `ExtensionDependencyProvider` carries a full execution context and
+    // is far larger than the other (zero-sized) variants, so storing it inline
+    // would bloat every `DependencyProvider` value (clippy::large_enum_variant).
+    Extension(Box<ExtensionDependencyProvider>),
     ComponentScript(ComponentScriptDependencyProvider),
 }
 
@@ -158,11 +161,9 @@ pub(crate) fn resolve_dependency_providers_optional(
         .unwrap_or(false)
     {
         match extension::resolve_execution_context(component, ExtensionCapability::Deps) {
-            Ok(context) => {
-                providers.push(DependencyProvider::Extension(ExtensionDependencyProvider {
-                    context,
-                }))
-            }
+            Ok(context) => providers.push(DependencyProvider::Extension(Box::new(
+                ExtensionDependencyProvider { context },
+            ))),
             Err(err) if providers.is_empty() => return Err(err),
             Err(_) => {}
         }
