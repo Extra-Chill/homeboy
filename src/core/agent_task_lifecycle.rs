@@ -521,6 +521,8 @@ pub fn record_pre_dispatch_failure(
             },
         ],
         artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
         queue: AgentTaskQueueStatus {
             max_concurrency: 1,
             completed: 1,
@@ -1739,6 +1741,8 @@ mod tests {
                     message: Some("Remote provider agent task failed.".to_string()),
                 }],
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: AgentTaskQueueStatus {
                     max_concurrency: 1,
                     completed: 1,
@@ -1860,6 +1864,8 @@ mod tests {
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: AgentTaskQueueStatus {
                     max_concurrency: 1,
                     completed: 1,
@@ -1963,6 +1969,8 @@ mod tests {
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: AgentTaskQueueStatus {
                     max_concurrency: 1,
                     completed: 1,
@@ -2074,6 +2082,8 @@ mod tests {
                     message: Some("ok".to_string()),
                 }],
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: Default::default(),
             };
 
@@ -2241,6 +2251,8 @@ mod tests {
                     message: Some("provider task failed".to_string()),
                 }],
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: Default::default(),
             };
 
@@ -2361,6 +2373,8 @@ mod tests {
                 }],
                 events: Vec::new(),
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: Default::default(),
             };
             record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
@@ -2677,6 +2691,8 @@ mod tests {
                     message: Some("ok".to_string()),
                 }],
                 artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
                 queue: Default::default(),
             };
 
@@ -2765,6 +2781,8 @@ mod tests {
                 message: Some("ok".to_string()),
             }],
             artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
             queue: Default::default(),
         }
     }

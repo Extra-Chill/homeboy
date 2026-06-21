@@ -502,8 +502,39 @@ pub struct AgentTaskAggregate {
     pub events: Vec<AgentTaskProgressEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_lineage: Vec<AgentTaskArtifactLineage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_runs: Vec<AgentTaskChildRun>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_bindings: Vec<AgentTaskArtifactRunBinding>,
     #[serde(default)]
     pub queue: AgentTaskQueueStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskChildRun {
+    pub task_id: String,
+    pub run_id: String,
+    pub state: AgentTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskArtifactRunBinding {
+    pub task_id: String,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

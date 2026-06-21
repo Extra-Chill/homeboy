@@ -428,10 +428,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fanout_aggregate_exposes_child_run_and_artifact_bindings() {
+        let scheduler = AgentTaskFanoutScheduler::new(GenericChildRunExecutor);
+        let plan = AgentTaskFanoutPlan::new(
+            "fuzz/campaign-1",
+            AgentTaskFanoutPlane::IsolatedTasks,
+            vec![request("case-a")],
+        );
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.schedule.child_runs.len(), 1);
+        assert_eq!(aggregate.schedule.child_runs[0].run_id, "child-case-a");
+        assert_eq!(aggregate.schedule.artifact_bindings.len(), 1);
+        assert_eq!(
+            aggregate.schedule.artifact_bindings[0].artifact_id,
+            "artifact-case-a"
+        );
+        assert_eq!(aggregate.reconciliation.summary.total, 1);
+    }
+
     #[derive(Default)]
     struct RecordingExecutor {
         observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
     }
+
+    struct GenericChildRunExecutor;
 
     impl AgentTaskExecutorAdapter for RecordingExecutor {
         fn execute(
@@ -462,6 +485,44 @@ mod tests {
                 workflow: None,
                 follow_up: None,
                 metadata: request.metadata,
+            }
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for GenericChildRunExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                task_id: request.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("generic fuzz case completed".to_string()),
+                failure_classification: None,
+                artifacts: vec![crate::core::agent_task::AgentTaskArtifact {
+                    schema: crate::core::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                    id: format!("artifact-{}", request.task_id),
+                    kind: "fuzz-report".to_string(),
+                    name: Some("report.json".to_string()),
+                    path: Some(format!("artifacts/{}/report.json", request.task_id)),
+                    url: None,
+                    mime: Some("application/json".to_string()),
+                    size_bytes: Some(512),
+                    sha256: None,
+                    metadata: json!({ "case_id": request.task_id }),
+                }],
+                typed_artifacts: Vec::new(),
+                evidence_refs: Vec::new(),
+                diagnostics: Vec::new(),
+                outputs: json!({ "case_id": request.task_id }),
+                workflow: None,
+                follow_up: None,
+                metadata: json!({
+                    "provider": "generic-fuzz",
+                    "child_run_id": format!("child-{}", request.task_id)
+                }),
             }
         }
     }
