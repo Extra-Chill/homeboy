@@ -109,6 +109,7 @@ pub mod scope;
 pub mod secret_env_plan;
 pub mod self_status;
 pub mod server;
+pub mod setup;
 pub mod source_snapshot;
 pub mod stack;
 pub mod stream_capture;
