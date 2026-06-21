@@ -41,6 +41,7 @@ module.exports = {
 	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wp-codebox-fuzz-run'),
 	...require('./lib/wordpress-workload-profile'),
+	...require('./lib/wordpress-hook-surface-discovery'),
 	...require('./lib/wordpress-fuzz-schemas'),
 	buildStaticVisualParityRecipe: staticVisualParity.buildStaticVisualParityRecipe,
 	createStaticServer: staticVisualParity.createStaticServer,
