@@ -15,11 +15,12 @@ pub use super::manifest_config::{
     AutofixVerifyConfig, BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig,
     CliHelpConfig, DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint,
     DeployVerification, DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition,
-    LintChangedFileRoute, LintConfig, RemotePathInferenceRule, RemotePathRootRule,
-    RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
-    TestChangedFileRoutingStrategy, TestConfig, TraceBrowserArtifactMapConfig,
-    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
-    TraceBrowserSummaryAliasConfig, TraceConfig, VersionPatternConfig,
+    FuzzConfig, FuzzWorkloadConfig, LintChangedFileRoute, LintConfig, RemotePathInferenceRule,
+    RemotePathRootRule, RequirementsConfig, SinceTagConfig, TestChangedFileExclusiveEnv,
+    TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig,
+    TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
+    VersionPatternConfig,
 };
 pub use super::manifest_deploy_config::DeployArchiveInstallPolicy;
 pub use super::manifest_sidecar::{StructuredSidecarContract, StructuredSidecarDeclaration};
@@ -594,6 +595,8 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bench: Option<BenchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuzz: Option<FuzzConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceConfig>,
     /// Post-write verify command used as a safety gate after `refactor --from ...`
     /// autofix writes to disk. If the command exits non-zero, the written files
@@ -695,6 +698,13 @@ impl ExtensionManifest {
             .is_some()
     }
 
+    pub fn has_fuzz(&self) -> bool {
+        self.fuzz
+            .as_ref()
+            .and_then(|c| c.extension_script.as_ref())
+            .is_some()
+    }
+
     pub fn has_trace(&self) -> bool {
         self.trace
             .as_ref()
@@ -730,6 +740,19 @@ impl ExtensionManifest {
         self.bench
             .as_ref()
             .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn fuzz_script(&self) -> Option<&str> {
+        self.fuzz
+            .as_ref()
+            .and_then(|c| c.extension_script.as_deref())
+    }
+
+    pub fn fuzz_workloads(&self) -> &[FuzzWorkloadConfig] {
+        self.fuzz
+            .as_ref()
+            .map(|fuzz| fuzz.workloads.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn trace_script(&self) -> Option<&str> {

@@ -22,6 +22,10 @@ fn extension_capability_owns_labels_and_scripts() {
         },
         "build": { "extension_script": "build.sh" },
         "bench": { "extension_script": "bench.sh" },
+        "fuzz": {
+            "extension_script": "fuzz.sh",
+            "workloads": [{ "id": "parser", "label": "Parser fuzz" }]
+        },
         "trace": { "extension_script": "trace.sh" },
         "deps": { "extension_script": "deps.sh" }
     }))
@@ -65,6 +69,7 @@ fn extension_capability_owns_labels_and_scripts() {
         (ExtensionCapability::Test, "test", "test.sh", true),
         (ExtensionCapability::Build, "build", "build.sh", false),
         (ExtensionCapability::Bench, "bench", "bench.sh", true),
+        (ExtensionCapability::Fuzz, "fuzz", "fuzz.sh", true),
         (ExtensionCapability::Trace, "trace", "trace.sh", true),
         (ExtensionCapability::Deps, "deps", "deps.sh", true),
     ] {
@@ -73,6 +78,8 @@ fn extension_capability_owns_labels_and_scripts() {
         assert_eq!(capability.script_path(&manifest), Some(script));
         assert_eq!(capability.requires_script(), requires_script);
     }
+
+    assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
 }
 
 #[test]

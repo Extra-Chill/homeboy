@@ -212,6 +212,7 @@ pub mod doctor;
 pub mod extension;
 pub mod file;
 pub mod fleet;
+pub mod fuzz;
 pub mod git;
 pub mod http;
 pub mod issues;

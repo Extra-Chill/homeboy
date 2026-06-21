@@ -386,6 +386,7 @@ JSON
             lint: None,
             test: None,
             bench: None,
+            fuzz: None,
             trace: None,
             structured_sidecars: std::collections::BTreeMap::new(),
             release_preflights: vec![],

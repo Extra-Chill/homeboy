@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
-    component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, git, http, issues,
-    lab, lint, logs, observe, project, refactor, refs, release, report, review, rig, runner, runs,
-    runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo, upgrade,
-    version, worktree,
+    component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
+    issues, lab, lint, logs, observe, project, refactor, refs, release, report, review, rig,
+    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
+    upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -68,6 +68,8 @@ pub enum Commands {
     Test(test::TestArgs),
     /// Run performance benchmarks for a component
     Bench(bench::BenchArgs),
+    /// Resolve generic fuzz workload contracts for a component
+    Fuzz(fuzz::FuzzArgs),
     /// Capture black-box behavioral traces for a component
     #[command(
         after_help = "Command-shaped trace modes:\n  homeboy trace list --profiles\n  homeboy trace <component> list\n  homeboy trace compare before.json after.json\n  homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>\n  homeboy trace matrix <component> <scenario> --axis name=value1,value2\n  homeboy trace compare-variant --rig <rig-id> --scenario <scenario>\n  homeboy trace compare-bundle --component <component> --scenario <scenario>\n  homeboy trace overlay-locks --stale"
@@ -299,6 +301,7 @@ impl Commands {
             Commands::Server(_) => "server",
             Commands::Test(_) => "test",
             Commands::Bench(_) => "bench",
+            Commands::Fuzz(_) => "fuzz",
             Commands::Trace(_) => "trace",
             Commands::Observe(_) => "observe",
             Commands::Lint(_) => "lint",
@@ -498,7 +501,7 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dangerous_flags =
                 vec!["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
         }
-        ["bench"] | ["test"] | ["lint"] | ["audit"] | ["trace"] => {
+        ["bench"] | ["fuzz"] | ["test"] | ["lint"] | ["audit"] | ["trace"] => {
             metadata.lab_supported = true;
             metadata.lab_notes =
                 "portable Lab offload may be available for resource-heavy workflows";

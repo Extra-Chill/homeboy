@@ -45,6 +45,20 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: Some("bench_contract.json"),
     },
     PublicOutputVariantContract {
+        command: "fuzz",
+        variant: "list",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("list"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
+        variant: "run",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("run"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
         command: "db",
         variant: "status",
         discriminator_field: Some("variant"),

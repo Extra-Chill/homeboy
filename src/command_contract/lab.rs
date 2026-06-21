@@ -91,6 +91,7 @@ pub(crate) const LINT_LAB_LABEL: &str = "lint";
 pub(crate) const TEST_LAB_LABEL: &str = "test";
 pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
+pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
 const TRACE_LAB_LABEL: &str = "trace";
 #[cfg(test)]
 const REFACTOR_LAB_LABEL: &str = "refactor";
@@ -170,6 +171,12 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
         contract_labels: &[BENCH_LAB_LABEL],
         message_label: BENCH_LAB_LABEL,
         hint_label: "bench run",
+    },
+    LabSupportedCommandSummary {
+        #[cfg(test)]
+        contract_labels: &[FUZZ_LAB_LABEL],
+        message_label: FUZZ_LAB_LABEL,
+        hint_label: "fuzz run",
     },
     LabSupportedCommandSummary {
         #[cfg(test)]
@@ -315,6 +322,7 @@ impl Commands {
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_AUTH_STATUS_LAB_LABEL),
             Commands::Audit(args) => args.lab_contract()?,
             Commands::Bench(args) => args.lab_contract()?,
+            Commands::Fuzz(args) => args.lab_contract()?,
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple("extension update")
             }
@@ -591,6 +599,9 @@ impl Commands {
                 extension_ids.extend(args.extension_override.extensions.clone())
             }
             Commands::Bench(args) => {
+                extension_ids.extend(args.extension_override_ids().iter().cloned())
+            }
+            Commands::Fuzz(args) => {
                 extension_ids.extend(args.extension_override_ids().iter().cloned())
             }
             Commands::Lint(args) => {

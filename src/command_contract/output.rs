@@ -104,6 +104,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("server", CommandJsonFamily::Ops),
     command_registry_entry("test", CommandJsonFamily::Quality),
     command_registry_entry("bench", CommandJsonFamily::Quality),
+    command_registry_entry("fuzz", CommandJsonFamily::Quality),
     command_registry_entry("trace", CommandJsonFamily::Quality),
     command_registry_entry("observe", CommandJsonFamily::Quality),
     command_registry_entry("lint", CommandJsonFamily::Quality),
@@ -294,6 +295,7 @@ impl Commands {
             },
             Commands::Test(args) => args.output_descriptor(output_file_mode),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
+            Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
             Commands::Lint(args) => args.output_descriptor(output_file_mode),
             Commands::Audit(args) => args.output_descriptor(output_file_mode),
             Commands::Observe(_) | Commands::AuditBaseline(_) | Commands::Refactor(_) => {
