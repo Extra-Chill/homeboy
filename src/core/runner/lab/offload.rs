@@ -94,6 +94,8 @@ pub struct LabLocalExecutionPolicy {
     /// Permit a selected Lab runner to fall back to local execution after
     /// offload preflight fails.
     pub allow_local_fallback: bool,
+    /// Fail instead of returning a local execution outcome.
+    pub deny_local_execution: bool,
 }
 
 pub struct LabOffloadRequest<'a> {
@@ -108,6 +110,7 @@ pub struct LabOffloadRequest<'a> {
     /// source-tree mutation. Used to render actionable diagnostics when the
     /// remote runner finishes cleanly but returns no patch to apply.
     pub mutation_flag: Option<&'a str>,
+    pub detach_after_handoff: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +196,26 @@ fn skipped_automatic_run_local(plan: HomeboyPlan, reason: &str) -> LabOffloadOut
     }
 }
 
+fn local_execution_denied_error(reason: &str, runner_id: Option<&str>) -> Error {
+    let mut hints = vec![
+        "Use --runner <runner-id> to offload to Lab.".to_string(),
+        "Remove --lab-only only when local execution on this controller is intentional."
+            .to_string(),
+    ];
+    if let Some(runner_id) = runner_id {
+        hints.insert(
+            0,
+            format!("Reconnect or repair runner `{runner_id}` before retrying."),
+        );
+    }
+    Error::validation_invalid_argument(
+        "lab_only",
+        format!("Lab-only execution refused local execution: {reason}"),
+        runner_id.map(str::to_string),
+        Some(hints),
+    )
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -214,6 +237,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 lab_runner_support_summary().unsupported_message,
             ));
         }
+        if request.local_policy.deny_local_execution {
+            return Err(local_execution_denied_error(
+                "command has no Lab contract",
+                None,
+            ));
+        }
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(plan, "command has no Lab contract"),
             metadata: None,
@@ -232,11 +261,20 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         let reason = contract
             .unsupported_reason
             .unwrap_or("command is local-only");
+        if request.local_policy.deny_local_execution {
+            return Err(local_execution_denied_error(reason, None));
+        }
         plan = disabled_select_runner_plan(plan, reason);
         return Ok(skipped_automatic_run_local(plan, reason));
     }
 
     if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
+        if request.local_policy.deny_local_execution {
+            return Err(local_execution_denied_error(
+                "automatic Lab offload disabled",
+                None,
+            ));
+        }
         return Ok(LabOffloadOutcome::RunLocal {
             plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
             metadata: None,
@@ -273,6 +311,9 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
+        if request.local_policy.deny_local_execution {
+            return Err(local_execution_denied_error(reason, None));
+        }
         return Ok(skipped_automatic_run_local(plan, reason));
     };
 
@@ -341,6 +382,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                         contract.hot_label, selection.runner_id, reason
                     ),
                     "release_gate",
+                ));
+            }
+            if request.local_policy.deny_local_execution {
+                return Err(local_execution_denied_error(
+                    &reason,
+                    Some(&selection.runner_id),
                 ));
             }
             if !request.local_policy.allow_local_fallback {
@@ -590,6 +637,7 @@ fn run_runner_resident_lab_offload(
             capability_preflight: None,
             required_extensions: contract.required_extensions,
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
     plan = with_step(
@@ -1132,6 +1180,9 @@ fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
+                if request.local_policy.deny_local_execution {
+                    return Err(local_execution_denied_error(&reason, Some(runner_id)));
+                }
                 return Ok(automatic_capability_fallback(
                     plan,
                     runner_id,
@@ -1177,6 +1228,7 @@ fn run_lab_offload_inner(
                         reason,
                         remediation,
                         request.local_policy.allow_local_fallback,
+                        request.local_policy.deny_local_execution,
                     );
                 }
                 LabRunnerSelectionSource::Explicit => {
@@ -1337,6 +1389,7 @@ fn run_lab_offload_inner(
             capability_preflight,
             required_extensions: contract.required_extensions,
             require_paths: Vec::new(),
+            detach_after_handoff: request.detach_after_handoff,
         },
     );
     let (exec_output, exit_code) = match exec_result {
@@ -1362,7 +1415,9 @@ fn run_lab_offload_inner(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if !request.local_policy.allow_local_fallback {
+                        if request.local_policy.deny_local_execution {
+                            Err(local_execution_denied_error(&reason, Some(runner_id)))
+                        } else if !request.local_policy.allow_local_fallback {
                             Err(selected_runner_fallback_error(
                                 &selection,
                                 "Lab offload selected a runner but its daemon did not respond",
@@ -1913,7 +1968,14 @@ fn automatic_capability_fallback_or_error(
     reason: String,
     remediation: Vec<String>,
     allow_local_fallback: bool,
+    deny_local_execution: bool,
 ) -> Result<LabOffloadOutcome> {
+    if deny_local_execution {
+        return Err(local_execution_denied_error(
+            &reason,
+            Some(&selection.runner_id),
+        ));
+    }
     if !allow_local_fallback {
         return Err(selected_runner_fallback_error(
             selection,
@@ -3317,6 +3379,7 @@ mod tests {
                 .to_string(),
             vec!["Install Playwright and browser binaries on the runner.".to_string()],
             false,
+            false,
         );
 
         let Err(err) = result else {
@@ -3350,6 +3413,7 @@ mod tests {
                 .to_string(),
             Vec::new(),
             true,
+            false,
         )
         .expect("explicit fallback opt-in should allow local run");
 
@@ -3373,10 +3437,12 @@ mod tests {
             local_policy: LabLocalExecutionPolicy {
                 allow_local_hot: true,
                 allow_local_fallback: false,
+                deny_local_execution: false,
             },
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
+            detach_after_handoff: false,
         })
         .expect("outcome");
 
@@ -3387,6 +3453,31 @@ mod tests {
         assert_eq!(plan.steps[0].id, "lab.select_runner");
         assert_eq!(plan.steps[0].status, PlanStepStatus::Skipped);
         assert_eq!(metadata.expect("metadata")["status"], "skipped");
+    }
+
+    #[test]
+    fn lab_only_refuses_local_execution_without_lab_contract() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &["homeboy".to_string(), "status".to_string()],
+            explicit_runner: None,
+            force_hot: false,
+            local_policy: LabLocalExecutionPolicy {
+                allow_local_hot: false,
+                allow_local_fallback: false,
+                deny_local_execution: true,
+            },
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+        });
+
+        let Err(err) = outcome else {
+            panic!("lab-only should refuse local execution");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("Lab-only execution refused"));
     }
 
     #[test]
@@ -3406,6 +3497,7 @@ mod tests {
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
+            detach_after_handoff: false,
         });
 
         let Err(err) = outcome else {

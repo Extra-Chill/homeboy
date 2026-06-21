@@ -48,6 +48,24 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
 | `gate-feedback` | Convert deterministic gate results into a cook-loop retry or stop decision. |
 
+## Lab Guardrails
+
+Use global `--lab-only` (alias `--no-local-execution`) with long-running or
+patch-producing `agent-task cook` / `agent-task loop` waves that must not execute
+provider processes on the controller. If Lab routing cannot select or prepare a
+runner, Homeboy fails before local execution instead of falling back.
+
+Use global `--detach-after-handoff` with `--runner <runner-id>` when the Lab job is
+expected to outlive the local shell. Homeboy returns after the runner daemon
+accepts the job and prints follow/cancel commands instead of waiting for remote
+provider completion.
+
+`--force-hot --allow-local-hot` is safe only when local execution on this
+controller is intentional. For agent-task waves with concurrency greater than 1
+or multiple tasks, Homeboy prints `HOMEBOY_LOCAL_FANOUT_WARNING` before provider
+processes start. Compact `agent-task status` includes `execution_location` as
+`local` or `runner:<id>`.
+
 ### Provider
 
 | Subcommand | Purpose |

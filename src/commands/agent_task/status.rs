@@ -288,6 +288,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "refs": refs,
         "refs_omitted": refs_omitted,
         "risk_flags": risk_flags,
+        "execution_location": execution_location(record),
         "queue_visibility": queue_visibility(record),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
@@ -319,6 +320,18 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         }
     }
     summary
+}
+
+fn execution_location(record: &Value) -> Value {
+    let runner_id = record
+        .get("metadata")
+        .and_then(|metadata| metadata.get("runner_id"))
+        .and_then(Value::as_str)
+        .filter(|runner_id| !runner_id.trim().is_empty());
+    match runner_id {
+        Some(runner_id) => json!(format!("runner:{runner_id}")),
+        None => json!("local"),
+    }
 }
 
 fn queue_visibility(record: &Value) -> Value {
@@ -599,5 +612,17 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("concurrency"));
+        assert_eq!(summary["execution_location"], "local");
+
+        let remote = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-run-2",
+                "state": "running",
+                "tasks": [],
+                "metadata": { "runner_id": "homeboy-lab" }
+            }),
+            "agent-task-run-2",
+        );
+        assert_eq!(remote["execution_location"], "runner:homeboy-lab");
     }
 }

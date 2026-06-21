@@ -82,19 +82,26 @@ pub fn route_after_parse(
             local_policy: runners::LabLocalExecutionPolicy {
                 allow_local_hot: cli.allow_local_hot,
                 allow_local_fallback: cli.allow_local_fallback,
+                deny_local_execution: cli.lab_only,
             },
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: mutation_flag.is_some(),
             mutation_flag,
             timeout: None,
             active_run_id: active_run_id.as_deref(),
+            detach_after_handoff: cli.detach_after_handoff,
         },
         trace_runner_id.as_deref(),
         observer,
     )?;
 
     match outcome {
-        LabRouteOutcome::RunLocal => Ok(None),
+        LabRouteOutcome::RunLocal => {
+            if let Some(warning) = agent_task_local_fanout_warning(&cli.command) {
+                eprintln!("{warning}");
+            }
+            Ok(None)
+        }
         LabRouteOutcome::Offloaded(output) => {
             if !output.stderr.is_empty() {
                 eprint!("{}", output.stderr);
@@ -106,6 +113,38 @@ pub fn route_after_parse(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
+    let (label, concurrency, task_count) = match command {
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command:
+                crate::commands::agent_task::AgentTaskCommand::Cook(args)
+                | crate::commands::agent_task::AgentTaskCommand::Dispatch(args),
+        }) => (
+            "agent-task local fanout",
+            args.concurrency,
+            args.tasks.len()
+                + usize::from(args.prompt.is_some())
+                + usize::from(args.core.tasks_json.is_some()),
+        ),
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Loop(args),
+        }) => (
+            "agent-task loop local fanout",
+            args.dispatch.concurrency,
+            args.dispatch.tasks.len()
+                + usize::from(args.dispatch.prompt.is_some())
+                + usize::from(args.dispatch.core.tasks_json.is_some()),
+        ),
+        _ => return None,
+    };
+
+    (concurrency > 1 || task_count > 1).then(|| {
+        format!(
+            "HOMEBOY_LOCAL_FANOUT_WARNING: {label} will execute on this controller with concurrency={concurrency}, tasks={task_count}, execution_location=local. Use --runner <runner-id> or --lab-only to prevent local provider fanout."
+        )
+    })
 }
 
 fn inject_lab_changed_files(
@@ -272,6 +311,7 @@ fn run_rig_source_management_on_runner(
             capability_preflight,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
 

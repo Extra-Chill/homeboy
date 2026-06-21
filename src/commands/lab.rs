@@ -333,6 +333,7 @@ fn sync_lab_extension(
             }),
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )?;
 
