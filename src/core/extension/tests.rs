@@ -131,6 +131,7 @@ fn manifest_parses_declared_structured_sidecars() {
             },
             "lint.findings": true,
             "lint.producers": true,
+            "fuzz.results": true,
             "trace.results": true,
             "trace.artifacts": true,
             "test.coverage": false
@@ -139,7 +140,7 @@ fn manifest_parses_declared_structured_sidecars() {
     .unwrap();
 
     let sidecars = manifest.structured_sidecars();
-    assert_eq!(sidecars.len(), 6);
+    assert_eq!(sidecars.len(), 7);
     assert_eq!(sidecars[0].name, "findings");
     assert_eq!(sidecars[0].path, "findings.json");
     assert_eq!(sidecars[0].schema_version.as_deref(), Some("1"));
@@ -154,12 +155,15 @@ fn manifest_parses_declared_structured_sidecars() {
     assert_eq!(sidecars[3].name, "producer.summary");
     assert_eq!(sidecars[3].path, "producer-summary.json");
     assert_eq!(sidecars[3].producer.as_deref(), Some("lint"));
-    assert_eq!(sidecars[4].name, "trace.artifacts");
-    assert_eq!(sidecars[4].path, "artifacts");
-    assert_eq!(sidecars[4].producer.as_deref(), Some("trace"));
-    assert_eq!(sidecars[5].name, "trace.results");
-    assert_eq!(sidecars[5].path, "trace.json");
+    assert_eq!(sidecars[4].name, "fuzz.results");
+    assert_eq!(sidecars[4].path, "fuzz-results.json");
+    assert_eq!(sidecars[4].producer.as_deref(), Some("fuzz"));
+    assert_eq!(sidecars[5].name, "trace.artifacts");
+    assert_eq!(sidecars[5].path, "artifacts");
     assert_eq!(sidecars[5].producer.as_deref(), Some("trace"));
+    assert_eq!(sidecars[6].name, "trace.results");
+    assert_eq!(sidecars[6].path, "trace.json");
+    assert_eq!(sidecars[6].producer.as_deref(), Some("trace"));
 }
 
 #[test]
