@@ -18,6 +18,7 @@ module.exports = {
 	...require('./lib/external-http-guardrail'),
 	...require('./lib/page-profiler'),
 	...require('./lib/rest-route-matrix'),
+	...require('./lib/wordpress-rest-fuzz-surface-discovery'),
 	...require('./lib/wordpress-route-latency'),
 	...require('./lib/block-quality'),
 	...require('./lib/materialized-site-quality'),
