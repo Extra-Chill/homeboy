@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
  * Internal dependencies
  */
 import { loadCodeboxRecipeBuilder } from './wp-codebox-recipe-builder-loader.mjs';
+import { applyWpCodeboxStepDiagnostics } from '../lib/wp-codebox-diagnostics-plan.mjs';
 
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const { builder: buildWordPressBenchRecipe } = await loadCodeboxRecipeBuilder('buildWordPressBenchRecipe');
@@ -29,6 +30,7 @@ if (selectedScenarioIds.length && Array.isArray(options.workloads)) {
 }
 
 const recipe = buildWordPressBenchRecipe(options);
+applyWpCodeboxStepDiagnostics(recipe, options);
 if (options.pluginRuntime && typeof options.pluginRuntime === 'object' && !Array.isArray(options.pluginRuntime)) {
 	recipe.inputs = recipe.inputs ?? {};
 	recipe.inputs.pluginRuntime = options.pluginRuntime;
