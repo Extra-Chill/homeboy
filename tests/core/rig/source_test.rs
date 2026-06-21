@@ -11,7 +11,25 @@ use std::path::Path;
 #[path = "support.rs"]
 mod support;
 
-use support::{minimal_rig, minimal_stack, write_rig, write_stack, GitFixture};
+use support::{minimal_rig, minimal_stack, run_git, write_rig, write_stack, GitFixture};
+
+/// Source-update-only fixture helpers. These live here rather than in the
+/// shared `support.rs` because only the source-update tests attach to an
+/// existing repo and push back to a bare source; keeping them in the shared
+/// module made them appear dead to `install_test.rs`, which includes the same
+/// `#[path]` module but never pushes.
+impl<'a> GitFixture<'a> {
+    /// Attach to an already-initialized repository in `dir` (e.g. one created
+    /// via a raw `git init` elsewhere) to reuse the commit/push helpers.
+    fn attach(dir: &'a Path) -> Self {
+        Self { dir }
+    }
+
+    /// Push the current `HEAD` to the `main` branch of `source`.
+    fn push_main(&self, source: &str) {
+        run_git(self.dir, &["push", source, "HEAD:main"]);
+    }
+}
 
 fn commit_package(package: &Path, message: &str) {
     GitFixture::attach(package).commit(message);
