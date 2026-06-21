@@ -51,7 +51,11 @@
         "env": ["HOMEBOY_WP_CODEBOX_BIN", "WP_CODEBOX_BIN"],
         "default": "wp-codebox"
       },
-      "runtime_component": ".ci/wp-codebox/packages/wordpress-plugin",
+      "runtime_component": {
+        "type": "path",
+        "env": ["HOMEBOY_WP_CODEBOX_RUNTIME_COMPONENT"],
+        "default": ""
+      },
       "runtime_core_module": "@automattic/wp-codebox-core"
     },
     "required_paths": ["runtime_bin"]

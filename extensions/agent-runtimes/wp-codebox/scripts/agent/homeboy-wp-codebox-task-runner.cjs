@@ -339,13 +339,6 @@ function workspaceRootFromMounts(mounts) {
   return mountedWorkspace?.source || '';
 }
 
-function bundledAgentsApiPath(dataMachinePath) {
-  return firstExistingPath(
-    path.join(dataMachinePath || '', 'vendor', 'wordpress', 'agents-api'),
-    path.join(dataMachinePath || '', 'vendor', 'automattic', 'agents-api'),
-  );
-}
-
 function runtimeStackMountEntries(request) {
   return [
     ...(request.runtime_stack_mounts || []),
@@ -1118,28 +1111,9 @@ function attachFailureEvidence(payload, evidence) {
   };
 }
 
-const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
-const LEGACY_BUNDLE_KEYS = [
-  `${LEGACY_RUNTIME_PREFIX}_bundle`,
-  `${LEGACY_RUNTIME_PREFIX}Bundle`,
-];
-
-function legacyValue(source, suffix = '') {
-  if (!source || typeof source !== 'object') {
-    return '';
-  }
-  const key = suffix ? `${LEGACY_RUNTIME_PREFIX}_${suffix}` : LEGACY_RUNTIME_PREFIX;
-  return source[key] || source[`${key}_path`] || '';
-}
-
 function requestAgentBundle(request) {
   if (request.agent_bundle && typeof request.agent_bundle === 'object') {
     return request.agent_bundle;
-  }
-  for (const key of LEGACY_BUNDLE_KEYS) {
-    if (request[key] && typeof request[key] === 'object') {
-      return request[key];
-    }
   }
   return {};
 }
@@ -1150,31 +1124,12 @@ function requestRuntimeComponents(request, mounts = []) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(requestComponentContracts(request));
   const agentRuntime = remapLabWorkspacePath(explicit.agent_runtime || contractPaths.agent_runtime);
-  const agentsApi = remapLabWorkspacePath(
-    explicit.agents_api
-      || contractPaths.agents_api
-      || request.agents_api_path
-      || request.agents_api
-      || agentsApiPathFromRuntime(agentRuntime),
-    'agents-api'
-  );
   return Object.fromEntries(Object.entries({
     ...contractPaths,
     ...explicit,
-    agents_api: agentsApi,
     agent_runtime: agentRuntime,
     agent_runtime_tools: remapLabWorkspacePath(explicit.agent_runtime_tools || contractPaths.agent_runtime_tools),
   }).filter(([, value]) => value !== '' && value !== undefined));
-}
-
-function agentsApiPathFromRuntime(agentRuntime) {
-  if (!agentRuntime) {
-    return '';
-  }
-  return [
-    path.join(agentRuntime, 'vendor', 'wordpress', 'agents-api'),
-    path.join(agentRuntime, 'vendor', 'automattic', 'agents-api'),
-  ].find((candidate) => fs.existsSync(path.join(candidate, 'agents-api.php'))) || '';
 }
 
 function runtimeComponentPathsFromContracts(contracts) {
@@ -1210,7 +1165,6 @@ function runnerInput(request, artifacts) {
   const mounts = mountEntries(request);
   const runtimeComponentPaths = {
     ...requestRuntimeComponents(request, mounts),
-    ...(argValue('--agents-api') ? { agents_api: argValue('--agents-api') } : {}),
   };
   return Object.fromEntries(Object.entries({
     parent_request: request,
