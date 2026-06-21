@@ -16,9 +16,9 @@ Each runtime package should include:
 - Runnable provider command files referenced by the manifest.
 - Tests or fixtures proving the manifest and provider command contract.
 
-The package may include implementation libraries, but Homeboy selects runtimes
-through the manifest and provider command contract, not by importing private
-runtime modules.
+The package may include implementation libraries. Homeboy selects runtimes
+through the manifest and provider command contract exported by the runtime
+package.
 
 ## Manifest Fields
 
@@ -55,9 +55,8 @@ Each `agent_task_executors[]` entry must declare:
 - `status`: lifecycle state, usually `active`, `experimental`, or `deprecated`.
 - `integration_contract`: higher-level contract name when the provider serves a domain extension.
 
-Runtime-specific fields are allowed, but they should be additive. A runtime
-should not require Homeboy core to understand backend-private settings just to
-invoke the provider.
+Runtime-specific fields are allowed when they are additive. The public manifest
+fields give Homeboy core the information it needs to invoke the provider.
 
 Generic runner specs must declare `executor.backend` explicitly. Runtime-specific
 planners may provide their own defaults, but the shared contract does not assume
@@ -104,8 +103,8 @@ result without parsing backend-native logs.
 TODO: Add a generic runtime-command provider only after the selected runtime owns
 a stable command substrate that accepts and returns backend-neutral shapes. The
 provider manifest should advertise a separate capability such as
-`runtime_command_execution`; until then, agent-task providers must not imply they
-can run arbitrary runtime commands.
+`runtime_command_execution`; agent-task providers currently advertise agent-task
+execution through the request and outcome schemas above.
 
 The generic request shape needs these caller-owned inputs:
 
@@ -124,10 +123,10 @@ The provider command should emit `homeboy/agent-task-outcome/v1` with normalized
 recipe artifacts may be attached as artifacts, but Homeboy should not parse them
 to determine the terminal outcome.
 
-For WP Codebox specifically, Homeboy Extensions can forward runtime package,
-recipe, command, args, and env-name declarations, but Codebox must provide the
-stable command runner and result envelope. Keep WPCOM, Dolly, and product-specific
-semantics in callers or runtime packages, not in this generic provider boundary.
+For WP Codebox specifically, Homeboy Extensions forwards runtime package,
+recipe, command, args, and env-name declarations to the Codebox executable
+contract, and Codebox returns the stable result envelope. WPCOM, Dolly, and
+product-specific semantics belong to callers or runtime packages.
 
 ## Homeboy Contract Adapter
 

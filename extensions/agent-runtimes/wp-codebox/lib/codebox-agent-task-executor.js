@@ -54,8 +54,6 @@ const {
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
   WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
-  wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
-  wpCodeboxLegacyRuntimeComponentAliasValues,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
@@ -132,12 +130,6 @@ const AGENT_BUNDLE_TRIGGER_FIELDS = AGENT_BUNDLE_CONFIG_FIELDS.filter((field) =>
   'prompt',
   'provider_plugin_paths',
 ].includes(field));
-
-const LEGACY_RUNTIME_PREFIX = ['data', 'machine'].join('_');
-const LEGACY_BUNDLE_KEYS = [
-  `${LEGACY_RUNTIME_PREFIX}_bundle`,
-  `${LEGACY_RUNTIME_PREFIX}Bundle`,
-];
 
 const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
   {
@@ -320,7 +312,6 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertProviderCredentialBoundaryNamesOnly(request.inputs || {});
   const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
-  const compatibilityDiagnostics = wpCodeboxLegacyRuntimeComponentAliasDiagnostics(config);
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
   const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
@@ -383,7 +374,6 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     artifact_declarations: artifactDeclarations,
     policy: request.policy || {},
     context,
-    ...(compatibilityDiagnostics.length > 0 ? { compatibility_diagnostics: compatibilityDiagnostics } : {}),
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
@@ -1086,12 +1076,10 @@ function runtimeComponentPaths(config, options = {}) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || [], options);
   const aliases = runtimeComponentPathAliases(options);
-  const legacyAliases = wpCodeboxLegacyRuntimeComponentAliasValues(config);
   const resolved = {
     ...contractPaths,
-    agents_api: config.agents_api || config.agents_api_path || options.agentsApi,
-    agent_runtime: config.agent_runtime || legacyAliases.agent_runtime || options.agentRuntime,
-    agent_runtime_tools: config.agent_runtime_tools || legacyAliases.agent_runtime_tools || options.agentRuntimeTools,
+    agent_runtime: config.agent_runtime || options.agentRuntime,
+    agent_runtime_tools: config.agent_runtime_tools || options.agentRuntimeTools,
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
   };
@@ -1178,14 +1166,9 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const provider = config.provider || options.provider || defaultProvider(settings);
   const providerConfig = providerConfigFor(provider, settings, providerDefaults);
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
-  const agentsApiPath = firstExistingPath(
-    options.agentsApi,
-    ...componentDiscoveryCandidates('agents_api', discovery, settings, workspaceBase, { agent_runtime: agentRuntimePath }),
-  );
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
 
   return {
-    agentsApi: agentsApiPath,
     agentRuntime: agentRuntimePath,
     agentRuntimeTools: agentRuntimeToolsPath,
     legacyRuntime: agentRuntimePath,
@@ -1836,10 +1819,8 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
   const explicitBundleSources = [
     inputs.agent_bundle,
     inputs.agentBundle,
-    ...LEGACY_BUNDLE_KEYS.map((key) => inputs[key]),
     config.agent_bundle,
     config.agentBundle,
-    ...LEGACY_BUNDLE_KEYS.map((key) => config[key]),
   ].filter((value) => value && typeof value === 'object');
   const requestedBundle = config.execution_kind === 'agent_bundle'
     || inputs.execution_kind === 'agent_bundle'

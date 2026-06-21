@@ -496,7 +496,7 @@ assert.deepEqual(codeboxRequest.runtime_requirements, {
     primitive_schema: 'wp-codebox/parent-tool-bridge/v1',
     status: 'required-upstream-primitive',
     adapter_behavior: 'declare_requirement_only',
-    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
 });
 const legacyOverlayNameRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -803,7 +803,7 @@ assert.deepEqual(genericProviderRuntimeRequest.runtime_requirements, {
     primitive_schema: 'wp-codebox/parent-tool-bridge/v1',
     status: 'required-upstream-primitive',
     adapter_behavior: 'declare_requirement_only',
-    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   }],
 });
 assert.deepEqual(genericProviderRuntimeRequest.runtime_overlay_profiles, ['fixture-profile']);
@@ -986,7 +986,6 @@ const codexAgentRequest = {
         'AI_PROVIDER_OPENAI_CODEX_FEDRAMP',
       ],
       runtime_component_paths: {
-        agents_api: '/components/agents-api',
         agent_runtime: '/components/example-runtime',
         agent_runtime_tools: '/components/example-runtime-tools',
       },
@@ -1003,9 +1002,9 @@ assert.equal(codexRequest.mode, 'sandbox');
 assert.equal(codexRequest.provider, 'codex');
 assert.equal(codexRequest.model, 'gpt-5.5');
 assert.deepEqual(codexRequest.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-assert.equal(codexRequest.runtime_component_paths.agents_api, '/components/agents-api');
 assert.equal(codexRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(codexRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
+assert.equal(Object.hasOwn(codexRequest.runtime_component_paths, 'agents_api'), false);
 assert.equal(Object.hasOwn(codexRequest, 'agents_api_path'), false);
 assert.equal(Object.hasOwn(codexRequest, 'data_machine_path'), false);
 assert.equal(Object.hasOwn(codexRequest, 'data_machine_code_path'), false);
@@ -1039,8 +1038,7 @@ const workflowStyleConfigRequest = codeboxTaskRequestFromAgentTaskRequest({
         mode: 'readonly',
       }],
       runtime_component_paths: {
-        runtime: '/components/wp-codebox/packages/wordpress-plugin',
-        agents_api: '/components/agents-api',
+        runtime: '/components/wp-codebox-runtime-plugin',
         agent_runtime: '/components/example-runtime',
         agent_runtime_tools: '/components/example-runtime-tools',
       },
@@ -1055,8 +1053,8 @@ assert.deepEqual(workflowStyleConfigRequest.mounts, [{
   target: '/wordpress/wp-content/plugins/driver/driver.php',
   mode: 'readonly',
 }]);
-assert.equal(workflowStyleConfigRequest.runtime_component_paths.runtime, '/components/wp-codebox/packages/wordpress-plugin');
-assert.equal(workflowStyleConfigRequest.runtime_component_paths.agents_api, '/components/agents-api');
+assert.equal(workflowStyleConfigRequest.runtime_component_paths.runtime, '/components/wp-codebox-runtime-plugin');
+assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'agents_api'), false);
 assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime, '/components/example-runtime');
 assert.equal(workflowStyleConfigRequest.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
 assert.equal(Object.hasOwn(workflowStyleConfigRequest.runtime_component_paths, 'data_machine'), false);
@@ -2645,8 +2643,6 @@ try {
     wpCodeboxRuntimeExecutor,
     '--task-runner',
     fixture,
-    '--agents-api',
-    '/components/agents-api',
   ], {
     encoding: 'utf8',
     env: fixtureEnv(),
@@ -2758,7 +2754,7 @@ try {
   assert.equal(capturedCodex.request.provider, 'codex');
   assert.equal(capturedCodex.request.model, 'gpt-5.5');
   assert.deepEqual(capturedCodex.request.provider_plugin_paths, ['/components/ai-provider-for-openai']);
-  assert.equal(capturedCodex.request.runtime_component_paths.agents_api, '/components/agents-api');
+  assert.equal(Object.hasOwn(capturedCodex.request.runtime_component_paths, 'agents_api'), false);
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime, '/components/example-runtime');
   assert.equal(capturedCodex.request.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
   assert.equal(Object.hasOwn(capturedCodex.request, 'agents_api_path'), false);

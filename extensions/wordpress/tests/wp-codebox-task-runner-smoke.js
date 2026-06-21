@@ -298,13 +298,11 @@ try {
   const preparedProviderPluginPath = path.join(root, 'artifacts', 'prepared-plugins', 'example-provider');
   const workspaceRoot = path.join(root, 'wp-coding-agents@proof-homeboy-fanout-a');
   const defaultRuntimePath = path.join(root, 'example-runtime');
-  const defaultAgentsApiPath = path.join(defaultRuntimePath, 'vendor', 'wordpress', 'agents-api');
   const defaultRuntimeToolsPath = path.join(root, 'example-runtime-tools');
   fs.mkdirSync(providerPluginPath, { recursive: true });
   fs.writeFileSync(path.join(providerPluginPath, 'example-provider.php'), '<?php\n/* Plugin Name: Example Provider */\n');
   fs.writeFileSync(path.join(providerPluginPath, 'composer.json'), JSON.stringify({ name: 'extra-chill/example-provider' }));
   fs.mkdirSync(workspaceRoot, { recursive: true });
-  fs.mkdirSync(defaultAgentsApiPath, { recursive: true });
   fs.mkdirSync(defaultRuntimeToolsPath, { recursive: true });
 
   const request = {
@@ -350,7 +348,6 @@ try {
   const result = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
     '--wp-codebox-bin', fixtureWpCodebox,
-    '--agents-api', '/components/agents-api',
     '--mount', '/repo/plugin:/wordpress/wp-content/plugins/plugin:readwrite',
     '--runtime-stack-mount', '/components/wordpress-develop:/wordpress:readonly',
     '--max-turns', '80',
@@ -399,17 +396,15 @@ try {
   assert.equal(captured.input.runtime_stack_mounts[0].source, '/components/php-ai-client');
   assert.equal(captured.input.runtime_stack_mounts[1].source, '/components/wordpress-develop');
   assert.equal(captured.input.mounts[0].source, '/repo/plugin');
-  assert.equal(captured.input.runtime_component_paths.agents_api, '/components/agents-api');
   assert.equal(captured.input.runtime_component_paths.agent_runtime, '/components/example-runtime');
   assert.equal(captured.input.runtime_component_paths.agent_runtime_tools, '/components/example-runtime-tools');
   assert.equal(Object.hasOwn(captured.input, 'agents_api_path'), false);
   assert.equal(Object.hasOwn(captured.input, 'data_machine_path'), false);
   assert.equal(Object.hasOwn(captured.input, 'data_machine_code_path'), false);
-  assert.equal(captured.input.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '/components/agents-api');
+  assert.equal(captured.input.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
   assert.equal(captured.input.extra_plugins.some((plugin) => plugin.slug === 'example-runtime'), false);
   assert.equal(captured.input.extra_plugins.some((plugin) => plugin.slug === 'example-runtime-tools'), false);
-  // WP Codebox 0.8.0 mounts runtime components from `component_contracts`.
-  assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/components/agents-api');
+  assert.equal(captured.input.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
   assert.equal(captured.input.component_contracts.some((contract) => contract.slug === 'example-runtime'), false);
   assert.equal(captured.input.component_contracts.some((contract) => contract.slug === 'example-runtime-tools'), false);
   assert.equal(captured.input.component_contracts.find((contract) => contract.slug === 'domain-component').path, '/workspace/domain-component');
@@ -421,7 +416,6 @@ try {
   const nestedOnlyResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
     '--wp-codebox-bin', fixtureWpCodebox,
-    '--agents-api', '/components/agents-api',
   ], {
     encoding: 'utf8',
     input: JSON.stringify({
@@ -877,7 +871,7 @@ try {
   const labRuntimeInput = readJson(labRuntimeCapturePath).input;
   const preparedLabRuntime = path.join(labRuntimeArtifacts, 'prepared-plugins', 'example-runtime');
   assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabRuntime);
-  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
+  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '.ci/agents-api');
   assert.equal(labRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
   assert.equal(fs.existsSync(path.join(preparedLabRuntime, 'example-runtime.php')), true);
 
@@ -965,11 +959,10 @@ try {
   assert.equal(implicitAgentsApiResult.status, 0, implicitAgentsApiResult.stderr || implicitAgentsApiResult.stdout);
   const implicitAgentsApiInput = readJson(implicitAgentsApiCapturePath).input;
   const preparedImplicitRuntime = path.join(implicitAgentsApiArtifacts, 'prepared-plugins', 'data-machine');
-  const preparedImplicitAgentsApi = path.join(preparedImplicitRuntime, 'vendor', 'wordpress', 'agents-api');
   assert.equal(implicitAgentsApiInput.runtime_component_paths.agent_runtime, preparedImplicitRuntime);
-  assert.equal(implicitAgentsApiInput.runtime_component_paths.agents_api, preparedImplicitAgentsApi);
-  assert.equal(implicitAgentsApiInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, preparedImplicitAgentsApi);
-  assert.equal(implicitAgentsApiInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedImplicitAgentsApi);
+  assert.equal(Object.hasOwn(implicitAgentsApiInput.runtime_component_paths, 'agents_api'), false);
+  assert.equal(implicitAgentsApiInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
+  assert.equal(implicitAgentsApiInput.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
 
   const legacyRuntimeCapturePath = path.join(root, 'capture-legacy-runtime-stack.json');
   const legacyRuntimeResult = spawnSync(process.execPath, [
@@ -979,15 +972,14 @@ try {
     encoding: 'utf8',
     input: JSON.stringify({
       ...request,
-      runtime_component_paths: undefined,
-      agents_api_path: '/legacy/agents-api',
+      runtime_component_paths: { agents_api: '/explicit/agents-api' },
     }),
     env: { ...process.env, FIXTURE_WP_CODEBOX_CAPTURE: legacyRuntimeCapturePath, OPENCODE_API_KEY: 'redacted-test-key' },
   });
   assert.equal(legacyRuntimeResult.status, 0, legacyRuntimeResult.stderr || legacyRuntimeResult.stdout);
   const legacyRuntimeInput = readJson(legacyRuntimeCapturePath).input;
-  assert.equal(legacyRuntimeInput.runtime_component_paths.agents_api, '/legacy/agents-api');
-  assert.equal(legacyRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/legacy/agents-api');
+  assert.equal(legacyRuntimeInput.runtime_component_paths.agents_api, '/explicit/agents-api');
+  assert.equal(legacyRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/explicit/agents-api');
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
@@ -1336,7 +1328,6 @@ try {
   const nonExecutableResult = spawnSync(process.execPath, [
     wpCodeboxTaskRunner,
     '--wp-codebox-bin', nonExecutableFixture,
-    '--agents-api', '/components/agents-api',
   ], {
     encoding: 'utf8',
     input: JSON.stringify(request),

@@ -3,7 +3,7 @@
 This package is the first-class WP Codebox agent-task runtime surface used by
 Homeboy. It declares the provider contract, runtime-local CLI, and normalized
 AgentTaskOutcome conversion for consumers that need a WordPress-capable AI
-runtime without embedding WP Codebox details in their own extension manifests.
+runtime through the WP Codebox executable and package contracts.
 
 ## Runtime Defaults
 
@@ -15,12 +15,11 @@ override through the provider contract or task conversion options:
 - `component_path_defaults` maps runtime component contracts, legacy aliases, and
   discovery hints into generic runtime component path keys.
 - `provider_metadata` declares the operator-facing provider ids, executor backend,
-  runtime id, model fields, and provider-plugin guidance without requiring Homeboy
-  core to know WordPress or Codebox provider details.
+  runtime id, model fields, and provider-plugin guidance consumed by the WP
+  Codebox runtime contract.
 
-The JavaScript executor consumes these manifest fields instead of owning product
-policy in code. Callers can supply generic manifest values without adding new
-runtime-specific branches.
+The JavaScript executor consumes these manifest fields as product policy. Callers
+can supply generic manifest values through the runtime package contract.
 
 Runtime selection and provider selection are separate concerns:
 
@@ -30,16 +29,15 @@ Runtime selection and provider selection are separate concerns:
 - `executor.config.provider` selects the WordPress AI provider id, such as
   `openai`, `codex`, or `claude-code`.
 - `executor.config.model` or `executor.model` carries the provider model name as
-  opaque runtime metadata. The runtime forwards it to WP Codebox and provider
-  plugins; Homeboy core does not interpret model names.
+  runtime metadata. Homeboy forwards the model name to WP Codebox and provider
+  plugins through the provider contract.
 
-## Adapter Boundary
+## Adapter Contract
 
 Homeboy Extensions is a thin adapter for Codebox-owned runtime primitives. It
 forwards `wp-codebox/runtime-profile/v1` dependencies, provider plugins, overlays,
-env, and mounts as runtime profile data. It no longer expands profile
-dependencies into `component_contracts` / `extra_plugins` or injects parent tool
-bridge environment variables.
+env, and mounts as runtime profile data, then invokes WP Codebox through the
+runtime package's executable contract.
 
 Codebox owns these primitives:
 
@@ -51,13 +49,13 @@ Codebox owns these primitives:
 - `wp-codebox/provider-runtime-invocation-contract/v1` for runner workspace, transcript, and artifact handoff operations.
 - `wp-codebox/evidence-artifact-envelope/v1` for typed artifacts, evidence refs, and run summaries.
 
-`lib/codebox-run-agent-task-contract.js` is the adapter boundary for launching
+`lib/codebox-run-agent-task-contract.js` is the adapter contract for launching
 Codebox agent tasks. It builds the preferred `wp-codebox/run-agent-task/v1`
 request shape and selects the stable `run-agent-task` CLI when the installed
 Codebox package advertises it. Older packages continue through the legacy
-`agent-task-run` / `wp-codebox/task-input/v1` path, but that compatibility is
-kept behind this adapter so the follow-up swap can remove the fallback without
-changing Homeboy callers.
+`agent-task-run` / `wp-codebox/task-input/v1` path, and that compatibility lives
+in this adapter so the follow-up swap can remove the fallback while preserving
+Homeboy caller contracts.
 
 Provider credentials stay outside adapter payloads. The adapter forwards
 `secret_env` names and a `provider_credential_boundary` descriptor, and rejects
@@ -73,8 +71,7 @@ backend-neutral fields such as `execution.type`, `execution.argv`,
 `execution.agent`, `input`, `workspace`, `limits`, `artifacts`, `diagnostics`, and
 `metadata`.
 
-The runtime manifest does not advertise a delegated-run capability yet. The
-current executable path still targets the existing task-input runner contract, so
-Homeboy should not select this runtime for generic delegated command execution
-until the substrate accepts the neutral request shape and returns the neutral
-result shape directly.
+The runtime manifest currently advertises agent-task execution. The current
+executable path targets the existing task-input runner contract; generic
+delegated command execution will use a future manifest capability when WP Codebox
+accepts the neutral request shape and returns the neutral result shape directly.

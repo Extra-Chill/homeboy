@@ -126,14 +126,14 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     schema: 'wp-codebox/runtime-profile/v1',
     owner: 'wp-codebox',
     adapter_behavior: 'forward_profile_payload',
-    requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts without Homeboy expanding Codebox orchestration internals.',
+    requirement: 'Consume generic runtime dependencies, provider plugins, overlays, env, and mounts through the public runtime profile payload Homeboy forwards.',
   },
   {
     id: 'parent-tool-bridge',
     schema: 'wp-codebox/parent-tool-bridge/v1',
     owner: 'wp-codebox',
     adapter_behavior: 'declare_requirement_when_missing',
-    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component instead of Homeboy injecting bridge implementation details.',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   },
   {
     id: 'provider-runtime-invocation',
@@ -192,36 +192,6 @@ function wpCodeboxProviderRuntimeOperationConfig(key, operation) {
   });
 }
 
-function wpCodeboxLegacyRuntimeComponentAliasFields() {
-  const prefix = ['data', 'machine'].join('_');
-  return {
-    agent_runtime: [prefix, `${prefix}_path`],
-    agent_runtime_tools: [`${prefix}_code`, `${prefix}_code_path`],
-  };
-}
-
-function wpCodeboxLegacyRuntimeComponentAliasValues(config = {}) {
-  const fields = wpCodeboxLegacyRuntimeComponentAliasFields();
-  return Object.fromEntries(Object.entries(fields).map(([canonical, aliases]) => [
-    canonical,
-    firstValue(...aliases.map((alias) => config[alias])),
-  ]));
-}
-
-function wpCodeboxLegacyRuntimeComponentAliasDiagnostics(config = {}) {
-  return Object.entries(wpCodeboxLegacyRuntimeComponentAliasFields()).flatMap(([canonical, aliases]) => aliases
-    .filter((alias) => config[alias] !== undefined)
-    .map((alias) => ({
-      class: 'codebox.compat.deprecated_runtime_component_alias',
-      message: `Deprecated runtime component alias "${alias}" was accepted for compatibility; use "${canonical}" instead.`,
-      data: {
-        alias,
-        replacement: canonical,
-        compatibility: 'accepted-for-current-callers',
-      },
-    })));
-}
-
 function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
@@ -250,9 +220,6 @@ module.exports = {
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
   WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
-  wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
-  wpCodeboxLegacyRuntimeComponentAliasFields,
-  wpCodeboxLegacyRuntimeComponentAliasValues,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,

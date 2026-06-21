@@ -20,13 +20,14 @@ const {
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
 	WP_CODEBOX_WORKSPACE_MOUNT_KIND,
 	WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
-	wpCodeboxLegacyRuntimeComponentAliasDiagnostics,
-	wpCodeboxLegacyRuntimeComponentAliasFields,
-	wpCodeboxLegacyRuntimeComponentAliasValues,
 	wpCodeboxProviderRuntimeInvocationContract,
 	wpCodeboxProviderRuntimeOperationConfig,
 	wpCodeboxProviderRuntimeOperationEntry,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-contract.js'));
+const {
+	DATAMACHINE_AGENT_BUNDLE_KEYS,
+	DATAMACHINE_RUNTIME_COMPONENT_ALIASES,
+} = require(path.join(rootDir, 'datamachine-agent-ci', 'lib', 'wp-codebox-compat.js'));
 const {
 	wpCodeboxBin,
 	wpCodeboxCliDescriptor,
@@ -101,21 +102,8 @@ assert.equal(
 );
 assert.doesNotMatch(JSON.stringify(cliDescriptor), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 
-const legacyRuntimeAliasPrefix = ['data', 'machine'].join('_');
-assert.deepEqual(wpCodeboxLegacyRuntimeComponentAliasFields(), {
-	agent_runtime: [legacyRuntimeAliasPrefix, `${legacyRuntimeAliasPrefix}_path`],
-	agent_runtime_tools: [`${legacyRuntimeAliasPrefix}_code`, `${legacyRuntimeAliasPrefix}_code_path`],
-});
-assert.deepEqual(wpCodeboxLegacyRuntimeComponentAliasValues({
-	[legacyRuntimeAliasPrefix]: '/runtime',
-	[`${legacyRuntimeAliasPrefix}_code_path`]: '/runtime-tools',
-}), {
-	agent_runtime: '/runtime',
-	agent_runtime_tools: '/runtime-tools',
-});
-assert.deepEqual(
-	wpCodeboxLegacyRuntimeComponentAliasDiagnostics({ [`${legacyRuntimeAliasPrefix}_path`]: '/runtime' }).map((diagnostic) => diagnostic.data.replacement),
-	['agent_runtime']
-);
+assert.deepEqual(DATAMACHINE_AGENT_BUNDLE_KEYS, ['data_machine_bundle', 'dataMachineBundle']);
+assert.equal(DATAMACHINE_RUNTIME_COMPONENT_ALIASES.data_machine_path, 'agent_runtime');
+assert.equal(DATAMACHINE_RUNTIME_COMPONENT_ALIASES.data_machine_code_path, 'agent_runtime_tools');
 
 console.log('wp-codebox adapter contract smoke passed');

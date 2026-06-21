@@ -167,6 +167,16 @@ function resolvePathValue(value, workspace, env = process.env) {
 		}
 		return value.default || value.command || '';
 	}
+	if (value.type === 'path') {
+		for (const envName of Array.isArray(value.env) ? value.env : []) {
+			if (typeof envName === 'string' && env[envName]) {
+				const envPath = env[envName];
+				return envPath.length > 0 && isWorkspaceRelativePath(envPath) ? path.join(workspace, envPath) : envPath;
+			}
+		}
+		const defaultPath = value.default || value.path || '';
+		return defaultPath.length > 0 && isWorkspaceRelativePath(defaultPath) ? path.join(workspace, defaultPath) : defaultPath;
+	}
 	return value.value || value.path || '';
 }
 

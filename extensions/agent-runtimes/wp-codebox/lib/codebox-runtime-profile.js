@@ -239,7 +239,7 @@ function codeboxParentToolBridgeRequirement() {
     primitive_schema: WP_CODEBOX_PARENT_TOOL_BRIDGE_SCHEMA,
     status: 'required-upstream-primitive',
     adapter_behavior: 'declare_requirement_only',
-    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component; Homeboy Extensions does not inject bridge env or synthesize sandbox bridge descriptors.',
+    requirement: 'Expose parent-owned tools inside the sandbox through a Codebox-owned bridge component declared by the public parent-tool-bridge contract.',
   };
 }
 

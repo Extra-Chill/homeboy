@@ -591,7 +591,6 @@ async function runTaskRunner(request) {
     return agentTaskOutcomeFromCodeboxResult(request, preflightPayload, { exitStatus: 1, ...coreNormalizers });
   }
   const configArgs = [
-    ['--agents-api', config.agents_api_path || config.agentsApiPath],
     ['--homeboy', config.homeboy_path || config.homeboyPath],
     ['--homeboy-extensions', config.homeboy_extensions_path || config.homeboyExtensionsPath],
   ].flatMap(([name, value]) => (value ? [name, value] : []));

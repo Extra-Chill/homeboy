@@ -170,14 +170,14 @@ WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,
 `themes`, `overlays`, `runtime_overlays`, `env`, and `provider_plugins`.
 Homeboy Extensions forwards those shapes as Codebox-owned runtime profile data
-without expanding them into Codebox orchestration internals. Data Machine ability
-selection, Homeboy task schemas, and caller-owned artifact declarations stay in
-Homeboy Extensions.
+through the current public runtime profile contract. Data Machine ability
+selection, Homeboy task schemas, and caller-owned artifact declarations are
+prepared by Homeboy Extensions before WP Codebox runs the task.
 
 Homeboy Extensions consumes a Codebox-owned `wp-codebox/parent-tool-bridge/v1`
-when the runtime profile exposes one. When it is missing, the adapter only
-declares an upstream primitive requirement in the runtime profile; it does not
-inject bridge environment variables or synthesize sandbox bridge descriptors.
+when the runtime profile exposes one. When it is missing, the adapter declares
+the upstream primitive requirement in the runtime profile for WP Codebox to
+fulfill through the public parent-tool-bridge contract.
 
 For WordPress fuzzing, Homeboy Extensions builds and forwards the
 Codebox-owned `wp-codebox/fuzz-run/v1` request through the WP Codebox runtime

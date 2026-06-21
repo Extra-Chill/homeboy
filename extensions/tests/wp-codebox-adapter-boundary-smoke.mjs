@@ -22,7 +22,7 @@ const stableConsumerExports = [
 ];
 const forbidden = /datamachine|data machine|wp-site-generator|wpsg|site generator/i;
 for (const exportName of stableConsumerExports) {
-  assert.doesNotMatch(JSON.stringify(packageJson.exports[exportName]), forbidden, `${exportName} export must not expose runtime internals`);
+  assert.doesNotMatch(JSON.stringify(packageJson.exports[exportName]), forbidden, `${exportName} export should stay on the WP Codebox runtime package contract`);
 }
 
 const allowedLegacyImporters = new Set([
