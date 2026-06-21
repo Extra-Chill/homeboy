@@ -76,7 +76,7 @@ impl ControllerDispatchHook for FailingDispatchHook {
                             "class": "provider.runtime_overlay",
                             "message": "Recipe runtime overlay preparation failed: download php-scoper timed out after 60004ms",
                             "data": {
-                                "provider": "codebox",
+                                "provider": "synthetic-runtime",
                                 "phase": "runtime_overlay_preparation"
                             }
                         }]
@@ -1536,7 +1536,7 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
             json!("task-overlay-prepare")
         );
         assert_eq!(failed["failure_summary"]["phase"], json!("prepare"));
-        assert_eq!(failed["failure_summary"]["provider"], json!("codebox"));
+        assert_eq!(failed["failure_summary"]["provider"], json!("synthetic-runtime"));
         assert_eq!(
             failed["failure_summary"]["failure_phase"],
             json!("runtime_overlay_preparation")

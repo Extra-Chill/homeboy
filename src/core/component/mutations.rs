@@ -183,25 +183,25 @@ mod tests {
     #[test]
     fn merge_local_path_updates_standalone_registration() {
         crate::test_support::with_isolated_home(|home| {
-            let old_repo = home.path().join("agents-api");
-            let new_repo = home.path().join("agents-api-current");
+            let old_repo = home.path().join("sample-plugin");
+            let new_repo = home.path().join("sample-plugin-current");
             fs::create_dir_all(&old_repo).expect("old repo dir");
             fs::create_dir_all(&new_repo).expect("new repo dir");
             fs::write(
                 old_repo.join("homeboy.json"),
-                r#"{"id":"agents-api","remote_path":"wp-content/plugins/agents-api"}"#,
+                r#"{"id":"sample-plugin","remote_path":"wp-content/plugins/sample-plugin"}"#,
             )
             .expect("old homeboy.json");
             fs::write(
                 new_repo.join("homeboy.json"),
-                r#"{"id":"agents-api","remote_path":"wp-content/plugins/agents-api"}"#,
+                r#"{"id":"sample-plugin","remote_path":"wp-content/plugins/sample-plugin"}"#,
             )
             .expect("new homeboy.json");
 
             let component = Component::new(
-                "agents-api".to_string(),
+                "sample-plugin".to_string(),
                 old_repo.to_string_lossy().to_string(),
-                "wp-content/plugins/agents-api".to_string(),
+                "wp-content/plugins/sample-plugin".to_string(),
                 None,
             );
             inventory::write_standalone_registration(&component)
@@ -211,18 +211,18 @@ mod tests {
                 "local_path": new_repo.to_string_lossy()
             })
             .to_string();
-            let result = merge(Some("agents-api"), &patch, &[]).expect("component merge");
+            let result = merge(Some("sample-plugin"), &patch, &[]).expect("component merge");
             let MergeOutput::Single(result) = result else {
                 panic!("expected single merge result");
             };
             assert_eq!(result.updated_fields, vec!["local_path".to_string()]);
 
-            let loaded = crate::core::component::load("agents-api").expect("load component");
+            let loaded = crate::core::component::load("sample-plugin").expect("load component");
             assert_eq!(loaded.local_path, new_repo.to_string_lossy());
 
             let registration_path = home
                 .path()
-                .join(".config/homeboy/components/agents-api.json");
+                .join(".config/homeboy/components/sample-plugin.json");
             let registration: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(registration_path).expect("read registration"),
             )
