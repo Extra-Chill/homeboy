@@ -15,7 +15,7 @@ use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
 
 use super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
-use super::{load, status, Runner, RunnerTunnelMode};
+use super::{load, status, Runner, RunnerArtifactRef, RunnerTunnelMode};
 
 pub fn is_remote_runner_artifact_path(path: &str) -> bool {
     EXECUTION_CONTRACT.artifacts.is_runner_artifact_ref(path)
@@ -124,6 +124,23 @@ pub fn download_remote_artifact(
             .get("sha256")
             .and_then(Value::as_str)
             .map(str::to_string),
+        artifact_ref: RunnerArtifactRef {
+            artifact_id: token.artifact_id.clone(),
+            name: Some(file_name.to_string()),
+            path: Some(EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
+                &token.runner_id,
+                &token.run_id,
+                &token.artifact_id,
+            )),
+            url: None,
+            mime: body.get("mime").and_then(Value::as_str).map(str::to_string),
+            size_bytes: body.get("size_bytes").and_then(Value::as_u64),
+            sha256: body
+                .get("sha256")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            transport: Some("daemon".to_string()),
+        },
     })
 }
 
@@ -193,7 +210,7 @@ fn download_direct_runner_artifact(
             .join("runner")
             .join(&token.runner_id)
             .join(&token.run_id)
-            .join(filename)
+            .join(&filename)
     });
     if let Some(parent) = output_path
         .parent()
@@ -219,6 +236,20 @@ fn download_direct_runner_artifact(
         content_type: header_string(&headers, header::CONTENT_TYPE.as_str()),
         size_bytes,
         sha256: header_string(&headers, "x-homeboy-artifact-sha256"),
+        artifact_ref: RunnerArtifactRef {
+            artifact_id: token.artifact_id.clone(),
+            name: Some(filename),
+            path: Some(EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
+                &token.runner_id,
+                &token.run_id,
+                &token.artifact_id,
+            )),
+            url: None,
+            mime: header_string(&headers, header::CONTENT_TYPE.as_str()),
+            size_bytes: size_bytes.and_then(|value| u64::try_from(value).ok()),
+            sha256: header_string(&headers, "x-homeboy-artifact-sha256"),
+            transport: Some("direct_daemon".to_string()),
+        },
     }))
 }
 
@@ -244,6 +275,7 @@ pub struct RemoteArtifactDownload {
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub sha256: Option<String>,
+    pub artifact_ref: RunnerArtifactRef,
 }
 
 #[derive(Debug)]

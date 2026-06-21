@@ -127,6 +127,7 @@ pub struct RunnerJobOutput {
     pub job_id: String,
     pub follow: bool,
     pub job: Job,
+    pub runner_job: homeboy::core::runners::RunnerJob,
     pub events: Vec<JobEvent>,
 }
 
@@ -1312,7 +1313,7 @@ fn runner_status_operator_commands(report: &RunnerStatusReport) -> Vec<RunnerOpe
     };
 
     let mut commands = Vec::new();
-    for job in &report.active_jobs {
+    for job in &report.active_runner_jobs {
         commands.push(RunnerOperatorCommand {
             scope: "job_logs",
             runner_id: report.runner_id.clone(),
@@ -1359,7 +1360,7 @@ fn runner_status_operator_commands(report: &RunnerStatusReport) -> Vec<RunnerOpe
                     "Fail expired reverse-runner claims through the broker-owned lifecycle path."
                         .to_string(),
             });
-            for job in &report.active_jobs {
+            for job in &report.active_runner_jobs {
                 commands.push(RunnerOperatorCommand {
                     scope: "broker_artifact_lookup",
                     runner_id: report.runner_id.clone(),
@@ -1623,6 +1624,7 @@ fn runner_exec_dry_run(
             stderr: String::new(),
             source_snapshot: None,
             job: None,
+            runner_job: None,
             job_id: None,
             job_events: None,
             mirror_run_id: None,
@@ -1630,6 +1632,8 @@ fn runner_exec_dry_run(
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: Some(runner::RunnerExecDiagnostics {
                 runner_workspace_root: runner.workspace_root,
                 source_snapshot_remote_path: None,
@@ -1690,6 +1694,13 @@ fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobOutput> {
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
     let (job, events) = homeboy::core::runners::runner_job_cancel(runner_id, job_id)?;
+    let runner_job = homeboy::core::runners::RunnerJob::from_job(
+        runner_id,
+        "runner.job.cancel",
+        &[],
+        None,
+        &job,
+    );
 
     Ok((
         RunnerJobOutput {
@@ -1699,6 +1710,7 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
             job_id: job_id.to_string(),
             follow: false,
             job,
+            runner_job,
             events,
         },
         0,
@@ -1721,6 +1733,13 @@ fn job_logs(
         snapshot = runner_job_log_snapshot(runner_id, job_id)?;
         emit_new_job_events(&snapshot.events, &mut emitted_sequence);
     }
+    let runner_job = homeboy::core::runners::RunnerJob::from_job(
+        runner_id,
+        "runner.job.logs",
+        &[],
+        None,
+        &snapshot.job,
+    );
 
     Ok((
         RunnerJobOutput {
@@ -1730,6 +1749,7 @@ fn job_logs(
             job_id: job_id.to_string(),
             follow,
             job: snapshot.job,
+            runner_job,
             events: snapshot.events,
         },
         0,
@@ -1861,6 +1881,7 @@ mod tests {
                 stderr: "warn\n".to_string(),
                 source_snapshot: None,
                 job: None,
+                runner_job: None,
                 job_id: Some("job-123".to_string()),
                 job_events: None,
                 mirror_run_id: None,
@@ -1868,6 +1889,8 @@ mod tests {
                 artifacts: Vec::new(),
                 metrics: None,
                 capture: None,
+                runner_result: None,
+                handoff: None,
                 diagnostics: None,
             },
             7,
@@ -1932,6 +1955,27 @@ mod tests {
                 durable_run_id: Some("run-123".to_string()),
                 active_child_count: None,
                 active_cell_count: None,
+            }],
+            active_runner_jobs: vec![homeboy::core::runners::RunnerJob {
+                runner_id: "homeboy-lab".to_string(),
+                job_id: "job-123".to_string(),
+                operation: "runner.exec".to_string(),
+                status: JobStatus::Running,
+                command: "true".to_string(),
+                cwd: None,
+                source: "broker".to_string(),
+                lifecycle_owner: homeboy::core::runners::RunnerLifecycleOwner::Broker,
+                started_at_ms: Some(1000),
+                updated_at_ms: Some(1500),
+                elapsed_ms: Some(500),
+                heartbeat_age_ms: Some(0),
+                claim_id: Some("claim-123".to_string()),
+                claimed_by_runner_id: Some("homeboy-lab".to_string()),
+                claimed_at_ms: Some(1000),
+                claim_expires_at_ms: Some(31_000),
+                claim_expires_in_ms: Some(29_500),
+                durable_run_id: Some("run-123".to_string()),
+                artifact_refs: Vec::new(),
             }],
             active_job_count: 1,
             session_path: "/tmp/session.json".to_string(),

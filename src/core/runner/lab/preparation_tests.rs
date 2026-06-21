@@ -24,6 +24,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 session: None,
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -83,6 +84,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                 )),
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -115,6 +117,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -152,6 +155,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 )),
                 stale_daemon: Some(stale_daemon_warning(runner_id)),
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -199,6 +203,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -233,6 +238,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 session: Some(connected_direct_session(runner_id, None)),
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -272,6 +278,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 session: None,
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })
@@ -323,6 +330,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 session: None,
                 stale_daemon: None,
                 active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
                 active_job_count: 0,
                 session_path: "/tmp/lab.json".to_string(),
             })

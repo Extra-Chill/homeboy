@@ -271,6 +271,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         Vec::new()
     };
     let active_job_count = active_jobs.len();
+    let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
@@ -278,6 +279,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         session,
         stale_daemon,
         active_jobs,
+        active_runner_jobs,
         active_job_count,
         session_path: session_path.display().to_string(),
     })

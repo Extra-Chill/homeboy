@@ -30,6 +30,7 @@ use serde_json::Value;
 
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::runners::RunnerArtifactRef;
 use homeboy::core::validation_progress::{ValidationCommandSummary, ValidationProgressLedger};
 use homeboy::core::Error;
 use homeboy::core::{api_jobs::ActiveRunnerJobSummary, runners as runner};
@@ -259,6 +260,8 @@ pub struct RunsArtifactGetOutput {
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<RunnerArtifactRef>,
 }
 
 #[derive(Args, Clone, Default)]
@@ -657,6 +660,7 @@ fn artifact_get(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
                     content_type: outcome.content_type,
                     size_bytes: outcome.size_bytes,
                     sha256: outcome.sha256,
+                    artifact_ref: None,
                 }),
                 0,
             ))

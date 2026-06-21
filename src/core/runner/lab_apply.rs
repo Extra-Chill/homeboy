@@ -120,6 +120,7 @@ mod tests {
             stderr: String::new(),
             source_snapshot: Some(snapshot),
             job: None,
+            runner_job: None,
             job_id: None,
             job_events: None,
             mirror_run_id: None,
@@ -130,6 +131,8 @@ mod tests {
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: None,
         };
 
@@ -184,6 +187,7 @@ mod tests {
             stderr: String::new(),
             source_snapshot: Some(snapshot),
             job: None,
+            runner_job: None,
             job_id: None,
             job_events: None,
             mirror_run_id: None,
@@ -194,6 +198,8 @@ mod tests {
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: None,
         };
 
