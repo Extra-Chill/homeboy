@@ -107,6 +107,34 @@ pub(crate) fn resolve_dependency_providers(
     component: &Component,
     path: &Path,
 ) -> Result<Vec<DependencyProvider>> {
+    let providers = resolve_dependency_providers_optional(component, path)?;
+
+    if providers.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "dependency_provider",
+            format!("No dependency provider found for {}", path.display()),
+            None,
+            Some(vec![
+                "Link an extension with deps support, or use a component with a supported dependency provider".to_string(),
+                "Package managers are resolved through dependency providers, not core command orchestration".to_string(),
+            ]),
+        ));
+    }
+
+    Ok(providers)
+}
+
+/// Resolve the dependency providers a component/workspace exposes, returning an
+/// empty vector when none are detected instead of erroring.
+///
+/// Setup orchestration treats "no provider" as a no-op (a component with no
+/// composer.json/package.json/deps script simply has nothing to install), so it
+/// needs the empty case without the actionable error that the command-facing
+/// [`resolve_dependency_providers`] raises.
+pub(crate) fn resolve_dependency_providers_optional(
+    component: &Component,
+    path: &Path,
+) -> Result<Vec<DependencyProvider>> {
     let mut providers = Vec::new();
 
     if ComposerDependencyProvider::supports(path) {
@@ -138,18 +166,6 @@ pub(crate) fn resolve_dependency_providers(
             Err(err) if providers.is_empty() => return Err(err),
             Err(_) => {}
         }
-    }
-
-    if providers.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "dependency_provider",
-            format!("No dependency provider found for {}", path.display()),
-            None,
-            Some(vec![
-                "Link an extension with deps support, or use a component with a supported dependency provider".to_string(),
-                "Package managers are resolved through dependency providers, not core command orchestration".to_string(),
-            ]),
-        ));
     }
 
     Ok(providers)
