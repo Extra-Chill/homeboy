@@ -8,6 +8,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const require = createRequire(import.meta.url);
 const {
   buildGenericAgentLoopRequest,
+  runDeterministicLoop,
   runGenericAgentLoop,
 } = require(path.join(repoRoot, 'runtime-agent-ci'));
 
@@ -121,5 +122,42 @@ const adapterLoop = runGenericAgentLoop({
   }),
 });
 assert.equal(adapterLoop.assertion.success_status, 'pr_opened');
+
+let retryHookCalls = 0;
+const deterministicLoop = runDeterministicLoop({
+  loopId: 'cook-loop',
+  maxIterations: 5,
+  state: { value: 0 },
+  buildIteration: ({ state }) => ({ next: state.value + 1 }),
+  maxAttempts: 2,
+  execute: ({ input, attempt }) => {
+    if (input.next === 1 && attempt === 1) {
+      return { status: 'failed', summary: 'retry once' };
+    }
+    return {
+      status: 'succeeded',
+      value: input.next,
+      artifacts: [{ name: `packet-${input.next}`, path: `/tmp/packet-${input.next}.json` }],
+    };
+  },
+  reconcile: ({ state, outcome }) => ({ ...state, value: outcome.value, complete: outcome.value === 2 }),
+  shouldRetry: ({ outcome }) => {
+    retryHookCalls += 1;
+    return outcome.status === 'failed';
+  },
+  stopCriteria: ({ state }) => ({ stop: state.complete === true, reason: state.complete ? 'value_complete' : '' }),
+});
+
+assert.equal(deterministicLoop.schema, 'homeboy/deterministic-loop-result/v1');
+assert.equal(deterministicLoop.status, 'completed');
+assert.equal(deterministicLoop.iterations.length, 2);
+assert.equal(deterministicLoop.state.value, 2);
+assert.equal(deterministicLoop.iterations[0].attempt, 2);
+assert.equal(deterministicLoop.iterations[1].stop.reason, 'value_complete');
+assert.equal(retryHookCalls, 2);
+assert.deepEqual(
+  deterministicLoop.iterations.map((iteration) => iteration.artifacts[0].name),
+  ['packet-1', 'packet-2']
+);
 
 console.log('generic agent loop runner smoke passed');
