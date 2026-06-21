@@ -171,7 +171,71 @@ fn failing_bench_prepare_aborts_before_check_and_workload() {
         };
 
         assert!(error.to_string().contains("bench_prepare"));
+        assert!(error.to_string().contains("bench prep"));
+        assert!(error.to_string().contains("exit 7"));
         assert_eq!(log_lines(&log_path), vec!["prepare"]);
+    });
+}
+
+#[test]
+fn failing_bench_prepare_requirement_reports_context() {
+    with_isolated_home(|home| {
+        let component = tempfile::TempDir::new().expect("component");
+        let log_dir = tempfile::TempDir::new().expect("log dir");
+        let log_path = log_dir.path().join("order.log");
+        let missing_marker = component.path().join("ready.marker");
+        write_logging_bench_extension(home, &log_path);
+
+        let rig_dir = home.path().join(".config").join("homeboy").join("rigs");
+        fs::create_dir_all(&rig_dir).expect("mkdir rigs");
+        let spec = serde_json::json!({
+            "components": {
+                "studio": {
+                    "path": component.path(),
+                    "extensions": { "fixture-bench": {} }
+                }
+            },
+            "bench": { "default_component": "studio" },
+            "pipeline": {
+                "bench_prepare": [{
+                    "kind": "requirement",
+                    "label": "prepare fixture marker",
+                    "file": missing_marker,
+                    "prepare_command": "printf 'prepare-command\\n'; exit 9",
+                    "prepare_phases": ["bench_prepare"],
+                    "remediation": "create the fixture marker before benchmarking"
+                }]
+            }
+        });
+        fs::write(
+            rig_dir.join("failing-requirement-rig.json"),
+            serde_json::to_string(&spec).expect("serialize rig"),
+        )
+        .expect("write rig");
+
+        let error = match run(
+            run_args(
+                None,
+                vec!["failing-requirement-rig".to_string()],
+                Vec::new(),
+            ),
+            &GlobalArgs {},
+        ) {
+            Ok(_) => panic!("bench should fail before workload"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("prepare fixture marker"), "error: {error}");
+        assert!(
+            error.contains(missing_marker.to_str().unwrap()),
+            "error: {error}"
+        );
+        assert!(error.contains("printf 'prepare-command"), "error: {error}");
+        assert!(
+            error.contains("create the fixture marker before benchmarking"),
+            "error: {error}"
+        );
+        assert_eq!(log_lines(&log_path), Vec::<String>::new());
     });
 }
 

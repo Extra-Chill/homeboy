@@ -768,7 +768,18 @@ fn run_requirement_step(
             cwd.as_deref(),
             env,
             settings,
-        )?;
+        )
+        .map_err(|error| {
+            requirement_failed(
+                rig,
+                format!(
+                    "{}; prepare command failed: {}",
+                    missing_before_prepare.join("; "),
+                    error
+                ),
+                remediation.as_deref(),
+            )
+        })?;
     }
 
     let missing = path_specs

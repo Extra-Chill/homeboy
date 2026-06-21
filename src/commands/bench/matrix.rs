@@ -14,7 +14,7 @@ use homeboy::core::extension::bench::{
 };
 use homeboy::core::extension::ExtensionCapability;
 use homeboy::core::rig::lease::ActiveRigRunLease;
-use homeboy::core::rig::{self, BenchSpec, RigSpec, RigStateSnapshot};
+use homeboy::core::rig::{self, BenchPrepareReport, BenchSpec, RigSpec, RigStateSnapshot};
 
 use super::observation::{self, BenchObservationStart};
 use super::{BenchRunArgs, CmdResult};
@@ -41,7 +41,7 @@ fn prepare_rig_bench_context(
             return Err(homeboy::core::Error::rig_pipeline_failed(
                 &spec.id,
                 "bench_prepare",
-                "rig bench preparation failed; refusing to run bench workload",
+                bench_prepare_failure_message(&prepare),
             ));
         }
     }
@@ -55,6 +55,30 @@ fn prepare_rig_bench_context(
         snapshot,
         _lease: lease,
     })
+}
+
+fn bench_prepare_failure_message(prepare: &BenchPrepareReport) -> String {
+    let failed_steps = prepare
+        .pipeline
+        .steps
+        .iter()
+        .filter(|step| step.status == "fail")
+        .map(|step| match step.error.as_deref() {
+            Some(error) if !error.is_empty() => {
+                format!("{} `{}` failed: {}", step.kind, step.label, error)
+            }
+            _ => format!("{} `{}` failed", step.kind, step.label),
+        })
+        .collect::<Vec<_>>();
+
+    if failed_steps.is_empty() {
+        "rig bench preparation failed; refusing to run bench workload".to_string()
+    } else {
+        format!(
+            "rig bench preparation failed; refusing to run bench workload. Failed bench_prepare steps: {}",
+            failed_steps.join("; ")
+        )
+    }
 }
 
 fn bench_prepare_settings(args: &BenchRunArgs) -> Vec<(String, String)> {

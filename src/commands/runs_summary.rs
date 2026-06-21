@@ -57,6 +57,7 @@ fn render_run_detail(run: &Value) -> String {
         lines.extend(super::bench_summary::bench_coverage_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
     }
+    lines.extend(key_artifact_lines(run, run_id));
     lines.extend(artifact_lines(run, run_id));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
@@ -97,18 +98,15 @@ fn artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
     lines
 }
 
+fn key_artifact_lines(run: &Value, run_id: &str) -> Vec<String> {
+    value_at(run, &["artifacts"])
+        .and_then(Value::as_array)
+        .map(|artifacts| super::key_artifacts::key_artifact_lines(artifacts, Some(run_id), true))
+        .unwrap_or_default()
+}
+
 fn artifact_locator(artifact: &Value) -> Option<String> {
-    if string_value(artifact, &["type"]) == Some("file") {
-        if let Some(path) = string_value(artifact, &["path"]) {
-            return Some(path.to_string());
-        }
-    }
-    for key in ["viewer_url", "public_url", "url", "path"] {
-        if let Some(value) = string_value(artifact, &[key]) {
-            return Some(value.to_string());
-        }
-    }
-    None
+    super::key_artifacts::artifact_locator(artifact).map(str::to_string)
 }
 
 fn finish(lines: Vec<String>) -> String {
@@ -356,6 +354,50 @@ mod tests {
         assert!(
             summary.contains("  generic-case work_units current=60 baseline=50 threshold=5 FAIL\n")
         );
+    }
+
+    #[test]
+    fn show_summary_surfaces_key_artifacts_before_full_artifact_list() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "run-1",
+                    "kind": "test",
+                    "status": "pass",
+                    "metadata": {},
+                    "artifacts": [
+                        {
+                            "id": "artifact-coverage",
+                            "run_id": "run-1",
+                            "scenario_id": "scenario-a",
+                            "kind": "coverage",
+                            "type": "file",
+                            "path": "/tmp/coverage.json"
+                        },
+                        {
+                            "id": "artifact-log",
+                            "run_id": "run-1",
+                            "scenario_id": "scenario-a",
+                            "kind": "log",
+                            "type": "file",
+                            "path": "/tmp/log.txt"
+                        }
+                    ]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+        let key_index = summary.find("Key artifacts:\n").expect("key artifacts");
+        let artifact_index = summary.find("Artifacts (2):\n").expect("artifacts");
+
+        assert!(key_index < artifact_index);
+        assert!(summary.contains("  scenario-a/artifact-coverage: /tmp/coverage.json\n"));
+        assert!(summary
+            .contains("    get: homeboy runs artifact get run-1 artifact-coverage -o <path>\n"));
+        assert!(!summary.contains("Key artifacts:\n  scenario-a/artifact-log"));
     }
 
     #[test]

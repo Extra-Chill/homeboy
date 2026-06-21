@@ -71,24 +71,16 @@ pub(crate) fn run_git(dir: &Path, args: &[&str]) {
 /// Tests that assert *failure* behavior or inspect raw git output should keep
 /// using [`run_git`] / explicit `Command::new("git")` calls instead.
 pub(crate) struct GitFixture<'a> {
-    dir: &'a Path,
+    /// Repository working directory. Exposed within the support module so
+    /// per-test-file extension `impl`s (see `source_test.rs`) can build their
+    /// own fixtures without re-running `git init`.
+    pub(crate) dir: &'a Path,
 }
 
 impl<'a> GitFixture<'a> {
     /// Initialize a git repository in `dir` on the `main` branch.
     pub(crate) fn init(dir: &'a Path) -> Self {
         run_git(dir, &["init", "-b", "main"]);
-        Self { dir }
-    }
-
-    /// Attach to an already-initialized repository in `dir` (e.g. one created
-    /// via a raw `git init` elsewhere) to reuse the commit/push helpers.
-    ///
-    /// `allow(dead_code)`: this shared support module is `#[path]`-included
-    /// separately into each rig test file, so helpers used by only one of them
-    /// (here, the source-update tests) appear unused from the other's view.
-    #[allow(dead_code)]
-    pub(crate) fn attach(dir: &'a Path) -> Self {
         Self { dir }
     }
 
@@ -126,14 +118,6 @@ impl<'a> GitFixture<'a> {
             ],
         );
         bare
-    }
-
-    /// Push the current `HEAD` to the `main` branch of `source`.
-    ///
-    /// `allow(dead_code)`: only the source-update tests push; see `attach`.
-    #[allow(dead_code)]
-    pub(crate) fn push_main(&self, source: &str) {
-        run_git(self.dir, &["push", source, "HEAD:main"]);
     }
 }
 
