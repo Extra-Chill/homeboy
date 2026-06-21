@@ -117,6 +117,77 @@ impl Language {
     pub fn builtin_test_file_suffixes() -> &'static [&'static str] {
         &["_test.rs", "_test.php", ".test.ts", ".test.js", ".test.tsx"]
     }
+
+    /// Method names that are universally idiomatic-shape across the ecosystems
+    /// Homeboy can classify — stdlib/trait methods, common conversions and
+    /// accessors, builder/serde hooks, and framework lifecycle/magic methods.
+    ///
+    /// These names are *expected* to carry boilerplate-shaped bodies across
+    /// unrelated types (e.g. every collection wrapper defines the same
+    /// `len`/`is_empty`), so coverage and duplication detectors treat them as
+    /// idiomatic rather than as gaps or smells. The concrete ecosystem literals
+    /// live here in the agnostic conventions home so detector implementations
+    /// under `code_audit::detectors` stay free of hardcoded language names;
+    /// components that opt into builtin defaults inherit this set and others
+    /// declare their own via `TestMappingConfig`.
+    pub fn builtin_trivial_method_names() -> &'static [&'static str] {
+        &[
+            // Core trait methods
+            "new",
+            "default",
+            "from",
+            "into",
+            "clone",
+            "fmt",
+            "display",
+            "eq",
+            "hash",
+            "drop",
+            // Common conversions
+            "as_str",
+            "as_ref",
+            "as_mut",
+            "to_string",
+            "to_str",
+            "to_owned",
+            // Common accessors
+            "is_empty",
+            "len",
+            "iter",
+            // Serialization hooks
+            "serialize",
+            "deserialize",
+            // Builder pattern
+            "build",
+            "builder",
+            // Magic / constructor methods
+            "__construct",
+            "__destruct",
+            "__toString",
+            "__clone",
+            "get_instance",
+            "getInstance",
+            // Test lifecycle methods (optional base-class overrides — not every
+            // test class needs to define them).
+            "set_up",
+            "tear_down",
+            "set_up_before_class",
+            "tear_down_after_class",
+            "setUp",
+            "tearDown",
+            "setUpBeforeClass",
+            "tearDownAfterClass",
+        ]
+    }
+
+    /// Method-name prefixes that mark a method as a simple getter / predicate
+    /// (e.g. `get_`, `is_`, `has_`). Like [`Self::builtin_trivial_method_names`],
+    /// these are kept in the agnostic conventions home so detectors do not bake
+    /// in language-shaped accessor conventions. Components that opt into builtin
+    /// defaults inherit this set; others declare their own.
+    pub fn builtin_trivial_method_prefixes() -> &'static [&'static str] {
+        &["get_", "is_", "has_"]
+    }
 }
 
 /// Builtin tracker-reference regex defaults shipped with Homeboy. These match

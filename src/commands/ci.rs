@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::refactor::auto::transaction::{
+    self, CiContext, TransactionOutcome, TransactionRequest, AUTOFIX_COMMIT_PREFIX,
+};
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{CmdResult, GlobalArgs};
@@ -20,6 +23,52 @@ pub enum CiCommand {
     List(CiListArgs),
     /// Run an extension-declared CI job or profile locally.
     Run(CiRunArgs),
+    /// Run the end-to-end CI autofix transaction (branch prep, drift-only
+    /// filtering, push-target resolution, commit, and push).
+    ///
+    /// This is the core-owned transaction the action calls instead of
+    /// re-implementing branch/commit/push orchestration in shell. It assumes
+    /// the working tree already contains the autofix changes to commit.
+    Autofix(CiAutofixArgs),
+}
+
+#[derive(Args)]
+pub struct CiAutofixArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
+
+    /// Target repository to push to (`owner/repo`). Defaults to `origin`.
+    #[arg(long)]
+    pub target_repo: Option<String>,
+
+    /// Repository backing the current `origin` remote (`owner/repo`).
+    #[arg(long)]
+    pub origin_repo: Option<String>,
+
+    /// Branch to push to (PR head branch or autofix branch).
+    #[arg(long)]
+    pub target_branch: Option<String>,
+
+    /// GitHub App / access token for the push (enables workflow re-runs and
+    /// cross-repo pushes). Falls back to the `APP_TOKEN` env var.
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Git identity to commit as. Defaults to the CI bot identity.
+    #[arg(long)]
+    pub git_identity: Option<String>,
+
+    /// Commit message for authored (non-drift) fixes. Defaults to a generic
+    /// autofix subject.
+    #[arg(long)]
+    pub message: Option<String>,
+
+    /// Classify and resolve the push target without committing or pushing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args)]
@@ -61,6 +110,17 @@ pub struct CiListOutput {
 pub enum CiOutput {
     List(CiListOutput),
     Run(CiRunCommandOutput),
+    Autofix(CiAutofixCommandOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CiAutofixCommandOutput {
+    pub command: &'static str,
+    pub component_id: String,
+    pub source_path: PathBuf,
+    pub push_target: String,
+    #[serde(flatten)]
+    pub outcome: TransactionOutcome,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +136,7 @@ pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
     match args.command {
         CiCommand::List(args) => run_list(args, global),
         CiCommand::Run(args) => run_ci(args, global),
+        CiCommand::Autofix(args) => run_autofix(args, global),
     }
 }
 
@@ -142,6 +203,60 @@ fn run_ci(args: CiRunArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
             component_id: ctx.component_id,
             source_path: ctx.source_path,
             run,
+        }),
+        exit_code,
+    ))
+}
+
+fn run_autofix(args: CiAutofixArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+    let ctx = execution_context::resolve(&ResolveOptions {
+        component_id: args.comp.component.clone(),
+        path_override: args.comp.path.clone(),
+        capability: None,
+        settings_overrides: Vec::new(),
+        settings_json_overrides: Vec::new(),
+        extension_overrides: args.extension_override.extensions.clone(),
+    })?;
+
+    let token = args
+        .token
+        .clone()
+        .or_else(|| std::env::var("APP_TOKEN").ok().filter(|t| !t.is_empty()));
+    let ci = CiContext {
+        target_repo: args.target_repo.clone(),
+        origin_repo: args.origin_repo.clone(),
+        target_branch: args.target_branch.clone(),
+        token,
+    };
+    let push_target = ci.resolve_push_target();
+
+    let fix_commit_message = args
+        .message
+        .clone()
+        .unwrap_or_else(|| AUTOFIX_COMMIT_PREFIX.to_string());
+
+    let outcome = transaction::run_autofix_transaction(TransactionRequest {
+        repo_path: &ctx.source_path,
+        component: &ctx.component,
+        ci,
+        git_identity: args.git_identity.as_deref(),
+        fix_commit_message,
+        dry_run: args.dry_run,
+    })?;
+
+    let exit_code = if outcome.committed || args.dry_run || outcome.status == "no-changes" {
+        0
+    } else {
+        1
+    };
+
+    Ok((
+        CiOutput::Autofix(CiAutofixCommandOutput {
+            command: "ci.autofix",
+            component_id: ctx.component_id,
+            source_path: ctx.source_path,
+            push_target,
+            outcome,
         }),
         exit_code,
     ))
