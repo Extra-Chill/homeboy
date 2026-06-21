@@ -185,6 +185,19 @@ pub fn submit_plan(
         .unwrap_or_else(default_run_id);
     let plan_path = store::write_plan(&run_id, plan)?;
 
+    let mut metadata = json!({
+        "task_count": plan.tasks.len(),
+        "max_concurrency": plan.options.max_concurrency,
+        "provider_run_ids": [],
+        "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
+        "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
+    });
+    if let Ok(runner_id) = std::env::var(crate::core::runner::RUNNER_ID_ENV) {
+        if !runner_id.trim().is_empty() {
+            metadata["runner_id"] = json!(runner_id);
+        }
+    }
+
     let record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
         run_id,
@@ -199,13 +212,7 @@ pub fn submit_plan(
         artifact_refs: Vec::new(),
         provider_handles: Vec::new(),
         lifecycle: lifecycle_for_submitted_plan(plan),
-        metadata: json!({
-            "task_count": plan.tasks.len(),
-            "max_concurrency": plan.options.max_concurrency,
-            "provider_run_ids": [],
-            "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
-            "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
-        }),
+        metadata,
     };
     store::write_record(&record)?;
     Ok(record)
