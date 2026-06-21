@@ -288,6 +288,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "refs": refs,
         "refs_omitted": refs_omitted,
         "risk_flags": risk_flags,
+        "queue_visibility": queue_visibility(record),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
 
@@ -318,6 +319,19 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         }
     }
     summary
+}
+
+fn queue_visibility(record: &Value) -> Value {
+    json!({
+        "state": record.get("state").cloned().unwrap_or(Value::Null),
+        "totals": record.get("totals").cloned().unwrap_or(Value::Null),
+        "commands": [
+            "homeboy agent-task list",
+            "homeboy agent-task active",
+            "homeboy agent-task run-next",
+        ],
+        "concurrency_note": "Cook/controller concurrency is declared by the queued plan; use `homeboy agent-task status <run-id> --full` to inspect the materialized dispatch settings.",
+    })
 }
 
 /// Map each run-record task to a source label: task id + issue URL (from the
@@ -577,5 +591,13 @@ mod tests {
             summary["latest_promotion"]["operator_notification"]["status"],
             "completed"
         );
+        assert_eq!(
+            summary["queue_visibility"]["commands"][0],
+            "homeboy agent-task list"
+        );
+        assert!(summary["queue_visibility"]["concurrency_note"]
+            .as_str()
+            .unwrap()
+            .contains("concurrency"));
     }
 }

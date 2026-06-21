@@ -93,6 +93,7 @@ pub struct LabSelectedRunnerOutput {
 
 #[derive(Serialize)]
 pub struct LabRunnerHomeboyOutput {
+    controller_version: String,
     configured_executable: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_daemon_version: Option<String>,
@@ -100,6 +101,8 @@ pub struct LabRunnerHomeboyOutput {
     active_daemon_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stale_daemon: Option<Value>,
+    version_drift: bool,
+    command_availability_checks: Vec<String>,
     refresh_commands: Vec<String>,
     upgrade_command: String,
 }
@@ -124,7 +127,16 @@ pub struct LabExtensionSyncOutput {
     replace: bool,
     execution_plan: CommandExecutionPlan,
     install_command: Vec<String>,
+    diagnostics: LabExtensionSyncDiagnostics,
     execution: RunnerExecOutput,
+}
+
+#[derive(Serialize)]
+pub struct LabExtensionSyncDiagnostics {
+    controller_version: String,
+    runner_homeboy_path: String,
+    command_availability_checks: Vec<String>,
+    binary_drift_hint: String,
 }
 
 pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
@@ -226,12 +238,18 @@ fn lab_runner_homeboy_output(
     configured_executable: &str,
     status: &RunnerStatusReport,
 ) -> LabRunnerHomeboyOutput {
+    let controller_version = env!("CARGO_PKG_VERSION").to_string();
+    let active_daemon_version = status
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.clone());
+    let version_drift = active_daemon_version
+        .as_ref()
+        .is_some_and(|version| version != &controller_version);
     LabRunnerHomeboyOutput {
+        controller_version,
         configured_executable: configured_executable.to_string(),
-        active_daemon_version: status
-            .session
-            .as_ref()
-            .map(|session| session.homeboy_version.clone()),
+        active_daemon_version,
         active_daemon_build_identity: status
             .session
             .as_ref()
@@ -240,6 +258,8 @@ fn lab_runner_homeboy_output(
             .stale_daemon
             .as_ref()
             .and_then(|warning| serde_json::to_value(warning).ok()),
+        version_drift,
+        command_availability_checks: lab_command_availability_checks(configured_executable),
         refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
         upgrade_command: format!(
             "homeboy upgrade --force --upgrade-runner {}",
@@ -307,7 +327,7 @@ fn sync_lab_extension(
             capability_preflight: Some(homeboy::core::runners::RunnerCapabilityPreflight {
                 command: "homeboy lab extension-sync".to_string(),
                 required_tools: vec![RunnerRequiredTool::Homeboy],
-                required_commands: Vec::new(),
+                required_commands: vec!["extension".to_string()],
                 required_components: Vec::new(),
                 required_env: Vec::new(),
             }),
@@ -336,7 +356,7 @@ fn sync_lab_extension(
         LabCommandOutput::ExtensionSync(Box::new(LabExtensionSyncOutput {
             command: "lab.extension_sync",
             runner_id,
-            runner_homeboy_path: homeboy_path,
+            runner_homeboy_path: homeboy_path.clone(),
             extension_id: extension_id.to_string(),
             source: source.to_string(),
             runner_source: (materialized_source.runner_source != source)
@@ -344,11 +364,27 @@ fn sync_lab_extension(
             source_revision: revision.to_string(),
             replace,
             install_command: execution_plan.remote_argv.clone(),
+            diagnostics: LabExtensionSyncDiagnostics {
+                controller_version: env!("CARGO_PKG_VERSION").to_string(),
+                runner_homeboy_path: homeboy_path.clone(),
+                command_availability_checks: lab_command_availability_checks(&homeboy_path),
+                binary_drift_hint: "If a source-main command exists locally but fails on the Lab runner, compare controller_version with the runner command output, then run `homeboy lab status --runner <id>` and refresh or upgrade the runner Homeboy binary.".to_string(),
+            },
             execution_plan,
             execution,
         })),
         exit_code,
     ))
+}
+
+fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
+    let binary = shell_arg(homeboy_path);
+    vec![
+        format!("{binary} --version"),
+        format!("{binary} fuzz --help"),
+        format!("{binary} runs evidence --help"),
+        format!("{binary} extension list"),
+    ]
 }
 
 struct MaterializedLabExtensionSource {
@@ -612,8 +648,8 @@ fn shell_arg(value: &str) -> String {
 mod tests {
     use super::{
         controller_local_source_path, installed_extension_source_revision,
-        lab_extension_sync_execution_plan, lab_followups, lab_runner_homeboy_refresh_commands,
-        revision_matches, runner_extension_install_command,
+        lab_command_availability_checks, lab_extension_sync_execution_plan, lab_followups,
+        lab_runner_homeboy_refresh_commands, revision_matches, runner_extension_install_command,
     };
     use homeboy::core::command_execution_plan::{
         CommandOutputContract, CommandPortability, CommandSourcePolicy, CommandWorkspacePolicy,
@@ -859,5 +895,14 @@ Installing declared dependencies...
                 "homeboy runner connect 'homeboy lab'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn lab_command_availability_checks_include_fuzz_and_evidence_surfaces() {
+        let checks = lab_command_availability_checks("/opt/homeboy/bin/homeboy");
+
+        assert!(checks.contains(&"/opt/homeboy/bin/homeboy --version".to_string()));
+        assert!(checks.contains(&"/opt/homeboy/bin/homeboy fuzz --help".to_string()));
+        assert!(checks.contains(&"/opt/homeboy/bin/homeboy runs evidence --help".to_string()));
     }
 }

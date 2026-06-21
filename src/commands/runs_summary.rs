@@ -333,9 +333,17 @@ mod tests {
                     "status": "fail",
                     "metadata": {
                         "coverage_summary": {
+                            "declared_count": 12,
+                            "executable_count": 10,
+                            "proven_count": 9,
                             "surface_count": 12,
+                            "operation_count": 18,
                             "exercised_count": 9,
                             "failed_count": 2,
+                            "skipped_reason_counts": {
+                                "requires_confirmation": 2,
+                                "missing_fixture": 1
+                            },
                             "coverage_gaps": [
                                 "parser::unicode",
                                 "parser::empty",
@@ -375,7 +383,12 @@ mod tests {
         assert!(summary.contains("Run fuzz-run-7 (fuzz)\n"));
         assert!(summary.contains("Coverage:\n"));
         assert!(summary.contains("  Surfaces: discovered=12 exercised=9 failed=2\n"));
+        assert!(summary.contains("  Proof states: declared=12 executable=10 proven=9\n"));
+        assert!(summary.contains("  Operations: 18\n"));
         assert!(summary.contains("  Coverage gaps: 3\n"));
+        assert!(summary.contains("  Skipped reasons:\n"));
+        assert!(summary.contains("    requires_confirmation: 2\n"));
+        assert!(summary.contains("    missing_fixture: 1\n"));
         assert!(summary.contains("    parser: 2\n"));
         assert!(summary.contains("    serializer: 1\n"));
         assert!(summary.contains("Key artifacts:\n"));

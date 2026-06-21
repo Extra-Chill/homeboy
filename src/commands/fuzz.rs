@@ -123,6 +123,7 @@ pub struct FuzzListOutput {
     pub rig_id: Option<String>,
     pub workloads: Vec<FuzzWorkloadOutput>,
     pub count: usize,
+    pub run_hint: String,
 }
 
 #[derive(Serialize)]
@@ -140,6 +141,7 @@ pub struct FuzzRunOutput {
     pub passthrough_args: Vec<String>,
     pub execution: Option<FuzzExecutionOutput>,
     pub runner_contract: FuzzRunnerContract,
+    pub evidence_followups: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -209,6 +211,7 @@ fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
         rig_id: rig_context.map(|context| context.spec.id),
         count: workloads.len(),
         workloads,
+        run_hint: "Select one workload with `homeboy fuzz run <component> --workload <id>`; offload heavy campaigns with the global `--runner <id>` flag when configured.".to_string(),
     })
 }
 
@@ -236,6 +239,7 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     let runner_output = run_fuzz_extension_script(&ctx, &args, selected_workload, &run_dir)?;
     let exit_code = runner_output.exit_code;
     let success = runner_output.success;
+    let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
 
     Ok((
         FuzzRunOutput {
@@ -272,9 +276,24 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
                     "HOMEBOY_FUZZ_MAX_DURATION",
                 ],
             },
+            evidence_followups,
         },
         exit_code,
     ))
+}
+
+fn fuzz_evidence_followups(run_id: Option<&str>) -> Vec<String> {
+    match run_id.filter(|run_id| !run_id.trim().is_empty()) {
+        Some(run_id) => vec![
+            format!("homeboy runs show {run_id}"),
+            format!("homeboy runs evidence {run_id}"),
+            format!("homeboy runs artifacts {run_id}"),
+        ],
+        None => vec![
+            "Use --run-id <stable-id> when the downstream runner records persisted Homeboy evidence.".to_string(),
+            "Inspect persisted proof with `homeboy runs show <run-id>` and `homeboy runs evidence <run-id>`.".to_string(),
+        ],
+    }
 }
 
 fn run_fuzz_extension_script(
@@ -533,12 +552,42 @@ fn select_workload<'a>(
             });
     }
 
+    if workloads.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "workload",
+            "No fuzz workloads are declared for this component/rig/extension selection",
+            None,
+            Some(vec![
+                "Run `homeboy fuzz list <component> --rig <id>` to inspect the resolved selection.".to_string(),
+                "Declare extension fuzz workloads, component scripts.fuzz commands, or rig fuzz_workloads before claiming fuzz coverage.".to_string(),
+                "If the command is available in source but not on the Lab runner, run `homeboy lab status --runner <id>` and refresh or upgrade the runner binary.".to_string(),
+            ]),
+        ));
+    }
+
     let mut path_workloads = workloads
         .iter()
         .filter(|workload| workload.manifest_path.is_some());
     let first = path_workloads.next();
     if first.is_some() && path_workloads.next().is_none() {
         return Ok(first);
+    }
+
+    if workloads.len() > 1 {
+        let workload_ids = workloads
+            .iter()
+            .map(|workload| workload.id.clone())
+            .collect::<Vec<_>>();
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "workload",
+            "Multiple fuzz workloads are declared; select one explicitly with --workload <id>",
+            None,
+            Some(vec![
+                format!("Available workload ids: {}", workload_ids.join(", ")),
+                "Run `homeboy fuzz list` for labels, descriptions, sources, and manifest paths."
+                    .to_string(),
+            ]),
+        ));
     }
 
     Ok(None)
@@ -598,6 +647,7 @@ mod tests {
             rig_id: None,
             workloads: Vec::new(),
             count: 0,
+            run_hint: "hint".to_string(),
         }))
         .unwrap();
         assert_eq!(list["variant"], "list");
@@ -620,6 +670,7 @@ mod tests {
                 extension_script_required: true,
                 env: Vec::new(),
             },
+            evidence_followups: Vec::new(),
         }))
         .unwrap();
         assert_eq!(run["variant"], "run");
@@ -725,6 +776,45 @@ mod tests {
         assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    }
+
+    #[test]
+    fn select_workload_requires_explicit_id_for_ambiguous_fuzz_workloads() {
+        let workloads = vec![
+            FuzzWorkloadOutput {
+                id: "parser".to_string(),
+                label: None,
+                description: None,
+                source: "extension:generic".to_string(),
+                manifest_path: None,
+            },
+            FuzzWorkloadOutput {
+                id: "serializer".to_string(),
+                label: None,
+                description: None,
+                source: "extension:generic".to_string(),
+                manifest_path: None,
+            },
+        ];
+
+        let err = select_workload(&workloads, None).expect_err("ambiguous workload");
+
+        assert!(err.message.contains("Multiple fuzz workloads"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("parser, serializer")));
+    }
+
+    #[test]
+    fn select_workload_rejects_empty_fuzz_selection() {
+        let err = select_workload(&[], None).expect_err("empty workload selection");
+
+        assert!(err.message.contains("No fuzz workloads"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("fuzz list")));
     }
 
     #[test]
