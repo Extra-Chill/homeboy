@@ -1,5 +1,8 @@
 'use strict';
 
+/**
+ * Internal dependencies
+ */
 const staticVisualParity = require('./lib/static-visual-parity');
 
 module.exports = {
@@ -29,6 +32,7 @@ module.exports = {
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
 	...require('./lib/wp-codebox-apply-adapter'),
+	...require('./lib/codebox-provider-adapter'),
 	...require('./lib/wp-codebox-recipe-helper'),
 	...require('./lib/wp-codebox-artifacts'),
 	...require('./lib/wordpress-workload-profile'),
@@ -41,6 +45,7 @@ module.exports = {
 	wpCodebox: {
 		...require('./lib/codebox-memory-report'),
 		...require('./lib/wp-codebox-apply-adapter'),
+		...require('./lib/codebox-provider-adapter'),
 		...require('./lib/wp-codebox-recipe-helper'),
 		...require('./lib/wp-codebox-artifacts'),
 		buildWpCodeboxStaticVisualParityRecipe: staticVisualParity.buildWpCodeboxStaticVisualParityRecipe,
