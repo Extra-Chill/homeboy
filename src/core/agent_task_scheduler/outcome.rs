@@ -9,6 +9,7 @@
 //! can reach them without widening the crate-public surface.
 
 use std::collections::HashMap;
+use std::fs;
 
 use serde_json::{Map, Value};
 
@@ -30,6 +31,120 @@ pub(super) fn missing_required_typed_artifacts(
                 .any(|artifact| artifact.name == *name)
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InvalidRequiredTypedArtifact {
+    pub(super) task_id: String,
+    pub(super) name: String,
+    pub(super) artifact_type: Option<String>,
+    pub(super) artifact_id: Option<String>,
+    pub(super) path: Option<String>,
+    pub(super) url: Option<String>,
+    pub(super) size_bytes: Option<u64>,
+    pub(super) reason: String,
+}
+
+pub(super) fn invalid_required_typed_artifacts(
+    outcome: &AgentTaskOutcome,
+    request: &AgentTaskRequest,
+) -> Vec<InvalidRequiredTypedArtifact> {
+    request
+        .canonical_artifact_declarations()
+        .into_iter()
+        .filter(|declaration| declaration.required)
+        .filter_map(|declaration| {
+            let artifact = outcome
+                .typed_artifacts
+                .iter()
+                .find(|artifact| artifact.name == declaration.name)?;
+            invalid_required_typed_artifact(outcome, artifact)
+        })
+        .collect()
+}
+
+fn invalid_required_typed_artifact(
+    outcome: &AgentTaskOutcome,
+    typed_artifact: &AgentTaskTypedArtifact,
+) -> Option<InvalidRequiredTypedArtifact> {
+    let artifact_id = typed_artifact
+        .artifact
+        .as_ref()
+        .map(|artifact| artifact.id.clone());
+    let path = typed_artifact
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.path.clone())
+        .or_else(|| string_field(&typed_artifact.payload, "path"));
+    let url = typed_artifact
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.url.clone())
+        .or_else(|| string_field(&typed_artifact.payload, "url"));
+    let size_bytes = typed_artifact
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.size_bytes)
+        .or_else(|| {
+            typed_artifact
+                .payload
+                .get("size_bytes")
+                .and_then(Value::as_u64)
+        });
+    let reason = invalid_typed_artifact_reason(typed_artifact, path.as_deref(), size_bytes)?;
+
+    Some(InvalidRequiredTypedArtifact {
+        task_id: outcome.task_id.clone(),
+        name: typed_artifact.name.clone(),
+        artifact_type: typed_artifact.artifact_type.clone(),
+        artifact_id,
+        path,
+        url,
+        size_bytes,
+        reason,
+    })
+}
+
+fn invalid_typed_artifact_reason(
+    typed_artifact: &AgentTaskTypedArtifact,
+    path: Option<&str>,
+    size_bytes: Option<u64>,
+) -> Option<String> {
+    if size_bytes == Some(0) {
+        return Some("declared artifact size is zero bytes".to_string());
+    }
+
+    if let Some(path) = path.filter(|path| !path.trim().is_empty()) {
+        if let Ok(metadata) = fs::metadata(path) {
+            if metadata.is_file() && metadata.len() == 0 {
+                return Some("referenced artifact file is zero bytes".to_string());
+            }
+        }
+    }
+
+    if typed_artifact.artifact.is_none() && value_is_empty(&typed_artifact.payload) {
+        return Some("typed artifact payload is empty and has no artifact reference".to_string());
+    }
+
+    None
+}
+
+fn string_field(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(object) => object.is_empty() || object.values().all(Value::is_null),
+        Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 pub(super) fn missing_typed_artifacts_failure(outcome: &AgentTaskOutcome) -> bool {
