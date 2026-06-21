@@ -9,9 +9,7 @@ const path = require('node:path');
 const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
-const {
-  WP_CODEBOX_RECIPE_RUN_CLI_COMMAND,
-} = require('../../agent-runtimes/wp-codebox/lib/wp-codebox-adapter-contract');
+const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = 'recipe-run';
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 50;
 const DEFAULT_EVENT_SOURCE = 'wp_codebox';
 const DEFAULT_EVENT_PREFIX = 'recipe';
