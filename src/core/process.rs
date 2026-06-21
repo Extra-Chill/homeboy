@@ -1,5 +1,7 @@
 use crate::core::error::{Error, Result};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -150,6 +152,125 @@ pub fn process_group_is_running(pgid: i32) -> bool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessTreeTermination {
+    pub owner_pid: u32,
+    pub descendant_pids: Vec<u32>,
+    pub signalled_pids: Vec<u32>,
+    pub signal: &'static str,
+    pub recovery_commands: Vec<String>,
+}
+
+pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
+    if owner_pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            format!("pid {} is outside the supported Unix pid range", owner_pid),
+            Some(owner_pid.to_string()),
+            None,
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let descendant_pids = unix_descendant_pids(owner_pid)?;
+        let current_pid = std::process::id();
+        let mut targets = descendant_pids.clone();
+        targets.push(owner_pid);
+        targets.retain(|pid| *pid != current_pid);
+        targets.sort_unstable();
+        targets.dedup();
+
+        for pid in targets.iter().rev() {
+            unsafe {
+                if libc::kill(*pid as libc::pid_t, libc::SIGTERM) != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(Error::internal_unexpected(format!(
+                            "failed to signal pid {} with SIGTERM: {}",
+                            pid, err
+                        )));
+                    }
+                }
+            }
+        }
+
+        let recovery_commands = if targets.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!(
+                "kill -TERM {}",
+                targets
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )]
+        };
+
+        return Ok(ProcessTreeTermination {
+            owner_pid,
+            descendant_pids,
+            signalled_pids: targets,
+            signal: "SIGTERM",
+            recovery_commands,
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = owner_pid;
+        Err(Error::validation_invalid_argument(
+            "pid",
+            "process-tree cancellation is only supported on Unix hosts",
+            None,
+            None,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn unix_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("failed to inspect process tree with ps: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "failed to inspect process tree with ps: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(descendant_pids_from_ps(&stdout, owner_pid))
+}
+
+#[cfg(unix)]
+fn descendant_pids_from_ps(ps_output: &str, owner_pid: u32) -> Vec<u32> {
+    let rows: Vec<(u32, u32)> = ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect();
+    let mut descendants = Vec::new();
+    let mut frontier = vec![owner_pid];
+    while let Some(parent) = frontier.pop() {
+        for (pid, ppid) in &rows {
+            if *ppid == parent && !descendants.contains(pid) {
+                descendants.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    descendants
+}
+
 #[cfg(target_os = "linux")]
 fn linux_process_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -213,5 +334,20 @@ mod tests {
 
         assert_eq!(process.state, 'Z');
         assert_eq!(process.process_group_id, 456);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_tree_tests {
+    use super::*;
+
+    #[test]
+    fn descendant_pids_from_ps_walks_nested_children() {
+        let ps = "10 1\n11 10\n12 11\n13 10\n20 1\n";
+
+        let mut descendants = descendant_pids_from_ps(ps, 10);
+        descendants.sort_unstable();
+
+        assert_eq!(descendants, vec![11, 12, 13]);
     }
 }
