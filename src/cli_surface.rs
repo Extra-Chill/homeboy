@@ -142,7 +142,8 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
-    /// Discover Lab routing and benchmark offload commands
+    /// Compatibility shortcut for Lab routing helpers; use `runner` for discovery.
+    #[command(hide = true)]
     Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
@@ -525,6 +526,7 @@ fn docs_path(path: &[String]) -> Option<String> {
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
     command
         .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| CommandSurfaceEntry {
             name: subcommand.get_name().to_string(),
             visible_aliases: subcommand
@@ -650,12 +652,18 @@ mod tests {
     fn command_safety_manifest_records_clap_visibility_metadata() {
         let manifest = current_command_safety_manifest();
 
-        let hidden_list = manifest.find_path(&["list"]).unwrap();
-        assert!(hidden_list.hidden);
+        assert!(manifest.find_path(&["list"]).is_none());
+        assert!(manifest.find_path(&["lab"]).is_none());
 
         let visible_status = manifest.find_path(&["status"]).unwrap();
         assert!(!visible_status.hidden);
         assert!(visible_status.aliases.is_empty());
+    }
+
+    #[test]
+    fn hidden_lab_shortcut_still_parses() {
+        Cli::try_parse_from(["homeboy", "lab", "status"])
+            .expect("hidden Lab compatibility shortcut should keep parsing");
     }
 
     #[test]
