@@ -59,6 +59,7 @@ assert.deepEqual(wpCodeboxProviderRuntimeOperationConfig('toolCallTranscriptReco
 
 assert.deepEqual(WP_CODEBOX_ROLE_ALIASES.artifact_roles.patch, ['codebox-patch']);
 assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) => requirement.id), [
+	'run-agent-task',
 	'runtime-profile',
 	'parent-tool-bridge',
 	'provider-runtime-invocation',

@@ -30,9 +30,18 @@ bridge environment variables.
 Codebox owns these primitives:
 
 - `wp-codebox/runtime-profile/v1` for runtime dependencies and mounts.
+- `wp-codebox/run-agent-task/v1` for launching a prepared agent task through a Codebox-owned run contract.
 - `wp-codebox/parent-tool-bridge/v1` for exposing parent-owned tools inside the sandbox.
 - `wp-codebox/provider-runtime-invocation-contract/v1` for runner workspace, transcript, and artifact handoff operations.
 - `wp-codebox/evidence-artifact-envelope/v1` for typed artifacts, evidence refs, and run summaries.
+
+`lib/codebox-run-agent-task-contract.js` is the adapter boundary for launching
+Codebox agent tasks. It builds the preferred `wp-codebox/run-agent-task/v1`
+request shape and selects the stable `run-agent-task` CLI when the installed
+Codebox package advertises it. Older packages continue through the legacy
+`agent-task-run` / `wp-codebox/task-input/v1` path, but that compatibility is
+kept behind this adapter so the follow-up swap can remove the fallback without
+changing Homeboy callers.
 
 ## Delegated Run Preparation
 

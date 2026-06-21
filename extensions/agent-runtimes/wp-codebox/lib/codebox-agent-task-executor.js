@@ -55,6 +55,9 @@ const {
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
+const {
+  WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
+} = require('./codebox-run-agent-task-contract');
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
@@ -2945,7 +2948,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     schema: AGENT_TASK_OUTCOME_SCHEMA,
     provider: 'wordpress.codebox-agent-task-executor',
     providerLabel: 'WP Codebox agent',
-    integrationContract: 'wp-codebox-cli/agent-task-run',
+    integrationContract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
     status,
     summary: missingRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
     artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
@@ -3027,6 +3030,7 @@ module.exports = {
   WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
   WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
   WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
+  WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
   RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
   providerContract,
   providerRuntimeInvocationContract,

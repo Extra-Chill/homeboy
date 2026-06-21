@@ -7,6 +7,7 @@
     ".": "./index.js",
     "./codebox-artifact-contract": "./lib/codebox-artifact-contract.js",
     "./codebox-agent-task-executor": "./lib/codebox-agent-task-executor.js",
+    "./codebox-run-agent-task-contract": "./lib/codebox-run-agent-task-contract.js",
     "./codebox-runtime-profile": "./lib/codebox-runtime-profile.js",
     "./delegated-run-contract": "./lib/delegated-run-contract.js",
     "./provider-outcome-normalizer": "./lib/provider-outcome-normalizer.js",

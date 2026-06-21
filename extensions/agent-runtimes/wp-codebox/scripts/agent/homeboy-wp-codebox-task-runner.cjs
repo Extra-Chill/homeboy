@@ -27,6 +27,9 @@ const {
   normalizeTypedArtifacts,
   typedArtifactFileRefs,
 } = require('../../lib/codebox-artifact-contract');
+const {
+  codeboxRunAgentTaskInvocation,
+} = require('../../lib/codebox-run-agent-task-contract');
 
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -2243,6 +2246,25 @@ function emptyStdoutPayloadFailure(result, artifacts) {
   );
 }
 
+function supportsRunAgentTaskCommand(wpCodeboxBin) {
+  const mode = process.env.HOMEBOY_WP_CODEBOX_RUN_AGENT_TASK || '';
+  if (/^(1|true|stable)$/i.test(mode)) {
+    return true;
+  }
+  if (/^(0|false|legacy)$/i.test(mode)) {
+    return false;
+  }
+
+  const resolved = resolveCommand(wpCodeboxBin, ['run-agent-task', '--help']);
+  const result = spawnSync(resolved.command, resolved.args, {
+    encoding: 'utf8',
+    env: process.env,
+    maxBuffer: 1024 * 1024,
+    timeout: 5000,
+  });
+  return !result.error && result.status === 0;
+}
+
 function runWpCodeboxParentTask(request, envOverrides = {}) {
   const explicitArtifacts = argValue('--artifacts') || request.artifacts_path || '';
   const artifacts = explicitArtifacts || fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-artifacts-'));
@@ -2273,16 +2295,19 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
       ...(bridgeServer ? { HOMEBOY_AGENT_TOOL_BRIDGE_URL: bridgeServer.url } : {}),
     },
   }, artifacts);
-  const inputPath = writeJsonFile('homeboy-wp-codebox-agent-task-input-', preparedInput.input);
-  const args = ['agent-task-run', `--input-file=${inputPath}`, '--json'];
-  const previewHold = argValue('--preview-hold');
-  if (previewHold) {
-    args.push(`--preview-hold-seconds=${previewHold}`);
-  }
-  const previewPublicUrl = argValue('--preview-public-url');
-  if (previewPublicUrl) {
-    args.push(`--preview-public-url=${previewPublicUrl}`);
-  }
+  const useStableRunAgentTask = supportsRunAgentTaskCommand(wpCodeboxBin);
+  const invocation = codeboxRunAgentTaskInvocation({
+    taskInput: preparedInput.input,
+    artifactsPath: artifacts,
+    previewHold: argValue('--preview-hold'),
+    previewPublicUrl: argValue('--preview-public-url'),
+    useStableRunAgentTask,
+  });
+  const inputPath = writeJsonFile(
+    useStableRunAgentTask ? 'homeboy-wp-codebox-run-agent-task-' : 'homeboy-wp-codebox-agent-task-input-',
+    invocation.input
+  );
+  const args = invocation.args.map((arg) => arg === '--input-file={{input_file}}' ? `--input-file=${inputPath}` : arg);
 
   const resolved = resolveCommand(wpCodeboxBin, args);
   const timeoutMs = requestTimeoutMs(request);
@@ -2293,6 +2318,9 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     command: resolved.command,
     args: resolved.args,
     prepared_plugins: preparedInput.prepared_plugins,
+    run_agent_task_contract: invocation.contract,
+    run_agent_task_implementation: invocation.implementation,
+    expected_result_schema: invocation.result_schema,
     timeout_ms: timeoutMs,
     task_id: request.orchestrator?.agent_task_id,
     sandbox_session_id: request.sandbox_session_id,

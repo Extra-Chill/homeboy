@@ -108,6 +108,13 @@ const WP_CODEBOX_ROLE_ALIASES = {
 
 const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
   {
+    id: 'run-agent-task',
+    schema: 'wp-codebox/run-agent-task/v1',
+    owner: 'wp-codebox',
+    adapter_behavior: 'prefer_stable_run_agent_task_with_legacy_agent_task_run_fallback',
+    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns a stable run-agent-task result envelope. Until that primitive is present, Homeboy Extensions keeps the legacy agent-task-run CLI compatibility path behind codebox-run-agent-task-contract.js.',
+  },
+  {
     id: 'runtime-profile',
     schema: 'wp-codebox/runtime-profile/v1',
     owner: 'wp-codebox',
