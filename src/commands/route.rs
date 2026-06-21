@@ -189,9 +189,14 @@ fn inject_lab_changed_files(
     Ok(Some(rewritten))
 }
 
-fn changed_scope_request(
-    command: &Commands,
-) -> Option<(Option<&String>, Option<&String>, Option<&str>, bool)> {
+type ChangedScopeRequest<'a> = (
+    Option<&'a String>,
+    Option<&'a String>,
+    Option<&'a str>,
+    bool,
+);
+
+fn changed_scope_request(command: &Commands) -> Option<ChangedScopeRequest<'_>> {
     match command {
         Commands::Lint(args) => Some((
             args.comp.component.as_ref(),

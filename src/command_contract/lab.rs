@@ -96,7 +96,6 @@ pub(crate) const REVIEW_LAB_LABEL: &str = "review";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
 pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
 const TRACE_LAB_LABEL: &str = "trace";
-#[cfg(test)]
 const REFACTOR_LAB_LABEL: &str = "refactor";
 const RIG_CHECK_LAB_LABEL: &str = "rig check";
 const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
