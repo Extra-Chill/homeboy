@@ -2,6 +2,16 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.22.0] - 2026-06-21
+
+### Added
+- publish Homebrew formulae from rust releases
+
+### Fixed
+- remove shared core helper fallbacks
+- prefer runtime helpers in extension wrappers
+- consume core test scope in runners
+
 ## [1.21.1] - 2026-06-15
 
 ### Fixed
