@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::conventions::AuditFinding;
+use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
 use super::idiomatic::is_trivial_method;
@@ -362,8 +362,15 @@ pub(crate) fn detect_near_duplicates(fingerprints: &[&FileFingerprint]) -> Vec<F
         // and Clippy's `len_without_is_empty` lint actually *requires* you to
         // pair `len` with `is_empty`. Flagging these as duplication is a
         // false positive (#1517). Predicate is shared with `test_coverage`
-        // via `super::idiomatic::is_trivial_method`.
-        if is_trivial_method(method_name) {
+        // via `super::idiomatic::is_trivial_method`. The near-duplicate pass has
+        // no per-component test mapping config, so it uses the builtin agnostic
+        // idiomatic name/prefix sets from the conventions home rather than
+        // embedding any language literals here.
+        if is_trivial_method(
+            method_name,
+            Language::builtin_trivial_method_names().iter().copied(),
+            Language::builtin_trivial_method_prefixes().iter().copied(),
+        ) {
             continue;
         }
 

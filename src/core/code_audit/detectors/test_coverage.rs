@@ -66,6 +66,13 @@ pub(crate) fn analyze_test_coverage(
         .and_then(|policy| policy.package_name.as_ref())
         .and_then(|source| resolve_package_name(root, source));
 
+    // Resolve the effective idiomatic-method sets once. These are
+    // config-declared (or the builtin agnostic fallback) so the detector does
+    // not embed any language/ecosystem literals when deciding which methods are
+    // exempt from coverage findings.
+    let trivial_names = config.effective_trivial_method_names();
+    let trivial_prefixes = config.effective_trivial_method_prefixes();
+
     // Check 1 & 2: For each source file, check for corresponding test file and methods
     for source_fp in &source_fps {
         // Skip files matching skip_test_patterns (e.g. CLI wrappers, pure type defs)
@@ -184,7 +191,7 @@ pub(crate) fn analyze_test_coverage(
 
             // Find source methods without tests (Check 2: MissingTestMethod)
             for method in &source_methods {
-                if is_trivial_method(method) {
+                if is_trivial_method(method, &trivial_names, &trivial_prefixes) {
                     continue;
                 }
                 if !is_testable_visibility(method, &source_fp.visibility) {
@@ -302,7 +309,7 @@ pub(crate) fn analyze_test_coverage(
                     .unwrap_or_else(|| "test file".to_string());
 
                 for method in &source_fp.methods {
-                    if is_trivial_method(method) {
+                    if is_trivial_method(method, &trivial_names, &trivial_prefixes) {
                         continue;
                     }
                     if !is_testable_visibility(method, &source_fp.visibility) {
