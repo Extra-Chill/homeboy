@@ -94,6 +94,9 @@ assert.equal(normalizeAgentTaskStatus({ success: false }), 'failed');
 
 assert.equal(normalizeProviderStatus({ success: true, outcome: 'no_op' }), 'no_op');
 assert.equal(providerFailureClassification('task', 'failed'), 'execution_failed');
+assert.equal(providerFailureClassification('incomplete', 'failed'), 'execution_failed');
+assert.equal(providerFailureClassification('max_turns', 'timeout'), 'timeout');
+assert.equal(providerFailureClassification('custom-runtime-detail', 'failed'), 'unknown');
 assert.throws(() => normalizeProviderTaskOutcome({}, {}), /request.task_id/);
 
 console.log('✓ provider outcome normalizer boundary test PASSED');

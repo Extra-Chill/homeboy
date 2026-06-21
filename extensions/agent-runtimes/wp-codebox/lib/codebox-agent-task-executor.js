@@ -2386,6 +2386,32 @@ function missingRequiredTypedArtifactDiagnostic(request, outputs) {
   };
 }
 
+function outputsWithInputTypedArtifacts(outputs, request) {
+  const typedArtifacts = outputs?.typed_artifacts && typeof outputs.typed_artifacts === 'object' && !Array.isArray(outputs.typed_artifacts)
+    ? { ...outputs.typed_artifacts }
+    : {};
+  let added = false;
+  for (const declaration of requiredArtifactDeclarationsFromRequest(request)) {
+    const name = typedArtifactNameFromDeclaration(declaration);
+    if (!name || typedArtifacts[name]) {
+      continue;
+    }
+    const value = request.inputs?.[name];
+    if (value === undefined || value === null || value === '') {
+      continue;
+    }
+    typedArtifacts[name] = normalizeTypedArtifactEntry(name, {
+      name,
+      type: declaration.type || declaration.kind || declaration.artifact_type || declaration.artifactType || name,
+      artifact_schema: declaration.artifact_schema || declaration.artifactSchema || declaration.schema,
+      payload: typeof value === 'object' ? value : { content: String(value), format: 'text' },
+      metadata: { normalized_from: 'request_input' },
+    });
+    added = true;
+  }
+  return added ? { ...outputs, typed_artifacts: typedArtifacts } : outputs;
+}
+
 function typedBundleOutputArtifacts(result) {
   return Object.values(typedArtifactsFromResult(result)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
     const fileRef = typeof ref === 'string' ? { path: ref } : ref;
@@ -2902,7 +2928,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     status = localStatus;
   }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
-  const outputs = normalizeOutputs(result, request);
+  const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request), request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
   if (status === 'succeeded' && missingRequiredTypedArtifacts) {
