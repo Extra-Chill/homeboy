@@ -85,6 +85,36 @@ _homeboy_validation_dependency_entry_source_type() {
     fi
 }
 
+_homeboy_validation_dependency_entry_package_path() {
+    local entry="${1:-}"
+
+    if _homeboy_validation_dependency_entry_is_object "$entry"; then
+        printf '%s' "$entry" | jq -r '.package_path // .packagePath // .subdir // .subdirectory // .plugin_path // .pluginPath // empty'
+    fi
+}
+
+_homeboy_validation_dependency_package_root() {
+    local resolved_path="${1:-}"
+    local package_path="${2:-}"
+
+    [ -n "$resolved_path" ] && [ -d "$resolved_path" ] || return 1
+    [ -n "$package_path" ] || {
+        printf '%s\n' "$resolved_path"
+        return 0
+    }
+
+    case "$package_path" in
+        /*|*..*) return 1 ;;
+    esac
+
+    if [ -d "${resolved_path%/}/${package_path}" ]; then
+        printf '%s\n' "${resolved_path%/}/${package_path}"
+        return 0
+    fi
+
+    return 1
+}
+
 _homeboy_validation_dependency_catalog_dir() {
     local base_dir="${HOMEBOY_CACHE_DIR:-${TMPDIR:-/tmp}}"
     local catalog_dir="${base_dir%/}/homeboy-deps"
@@ -182,16 +212,17 @@ _homeboy_resolve_validation_dependency_entry_path() {
         return $?
     fi
 
-    local source_type source slug revision url resolved
+    local source_type source slug revision url package_path resolved package_root
     source_type=$(_homeboy_validation_dependency_entry_source_type "$entry")
     source=$(printf '%s' "$entry" | jq -r '.path // .local_path // .dependency // .source // empty')
     slug=$(_homeboy_validation_dependency_entry_slug "$entry")
     revision=$(printf '%s' "$entry" | jq -r '.revision // .ref // .version // empty')
     url=$(printf '%s' "$entry" | jq -r '.url // .zip_url // empty')
+    package_path=$(_homeboy_validation_dependency_entry_package_path "$entry")
 
     if [ -n "$source" ] && [ -d "$source" ]; then
-        printf '%s\n' "$source"
-        return 0
+        package_root=$(_homeboy_validation_dependency_package_root "$source" "$package_path" || true)
+        [ -n "$package_root" ] && printf '%s\n' "$package_root" && return 0
     fi
 
     case "$source_type" in
@@ -199,18 +230,22 @@ _homeboy_resolve_validation_dependency_entry_path() {
             local repo
             repo=$(printf '%s' "$entry" | jq -r '.repo // .repository // .source // empty')
             resolved=$(_homeboy_clone_catalog_github_dependency "$repo" "$slug" "$revision" || true)
-            [ -n "$resolved" ] && [ -d "$resolved" ] && printf '%s\n' "$resolved" && return 0
+            package_root=$(_homeboy_validation_dependency_package_root "$resolved" "$package_path" || true)
+            [ -n "$package_root" ] && [ -d "$package_root" ] && printf '%s\n' "$package_root" && return 0
             ;;
         wp.org|wporg|wordpress.org|wp.org-zip|wordpress.org-zip)
             [ -n "$slug" ] || slug=$(printf '%s' "$entry" | jq -r '.dependency // empty')
             resolved=$(_homeboy_materialize_wordpress_org_zip_dependency "$slug" "$revision" "$url" || true)
-            [ -n "$resolved" ] && [ -d "$resolved" ] && printf '%s\n' "$resolved" && return 0
+            package_root=$(_homeboy_validation_dependency_package_root "$resolved" "$package_path" || true)
+            [ -n "$package_root" ] && [ -d "$package_root" ] && printf '%s\n' "$package_root" && return 0
             ;;
     esac
 
     if [ -n "$source" ]; then
-        homeboy_resolve_validation_dependency_path "$source"
-        return $?
+        resolved=$(homeboy_resolve_validation_dependency_path "$source" || true)
+        package_root=$(_homeboy_validation_dependency_package_root "$resolved" "$package_path" || true)
+        [ -n "$package_root" ] && printf '%s\n' "$package_root" && return 0
+        return 1
     fi
 
     [ -n "$slug" ] || return 1
