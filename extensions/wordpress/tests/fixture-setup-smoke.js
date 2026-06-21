@@ -17,6 +17,7 @@ const {
 	runWordPressFixtureSetup,
 	withWordPressFixturePlugins,
 } = require('../lib/fixture-setup');
+const { wpCodeboxPluginStateStep } = require('../lib/wp-codebox-recipe-helper');
 
 const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-fixtures-'));
 
@@ -94,6 +95,13 @@ async function main() {
 			fixtureRecipeStep({ type: 'wp-eval-file', path: 'fixtures/seed.php' }),
 			{ command: 'wordpress.run-php', args: ['code-file=fixtures/seed.php'] }
 		);
+		assert.deepEqual(
+			wpCodeboxPluginStateStep({ activate: ['source-plugin/source-plugin.php'], deactivate: [{ slug: 'old-plugin' }] }),
+			{
+				command: 'wordpress.plugin-state',
+				args: ['plugin-state-json={"activate":[{"plugin":"source-plugin/source-plugin.php"}],"deactivate":[{"slug":"old-plugin","plugin":"old-plugin"}],"report":true}'],
+			}
+		);
 
 		const recipeSteps = [];
 		const wpCodeboxResult = await runWordPressFixtureSetup({
@@ -152,6 +160,28 @@ async function main() {
 		assert.equal(fs.lstatSync(path.join(pluginsDir, 'source-plugin')).isSymbolicLink(), true);
 		assert.equal(fs.existsSync(path.join(pluginsDir, 'copy-source-plugin', 'copy-source-plugin.php')), true);
 		assert.deepEqual(activationCalls, [{ command: 'plugin activate source-plugin/source-plugin.php', slug: 'source-plugin', timeoutMs: 12345 }]);
+
+		const codeboxActivationCalls = [];
+		const codeboxInstalledPlugins = await installWordPressFixturePlugins({
+			sitePath,
+			fixtureExecutionRoute: 'wp-codebox',
+			plugins: [{ path: sourceDir, plugin: 'source-plugin/source-plugin.php' }],
+			runRecipeStep: async (recipeStep, context) => {
+				codeboxActivationCalls.push({ recipeStep, slug: context.plugin.slug, timeoutMs: context.timeoutMs });
+				return { exitCode: 0, stdout: 'activated', stderr: '' };
+			},
+			activateTimeoutMs: 23456,
+		});
+		assert.equal(codeboxActivationCalls.length, 1);
+		assert.equal(codeboxActivationCalls[0].recipeStep.command, 'wordpress.plugin-state');
+		assert.deepEqual(JSON.parse(codeboxActivationCalls[0].recipeStep.args[0].replace(/^plugin-state-json=/, '')), {
+			activate: [{ plugin: 'source-plugin/source-plugin.php', slug: 'source-plugin' }],
+			deactivate: [],
+			report: true,
+		});
+		assert.equal(codeboxActivationCalls[0].timeoutMs, 23456);
+		assert.equal(codeboxInstalledPlugins[0].activation.recipeStep.command, 'wordpress.plugin-state');
+		await restoreWordPressFixturePlugins(codeboxInstalledPlugins);
 
 		await restoreWordPressFixturePlugins(installedPlugins);
 		assert.equal(fs.readFileSync(path.join(existingDir, 'existing.txt'), 'utf8'), 'existing plugin');

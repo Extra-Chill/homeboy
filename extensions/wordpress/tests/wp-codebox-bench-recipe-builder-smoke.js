@@ -43,6 +43,7 @@ const input = {
 				scopes: { posts: { slugs: ['home'] }, options: { names: ['blogname'] } },
 			}],
 		},
+		diagnosticsCapture: true,
 		mounts: [{ source: '/tmp/fixture-plugin', target: '/wordpress/wp-content/plugins/fixture-plugin' }],
 		extraPlugins: [{ source: '/tmp/extra-plugin.zip', slug: 'extra-plugin', activate: true }],
 	},
@@ -77,6 +78,7 @@ assert.deepEqual(recipe.workflow.steps, [{
 		'lifecycle-json={"before":["fixture"]}',
 		'reset-policy-json={"mode":"snapshot"}',
 	],
+	diagnostics: { capture: ['queries', 'errors'] },
 }]);
 
 const filteredResult = spawnSync(process.execPath, [script], {

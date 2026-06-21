@@ -1137,6 +1137,10 @@ fi
 if printf '%s' "$WP_CODEBOX_BOOTSTRAP_STEPS_JSON" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
     WP_CODEBOX_PLUGIN_RUNTIME_JSON=$(jq -nc --argjson runtime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" --argjson setup "$WP_CODEBOX_BOOTSTRAP_STEPS_JSON" '$runtime + {setup: $setup}')
 fi
+WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="null"
+if [ "$settings_json" != "{}" ]; then
+    WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON=$(printf '%s' "$settings_json" | jq -c '.wp_codebox_command_diagnostics // .command_diagnostics // .diagnostics_capture // .diagnosticsCapture // null' 2>/dev/null || echo "null")
+fi
 
 homeboy_wp_codebox_emit_memory_fatal_diagnostic() {
     local output_file="$1"
@@ -1400,7 +1404,8 @@ jq -n \
     --argjson bootstrapFiles "$WP_CODEBOX_BOOTSTRAP_FILES_JSON" \
     --argjson workloads "$WP_CODEBOX_WORKLOADS_JSON" \
     --argjson pluginRuntime "$WP_CODEBOX_PLUGIN_RUNTIME_JSON" \
-    '{
+    --argjson diagnostics "$WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON" \
+    '({
         wpCodeboxBin: $wpCodeboxBin,
         options: ({
             blueprint: $blueprint,
@@ -1417,7 +1422,7 @@ jq -n \
             bootstrapFiles: $bootstrapFiles,
             workloads: $workloads
         } + (if $wp == "" then {} else {wordpressVersion: $wp} end))
-    }' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
+    } | .options += (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' | node "$BENCH_RECIPE_BUILDER" > "$RECIPE_FILE"
 
 WP_CODEBOX_TMPFILE=$(mktemp "${ARTIFACTS_DIR}/homeboy-wp-codebox-output.XXXXXX")
 set +e

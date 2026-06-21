@@ -626,6 +626,7 @@ DEPENDENCY_PATHS="${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}"
 WP_CONFIG_DEFINES_JSON="{}"
 PHPUNIT_ENV_JSON="{}"
 WP_CODEBOX_FILE_MOUNTS_JSON="[]"
+WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="null"
 PHPUNIT_NO_TESTS="skipped"
 WP_CODEBOX_WORDPRESS_VERSION=""
 WP_CODEBOX_MULTISITE=""
@@ -644,6 +645,9 @@ if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]
 
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_multisite // empty' 2>/dev/null || true)
     [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_MULTISITE="$extracted"
+
+    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_codebox_command_diagnostics // .command_diagnostics // .diagnostics_capture // .diagnosticsCapture // null' 2>/dev/null || echo "null")
+    [ -n "$extracted" ] && WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON="$extracted"
 fi
 if [ -n "${HOMEBOY_WORDPRESS_MULTISITE+x}" ]; then
     WP_CODEBOX_MULTISITE="$HOMEBOY_WORDPRESS_MULTISITE"
@@ -824,6 +828,7 @@ jq -n \
     --arg projectBootstrap "$WP_CODEBOX_PHPUNIT_PROJECT_BOOTSTRAP" \
     --arg dependencyMounts "$WP_CODEBOX_DEP_MOUNTS" \
     --arg multisite "$WP_CODEBOX_MULTISITE" \
+    --argjson diagnostics "$WP_CODEBOX_COMMAND_DIAGNOSTICS_JSON" \
     '({
         mounts: $mounts,
         pluginSlug: $pluginSlug,
@@ -839,7 +844,9 @@ jq -n \
         testsDir: "/wp-codebox-vendor/wp-phpunit/wp-phpunit",
         dependencyMounts: ($dependencyMounts | split("\n") | map(select(. != ""))),
         multisite: (if (($multisite | ascii_downcase) as $v | $v == "1" or $v == "true" or $v == "yes" or $v == "on") then true else false end)
-    } + (if $wp == "" then {} else {wordpressVersion: $wp} end))' > "$RECIPE_OPTIONS_FILE"
+    }
+    + (if $wp == "" then {} else {wordpressVersion: $wp} end)
+    + (if $diagnostics == null then {} else {diagnosticsCapture: $diagnostics} end))' > "$RECIPE_OPTIONS_FILE"
 
 if [ ! -f "$PHPUNIT_RECIPE_BUILDER" ]; then
     echo "Error: WP Codebox PHPUnit recipe builder not found: ${PHPUNIT_RECIPE_BUILDER}" >&2

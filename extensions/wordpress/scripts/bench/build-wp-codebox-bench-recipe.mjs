@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
  * Internal dependencies
  */
 import { loadCodeboxRecipeBuilder } from './wp-codebox-recipe-builder-loader.mjs';
+import { applyWpCodeboxStepDiagnostics } from '../lib/wp-codebox-diagnostics-plan.mjs';
 
 const require = createRequire(import.meta.url);
 const { normalizeFixtureProfileSiteSeeds } = require('../../lib/fixture-setup.js');
@@ -42,6 +43,7 @@ if (siteSeeds.length > 0) {
 		...siteSeeds,
 	];
 }
+applyWpCodeboxStepDiagnostics(recipe, options);
 if (options.pluginRuntime && typeof options.pluginRuntime === 'object' && !Array.isArray(options.pluginRuntime)) {
 	recipe.inputs = recipe.inputs ?? {};
 	recipe.inputs.pluginRuntime = options.pluginRuntime;

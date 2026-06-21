@@ -20,6 +20,13 @@ provider contract, task request mapping, runtime CLI, and normalized outcome
 conversion so the WordPress extension can depend on generic runtime capabilities
 instead of embedding the provider contract.
 
+Provider discovery lives in the runtime manifest's
+`provider_metadata` block. Operators and generic tooling should read that block to
+separate executor backend (`codebox`), runtime id (`wp-codebox`), provider id
+(`openai`, `codex`, `claude-code`, or another WordPress AI provider), and model
+selection (`executor.config.model` / `executor.model`). Homeboy core should treat
+provider ids and model names as opaque runtime metadata.
+
 Configure the Codex pair with task config, global settings, or environment variables:
 
 - `provider_plugin_paths`: a Codex-capable provider plugin checkout, such as the Codex provider branch of `ai-provider-for-openai`. Legacy compatibility aliases: `wp_codebox_provider_plugin_paths`, `HOMEBOY_WP_CODEBOX_PROVIDER_PLUGIN_PATH`.
@@ -232,6 +239,71 @@ The profile is intentionally product-agnostic: import, fixture setup, crawling,
 and verification are ordinary WordPress recipe steps, while visual comparison is
 carried as a verifier step that a runtime can implement with its own browser
 capture and artifact policy.
+
+### Surface discovery and fuzz schemas
+
+The WordPress extension exposes product-agnostic data shapes for discovering
+WordPress surfaces and exchanging fuzz plans/results. These are schema contracts
+only; they do not select a runtime, generate cases, or execute fuzzing.
+
+- `wordpress-surface-discovery/v1` lists WordPress surfaces such as REST routes,
+  admin pages, post types, taxonomies, roles, capabilities, hooks, blocks,
+  options, cron events, database tables, frontend URLs, and WP-CLI commands.
+- `wordpress-fuzz-plan/v1` groups fuzz cases by discovered surface target.
+- `wordpress-fuzz-result/v1` reports normalized case outcomes and summaries.
+
+```json
+{
+  "schema": "wordpress-surface-discovery/v1",
+  "id": "site-surfaces",
+  "surfaces": [
+    {
+      "id": "wp-v2-posts",
+      "type": "rest-route",
+      "method": "GET",
+      "route": "/wp/v2/posts"
+    }
+  ]
+}
+```
+
+```json
+{
+  "schema": "wordpress-fuzz-plan/v1",
+  "id": "rest-route-fuzz",
+  "discovery_id": "site-surfaces",
+  "targets": [
+    {
+      "id": "posts-list-query",
+      "surface_id": "wp-v2-posts",
+      "method": "GET",
+      "route": "/wp/v2/posts",
+      "cases": [
+        { "id": "per-page-max", "query": { "per_page": 100 } }
+      ]
+    }
+  ],
+  "budget": { "max_cases": 25 }
+}
+```
+
+```json
+{
+  "schema": "wordpress-fuzz-result/v1",
+  "id": "rest-route-fuzz-result",
+  "plan_id": "rest-route-fuzz",
+  "status": "passed",
+  "summary": { "total": 1, "passed": 1, "failed": 0, "errored": 0, "skipped": 0 },
+  "cases": [
+    {
+      "id": "per-page-max",
+      "target_id": "posts-list-query",
+      "status": "passed",
+      "duration_ms": 42
+    }
+  ]
+}
+```
 
 ```json
 {
