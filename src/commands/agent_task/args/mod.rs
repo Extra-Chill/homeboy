@@ -199,6 +199,12 @@ pub struct VerifyGateArgs {
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
 }
 
+impl VerifyGateArgs {
+    pub fn has_deterministic_gate(&self) -> bool {
+        !self.verify.is_empty() || !self.private_verify.is_empty()
+    }
+}
+
 impl From<VerifyGateArgs> for VerifyGateOptions {
     fn from(args: VerifyGateArgs) -> Self {
         VerifyGateOptions {

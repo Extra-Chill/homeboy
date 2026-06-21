@@ -80,6 +80,8 @@ pub enum LabCommandRequiredTool {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
+const AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON: &str =
+    "agent-task loop requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/loop/run-plan/retry --run";
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/materialize";
@@ -282,9 +284,22 @@ impl Commands {
                 command:
                     agent_task::AgentTaskCommand::Cook(_)
                     | agent_task::AgentTaskCommand::Dispatch(_)
-                    | agent_task::AgentTaskCommand::Loop(_)
                     | agent_task::AgentTaskCommand::RunPlan(_)
                     | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs { run: true, .. }),
+            }) => LabCommandContract::portable(
+                AGENT_TASK_RUN_LAB_LABEL,
+                None,
+                true,
+                LAB_NO_EXTRA_TOOLS,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Loop(args),
+            }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
+                AGENT_TASK_RUN_LAB_LABEL,
+                AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Loop(_),
             }) => LabCommandContract::portable(
                 AGENT_TASK_RUN_LAB_LABEL,
                 None,
