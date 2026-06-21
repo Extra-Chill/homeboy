@@ -608,8 +608,16 @@ fn snapshot_archive_command(
     target_command: &str,
     excludes: &[String],
 ) -> String {
+    // `-h`/`--dereference` follows symlinks and archives their target contents
+    // instead of recording the link itself. Controller-native workspaces often
+    // wire local dependencies into the tree via symlinks (e.g. a `.ci/<dep>`
+    // entry pointing at a sibling checkout/worktree). Archiving those as plain
+    // links produces a runner snapshot whose links dangle, so embedded plan
+    // paths that traverse a symlinked dependency resolve to missing files on the
+    // runner. Dereferencing materializes the real dependency contents into the
+    // snapshot so offloaded plans find them at the remapped path (#3913).
     format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - . | {target_command}",
+        "COPYFILE_DISABLE=1 tar --no-xattrs -h -C {src} {exclude} -cf - . | {target_command}",
         src = shell::quote_arg(&local_path.display().to_string()),
         exclude = tar_exclude_args(excludes),
         target_command = target_command,
@@ -1806,6 +1814,55 @@ mod tests {
 
         assert!(command.contains("COPYFILE_DISABLE=1"));
         assert!(command.contains("tar --no-xattrs"));
+    }
+
+    #[test]
+    fn snapshot_archive_command_dereferences_symlinked_dependencies() {
+        // Symlinked plan dependencies (e.g. a `.ci/<dep>` link to a sibling
+        // checkout) must be materialized into the runner snapshot so offloaded
+        // plans whose embedded paths traverse the symlink resolve on the runner
+        // instead of dangling (#3913).
+        let command = snapshot_archive_command(
+            Path::new("/Users/user/Developer/wp-site-generator"),
+            "ssh runner 'tar -xf -'",
+            &[],
+        );
+
+        assert!(
+            command.contains("tar --no-xattrs -h "),
+            "snapshot tar must dereference symlinks: {command}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn copy_snapshot_materializes_symlinked_dependency_contents() {
+        // End-to-end guard for #3913: a primary workspace that wires a
+        // dependency in via a symlink (here `.ci/dep` -> a sibling checkout)
+        // must land the real dependency file contents in the snapshot, not a
+        // dangling link, so an offloaded plan path traversing the symlink
+        // resolves on the runner.
+        let controller = tempfile::tempdir().expect("controller");
+        let source = controller.path().join("primary");
+        let dependency = controller.path().join("dependency");
+        let dependency_file = dependency.join("packages/cli/dist/index.js");
+        std::fs::create_dir_all(dependency_file.parent().unwrap()).expect("dependency dir");
+        std::fs::write(&dependency_file, "#!/usr/bin/env node\n").expect("dependency file");
+        std::fs::create_dir_all(source.join(".ci")).expect("ci dir");
+        std::os::unix::fs::symlink(&dependency, source.join(".ci/dep")).expect("dep symlink");
+
+        let destination = controller.path().join("snapshot");
+        copy_snapshot_to_directory(&source, &destination, &[]).expect("copy snapshot");
+
+        let materialized = destination.join(".ci/dep/packages/cli/dist/index.js");
+        assert!(
+            !materialized.symlink_metadata().expect("entry").is_symlink(),
+            "symlinked dependency directory must be dereferenced, not copied as a link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&materialized).expect("materialized dependency file"),
+            "#!/usr/bin/env node\n"
+        );
     }
 
     #[test]
