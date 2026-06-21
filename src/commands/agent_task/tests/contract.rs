@@ -6,7 +6,10 @@ use super::support::*;
 fn providers_output_includes_core_capability_contract() {
     with_isolated_home(|_| {
         let (value, status) = review::providers(ProvidersArgs {
+            backend: None,
+            selector: None,
             secret_env: Vec::new(),
+            validate_readiness: false,
         })
         .expect("providers output");
 
