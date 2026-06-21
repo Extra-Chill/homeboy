@@ -43,7 +43,7 @@ function normalizeArtifactExports(bundleRun) {
   return undefined;
 }
 
-function normalizeDatamachineAgentBundleResult(bundleRun, config = {}, options = {}) {
+function normalizeRuntimeAgentBundleResult(bundleRun, config = {}, options = {}) {
   const bundle = plainObject(bundleRun.bundle) ? bundleRun.bundle : {};
   const workflowSteps = Array.isArray(bundleRun.workflow?.steps) ? bundleRun.workflow.steps : [];
   const legacyProjectionOutputs = typeof options.legacyProjectionOutputs === 'function'
@@ -84,5 +84,5 @@ function normalizeDatamachineAgentBundleResult(bundleRun, config = {}, options =
 }
 
 module.exports = {
-  normalizeDatamachineAgentBundleResult,
+  normalizeRuntimeAgentBundleResult,
 };

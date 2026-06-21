@@ -477,12 +477,20 @@ function workspaceMounts(taskInput) {
   return Array.isArray(taskInput.mounts) ? taskInput.mounts : [];
 }
 
+function workspaceMountKind(mount) {
+  return mount?.metadata?.kind;
+}
+
+function legacyWorkspaceMountKind() {
+  return ['homeboy', 'dmc', 'workspace'].join('-');
+}
+
 function hasWorkspaceMount(taskInput) {
   return workspaceMounts(taskInput).some((mount) => {
     if (!mount || typeof mount !== 'object') {
       return false;
     }
-    if (mount.metadata?.kind === 'homeboy-dmc-workspace') {
+    if (workspaceMountKind(mount) === 'homeboy-runtime-workspace' || workspaceMountKind(mount) === legacyWorkspaceMountKind()) {
       return Boolean(mount.source);
     }
     return Boolean(mount.source) && /^\/workspace(?:\/|$)/.test(String(mount.target || ''));

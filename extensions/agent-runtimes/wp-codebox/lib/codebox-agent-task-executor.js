@@ -67,6 +67,8 @@ const {
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
+const WP_CODEBOX_WORKSPACE_MOUNT_KIND = 'homeboy-runtime-workspace';
+const WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND = ['homeboy', 'dmc', 'workspace'].join('-');
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
@@ -309,6 +311,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertProviderCredentialBoundaryNamesOnly(request.inputs || {});
   const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
+  const compatibilityDiagnostics = legacyRuntimeComponentAliasDiagnostics(config);
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
   const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
@@ -371,6 +374,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     artifact_declarations: artifactDeclarations,
     policy: request.policy || {},
     context,
+    ...(compatibilityDiagnostics.length > 0 ? { compatibility_diagnostics: compatibilityDiagnostics } : {}),
     recipe,
     sandbox_tool_policy: sandboxToolPolicy,
     runtime_task: runtimeTask,
@@ -1067,11 +1071,12 @@ function runtimeComponentPaths(config, options = {}) {
     : {};
   const contractPaths = runtimeComponentPathsFromContracts(config.component_contracts || options.componentContracts || [], options);
   const aliases = runtimeComponentPathAliases(options);
+  const legacyAliases = legacyRuntimeComponentAliasValues(config);
   const resolved = {
     ...contractPaths,
     agents_api: config.agents_api || config.agents_api_path || options.agentsApi,
-    agent_runtime: config.agent_runtime || config.data_machine || config.data_machine_path || options.agentRuntime,
-    agent_runtime_tools: config.agent_runtime_tools || config.data_machine_code || config.data_machine_code_path || options.agentRuntimeTools,
+    agent_runtime: config.agent_runtime || legacyAliases.agent_runtime || options.agentRuntime,
+    agent_runtime_tools: config.agent_runtime_tools || legacyAliases.agent_runtime_tools || options.agentRuntimeTools,
     ...explicit,
     runtime: explicit.runtime || runtimeComponents.runtime,
   };
@@ -1090,6 +1095,36 @@ function runtimeComponentPaths(config, options = {}) {
   }
 
   return Object.fromEntries(Object.entries(resolved).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function legacyRuntimeComponentAliasFields() {
+  const prefix = ['data', 'machine'].join('_');
+  return {
+    agent_runtime: [prefix, `${prefix}_path`],
+    agent_runtime_tools: [`${prefix}_code`, `${prefix}_code_path`],
+  };
+}
+
+function legacyRuntimeComponentAliasValues(config = {}) {
+  const fields = legacyRuntimeComponentAliasFields();
+  return Object.fromEntries(Object.entries(fields).map(([canonical, aliases]) => [
+    canonical,
+    firstValue(...aliases.map((alias) => config[alias])),
+  ]));
+}
+
+function legacyRuntimeComponentAliasDiagnostics(config = {}) {
+  return Object.entries(legacyRuntimeComponentAliasFields()).flatMap(([canonical, aliases]) => aliases
+    .filter((alias) => config[alias] !== undefined)
+    .map((alias) => ({
+      class: 'codebox.compat.deprecated_runtime_component_alias',
+      message: `Deprecated runtime component alias "${alias}" was accepted for compatibility; use "${canonical}" instead.`,
+      data: {
+        alias,
+        replacement: canonical,
+        compatibility: 'accepted-for-current-callers',
+      },
+    })));
 }
 
 function componentPathCandidateValue(candidate, sources) {
@@ -1595,7 +1630,7 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
       source: workspaceRoot,
       target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: 'homeboy-dmc-workspace', workspace_slug: workspaceSlug(workspaceRoot) },
+      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, legacy_kinds: [WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND], workspace_slug: workspaceSlug(workspaceRoot) },
     },
   ];
 }

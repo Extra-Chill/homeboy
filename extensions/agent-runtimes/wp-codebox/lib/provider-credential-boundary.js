@@ -22,7 +22,7 @@ function providerCredentialRequestFields(...sources) {
 }
 
 function assertProviderCredentialBoundaryNamesOnly(request = {}) {
-  const forbidden = ['secret_env_values', 'secretEnvValues', 'secret_values', 'secretValues', 'credentials'];
+  const forbidden = ['secret_env_values', 'secretEnvValues', 'secret_values', 'secretValues', 'credentials', 'provider_credentials', 'providerCredentials'];
   const present = forbidden.filter((field) => request[field] !== undefined);
   if (present.length > 0) {
     throw new Error(`WP Codebox provider credential boundary accepts secret_env names only; remove raw credential fields: ${present.join(', ')}`);
