@@ -46,7 +46,10 @@ fn schedules_tasks_with_bounded_concurrency_and_success_aggregate() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.queued, 0);
     assert_eq!(aggregate.totals.succeeded, 4);
     assert!(max_seen.load(Ordering::SeqCst) <= 2);
@@ -67,7 +70,10 @@ fn preserves_partial_failure_evidence() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure
+    );
     assert_eq!(aggregate.totals.queued, 0);
     assert_eq!(aggregate.totals.succeeded, 2);
     assert_eq!(aggregate.totals.failed, 1);
@@ -88,7 +94,10 @@ fn failed_single_task_is_not_also_counted_as_queued() {
 
     let aggregate = scheduler.run(plan_with_tasks(1));
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+    );
     assert_eq!(aggregate.totals.failed, 1);
     assert_eq!(aggregate.totals.queued, 0);
     assert_eq!(aggregate.queue.queued, 0);
@@ -105,7 +114,10 @@ fn normalizes_slow_task_to_timeout() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+    );
     assert_eq!(aggregate.totals.timed_out, 1);
     assert_eq!(
         aggregate.outcomes[0].status,
@@ -175,7 +187,10 @@ fn timeout_with_completed_runtime_artifacts_is_discoverable_and_promotable() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.succeeded, 1);
     assert_eq!(aggregate.totals.timed_out, 0);
     assert!(aggregate
@@ -232,7 +247,10 @@ fn runtime_bundle_artifacts_materialize_required_typed_artifacts() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.succeeded, 1);
     let outcome = &aggregate.outcomes[0];
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
@@ -318,7 +336,10 @@ fn timeout_with_empty_patch_artifacts_and_actionable_false_stays_timed_out() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+    );
     assert_eq!(aggregate.totals.succeeded, 0);
     assert_eq!(aggregate.totals.timed_out, 1);
     assert!(aggregate
@@ -373,7 +394,10 @@ fn blocks_tasks_over_queue_depth_and_reports_backpressure() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure
+    );
     assert_eq!(aggregate.totals.succeeded, 2);
     assert_eq!(aggregate.totals.blocked, 1);
     assert_eq!(aggregate.queue.blocked, 1);
@@ -402,7 +426,10 @@ fn applies_per_executor_concurrency_below_global_limit() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert!(max_seen.load(Ordering::SeqCst) <= 1);
     assert_eq!(
         aggregate.queue.per_executor_concurrency.get("test"),
@@ -422,7 +449,10 @@ fn resource_budget_limits_concurrent_task_cost() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.succeeded, 4);
     assert!(max_seen.load(Ordering::SeqCst) <= 2);
     assert_eq!(aggregate.queue.resource_budget.max_active_units, Some(2));
@@ -441,7 +471,10 @@ fn resource_budget_blocks_task_that_cannot_fit() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+    );
     assert_eq!(aggregate.totals.blocked, 1);
     assert_eq!(aggregate.queue.blocked, 1);
     assert!(aggregate
@@ -470,7 +503,10 @@ fn adaptive_concurrency_scales_up_when_runner_slots_are_available() {
         .adaptive_concurrency
         .expect("adaptive status");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert!(max_seen.load(Ordering::SeqCst) > 1);
     assert!(max_seen.load(Ordering::SeqCst) <= 3);
     assert_eq!(adaptive.configured_max_concurrency, 1);
@@ -502,7 +538,10 @@ fn adaptive_concurrency_scales_down_under_runner_pressure() {
         .adaptive_concurrency
         .expect("adaptive status");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert!(max_seen.load(Ordering::SeqCst) <= 1);
     assert_eq!(adaptive.effective_concurrency, 1);
     assert!(adaptive.decisions.iter().any(|decision| {
@@ -536,7 +575,10 @@ fn adaptive_concurrency_pauses_and_blocks_when_runner_capacity_is_unavailable() 
         .adaptive_concurrency
         .expect("adaptive status");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Failed);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Failed
+    );
     assert_eq!(aggregate.totals.blocked, 2);
     assert_eq!(max_seen.load(Ordering::SeqCst), 0);
     assert_eq!(adaptive.effective_concurrency, 0);
@@ -567,7 +609,10 @@ fn adaptive_concurrency_status_records_held_decision() {
         .adaptive_concurrency
         .expect("adaptive status");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(adaptive.effective_concurrency, 2);
     assert!(adaptive.decisions.iter().any(|decision| {
         decision.action == AgentTaskAdaptiveConcurrencyAction::Held
@@ -591,7 +636,10 @@ fn applies_per_model_concurrency_below_global_limit() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert!(max_seen.load(Ordering::SeqCst) <= 1);
     assert_eq!(
         aggregate.queue.per_model_concurrency.get("test:model-a"),
@@ -708,7 +756,10 @@ fn templates_prior_output_into_downstream_task_request() {
         .find(|request| request.task_id == "design")
         .expect("design request dispatched");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.succeeded, 2);
     assert_eq!(design.instructions, "Build design for issue #3447");
     assert_eq!(design.executor.config["github_issue"], json!(3447));
@@ -783,7 +834,10 @@ fn binds_typed_artifact_payload_into_downstream_task_request() {
         .find(|request| request.task_id == "design")
         .expect("design request dispatched");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(design.inputs["packet"], json!("Demo concept"));
     assert_eq!(aggregate.artifact_lineage.len(), 1);
     assert_eq!(aggregate.artifact_lineage[0].name, "concept_packet");
@@ -860,7 +914,10 @@ fn skips_required_typed_artifact_binding_when_artifact_is_missing() {
     let aggregate = scheduler.run(plan);
     let observed = observed.lock().expect("observed requests");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure
+    );
     assert!(observed.iter().all(|request| request.task_id != "design"));
     let skipped = aggregate
         .outcomes
@@ -914,7 +971,10 @@ fn optional_typed_artifact_binding_uses_default() {
         .find(|request| request.task_id == "design")
         .expect("design request dispatched");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(design.inputs["packet"], json!({ "findings": [] }));
 }
 
@@ -948,7 +1008,10 @@ fn skips_downstream_task_when_required_output_is_missing() {
     let aggregate = scheduler.run(plan);
     let observed = observed.lock().expect("observed requests");
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::PartialFailure);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::PartialFailure
+    );
     assert_eq!(aggregate.totals.succeeded, 1);
     assert_eq!(aggregate.totals.skipped, 1);
     assert_eq!(aggregate.totals.failed, 0);
@@ -984,7 +1047,10 @@ fn static_batch_plans_remain_compatible_without_output_dependencies() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+    assert_eq!(
+        aggregate.status,
+        crate::core::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded
+    );
     assert_eq!(aggregate.totals.succeeded, 2);
     assert_eq!(aggregate.totals.skipped, 0);
     assert_eq!(aggregate.queue.max_concurrency, 1);
