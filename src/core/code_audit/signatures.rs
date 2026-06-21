@@ -42,18 +42,18 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
 
     // Strip return type declarations — they don't change the calling convention
     // and shouldn't cause structural mismatches.
-    // PHP:  "function foo(): void" → "function foo()"
-    // PHP:  "function foo(): ?array" → "function foo()"
-    // Rust: "fn foo() -> Result<T>" → "fn foo()"
+    // Colon-style:  "function example(): void" → "function example()"
+    // Colon-style:  "function example(): ?array" → "function example()"
+    // Arrow-style: "fn example() -> Result<T>" → "fn example()"
     let normalized = strip_return_type(&normalized);
     let normalized = strip_declaration_terminator(&normalized);
 
     // Strip parameter type annotations — only arity and parameter names matter
     // for structural comparison.  This is language-agnostic: for each comma-
     // separated parameter, keep only the last identifier (the parameter name).
-    // PHP:  "function execute(array $config)" → "function execute($config)"
-    // PHP:  "function handle(WP_REST_Request $request)" → "function handle($request)"
-    // Rust: "fn run(args: RunArgs)" → "fn run(args)"
+    // Prefix-type:  "function execute(array $config)" → "function execute($config)"
+    // Prefix-type:  "function handle(RequestType $request)" → "function handle($request)"
+    // Postfix-type: "fn run(args: RunArgs)" → "fn run(args)"
     // Already-untyped params pass through unchanged.
 
     strip_param_types(&normalized)
@@ -78,10 +78,10 @@ fn strip_declaration_terminator(sig: &str) -> String {
 /// reduces each comma-separated parameter to just its name — the last
 /// identifier-like token. This is language-agnostic:
 ///
-/// - PHP prefix types:  `array $config` → `$config`
-/// - PHP class types:   `WP_REST_Request $request` → `$request`
-/// - Rust postfix types: `args: RunArgs` → `args`
-/// - Rust references:    `config: &Config` → `config`
+/// - Prefix types:      `array $config` → `$config`
+/// - Prefix class types: `RequestType $request` → `$request`
+/// - Postfix types:     `args: RunArgs` → `args`
+/// - References:        `config: &Config` → `config`
 /// - Variadic/spread:    `...$args` → `...$args` (preserved)
 /// - No-type params:     `$request` → `$request` (unchanged)
 ///
@@ -132,7 +132,7 @@ fn strip_param_types(sig: &str) -> String {
                 return String::new();
             }
             // The parameter name is the last identifier-like token.
-            // Identifiers can contain word chars plus $ (PHP) and & (reference).
+            // Identifiers can contain word chars plus $ (sigil) and & (reference).
             // Walk backward to find it.
             extract_param_name(param)
         })
@@ -146,17 +146,17 @@ fn strip_param_types(sig: &str) -> String {
 /// Extract just the parameter name from a parameter declaration.
 ///
 /// Handles multiple language patterns generically:
-/// - `array $config` → `$config` (PHP prefix type)
-/// - `?WP_REST_Request $request` → `$request` (PHP nullable type)
-/// - `args: RunArgs` → `args` (Rust postfix type)
-/// - `args: &'a RunArgs` → `args` (Rust reference + lifetime)
-/// - `$request` → `$request` (no type, PHP)
-/// - `self` / `&self` / `&mut self` → `&self` (Rust self param, normalized)
-/// - `...int $values` → `...$values` (PHP variadic)
+/// - `array $config` → `$config` (prefix type)
+/// - `?RequestType $request` → `$request` (nullable prefix type)
+/// - `args: RunArgs` → `args` (postfix type)
+/// - `args: &'a RunArgs` → `args` (reference + lifetime)
+/// - `$request` → `$request` (no type, sigil name)
+/// - `self` / `&self` / `&mut self` → `&self` (receiver param, normalized)
+/// - `...int $values` → `...$values` (variadic)
 fn extract_param_name(param: &str) -> String {
     let trimmed = param.trim();
 
-    // Rust self parameter — normalize all variants to &self
+    // Receiver parameter — normalize all variants to &self
     if trimmed == "self" || trimmed == "&self" || trimmed == "&mut self" || trimmed == "mut self" {
         return "&self".to_string();
     }
@@ -168,7 +168,7 @@ fn extract_param_name(param: &str) -> String {
         return String::new();
     }
 
-    // For Rust postfix type syntax (name: Type), the name is before the colon.
+    // For postfix type syntax (name: Type), the name is before the colon.
     // Check if any token contains ':' or if ':' appears standalone.
     if let Some(colon_pos) = tokens.iter().position(|t| *t == ":" || t.ends_with(':')) {
         // Everything before the colon is the parameter name (possibly with & or mut)
@@ -184,7 +184,7 @@ fn extract_param_name(param: &str) -> String {
         }
     }
 
-    // For PHP prefix type syntax (Type $name) or just ($name),
+    // For prefix type syntax (Type $name) or just ($name),
     // the parameter name is the last token.
     // Also handles variadics: `...Type $name` or `...$name`
     let last = tokens.last().unwrap();
@@ -238,8 +238,8 @@ fn strip_return_type(sig: &str) -> String {
                     if depth == 0 {
                         let paren_pos = open_pos + i;
                         let after_paren = sig[paren_pos + 1..].trim_start();
-                        // PHP return type: ": void", ": ?array", ": \Namespace\Type"
-                        // Rust return type: "-> Result<T>", "-> bool"
+                        // Colon-style return type: ": void", ": ?array", ": \Namespace\Type"
+                        // Arrow-style return type: "-> Result<T>", "-> bool"
                         if after_paren.starts_with(':') || after_paren.starts_with("->") {
                             return sig[..=paren_pos].to_string();
                         }
@@ -440,7 +440,7 @@ mod tests {
         let normalized = normalize_signature(sig);
         assert!(
             !normalized.contains("array"),
-            "PHP type hint should be stripped: {}",
+            "Prefix type hint should be stripped: {}",
             normalized
         );
         assert!(
@@ -452,11 +452,11 @@ mod tests {
 
     #[test]
     fn php_class_type_stripped() {
-        let sig = "public function handle(WP_REST_Request $request)";
+        let sig = "public function handle(RequestType $request)";
         let normalized = normalize_signature(sig);
         assert!(
-            !normalized.contains("WP_REST_Request"),
-            "PHP class type should be stripped: {}",
+            !normalized.contains("RequestType"),
+            "Prefix class type should be stripped: {}",
             normalized
         );
         assert!(
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn php_class_typed_and_untyped_same_tokens() {
-        let typed = tokenize_signature("public function handle(WP_REST_Request $request)");
+        let typed = tokenize_signature("public function handle(RequestType $request)");
         let untyped = tokenize_signature("public function handle($request)");
         assert_eq!(
             typed.len(),
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn php_multiple_params_types_stripped() {
         let typed =
-            tokenize_signature("public function execute(array $config, WP_REST_Request $request)");
+            tokenize_signature("public function execute(array $config, RequestType $request)");
         let untyped = tokenize_signature("public function execute($config, $request)");
         assert_eq!(
             typed.len(),
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(
             typed.len(),
             untyped.len(),
-            "Rust type annotation should be stripped: {:?} vs {:?}",
+            "Postfix type annotation should be stripped: {:?} vs {:?}",
             typed,
             untyped
         );
