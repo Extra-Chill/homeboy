@@ -44,6 +44,7 @@ module.exports = {
 	...require('./lib/wordpress-workload-profile'),
 	...require('./lib/wordpress-hook-surface-discovery'),
 	...require('./lib/wordpress-fuzz-schemas'),
+	...require('./lib/wordpress-fuzz-runner'),
 	buildStaticVisualParityRecipe: staticVisualParity.buildStaticVisualParityRecipe,
 	createStaticServer: staticVisualParity.createStaticServer,
 	normalizeStaticVisualParityArtifacts: staticVisualParity.normalizeStaticVisualParityArtifacts,

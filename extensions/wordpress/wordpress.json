@@ -6,7 +6,7 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
-    "capabilities": ["fingerprint", "refactor", "crossref", "validate"]
+    "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"]
   },
   "structured_sidecars": {
     "lint.findings": true,
@@ -822,6 +822,17 @@
         "legacy_field": "wp_codebox",
         "env_keys": ["HOMEBOY_WP_CODEBOX_BIN", "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"]
       }
+    ]
+  },
+  "fuzz": {
+    "extension_script": "scripts/fuzz/fuzz-runner.cjs",
+    "capabilities": ["wordpress-fuzz-runner", "wp-codebox-fuzz-run", "wordpress-fuzz-coverage-aggregate"],
+    "env": [
+      "HOMEBOY_FUZZ_WORKLOAD_PATH",
+      "HOMEBOY_FUZZ_WORKLOAD_ID",
+      "HOMEBOY_FUZZ_RUN_ID",
+      "HOMEBOY_FUZZ_SEED",
+      "HOMEBOY_FUZZ_MAX_DURATION"
     ]
   },
   "testing": {
