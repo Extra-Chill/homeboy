@@ -1041,6 +1041,13 @@
       "description": "Component-relative path under wp_codebox_source_root used as the plugin source for WP Codebox bench prep, workload discovery, file mounts, and plugin loading. Leave empty only when HOMEBOY_COMPONENT_PATH is already under wp_codebox_source_root and the runner can derive the relative path."
     },
     {
+      "id": "wp_codebox_bin",
+      "label": "WP Codebox binary",
+      "type": "string",
+      "default": "",
+      "description": "Optional WP Codebox CLI binary path for WP Codebox-backed WordPress runtime execution. Use this to pin bench runs to a runner-local WP Codebox build with required runtime primitives. Leave empty to use HOMEBOY_WP_CODEBOX_BIN or the extension default."
+    },
+    {
       "id": "wp_codebox_scenario_manifests",
       "label": "WP Codebox scenario manifests",
       "type": "array",
