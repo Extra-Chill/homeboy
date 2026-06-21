@@ -1554,7 +1554,7 @@ _homeboy_prepared_dependency_cache_metadata() {
         '($catalogEntry // {}) as $catalog |
         {
             schema: $schema,
-            slug: $slug,
+            slug: ($catalog.slug // $slug),
             source_type: ($catalog.source_type // null),
             requested_version: ($catalog.requested_version // null),
             requested_revision: ($catalog.requested_revision // null),
@@ -1610,6 +1610,25 @@ _homeboy_record_prepared_dependency_metadata() {
         --arg cache_status "$cache_status" \
         '$existing + [($dependency + {cache_key: $cache_key, prepared_path: $prepared_path, cache_status: $cache_status})]' > "$tmp_file"
     mv "$tmp_file" "$metadata_file"
+}
+
+homeboy_get_prepared_validation_dependency_slug() {
+    local dependency_path="${1:-}"
+    local artifacts_dir="${2:-}"
+
+    [ -n "$dependency_path" ] && [ -n "$artifacts_dir" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+
+    local metadata_file dependency_realpath
+    metadata_file="${artifacts_dir%/}/prepared-bench-dependencies.json"
+    [ -f "$metadata_file" ] || return 1
+    dependency_realpath=$(cd "$dependency_path" && pwd -P 2>/dev/null || printf '%s\n' "$dependency_path")
+
+    jq -er --arg dependencyPath "$dependency_path" --arg dependencyRealpath "$dependency_realpath" '
+        if type == "array" then . else [] end
+        | map(select(.prepared_path == $dependencyPath or .prepared_path == $dependencyRealpath or .package_root == $dependencyPath or .package_root == $dependencyRealpath))
+        | .[-1].slug // empty
+    ' "$metadata_file" 2>/dev/null
 }
 
 _homeboy_command_version() {
@@ -1713,10 +1732,13 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
 
     [ -n "$dependency_path" ] && [ -d "$dependency_path" ] || return 1
 
-    local dependency_slug package_root
+    local dependency_slug package_root catalog_entry_json catalog_slug
     dependency_slug=$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")
     package_root=$(homeboy_find_validation_dependency_plugin_package_root "$dependency_path" "$dependency_slug" || true)
     [ -n "$package_root" ] && [ -d "$package_root" ] || package_root="$dependency_path"
+    catalog_entry_json=$(_homeboy_prepared_dependency_catalog_entry "$dependency_path" "$package_root")
+    catalog_slug=$(printf '%s' "$catalog_entry_json" | jq -r '.slug // empty' 2>/dev/null || true)
+    [ -n "$catalog_slug" ] && dependency_slug="$catalog_slug"
 
     if ! homeboy_dependency_needs_composer_prepare "$package_root"; then
         local source_realpath package_realpath relative_source_plugin_path metadata_json
