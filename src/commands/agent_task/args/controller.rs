@@ -75,6 +75,10 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Model override to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -158,6 +162,10 @@ pub struct AgentTaskControllerRunNextArgs {
     /// Model override to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -184,6 +192,10 @@ pub struct AgentTaskControllerRunArgs {
     /// Model override to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-model", value_name = "MODEL")]
     pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
 }
 
 #[derive(Args, Debug)]
