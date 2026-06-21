@@ -2,6 +2,17 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.63] - 2026-06-21
+
+### Changed
+- Add WordPress fuzz schema contracts
+- Add WP Codebox fuzz-run consumer
+- Add WordPress frontend URL surface discovery
+- Add WordPress discovery inventory helper
+- Add WordPress admin fuzz surface discovery
+- Use Codebox plugin-state for fixture activation
+- Add WordPress fuzz coverage aggregation
+
 ## [3.7.62] - 2026-06-21
 
 ### Changed
