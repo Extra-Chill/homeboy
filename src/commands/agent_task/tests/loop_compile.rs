@@ -364,6 +364,7 @@ fn controller_from_spec_doctor_reports_missing_provider_before_resume() {
         dispatch_backend: Some("missing-provider".to_string()),
         dispatch_selector: None,
         dispatch_model: None,
+        dispatch_provider_config: None,
     })
     .expect("doctor report");
 
@@ -403,6 +404,7 @@ fn controller_from_spec_doctor_accepts_fixture_provider() {
         dispatch_backend: Some("fixture".to_string()),
         dispatch_selector: None,
         dispatch_model: None,
+        dispatch_provider_config: None,
     })
     .expect("doctor report");
 

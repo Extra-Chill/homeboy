@@ -444,6 +444,7 @@ struct ControllerDispatchDefaults {
     backend: Option<String>,
     selector: Option<String>,
     model: Option<String>,
+    provider_config: Option<String>,
 }
 
 impl ControllerDispatchDefaults {
@@ -452,6 +453,7 @@ impl ControllerDispatchDefaults {
             backend: args.dispatch_backend.clone(),
             selector: args.dispatch_selector.clone(),
             model: args.dispatch_model.clone(),
+            provider_config: args.dispatch_provider_config.clone(),
         }
     }
 
@@ -460,6 +462,7 @@ impl ControllerDispatchDefaults {
             backend: args.dispatch_backend.clone(),
             selector: args.dispatch_selector.clone(),
             model: args.dispatch_model.clone(),
+            provider_config: args.dispatch_provider_config.clone(),
         }
     }
 
@@ -468,6 +471,7 @@ impl ControllerDispatchDefaults {
             backend: args.dispatch_backend.clone(),
             selector: args.dispatch_selector.clone(),
             model: args.dispatch_model.clone(),
+            provider_config: args.dispatch_provider_config.clone(),
         }
     }
 
@@ -480,6 +484,9 @@ impl ControllerDispatchDefaults {
         }
         if args.model.is_none() {
             args.model = self.model.clone();
+        }
+        if args.core.provider_config.is_none() {
+            args.core.provider_config = self.provider_config.clone();
         }
     }
 }
@@ -670,4 +677,61 @@ where
     };
     let result = agent_task_controller_service::resume(&loop_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controller_dispatch_defaults_apply_provider_config_when_missing() {
+        let mut args = dispatch_args_from_controller_request(&serde_json::json!({
+            "dispatch": {
+                "prompt": "Cook",
+                "tasks": ["Do the work"],
+                "backend": "codebox"
+            }
+        }))
+        .expect("dispatch args");
+
+        ControllerDispatchDefaults {
+            backend: Some("ignored-backend".to_string()),
+            selector: None,
+            model: Some("gpt-5.5".to_string()),
+            provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
+        }
+        .apply(&mut args);
+
+        assert_eq!(args.backend.as_deref(), Some("codebox"));
+        assert_eq!(args.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            args.core.provider_config.as_deref(),
+            Some(r#"{"runtime_wordpress_version":"7.0"}"#)
+        );
+    }
+
+    #[test]
+    fn controller_dispatch_defaults_preserve_existing_provider_config() {
+        let mut args = dispatch_args_from_controller_request(&serde_json::json!({
+            "dispatch": {
+                "prompt": "Cook",
+                "tasks": ["Do the work"],
+                "provider_config": "{\"runtime_wordpress_version\":\"nightly\"}"
+            }
+        }))
+        .expect("dispatch args");
+
+        ControllerDispatchDefaults {
+            backend: None,
+            selector: None,
+            model: None,
+            provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
+        }
+        .apply(&mut args);
+
+        assert_eq!(
+            args.core.provider_config.as_deref(),
+            Some(r#"{"runtime_wordpress_version":"nightly"}"#)
+        );
+    }
 }
