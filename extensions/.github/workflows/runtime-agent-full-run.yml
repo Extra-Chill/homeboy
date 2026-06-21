@@ -580,8 +580,10 @@ jobs:
           PROVIDER_SECRET_5: ${{ secrets.PROVIDER_SECRET_5 }}
           HOMEBOY_RUNTIME_AGENT_RESULTS_FILE: ${{ runner.temp }}/run-results.json
           HOMEBOY_AGENT_TASK_OUTCOME_FILE: ${{ runner.temp }}/agent-task-outcome.json
+          HOMEBOY_RUNTIME_AGENT_EVENTS_FILE: ${{ runner.temp }}/runtime-agent-events.json
+          HOMEBOY_RUNTIME_AGENT_LOOP_RESULT_FILE: ${{ runner.temp }}/runtime-agent-loop-result.json
           HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR: ${{ inputs.replay_bundle_artifact_name != '' && format('{0}/runtime-agent-replay-bundles', runner.temp) || '' }}
-        run: node .ci/homeboy-extensions/wordpress/scripts/agent/run-runtime-agent-task.cjs "${{ steps.config.outputs.config_path }}"
+        run: node .ci/homeboy-extensions/runtime-agent-ci/scripts/run-headless-loop.cjs --spec "${{ steps.config.outputs.config_path }}" ${{ inputs.dry_run && '--dry-run' || '' }}
 
       - name: Run host runner lifecycle
         if: ${{ inputs.run_agent && ! inputs.dry_run }}
@@ -695,7 +697,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.transcript_artifact_name }}-results
-          path: ${{ runner.temp }}/run-results.json
+          path: |
+            ${{ runner.temp }}/run-results.json
+            ${{ runner.temp }}/runtime-agent-events.json
+            ${{ runner.temp }}/runtime-agent-loop-result.json
           if-no-files-found: warn
 
       - name: Upload replay bundle artifact

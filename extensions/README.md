@@ -126,12 +126,12 @@ homeboy release
 
 ### Runtime agent full-run tasks
 
-The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is the
-recommended entrypoint for full runtime-backed agent and ability runs. Use
-`runtime_task` or the `ability_request`/`ability_input` shorthand for direct
-ability execution. Mount downloaded GitHub Actions artifacts with
-`runtime_mounts`, and enforce typed outputs with `artifact_declarations` plus
-`runtime_output_projections`.
+The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is a thin
+GitHub Actions adapter over the headless deterministic loop runner in
+`runtime-agent-ci`. Use `runtime_task` or the `ability_request`/`ability_input`
+shorthand for direct ability execution. Mount downloaded GitHub Actions
+artifacts with `runtime_mounts`, and enforce typed outputs with
+`artifact_declarations` plus `runtime_output_projections`.
 
 New callers should select runtimes with `runtime` and `profile`. Existing
 `runtime_provider` / `runtime_profile` callers remain supported, and the legacy
@@ -147,6 +147,22 @@ Use `component_contracts` only when the ability provider plugin or runtime
 component must be mounted explicitly. Keep ability names, schemas, and artifact
 types owned by the caller; Homeboy Extensions only forwards the generic runtime
 task contract.
+
+Non-GitHub callers can run the same primitive directly:
+
+```bash
+node runtime-agent-ci/scripts/run-headless-loop.cjs \
+  --spec runtime-agent-full-run-config.json \
+  --result loop-result.json \
+  --events loop-events.json \
+  --outcome agent-task-outcome.json \
+  --results run-results.json
+```
+
+The CLI accepts the same loop spec/config that GitHub Actions materializes, plus
+an injected `runtime_manifest` when the caller does not want to rely on the
+checked-in runtime registry. It emits durable JSON loop results, ordered events,
+and the existing outcome/results files consumed by workflow adapters.
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,

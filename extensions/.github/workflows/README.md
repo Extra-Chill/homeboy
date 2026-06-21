@@ -47,16 +47,18 @@ evidence.
 
 `runtime-agent-full-run.yml` is the generic reusable workflow for a complete
 runtime-backed agent run. It owns the GitHub Actions orchestration that callers
-should not repeat: dependency materialization, provider/runtime setup, Codebox
-execution, runner workspace lifecycle, transcript/replay artifact upload,
-success gating, PR comments, output/evidence projections, `callback_data_json`,
-before/after workload hooks, extra mounts, and runtime config defines.
+should not repeat: dependency materialization, provider/runtime setup, runner
+workspace lifecycle, transcript/replay artifact upload, PR comments,
+`callback_data_json`, before/after workload hooks, extra mounts, and runtime
+config defines. The runtime execution primitive is
+`runtime-agent-ci/scripts/run-headless-loop.cjs`, which materializes task
+requests, runs the selected runtime provider, validates gates, and emits durable
+JSON results/events outside GitHub Actions.
 
 The generic workflow requires callers to provide their domain runtime profile,
 runtime component dependencies, required abilities, and runtime task/execution
-descriptor. Homeboy Extensions only assumes the runtime provider contract and the
-WP Codebox provider surface; domain ability names and component stacks are caller
-inputs.
+descriptor. Homeboy Extensions only assumes the runtime provider contract;
+domain ability names and component stacks are caller inputs.
 
 ```yaml
 jobs:
