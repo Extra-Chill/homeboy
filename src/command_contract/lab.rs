@@ -422,7 +422,12 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
+        agent_task::AgentTaskCommand::Cook(args)
+        | agent_task::AgentTaskCommand::Dispatch(args)
+        | agent_task::AgentTaskCommand::Loop(agent_task::AgentTaskLoopArgs {
+            dispatch: args,
+            ..
+        }) => {
             let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
                 || args
                     .workspace

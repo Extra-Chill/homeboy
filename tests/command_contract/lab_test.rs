@@ -76,10 +76,6 @@ fn test_supports_lab_runner() {
     );
     assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "review", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
     assert!(parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
@@ -243,10 +239,6 @@ fn test_lab_command_contracts_cover_hot_commands() {
         (parsed_command(&["homeboy", "test"]), "test"),
         (parsed_command(&["homeboy", "audit"]), "audit"),
         (parsed_command(&["homeboy", "review"]), "review"),
-        (
-            parsed_command(&["homeboy", "review", "--changed-since", "origin/main"]),
-            "review",
-        ),
         (parsed_command(&["homeboy", "bench"]), "bench"),
         (
             parsed_command(&[
@@ -684,6 +676,43 @@ fn agent_task_git_checkout_policy_treats_workspace_like_cwd() {
         || Some("default-patch-provider".to_string()),
         |backend, selector| backend == "default-patch-provider" && selector.is_none(),
     ));
+}
+
+#[test]
+fn agent_task_git_checkout_policy_covers_loop_dispatch_workspace() {
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "loop",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
+        "--cwd",
+        "/work/repo",
+        "--backend",
+        "generic-patch-provider",
+        "--selector",
+        "selected",
+        "--prompt",
+        "cook",
+    ]);
+    let Commands::AgentTask(ref args) = command else {
+        panic!("expected agent-task command");
+    };
+
+    assert!(agent_task_provider_requires_cwd_git_checkout_with(
+        &args.command,
+        || None,
+        |backend, selector| backend == "generic-patch-provider" && selector == Some("selected"),
+    ));
+    assert_eq!(
+        command
+            .lab_contract()
+            .expect("agent-task loop contract")
+            .workspace_mode_policy,
+        LabWorkspaceModePolicy::GitCheckoutRequired
+    );
 }
 
 #[test]

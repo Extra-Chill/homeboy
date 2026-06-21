@@ -93,6 +93,7 @@ mod tests {
             session: Some(session),
             stale_daemon: None,
             active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
             active_job_count: 0,
             session_path: "/tmp/session.json".to_string(),
         }
