@@ -55,6 +55,7 @@ fn render_run_detail(run: &Value) -> String {
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_coverage_lines(run));
+        lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
     }
     lines.extend(artifact_lines(run, run_id));
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
@@ -320,6 +321,41 @@ mod tests {
         assert!(summary.contains("  Coverage gaps: 3\n"));
         assert!(summary.contains("    api: 2\n"));
         assert!(summary.contains("    cli: 1\n"));
+    }
+
+    #[test]
+    fn bench_show_summary_surfaces_regression_threshold_metadata() {
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "bench-run-42",
+                    "kind": "bench",
+                    "status": "fail",
+                    "metadata": {
+                        "baseline_thresholds": [
+                            {
+                                "scenario_id": "generic-case",
+                                "metric": "work_units",
+                                "current_value": 60.0,
+                                "baseline_value": 50.0,
+                                "threshold_value": 5.0,
+                                "passed": false
+                            }
+                        ]
+                    },
+                    "artifacts": []
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Regression thresholds:\n"));
+        assert!(
+            summary.contains("  generic-case work_units current=60 baseline=50 threshold=5 FAIL\n")
+        );
     }
 
     #[test]

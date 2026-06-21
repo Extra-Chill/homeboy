@@ -80,6 +80,7 @@ fn render_single_summary(output: &Value) -> String {
     lines.extend(key_metric_lines(output));
     lines.extend(bench_hotspot_lines(output));
     lines.extend(bench_coverage_lines(output));
+    lines.extend(bench_regression_threshold_lines(output));
     lines.extend(gate_failure_lines(output));
     lines.extend(artifact_lines(output));
     lines.extend(failure_lines(output));
@@ -118,6 +119,7 @@ fn render_comparison_summary(output: &Value) -> String {
         lines.push(format!("Regressions/failures: {regressions}"));
     }
 
+    lines.extend(bench_regression_threshold_lines(output));
     lines.extend(comparison_artifact_lines(output));
     lines.extend(hint_lines(output));
 
@@ -221,6 +223,136 @@ fn gate_failure_lines(output: &Value) -> Vec<String> {
         lines.push(format!("  {failure}"));
     }
     lines
+}
+
+/// Surface generic baseline/regression threshold checks when a bench payload
+/// includes them. The bench producers are intentionally extensible, so this
+/// reader accepts a few plain metadata shapes and ignores anything incomplete.
+pub(crate) fn bench_regression_threshold_lines(output: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    for check in regression_threshold_checks(output) {
+        let Some(metric) = first_string(check, &["metric", "metric_name", "name"]) else {
+            continue;
+        };
+        let scenario = first_string(check, &["scenario", "scenario_id", "id"]);
+        let current = first_display_value(check, &["current", "current_value", "actual", "value"]);
+        let baseline = first_display_value(
+            check,
+            &[
+                "baseline",
+                "baseline_value",
+                "expected",
+                "reference",
+                "previous",
+            ],
+        );
+        let threshold = first_display_value(
+            check,
+            &[
+                "threshold",
+                "threshold_value",
+                "tolerance",
+                "regression_threshold",
+            ],
+        );
+        if current.is_none() && baseline.is_none() && threshold.is_none() {
+            continue;
+        }
+
+        let mut parts = Vec::new();
+        if let Some(scenario) = scenario {
+            parts.push(scenario.to_string());
+        }
+        parts.push(metric.to_string());
+        if let Some(current) = current {
+            parts.push(format!("current={current}"));
+        }
+        if let Some(baseline) = baseline {
+            parts.push(format!("baseline={baseline}"));
+        }
+        if let Some(threshold) = threshold {
+            parts.push(format!("threshold={threshold}"));
+        }
+        if let Some(status) = threshold_status(check) {
+            parts.push(status.to_string());
+        }
+        lines.push(format!("  {}", parts.join(" ")));
+    }
+    if !lines.is_empty() {
+        lines.insert(0, "Regression thresholds:".to_string());
+    }
+    lines
+}
+
+fn regression_threshold_checks(output: &Value) -> Vec<&Value> {
+    let mut checks = Vec::new();
+    for base_path in [
+        &[][..],
+        &["metadata"][..],
+        &["results", "metadata"][..],
+        &["results", "run_metadata"][..],
+    ] {
+        let Some(base) = value_at(output, base_path) else {
+            continue;
+        };
+        collect_threshold_checks(base, &mut checks);
+    }
+    checks
+}
+
+fn collect_threshold_checks<'a>(value: &'a Value, checks: &mut Vec<&'a Value>) {
+    for key in [
+        "regression_thresholds",
+        "regression_threshold_checks",
+        "thresholds",
+        "threshold_checks",
+        "baseline_thresholds",
+        "baseline_regressions",
+        "regression_checks",
+    ] {
+        let Some(candidate) = value.get(key) else {
+            continue;
+        };
+        match candidate {
+            Value::Array(items) => checks.extend(items.iter().filter(|item| item.is_object())),
+            Value::Object(_) => {
+                if let Some(items) = candidate.get("checks").and_then(Value::as_array) {
+                    checks.extend(items.iter().filter(|item| item.is_object()));
+                } else {
+                    checks.push(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn first_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| string_value(value, &[*key]))
+}
+
+fn first_display_value(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| display_value(value.get(*key)?))
+}
+
+fn display_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value.to_string()),
+        Value::Number(value) => value.as_f64().map(format_metric),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn threshold_status(check: &Value) -> Option<&'static str> {
+    if let Some(passed) = check.get("passed").and_then(Value::as_bool) {
+        return Some(pass_fail(passed));
+    }
+    match first_string(check, &["status", "result", "outcome"])? {
+        "pass" | "passed" | "ok" | "success" => Some("PASS"),
+        "fail" | "failed" | "regression" | "error" => Some("FAIL"),
+        _ => None,
+    }
 }
 
 /// Surface artifact pointers (#3260): shared-state files, runner bundle
@@ -623,6 +755,79 @@ mod tests {
         assert!(summary.contains("  Top uncovered groups:\n"));
         assert!(summary.contains("    runner: 2\n"));
         assert!(summary.contains("    report: 1\n"));
+    }
+
+    #[test]
+    fn single_summary_surfaces_generic_regression_threshold_metadata() {
+        let payload = single_payload(json!({
+            "passed": false,
+            "status": "failed",
+            "component": "sample-component",
+            "iterations": 3,
+            "metadata": {
+                "regression_thresholds": [
+                    {
+                        "scenario_id": "scenario-alpha",
+                        "metric": "duration_ms",
+                        "current": 130.25,
+                        "baseline": 100.0,
+                        "threshold": "20%",
+                        "passed": false
+                    },
+                    {
+                        "scenario": "scenario-beta",
+                        "metric_name": "throughput",
+                        "actual": 45.0,
+                        "reference": 40.0,
+                        "tolerance": 10.0,
+                        "status": "passed"
+                    }
+                ]
+            }
+        }));
+
+        let summary = render_bench_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Regression thresholds:\n"));
+        assert!(summary.contains(
+            "  scenario-alpha duration_ms current=130.25 baseline=100 threshold=20% FAIL\n"
+        ));
+        assert!(summary
+            .contains("  scenario-beta throughput current=45 baseline=40 threshold=10 PASS\n"));
+    }
+
+    #[test]
+    fn comparison_summary_surfaces_generic_nested_threshold_checks() {
+        let payload = json!({
+            "variant": "comparison",
+            "payload": {
+                "passed": false,
+                "component": "sample-component",
+                "iterations": 3,
+                "results": {
+                    "run_metadata": {
+                        "threshold_checks": {
+                            "checks": [
+                                {
+                                    "id": "scenario-gamma",
+                                    "name": "latency_ms",
+                                    "value": 88.0,
+                                    "baseline_value": 70.0,
+                                    "regression_threshold": 15.0,
+                                    "outcome": "regression"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        let summary = render_bench_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Regression thresholds:\n"));
+        assert!(summary
+            .contains("  scenario-gamma latency_ms current=88 baseline=70 threshold=15 FAIL\n"));
     }
 
     #[test]
