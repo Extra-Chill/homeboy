@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.247.5] - 2026-06-21
+
+### Changed
+- resolve structural findings (#5558)
+- extract agent-task provider preflight from lab offload god-module to harden API boundary (#4303)
+
+### Fixed
+- fix(agent-runtime): prefer extension runtimes over stale cache
+- fix(agent-task): add generic provider preflight diagnostics
+- validate runtime provider discovery on install
+- fetch direct artifacts as bytes
+- fail stale runner upgrade reports
+
 ## [0.247.4] - 2026-06-21
 
 ### Fixed
