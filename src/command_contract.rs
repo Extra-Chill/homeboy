@@ -20,7 +20,8 @@ mod output;
 mod public_variants;
 
 pub use lab::{
-    lab_runner_support_summary, lab_runner_supported_labels, lab_runner_unsupported_hint,
+    lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
+    lab_runner_supports_contract_label, lab_runner_unsupported_hint,
     lab_runner_unsupported_message, LabCommandContract, LabCommandPortability,
     LabCommandRequiredTool, LabRoutingPolicy, LabRunnerSupportSummary, LabSourcePathMode,
     LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,

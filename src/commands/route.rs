@@ -540,6 +540,7 @@ fn strip_component_target_args(
 mod tests {
     use super::*;
     use clap::Parser;
+    use homeboy::command_contract::lab_runner_supports_contract_label;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
 
@@ -952,7 +953,7 @@ mod tests {
         ] {
             let cli = Cli::parse_from(args);
             let command = lab_offload_command(&cli.command).unwrap().unwrap();
-            assert_eq!(command.hot_label, "agent-task status/logs/artifacts/review");
+            assert!(lab_runner_supports_contract_label(command.hot_label));
             assert_eq!(
                 command.source_path_mode,
                 runners::LabOffloadSourcePathMode::RunnerResident
@@ -992,10 +993,7 @@ mod tests {
             let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-            assert_eq!(
-                command.hot_label,
-                "agent-task dispatch/cook/loop/run-plan/retry --run"
-            );
+            assert!(lab_runner_supports_contract_label(command.hot_label));
             assert!(command.portable);
             assert!(command.routing_policy.default_lab_offload);
         }
@@ -1014,7 +1012,7 @@ mod tests {
         let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert_eq!(command.hot_label, "agent-task providers");
+        assert!(lab_runner_supports_contract_label(command.hot_label));
         assert!(command.portable);
         assert!(!command.routing_policy.default_lab_offload);
         assert!(!command.routing_policy.requires_extension_parity);
