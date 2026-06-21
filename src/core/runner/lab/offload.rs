@@ -3270,6 +3270,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: Some(CommandCaptureMetadata {
                 stdout: CaptureMetadata {
@@ -3319,6 +3320,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: None,
             diagnostics: None,

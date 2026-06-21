@@ -1484,6 +1484,7 @@ mod tests {
                     exit_code: 0,
                     stdout: None,
                     stderr: None,
+                    patch: None,
                     data: None,
                     artifacts: Vec::new(),
                     metrics: None,
@@ -1552,6 +1553,7 @@ mod tests {
                     exit_code: 0,
                     stdout: Some("ok".to_string()),
                     stderr: None,
+                    patch: None,
                     data: Some(json!({ "summary": "passed" })),
                     artifacts: vec![JobArtifactMetadata {
                         id: "report".to_string(),
@@ -1607,6 +1609,7 @@ mod tests {
                     exit_code: 1,
                     stdout: None,
                     stderr: Some("nope".to_string()),
+                    patch: None,
                     data: None,
                     artifacts: Vec::new(),
                     metrics: None,

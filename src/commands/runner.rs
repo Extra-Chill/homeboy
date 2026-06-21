@@ -1626,6 +1626,7 @@ fn runner_exec_dry_run(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: None,
             diagnostics: Some(runner::RunnerExecDiagnostics {
@@ -1863,6 +1864,7 @@ mod tests {
                 job_events: None,
                 mirror_run_id: None,
                 patch: None,
+                artifacts: Vec::new(),
                 metrics: None,
                 capture: None,
                 diagnostics: None,
