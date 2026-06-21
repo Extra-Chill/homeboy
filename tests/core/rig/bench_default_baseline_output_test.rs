@@ -1,4 +1,5 @@
 use super::*;
+use homeboy::core::extension::bench::BenchDefaultBaselineExpansion;
 
 fn write_rig_with_default_baseline(
     home: &TempDir,
