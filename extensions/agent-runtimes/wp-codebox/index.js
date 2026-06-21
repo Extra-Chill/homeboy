@@ -7,6 +7,7 @@ module.exports = {
 	...require('./lib/codebox-runtime-profile'),
 	...require('./lib/delegated-run-contract'),
 	...require('./lib/wp-codebox-adapter-contract'),
+	...require('./lib/provider-credential-boundary'),
 	...require('./lib/provider-preflight-manifest'),
 	...require('./lib/provider-outcome-normalizer'),
 };

@@ -10,6 +10,7 @@ const {
 	WP_CODEBOX_BACKEND,
 	WP_CODEBOX_PROVIDER_ID,
 	WP_CODEBOX_PROVIDER_LABEL,
+	WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA,
 	WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES,
 	WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS,
 	WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES,
@@ -24,6 +25,7 @@ const {
 assert.equal(WP_CODEBOX_BACKEND, 'codebox');
 assert.equal(WP_CODEBOX_PROVIDER_ID, 'wordpress.codebox-agent-task-executor');
 assert.equal(WP_CODEBOX_PROVIDER_LABEL, 'WP Codebox agent task executor');
+assert.equal(WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA, 'wp-codebox/provider-credential-boundary/v1');
 assert.equal(WP_CODEBOX_TASK_REQUEST_SCHEMA, 'wp-codebox/task-input/v1');
 
 const invocationContract = wpCodeboxProviderRuntimeInvocationContract();
@@ -60,6 +62,7 @@ assert.deepEqual(wpCodeboxProviderRuntimeOperationConfig('toolCallTranscriptReco
 assert.deepEqual(WP_CODEBOX_ROLE_ALIASES.artifact_roles.patch, ['codebox-patch']);
 assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) => requirement.id), [
 	'run-agent-task',
+	'provider-credential-boundary',
 	'runtime-profile',
 	'parent-tool-bridge',
 	'provider-runtime-invocation',

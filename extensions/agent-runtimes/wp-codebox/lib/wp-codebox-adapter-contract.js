@@ -5,6 +5,7 @@ const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
 const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = 'wp-codebox/provider-runtime-invocation-contract/v1';
+const WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA = 'wp-codebox/provider-credential-boundary/v1';
 
 const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
   workspaceCapture: 'wp-codebox.runner-workspace.capture',
@@ -112,7 +113,14 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     schema: 'wp-codebox/run-agent-task/v1',
     owner: 'wp-codebox',
     adapter_behavior: 'prefer_stable_run_agent_task_with_legacy_agent_task_run_fallback',
-    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns a stable run-agent-task result envelope. Until that primitive is present, Homeboy Extensions keeps the legacy agent-task-run CLI compatibility path behind codebox-run-agent-task-contract.js.',
+    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Until that primitive is present, Homeboy Extensions keeps the legacy agent-task-run CLI compatibility path behind codebox-run-agent-task-contract.js.',
+  },
+  {
+    id: 'provider-credential-boundary',
+    schema: WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA,
+    owner: 'wp-codebox',
+    adapter_behavior: 'forward_secret_env_names_only',
+    requirement: 'Resolve provider credentials through provider plugins or parent control-plane filters. Homeboy passes only secret_env names and must not serialize raw provider credentials into request JSON, artifacts, diagnostics, or review output.',
   },
   {
     id: 'runtime-profile',
@@ -201,6 +209,7 @@ module.exports = {
   WP_CODEBOX_BACKEND,
   WP_CODEBOX_PROVIDER_ID,
   WP_CODEBOX_PROVIDER_LABEL,
+  WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA,
   WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES,
   WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA,
   WP_CODEBOX_PROVIDER_RUNTIME_OPERATION_ALIASES,

@@ -58,6 +58,11 @@ const {
 const {
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
 } = require('./codebox-run-agent-task-contract');
+const {
+  assertProviderCredentialBoundaryNamesOnly,
+  providerCredentialBoundary,
+  providerCredentialRequestFields,
+} = require('./provider-credential-boundary');
 
 const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
@@ -168,6 +173,7 @@ function providerContract(options = {}) {
     component_path_defaults: runtimeComponentPathDefaults(options),
     provider_defaults: providerDefaultsContract(runtimeProviderDefaults()),
     provider_preflight: runtimeProviderPreflight(),
+    provider_credential_boundary: providerCredentialBoundary(),
     provider_runtime_invocation: providerRuntimeInvocationContract(),
     role_aliases: WP_CODEBOX_ROLE_ALIASES,
     upstream_primitive_requirements: WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
@@ -298,6 +304,9 @@ function runtimeSecretEnvRequirements() {
 function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   assertAgentTaskRequest(request);
   const config = request.executor.config || {};
+  assertProviderCredentialBoundaryNamesOnly(request.executor || {});
+  assertProviderCredentialBoundaryNamesOnly(config);
+  assertProviderCredentialBoundaryNamesOnly(request.inputs || {});
   const runtimeOptions = runtimeOptionsFromExecutorConfig(config, options);
   const inputs = request.inputs || {};
   const defaults = defaultCodeboxRuntimeConfig(request, config, inputs, runtimeOptions);
@@ -392,7 +401,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     },
     runtime_state_mounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeOptions.runtimeStateMounts, defaults.runtimeStateMounts, []),
     runtime_config_mounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeOptions.runtimeConfigMounts, defaults.runtimeConfigMounts, []),
-    secret_env: explicitSecretEnv.length > 0 ? Array.from(new Set(explicitSecretEnv)) : defaults.secretEnv || [],
+    ...providerCredentialRequestFields({ secret_env: explicitSecretEnv.length > 0 ? explicitSecretEnv : defaults.secretEnv || [] }),
     // Post-agent verification gate (recipe workflow.after). Supplied as WP
     // Codebox recipe steps; a non-zero exit fails the run so the orchestrator
     // refuses to report success until the gates are green.

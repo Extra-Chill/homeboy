@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
 	WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
+	WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
 	WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 	WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
 	WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA,
@@ -53,6 +54,8 @@ assert.equal(stableInvocation.implementation, 'stable-run-agent-task');
 assert.equal(stableInvocation.input.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
 assert.equal(stableInvocation.args[0], WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND);
 assert.equal(stableInvocation.result_schema, WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA);
+assert.equal(stableInvocation.result_schema, WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA);
+assert.equal(stableInvocation.result_key, 'agent_task_run_result');
 
 assert.throws(
 	() => codeboxRunAgentTaskRequestFromTaskInput({ schema: 'wp-codebox/not-task-input/v1' }),

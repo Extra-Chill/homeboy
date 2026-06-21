@@ -49,6 +49,8 @@ assert.equal(provider.label, 'WP Codebox agent task executor');
 assert.equal(provider.backend, 'codebox');
 assert.equal(provider.runtime_id, 'wp-codebox');
 assert.equal(provider.integration_contract, 'homeboy-wordpress-agent-task/v1');
+assert.equal(provider.provider_credential_boundary.schema, 'wp-codebox/provider-credential-boundary/v1');
+assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'provider-credential-boundary'), true);
 assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocationContract());
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
