@@ -100,14 +100,17 @@ function normalizeProviderStatus(result = {}, exitStatus = 0) {
 }
 
 function providerFailureClassification(classification, status) {
-  if (classification === 'provider' || classification === 'timeout') {
+  if (classification === 'provider' || classification === 'transient' || classification === 'timeout' || classification === 'policy_denied' || classification === 'capability_missing' || classification === 'invalid_input' || classification === 'execution_failed' || classification === 'unknown') {
     return classification;
   }
-  if (classification === 'runtime' || classification === 'task') {
+  if (classification === 'max_turns') {
+    return 'timeout';
+  }
+  if (classification === 'runtime' || classification === 'task' || classification === 'incomplete') {
     return 'execution_failed';
   }
   if (classification) {
-    return classification;
+    return 'unknown';
   }
   if (status === 'provider_error') {
     return 'provider';
