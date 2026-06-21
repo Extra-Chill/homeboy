@@ -313,6 +313,60 @@ fn renders_test_failure_digest_from_fixture() {
 }
 
 #[test]
+fn classifies_failures_as_branch_introduced_when_baseline_has_distinct_failures() {
+    let guard = tmp_dir("origin-branch-introduced");
+    let dir = guard.path();
+    write_file(dir, "test.json", TEST_JSON);
+    write_file(
+        dir,
+        "baseline-test.json",
+        r#"{
+            "success": false,
+            "data": {
+                "findings": [
+                    {
+                        "tool": "test",
+                        "message": "existing unrelated failure",
+                        "file": "tests/other_test.rs",
+                        "metadata": {"test_name": "test_existing_failure"}
+                    }
+                ]
+            }
+        }"#,
+    );
+
+    let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
+
+    assert!(markdown.contains("### Failure origin classification"));
+    assert!(markdown.contains("- `test`: **branch-introduced** (head: 2, baseline: 1, shared: 0)"));
+}
+
+#[test]
+fn classifies_failures_as_baseline_present_when_all_head_failures_match_baseline() {
+    let guard = tmp_dir("origin-baseline-present");
+    let dir = guard.path();
+    write_file(dir, "test.json", TEST_JSON);
+    write_file(dir, "baseline-test.json", TEST_JSON);
+
+    let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
+
+    assert!(markdown.contains("- `test`: **baseline-present** (head: 2, baseline: 2, shared: 2)"));
+}
+
+#[test]
+fn reports_indeterminate_when_baseline_artifact_cannot_be_parsed() {
+    let guard = tmp_dir("origin-baseline-parse-failed");
+    let dir = guard.path();
+    write_file(dir, "test.json", TEST_JSON);
+    write_file(dir, "baseline-test.json", "not json");
+
+    let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
+
+    assert!(markdown.contains("- `test`: **indeterminate** (baseline artifact `"));
+    assert!(markdown.contains("failed to parse"));
+}
+
+#[test]
 fn renders_audit_failure_digest_from_fixture() {
     let guard = tmp_dir("audit");
     let dir = guard.path();
