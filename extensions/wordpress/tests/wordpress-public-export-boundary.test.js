@@ -35,11 +35,14 @@ assert.equal(typeof wordpress.wpCodebox.resolveWpCodeboxArtifactPath, 'function'
 assert.equal(typeof wordpress.wpCodebox.runWpCodeboxRecipe, 'function');
 assert.equal(typeof wordpress.wpCodebox.buildWpCodeboxFuzzPlanRecipe, 'function');
 assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzRunTaskRequest, 'function');
+assert.equal(typeof wordpress.wpCodebox.wpCodeboxFuzzSuiteTaskRequest, 'function');
 
 assert.equal(typeof wordpress.resolveWpCodeboxArtifactPath, 'function');
 assert.equal(typeof wordpress.runWpCodeboxRecipe, 'function');
 assert.equal(typeof wordpress.buildWpCodeboxFuzzPlanRecipe, 'function');
 assert.equal(typeof wordpress.wpCodeboxFuzzRunTaskRequest, 'function');
+assert.equal(typeof wordpress.wpCodeboxFuzzSuiteTaskRequest, 'function');
+assert.equal(wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA, 'wp-codebox/fuzz-suite/v1');
 assert.equal(typeof wordpress.applyApprovedWpCodeboxArtifact, 'function');
 assert.equal(wordpress.compareCodeboxMemoryResults, undefined);
 

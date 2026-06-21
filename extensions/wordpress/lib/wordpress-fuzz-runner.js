@@ -4,6 +4,7 @@
  * External dependencies
  */
 const fs = require('node:fs');
+const path = require('node:path');
 
 /**
  * Internal dependencies
@@ -21,6 +22,7 @@ const {
 const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-aggregate');
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
+const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
 
 function readWordPressFuzzRunnerEnv(env = process.env) {
 	return stripUndefined({
@@ -29,6 +31,7 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 		runId: env.HOMEBOY_FUZZ_RUN_ID,
 		seed: env.HOMEBOY_FUZZ_SEED,
 		maxDuration: env.HOMEBOY_FUZZ_MAX_DURATION,
+		resultsFile: env.HOMEBOY_FUZZ_RESULTS_FILE,
 	});
 }
 
@@ -48,9 +51,10 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
 	});
 	const codeboxPlanRecipe = buildCodeboxPlanRecipe(workload);
-	const codeboxResult = normalizeCodeboxResult(workload);
+	const codeboxResult = normalizeCodeboxResult(workload, { runId });
 	const coverage = aggregateCoverage(workload, codeboxResult);
 	const status = normalizeRunnerStatus(codeboxResult, coverage);
+	const homeboyFuzzCampaign = buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status });
 
 	return stripUndefined({
 		schema: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
@@ -66,6 +70,7 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 		wp_codebox_plan_recipe: codeboxPlanRecipe,
 		wp_codebox_result: codeboxResult,
 		coverage,
+		homeboy_fuzz_campaign: homeboyFuzzCampaign,
 		metadata: objectOrUndefined(workload.metadata),
 	});
 }
@@ -102,7 +107,7 @@ function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDurat
 		coverage: workload.coverage || { wordpress_fuzz_coverage: true },
 		runtimeProfile: workload.runtime_profile || workload.runtimeProfile,
 		artifacts: workload.artifacts,
-		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA }),
+		metadata: stripUndefined({ ...(workload.metadata || {}), runner: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA, workload: stripUndefined({ id: workloadId }) }),
 	});
 }
 
@@ -123,9 +128,23 @@ function buildCodeboxPlanRecipe(workload) {
 	return buildWpCodeboxFuzzPlanRecipe(plan);
 }
 
-function normalizeCodeboxResult(workload) {
-	const result = workload.wp_codebox_result || workload.wpCodeboxResult || workload.result;
-	return result ? normalizeWpCodeboxFuzzRunResult(result) : undefined;
+function normalizeCodeboxResult(workload, context = {}) {
+	const result = workload.wp_codebox_result || workload.wpCodeboxResult || workload.wp_codebox_suite_result || workload.wpCodeboxSuiteResult || workload.result;
+	if (result) {
+		return normalizeWpCodeboxFuzzRunResult(result);
+	}
+	return normalizeWpCodeboxFuzzRunResult({
+		schema: 'wp-codebox/fuzz-suite-result/v1',
+		request_id: context.runId,
+		status: 'skipped',
+		diagnostics: [
+			{
+				severity: 'warning',
+				code: 'wp_codebox_fuzz_suite_execution_unsupported',
+				message: 'WP Codebox exposes the public fuzz suite contract, but no merged execution API was available to this runner. Provide wp_codebox_suite_result in the workload or install a Codebox runtime that executes wp-codebox/fuzz-suite/v1.',
+			},
+		],
+	});
 }
 
 function aggregateCoverage(workload, codeboxResult) {
@@ -141,13 +160,38 @@ function hasCoverageFailures(coverage) {
 }
 
 function normalizeRunnerStatus(codeboxResult, coverage) {
-	if (!codeboxResult) {
-		return 'failed';
-	}
 	if (codeboxResult.succeeded === false || hasCoverageFailures(coverage)) {
 		return 'failed';
 	}
 	return codeboxResult.status || 'succeeded';
+}
+
+function buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status }) {
+	const diagnostics = normalizeArray(codeboxResult?.failures || codeboxResult?.metadata?.diagnostics || codeboxResult?.diagnostics);
+	return stripUndefined({
+		schema: HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
+		id: runId,
+		title: `WordPress fuzz campaign ${runId}`,
+		safety_class: 'read_only',
+		metadata: stripUndefined({
+			workload_id: workloadId,
+			plan_id: plan?.id,
+			status,
+			success: codeboxResult?.succeeded,
+			wp_codebox_result_schema: codeboxResult?.result_schema,
+			diagnostics: diagnostics.length > 0 ? diagnostics : undefined,
+			artifact_refs: normalizeArray(codeboxResult?.artifacts),
+			wordpress_fuzz_result: codeboxResult?.wordpress_fuzz_result,
+		}),
+	});
+}
+
+function writeHomeboyFuzzResultsFile(filePath, campaign) {
+	if (!filePath) {
+		return;
+	}
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${JSON.stringify(campaign, null, 2)}\n`);
 }
 
 function readJsonFile(filePath) {
@@ -187,7 +231,9 @@ function stripUndefined(value) {
 }
 
 module.exports = {
+	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
+	writeHomeboyFuzzResultsFile,
 	readWordPressFuzzRunnerEnv,
 };
