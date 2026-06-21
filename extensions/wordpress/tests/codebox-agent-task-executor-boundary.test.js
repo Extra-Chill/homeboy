@@ -9,11 +9,13 @@ const {
   agentTaskOutcomeFromCodeboxResult,
   artifactResultEnvelopeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
+  codeboxRunAgentTaskInvocation,
   discoverCodeboxArtifactRefs,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
   providerContract,
   providerRuntimeInvocationContract,
+  runtimeContractSchemas,
   typedArtifactsFromCodeboxResult,
 } = require('../../agent-runtimes/wp-codebox');
 
@@ -57,6 +59,8 @@ assert.deepEqual(provider.provider_runtime_invocation, providerRuntimeInvocation
 assert.equal(provider.provider_runtime_invocation.tasks.workspaceCommand, 'wp-codebox.runner-workspace.command');
 assert.equal(provider.provider_runtime_invocation.abilities.workspaceCommand, 'wp-codebox/runner-workspace-command');
 assert.equal(provider.upstream_primitive_requirements.some((requirement) => requirement.id === 'artifact-apply-execution'), true);
+const runAgentTaskRequirement = provider.upstream_primitive_requirements.find((requirement) => requirement.id === 'run-agent-task');
+assert.equal(runAgentTaskRequirement.schema, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(
   provider.upstream_primitive_requirements.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
   'consume_canonical_envelope_with_legacy_package_fallback'
@@ -254,6 +258,14 @@ assert.equal(
   taskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'wordpress.read-post'),
   true
 );
+const legacyCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
+assert.equal(legacyCodeboxInvocation.contract, runAgentTaskRequirement.schema);
+assert.equal(legacyCodeboxInvocation.args[0], 'agent-task-run');
+assert.equal(legacyCodeboxInvocation.result_schema, runtimeContractSchemas().agentTask.legacyRunResponse);
+const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput, useStableRunAgentTask: true });
+assert.equal(stableCodeboxInvocation.input.schema, runtimeContractSchemas().agentTask.runRequest);
+assert.equal(stableCodeboxInvocation.args[0], 'run-agent-task');
+assert.equal(stableCodeboxInvocation.result_schema, runtimeContractSchemas().agentTask.runResult);
 
 const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;

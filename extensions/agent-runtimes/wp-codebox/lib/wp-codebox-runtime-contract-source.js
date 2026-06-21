@@ -17,7 +17,9 @@ const FALLBACK_RUNTIME_CONTRACT_SCHEMAS = {
     credentialResolution: 'wp-codebox/provider-credential-resolution/v1',
   },
   agentTask: {
+    runRequest: 'wp-codebox/run-agent-task/v1',
     runResult: 'wp-codebox/agent-task-run-result/v1',
+    legacyRunResponse: 'wp-codebox/agent-task-run/v1',
   },
   runtimeBoundary: {
     profile: 'wp-codebox/runtime-profile/v1',
@@ -72,6 +74,7 @@ const FALLBACK_PROVIDER_RUNTIME_INVOCATION_CONTRACT = {
     workspace_publication: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.runnerWorkspace.publicationResult,
     tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
     evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
+    artifact_result_envelope: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope,
   },
 };
 

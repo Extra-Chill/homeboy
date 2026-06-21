@@ -366,6 +366,7 @@
         "schema": "wp-codebox/provider-runtime-invocation-contract/v1",
         "version": 1,
         "tasks": {
+          "workspacePrepare": "wp-codebox.runner-workspace.prepare",
           "workspaceCapture": "wp-codebox.runner-workspace.capture",
           "workspaceCommand": "wp-codebox.runner-workspace.command",
           "workspacePublish": "wp-codebox.runner-workspace.publish",
@@ -373,6 +374,7 @@
           "artifactHandoff": "wp-codebox.artifact-handoff"
         },
         "abilities": {
+          "workspacePrepare": "wp-codebox/runner-workspace-prepare",
           "workspaceCapture": "wp-codebox/runner-workspace-capture",
           "workspaceCommand": "wp-codebox/runner-workspace-command",
           "workspacePublish": "wp-codebox/runner-workspace-publish",
@@ -380,6 +382,7 @@
           "artifactHandoff": "wp-codebox/handoff-artifacts"
         },
         "result_schemas": {
+          "workspace_prepare": "wp-codebox/runner-workspace-prepare-result/v1",
           "workspace_capture": "wp-codebox/runner-workspace-capture-result/v1",
           "workspace_command": "wp-codebox/runner-workspace-command-result/v1",
           "workspace_publication": "wp-codebox/runner-workspace-publication-result/v1",
