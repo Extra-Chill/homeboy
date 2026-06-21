@@ -110,6 +110,7 @@ pub mod self_status;
 pub mod server;
 pub mod source_snapshot;
 pub mod stack;
+pub mod stream_capture;
 pub mod structured_sidecar;
 pub mod top_n;
 pub mod trace_compare;

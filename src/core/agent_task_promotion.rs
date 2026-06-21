@@ -18,6 +18,7 @@ use crate::core::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE
 use crate::core::agent_task_timeout_artifacts::is_actionable_patch_artifact;
 use crate::core::command_invocation::CommandInvocation;
 use crate::core::gate::HomeboyGateResult;
+use crate::core::stream_capture::StreamCaptureMetadata;
 use crate::core::{Error, Result};
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -28,26 +29,17 @@ const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMA
 /// retained evidence cannot grow without bound (#5077).
 const PROMOTION_CAPTURE_LIMIT_BYTES: usize = 65_536;
 
-/// Truncation metadata describing how much of a captured stream was retained.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskPromotionStreamCapture {
-    pub limit_bytes: usize,
-    pub seen_bytes: usize,
-    pub retained_bytes: usize,
-    pub truncated: bool,
-}
-
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
 /// (most relevant tail) and returning the retained text plus truncation
 /// metadata. Mirrors the `BoundedCapture` pattern in extension self-checks.
-fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, AgentTaskPromotionStreamCapture) {
+fn bound_captured_stream(bytes: &[u8], limit: usize) -> (String, StreamCaptureMetadata) {
     let seen = bytes.len();
     let retained: &[u8] = if seen > limit {
         &bytes[seen - limit..]
     } else {
         bytes
     };
-    let metadata = AgentTaskPromotionStreamCapture {
+    let metadata = StreamCaptureMetadata {
         limit_bytes: limit,
         seen_bytes: seen,
         retained_bytes: retained.len(),
@@ -181,9 +173,9 @@ pub struct AgentTaskPromotionCommandReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskPromotionCommandCapture {
     #[serde(default, skip_serializing_if = "is_untruncated_stream")]
-    pub stdout: AgentTaskPromotionStreamCapture,
+    pub stdout: StreamCaptureMetadata,
     #[serde(default, skip_serializing_if = "is_untruncated_stream")]
-    pub stderr: AgentTaskPromotionStreamCapture,
+    pub stderr: StreamCaptureMetadata,
 }
 
 impl AgentTaskPromotionCommandCapture {
@@ -192,7 +184,7 @@ impl AgentTaskPromotionCommandCapture {
     }
 }
 
-fn is_untruncated_stream(stream: &AgentTaskPromotionStreamCapture) -> bool {
+fn is_untruncated_stream(stream: &StreamCaptureMetadata) -> bool {
     !stream.truncated
 }
 
