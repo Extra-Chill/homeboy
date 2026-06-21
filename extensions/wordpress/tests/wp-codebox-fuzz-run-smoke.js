@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 
 const {
 	DEFAULT_FUZZ_RUN_ABILITY,
+	DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS,
 	WP_CODEBOX_FUZZ_RUN_SCHEMA,
 	normalizeWpCodeboxFuzzRunResult,
 	runWpCodeboxFuzzRun,
@@ -39,6 +40,11 @@ assert.equal(taskRequest.executor.runtime, 'wp-codebox');
 assert.equal(taskRequest.executor.config.runtime_task.ability, DEFAULT_FUZZ_RUN_ABILITY);
 assert.equal(taskRequest.executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_RUN_SCHEMA);
 assert.deepEqual(taskRequest.expected_artifacts, ['wp-codebox-fuzz-run-result', 'wordpress-fuzz-coverage']);
+assert.deepEqual(taskRequest.artifact_declarations, DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS);
+assert.deepEqual(
+	taskRequest.artifact_declarations.filter((artifact) => artifact.required === true).map((artifact) => artifact.name),
+	taskRequest.expected_artifacts
+);
 assert(!JSON.stringify(taskRequest).includes('woocommerce'), 'fuzz-run helper must stay product-agnostic');
 
 let invoked = false;
@@ -92,8 +98,10 @@ runWpCodeboxFuzzRun({
 				},
 				artifacts: {
 					fuzz_report: { path: 'reports/fuzz-report.json', content_type: 'application/json' },
+					coverage: { path: 'reports/coverage.json', content_type: 'application/json', size_bytes: 123 },
 					normalized_fuzz_result: { path: 'reports/wordpress-fuzz-result.json', content_type: 'application/json' },
 					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
+					placeholder_case: { name: 'placeholder-only' },
 					failing_case: { path: 'cases/failing-case.json', case_id: 'case-002' },
 					case_artifact: { path: 'cases/case-001.json', case_id: 'case-001' },
 					repro_case: { path: 'repro/case-002.js', case_id: 'case-002' },
@@ -118,14 +126,20 @@ runWpCodeboxFuzzRun({
 	assert.equal(summary.wordpress_fuzz_result.summary.admin_browser_errors.errors, 1);
 	assert.equal(summary.wordpress_fuzz_result.summary.http_guardrail_outcomes.blocked, 1);
 	assert.equal(summary.wordpress_fuzz_result.provenance.workload_manifest, 'workloads/generic-wordpress-fuzz.json');
+	assert.equal(summary.wordpress_fuzz_result.artifacts.some((artifact) => artifact.role === 'coverage'), true);
+	assert.equal(summary.wordpress_fuzz_result.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
 	assert.equal(summary.coverage_gaps[0].status, 'skipped');
-	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'normalized_fuzz_result', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case']);
+	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage', 'normalized_fuzz_result', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case']);
 	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').semantic_key, 'fuzz.coverage');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'coverage').size_bytes, 123);
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'normalized_fuzz_result').semantic_key, 'fuzz.result.normalized');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').semantic_key, 'fuzz.case');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').case_id, 'case-000');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'failing_case').semantic_key, 'fuzz.case.failing');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
+	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
 
 	const normalized = normalizeWpCodeboxFuzzRunResult({ status: 'failed', failures: [{ message: 'boom' }] });
 	assert.equal(normalized.succeeded, false);

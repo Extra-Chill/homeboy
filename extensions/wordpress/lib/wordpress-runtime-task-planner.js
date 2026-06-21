@@ -91,7 +91,9 @@ function wordpressRuntimeTaskRequest(options = {}) {
 			...(options.metadata || {}),
 			fanout: options.fanout,
 		}),
-		includeArtifactDeclarations: false,
+		includeArtifactDeclarations: options.includeArtifactDeclarations === false
+			? false
+			: normalizeArray(options.artifactDeclarations || options.artifact_declarations).length > 0,
 		runnerSpec,
 	});
 }
@@ -105,6 +107,7 @@ function wordpressRuntimeTaskRunnerSpec(options = {}) {
 		secret_env: normalizeArray(options.secretEnv || options.secret_env),
 		task_timeout_seconds: numberOrUndefined(options.taskTimeoutSeconds || options.task_timeout_seconds || options.timeoutSeconds || options.timeout_seconds),
 		limits: options.limits,
+		artifact_declarations: options.artifactDeclarations || options.artifact_declarations,
 		expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
 	});
 }
