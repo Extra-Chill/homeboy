@@ -12,17 +12,20 @@ const {
 	wordpressRuntimeTaskRequest,
 } = require('./wordpress-runtime-task-planner');
 
-const WP_CODEBOX_FUZZ_RUN_SCHEMA = 'wp-codebox/fuzz-run/v1';
-const WP_CODEBOX_FUZZ_RUN_RESULT_SCHEMA = 'wp-codebox/fuzz-run-result/v1';
+const WP_CODEBOX_FUZZ_SUITE_SCHEMA = 'wp-codebox/fuzz-suite/v1';
+const WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA = 'wp-codebox/fuzz-suite-result/v1';
+const WP_CODEBOX_FUZZ_RUN_SCHEMA = WP_CODEBOX_FUZZ_SUITE_SCHEMA;
+const WP_CODEBOX_FUZZ_RUN_RESULT_SCHEMA = WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA;
 const WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA = 'homeboy/wordpress-codebox-fuzz-run-consumer/v1';
-const DEFAULT_FUZZ_RUN_ABILITY = 'wp-codebox/fuzz-run';
+const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/fuzz-suite';
+const DEFAULT_FUZZ_RUN_ABILITY = DEFAULT_FUZZ_SUITE_ABILITY;
 const DEFAULT_FUZZ_RUN_EXPECTED_ARTIFACTS = [
-	'wp-codebox-fuzz-run-result',
+	'wp-codebox-fuzz-suite-result',
 	'wordpress-fuzz-coverage',
 ];
 const DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS = [
 	{
-		name: 'wp-codebox-fuzz-run-result',
+		name: 'wp-codebox-fuzz-suite-result',
 		semantic_key: 'fuzz.result.normalized',
 		content_type: 'application/json',
 		required: true,
@@ -64,19 +67,24 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 
 function wpCodeboxFuzzRunInput(options = {}) {
 	return stripUndefined({
-		schema: WP_CODEBOX_FUZZ_RUN_SCHEMA,
+		schema: WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 		id: options.id || options.runId || options.run_id,
+		version: options.version,
 		target: options.target,
-		workload: options.workload,
 		cases: normalizeArray(options.cases),
-		seeds: normalizeArray(options.seeds),
-		limits: objectOrUndefined(options.limits),
-		coverage: objectOrUndefined(options.coverage),
-		runtime_profile: objectOrUndefined(options.runtimeProfile || options.runtime_profile),
-		artifacts: objectOrUndefined(options.artifacts),
-		metadata: objectOrUndefined(options.metadata),
+		metadata: stripUndefined({
+			...(objectOrUndefined(options.metadata) || {}),
+			workload: objectOrUndefined(options.workload),
+			seeds: normalizeArray(options.seeds).length > 0 ? normalizeArray(options.seeds) : undefined,
+			limits: objectOrUndefined(options.limits),
+			coverage: objectOrUndefined(options.coverage),
+			runtime_profile: objectOrUndefined(options.runtimeProfile || options.runtime_profile),
+			artifacts: objectOrUndefined(options.artifacts),
+		}),
 	});
 }
+
+const wpCodeboxFuzzSuiteInput = wpCodeboxFuzzRunInput;
 
 function wpCodeboxFuzzRunTaskRequest(options = {}) {
 	const input = wpCodeboxFuzzRunInput(options.input || options.abilityInput || options.ability_input || options);
@@ -91,6 +99,8 @@ function wpCodeboxFuzzRunTaskRequest(options = {}) {
 	});
 }
 
+const wpCodeboxFuzzSuiteTaskRequest = wpCodeboxFuzzRunTaskRequest;
+
 async function runWpCodeboxFuzzRun(options = {}) {
 	const request = wpCodeboxFuzzRunTaskRequest(options);
 	const runner = options.runFuzzRun || options.runRuntimeTask || options.runTask;
@@ -102,6 +112,8 @@ async function runWpCodeboxFuzzRun(options = {}) {
 	return normalizeWpCodeboxFuzzRunResult(result, { request });
 }
 
+const runWpCodeboxFuzzSuite = runWpCodeboxFuzzRun;
+
 function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 	const source = result?.json || result?.result || result?.output || result;
 	const status = source?.status || source?.outcome?.status || result?.status || '';
@@ -112,7 +124,7 @@ function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 	return stripUndefined({
 		schema: WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA,
 		delegated_schema: WP_CODEBOX_FUZZ_RUN_SCHEMA,
-		result_schema: source?.schema || result?.schema || WP_CODEBOX_FUZZ_RUN_RESULT_SCHEMA,
+		result_schema: source?.schema || result?.schema || WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
 		request_id: source?.request_id || source?.requestId || context.request?.task_id,
 		status,
 		succeeded: status ? ['succeeded', 'success', 'passed', 'ok'].includes(String(status).toLowerCase()) : undefined,
@@ -121,15 +133,23 @@ function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 		coverage_gaps: coverageGaps,
 		wordpress_fuzz_result: normalizedResult,
 		artifacts,
-		failures: normalizeArray(source?.failures || source?.errors),
-		metadata: objectOrUndefined(source?.metadata),
+		failures: normalizeArray(source?.failures || source?.errors || source?.diagnostics),
+		metadata: stripUndefined({
+			...(objectOrUndefined(source?.metadata) || {}),
+			suite: objectOrUndefined(source?.suite),
+			summary: objectOrUndefined(source?.summary),
+		}),
 	});
 }
+
+const normalizeWpCodeboxFuzzSuiteResult = normalizeWpCodeboxFuzzRunResult;
 
 function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	const artifacts = [];
 	appendArtifactCandidates(artifacts, source?.artifacts);
+	appendArtifactCandidates(artifacts, source?.artifactRefs || source?.artifact_refs);
 	appendArtifactCandidates(artifacts, result?.artifacts);
+	appendArtifactCandidates(artifacts, result?.artifactRefs || result?.artifact_refs);
 	appendNamedArtifact(artifacts, 'fuzz_report', source?.fuzz_report || source?.fuzzReport || source?.report || source?.summary_report || source?.summaryReport);
 	appendNamedArtifact(artifacts, 'coverage', source?.coverage_artifact || source?.coverageArtifact || source?.wordpress_fuzz_coverage || source?.wordpressFuzzCoverage);
 	appendNamedArtifact(artifacts, 'normalized_fuzz_result', source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult);
@@ -245,6 +265,9 @@ function normalizeFuzzArtifactRole(value) {
 	if (['repro_case', 'reproduction', 'repro', 'reproducer'].includes(label)) {
 		return 'repro_case';
 	}
+	if (['replay', 'replay_case', 'replay_artifact'].includes(label)) {
+		return 'repro_case';
+	}
 	if (['case_artifact', 'case_artifacts', 'artifact_ref', 'artifact_refs'].includes(label)) {
 		return 'case_artifact';
 	}
@@ -255,6 +278,9 @@ function normalizeFuzzArtifactRole(value) {
 		return 'failing_case';
 	}
 	if (/repro/.test(label)) {
+		return 'repro_case';
+	}
+	if (/replay/.test(label)) {
 		return 'repro_case';
 	}
 	if (/case/.test(label)) {
@@ -373,13 +399,20 @@ module.exports = {
 	DEFAULT_FUZZ_RUN_ABILITY,
 	DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS,
 	DEFAULT_FUZZ_RUN_EXPECTED_ARTIFACTS,
+	DEFAULT_FUZZ_SUITE_ABILITY,
 	FUZZ_ARTIFACT_SEMANTIC_KEYS,
 	WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA,
 	WP_CODEBOX_FUZZ_RUN_RESULT_SCHEMA,
 	WP_CODEBOX_FUZZ_RUN_SCHEMA,
+	WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	normalizeWpCodeboxFuzzArtifacts,
 	normalizeWpCodeboxFuzzRunResult,
+	normalizeWpCodeboxFuzzSuiteResult,
 	runWpCodeboxFuzzRun,
+	runWpCodeboxFuzzSuite,
 	wpCodeboxFuzzRunInput,
 	wpCodeboxFuzzRunTaskRequest,
+	wpCodeboxFuzzSuiteInput,
+	wpCodeboxFuzzSuiteTaskRequest,
 };
