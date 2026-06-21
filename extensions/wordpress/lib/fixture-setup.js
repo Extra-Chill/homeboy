@@ -12,6 +12,7 @@ const { spawn } = require('node:child_process');
  * Internal dependencies
  */
 const { isPlainObject } = require('./shared');
+const { wpCodeboxPluginStateStep } = require('./wp-codebox-recipe-helper');
 
 function normalizeFixtureList(fixtures) {
 	if (fixtures === undefined || fixtures === null) {
@@ -216,28 +217,52 @@ async function installWordPressFixturePlugins(options = {}) {
 		});
 	}
 
+	const route = normalizeExecutionRoute(options);
 	const runCli = options.runCli || ((command, runContext) => defaultRunCli(command, {
 		...options,
 		...runContext,
 	}));
+	const runPluginStateStep = options.runPluginStateStep || (route === 'wp-codebox' && (options.runRecipeStep || options.runWpCodeboxStep)
+		? async (plugin, runContext = {}) => {
+			const recipeStep = wpCodeboxPluginStateStep({
+				activate: [{ plugin: plugin.plugin, slug: plugin.slug }],
+				report: true,
+			});
+			const result = await (options.runRecipeStep || options.runWpCodeboxStep)(recipeStep, {
+				...runContext,
+				plugin,
+				recipeStep,
+			});
+			return { ...normalizeCliResult(result), recipeStep };
+		}
+		: null);
 	for (const plugin of installed.filter((entry) => entry.activate)) {
-		const result = normalizeCliResult(await runCli(`plugin activate ${plugin.plugin}`, {
-			plugin,
-			role: 'fixture-plugin-activate',
-			timeoutMs: options.activateTimeoutMs,
-		}));
+		const activationCommand = `plugin activate ${plugin.plugin}`;
+		const result = runPluginStateStep
+			? await runPluginStateStep(plugin, {
+				role: 'fixture-plugin-activate',
+				timeoutMs: options.activateTimeoutMs,
+			})
+			: normalizeCliResult(await runCli(activationCommand, {
+				plugin,
+				role: 'fixture-plugin-activate',
+				timeoutMs: options.activateTimeoutMs,
+			}));
 		if (result.exitCode !== 0) {
-			throw Object.assign(failedStepError({ label: `activate:${plugin.slug}`, type: 'wp-cli' }, `plugin activate ${plugin.plugin}`, result), {
+			throw Object.assign(failedStepError({ label: `activate:${plugin.slug}`, type: runPluginStateStep ? 'wp-codebox' : 'wp-cli' }, activationCommand, result), {
 				fixturePlugin: plugin,
 				installedPlugins: installed,
 			});
 		}
 		plugin.activation = {
-			command: `plugin activate ${plugin.plugin}`,
+			command: activationCommand,
 			exitCode: result.exitCode,
 			stdout: result.stdout,
 			stderr: result.stderr,
 		};
+		if (result.recipeStep) {
+			plugin.activation.recipeStep = result.recipeStep;
+		}
 	}
 
 	return installed.map((plugin) => ({

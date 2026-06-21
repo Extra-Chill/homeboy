@@ -2,7 +2,7 @@
   "schema": "homeboy/agent-runtime-manifest/v1",
   "id": "wp-codebox",
   "name": "WP Codebox",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "WP Codebox agent runtime for Homeboy agent tasks.",
   "ci_materialization": {
     "checkout": {
@@ -178,6 +178,56 @@
         ]
       },
       "component_path_defaults": {},
+      "provider_metadata": {
+        "schema": "homeboy/agent-task-provider-metadata/v1",
+        "selection": {
+          "backend": "codebox",
+          "runtime_id": "wp-codebox",
+          "provider_id_paths": [
+            "executor.config.provider",
+            "executor.provider",
+            "provider"
+          ],
+          "model_paths": [
+            "executor.model",
+            "executor.config.model",
+            "model"
+          ],
+          "guidance": "Select the generic executor backend with executor.backend=codebox, then select the WordPress AI provider id with executor.config.provider and the provider model with executor.config.model or executor.model. Homeboy core should treat provider ids and models as opaque runtime metadata."
+        },
+        "providers": [
+          {
+            "id": "openai",
+            "label": "OpenAI API",
+            "backend": "codebox",
+            "runtime_id": "wp-codebox",
+            "default_model": "",
+            "model_required": false,
+            "model_guidance": "Set executor.config.model or executor.model when the selected OpenAI provider plugin requires an explicit model.",
+            "provider_plugin_guidance": "Use a WordPress AI provider plugin that registers the openai provider id."
+          },
+          {
+            "id": "codex",
+            "label": "Codex",
+            "backend": "codebox",
+            "runtime_id": "wp-codebox",
+            "default_model": "",
+            "model_required": false,
+            "model_guidance": "Set executor.config.model or executor.model to the Codex model requested by the task; the runtime forwards it without Homeboy core interpretation.",
+            "provider_plugin_guidance": "Use a Codex-capable WordPress AI provider plugin checkout, such as the Codex provider branch for ai-provider-for-openai."
+          },
+          {
+            "id": "claude-code",
+            "label": "Claude Code",
+            "backend": "codebox",
+            "runtime_id": "wp-codebox",
+            "default_model": "",
+            "model_required": false,
+            "model_guidance": "Claude Code provider plugins may ignore model selection; pass executor.config.model only when the provider/runtime supports it.",
+            "provider_plugin_guidance": "Use a WordPress AI provider plugin that registers the claude-code provider id and resolves Claude Code OAuth credentials."
+          }
+        ]
+      },
       "provider_defaults": {
         "openai": {
           "secret_env": ["OPENAI_API_KEY"]

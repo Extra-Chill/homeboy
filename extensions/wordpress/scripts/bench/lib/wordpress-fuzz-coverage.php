@@ -8,6 +8,369 @@
 
 require_once __DIR__ . '/wordpress-db-query-profiler.php';
 
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surfaces' ) ) {
+	/**
+	 * Discover bounded generic frontend URL candidates for fuzz planning.
+	 *
+	 * @param array<string,mixed> $options Discovery options.
+	 * @return array<string,mixed>
+	 */
+	function homeboy_wordpress_bench_frontend_url_surfaces( array $options = array() ): array {
+		$max_total       = homeboy_wordpress_bench_frontend_url_surface_limit( $options['max_total'] ?? 50, 1, 200 );
+		$max_per_surface = homeboy_wordpress_bench_frontend_url_surface_limit( $options['max_per_surface'] ?? 10, 1, 50 );
+		$state           = array(
+			'candidates'  => array(),
+			'seen'        => array(),
+			'counts'      => array(),
+			'skipped'     => array(),
+			'max_total'   => $max_total,
+			'max_surface' => $max_per_surface,
+		);
+
+		homeboy_wordpress_bench_frontend_url_surface_home_candidates( $state );
+		homeboy_wordpress_bench_frontend_url_surface_front_candidates( $state );
+		homeboy_wordpress_bench_frontend_url_surface_archive_candidates( $state, $options );
+		homeboy_wordpress_bench_frontend_url_surface_sitemap_candidates( $state );
+		homeboy_wordpress_bench_frontend_url_surface_permalink_candidates( $state, $options );
+
+		return array(
+			'schema'               => 'homeboy/wordpress-frontend-url-surfaces/v1',
+			'generated_at_unix_ms' => (int) floor( microtime( true ) * 1000 ),
+			'limits'               => array(
+				'max_total'       => $max_total,
+				'max_per_surface' => $max_per_surface,
+			),
+			'candidates'           => $state['candidates'],
+			'counts'               => $state['counts'],
+			'skipped'              => $state['skipped'],
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_home_candidates' ) ) {
+	/** @param array<string,mixed> $state Discovery state. */
+	function homeboy_wordpress_bench_frontend_url_surface_home_candidates( array &$state ): void {
+		if ( ! function_exists( 'home_url' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'home', 'missing_home_url' );
+			return;
+		}
+
+		homeboy_wordpress_bench_frontend_url_surface_add(
+			$state,
+			array(
+				'surface' => 'home',
+				'url'     => home_url( '/' ),
+				'source'  => 'home_url',
+				'label'   => 'Site home',
+			)
+		);
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_front_candidates' ) ) {
+	/** @param array<string,mixed> $state Discovery state. */
+	function homeboy_wordpress_bench_frontend_url_surface_front_candidates( array &$state ): void {
+		if ( ! function_exists( 'get_option' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'front', 'missing_get_option' );
+			return;
+		}
+
+		$show_on_front = (string) get_option( 'show_on_front', 'posts' );
+		$page_on_front = (int) get_option( 'page_on_front', 0 );
+		if ( 'page' === $show_on_front && $page_on_front > 0 && function_exists( 'get_permalink' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_add(
+				$state,
+				array(
+					'surface'        => 'front',
+					'url'            => get_permalink( $page_on_front ),
+					'source'         => 'page_on_front',
+					'label'          => 'Static front page',
+					'object_type'    => 'post',
+					'object_subtype' => 'page',
+					'object_id'      => $page_on_front,
+				)
+			);
+			return;
+		}
+
+		if ( function_exists( 'home_url' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_add(
+				$state,
+				array(
+					'surface' => 'front',
+					'url'     => home_url( '/' ),
+					'source'  => 'show_on_front:' . $show_on_front,
+					'label'   => 'Posts front page',
+				)
+			);
+			return;
+		}
+
+		homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'front', 'missing_front_url' );
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_archive_candidates' ) ) {
+	/**
+	 * @param array<string,mixed> $state Discovery state.
+	 * @param array<string,mixed> $options Discovery options.
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_archive_candidates( array &$state, array $options ): void {
+		if ( function_exists( 'get_post_type_archive_link' ) ) {
+			$post_types = homeboy_wordpress_bench_frontend_url_surface_post_types( $options );
+			foreach ( $post_types as $post_type ) {
+				$link = get_post_type_archive_link( $post_type );
+				if ( $link ) {
+					homeboy_wordpress_bench_frontend_url_surface_add(
+						$state,
+						array(
+							'surface'        => 'archive',
+							'url'            => $link,
+							'source'         => 'post_type_archive',
+							'label'          => $post_type . ' archive',
+							'object_type'    => 'post_type',
+							'object_subtype' => $post_type,
+						)
+					);
+				}
+			}
+		} else {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'archive', 'missing_get_post_type_archive_link' );
+		}
+
+		if ( function_exists( 'get_terms' ) && function_exists( 'get_term_link' ) ) {
+			$taxonomies = homeboy_wordpress_bench_frontend_url_surface_taxonomies( $options );
+			foreach ( $taxonomies as $taxonomy ) {
+				$terms = get_terms(
+					array(
+						'taxonomy'   => $taxonomy,
+						'hide_empty' => true,
+						'number'     => (int) $state['max_surface'],
+					)
+				);
+				if ( homeboy_wordpress_bench_frontend_url_surface_is_wp_error( $terms ) || ! is_array( $terms ) ) {
+					continue;
+				}
+				foreach ( $terms as $term ) {
+					$link = get_term_link( $term );
+					if ( homeboy_wordpress_bench_frontend_url_surface_is_wp_error( $link ) || ! $link ) {
+						continue;
+					}
+					homeboy_wordpress_bench_frontend_url_surface_add(
+						$state,
+						array(
+							'surface'        => 'archive',
+							'url'            => $link,
+							'source'         => 'term_archive',
+							'label'          => isset( $term->name ) ? (string) $term->name : $taxonomy . ' term',
+							'object_type'    => 'term',
+							'object_subtype' => $taxonomy,
+							'object_id'      => isset( $term->term_id ) ? (int) $term->term_id : null,
+						)
+					);
+				}
+			}
+		} else {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'archive', 'missing_term_archive_functions' );
+		}
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_sitemap_candidates' ) ) {
+	/** @param array<string,mixed> $state Discovery state. */
+	function homeboy_wordpress_bench_frontend_url_surface_sitemap_candidates( array &$state ): void {
+		if ( ! function_exists( 'home_url' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'sitemap', 'missing_home_url' );
+			return;
+		}
+
+		foreach ( array( '/wp-sitemap.xml', '/sitemap.xml' ) as $path ) {
+			homeboy_wordpress_bench_frontend_url_surface_add(
+				$state,
+				array(
+					'surface' => 'sitemap',
+					'url'     => home_url( $path ),
+					'source'  => 'conventional_sitemap',
+					'label'   => ltrim( $path, '/' ),
+				)
+			);
+		}
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_permalink_candidates' ) ) {
+	/**
+	 * @param array<string,mixed> $state Discovery state.
+	 * @param array<string,mixed> $options Discovery options.
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_permalink_candidates( array &$state, array $options ): void {
+		if ( ! function_exists( 'get_posts' ) || ! function_exists( 'get_permalink' ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, 'permalink', 'missing_permalink_functions' );
+			return;
+		}
+
+		$post_types = homeboy_wordpress_bench_frontend_url_surface_post_types( $options );
+		$posts      = get_posts(
+			array(
+				'post_type'      => empty( $post_types ) ? 'any' : $post_types,
+				'post_status'    => 'publish',
+				'posts_per_page' => (int) $state['max_surface'],
+				'orderby'        => 'date',
+				'order'          => 'DESC',
+			)
+		);
+
+		if ( ! is_array( $posts ) ) {
+			return;
+		}
+
+		foreach ( $posts as $post ) {
+			$post_id = isset( $post->ID ) ? (int) $post->ID : 0;
+			if ( $post_id <= 0 ) {
+				continue;
+			}
+			$link = get_permalink( $post_id );
+			if ( ! $link ) {
+				continue;
+			}
+			homeboy_wordpress_bench_frontend_url_surface_add(
+				$state,
+				array(
+					'surface'        => 'permalink',
+					'url'            => $link,
+					'source'         => 'recent_posts',
+					'label'          => isset( $post->post_title ) ? (string) $post->post_title : 'Post ' . $post_id,
+					'object_type'    => 'post',
+					'object_subtype' => isset( $post->post_type ) ? (string) $post->post_type : '',
+					'object_id'      => $post_id,
+				)
+			);
+		}
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_post_types' ) ) {
+	/**
+	 * @param array<string,mixed> $options Discovery options.
+	 * @return array<int,string>
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_post_types( array $options ): array {
+		if ( isset( $options['post_types'] ) && is_array( $options['post_types'] ) ) {
+			return array_values( array_filter( array_map( 'strval', $options['post_types'] ) ) );
+		}
+
+		if ( ! function_exists( 'get_post_types' ) ) {
+			return array( 'post', 'page' );
+		}
+
+		$post_types = get_post_types( array( 'public' => true ), 'names' );
+		return is_array( $post_types ) ? array_values( array_filter( array_map( 'strval', $post_types ) ) ) : array();
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_taxonomies' ) ) {
+	/**
+	 * @param array<string,mixed> $options Discovery options.
+	 * @return array<int,string>
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_taxonomies( array $options ): array {
+		if ( isset( $options['taxonomies'] ) && is_array( $options['taxonomies'] ) ) {
+			return array_values( array_filter( array_map( 'strval', $options['taxonomies'] ) ) );
+		}
+
+		if ( ! function_exists( 'get_taxonomies' ) ) {
+			return array( 'category', 'post_tag' );
+		}
+
+		$taxonomies = get_taxonomies( array( 'public' => true ), 'names' );
+		return is_array( $taxonomies ) ? array_values( array_filter( array_map( 'strval', $taxonomies ) ) ) : array();
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_add' ) ) {
+	/**
+	 * @param array<string,mixed> $state Discovery state.
+	 * @param array<string,mixed> $candidate Candidate row.
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_add( array &$state, array $candidate ): void {
+		$surface = isset( $candidate['surface'] ) ? (string) $candidate['surface'] : '';
+		$url     = homeboy_wordpress_bench_frontend_url_surface_url( $candidate['url'] ?? '' );
+		if ( '' === $surface || '' === $url ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, '' === $surface ? 'unknown' : $surface, 'invalid_candidate' );
+			return;
+		}
+
+		if ( count( $state['candidates'] ) >= (int) $state['max_total'] ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, $surface, 'max_total' );
+			return;
+		}
+
+		$surface_count = (int) ( $state['counts'][ $surface ] ?? 0 );
+		if ( $surface_count >= (int) $state['max_surface'] ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, $surface, 'max_per_surface' );
+			return;
+		}
+
+		$key = $surface . ' ' . $url;
+		if ( isset( $state['seen'][ $key ] ) ) {
+			homeboy_wordpress_bench_frontend_url_surface_skip( $state, $surface, 'duplicate' );
+			return;
+		}
+
+		$state['seen'][ $key ]       = true;
+		$state['counts'][ $surface ] = $surface_count + 1;
+		$candidate['url']            = $url;
+		$state['candidates'][]       = homeboy_wordpress_bench_frontend_url_surface_compact( $candidate );
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_skip' ) ) {
+	/** @param array<string,mixed> $state Discovery state. */
+	function homeboy_wordpress_bench_frontend_url_surface_skip( array &$state, string $surface, string $reason ): void {
+		$key                      = '' === $surface ? $reason : $surface . ':' . $reason;
+		$state['skipped'][ $key ] = (int) ( $state['skipped'][ $key ] ?? 0 ) + 1;
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_limit' ) ) {
+	function homeboy_wordpress_bench_frontend_url_surface_limit( $value, int $minimum, int $maximum ): int {
+		$parsed = is_numeric( $value ) ? (int) $value : $minimum;
+		return max( $minimum, min( $maximum, $parsed ) );
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_is_wp_error' ) ) {
+	function homeboy_wordpress_bench_frontend_url_surface_is_wp_error( $value ): bool {
+		return function_exists( 'is_wp_error' ) && is_wp_error( $value );
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_url' ) ) {
+	function homeboy_wordpress_bench_frontend_url_surface_url( $url ): string {
+		$url = is_string( $url ) ? trim( $url ) : '';
+		if ( '' === $url || ! preg_match( '#^https?://#i', $url ) ) {
+			return '';
+		}
+
+		return $url;
+	}
+}
+
+if ( ! function_exists( 'homeboy_wordpress_bench_frontend_url_surface_compact' ) ) {
+	/**
+	 * @param array<string,mixed> $candidate Candidate row.
+	 * @return array<string,mixed>
+	 */
+	function homeboy_wordpress_bench_frontend_url_surface_compact( array $candidate ): array {
+		return array_filter(
+			$candidate,
+			static function ( $value ): bool {
+				return null !== $value && '' !== $value && array() !== $value;
+			}
+		);
+	}
+}
+
 if ( ! function_exists( 'homeboy_wordpress_bench_coverage_start' ) ) {
 	/**
 	 * Start collecting coverage counters for a workload/request batch.
@@ -22,14 +385,14 @@ if ( ! function_exists( 'homeboy_wordpress_bench_coverage_start' ) ) {
 		}
 
 		$state = array(
-			'label'              => $label,
-			'options'            => $options,
-			'started_at_unix_ms' => (int) floor( microtime( true ) * 1000 ),
-			'started_at'         => microtime( true ),
-			'all_hooks'          => array(),
-			'actions_before'     => homeboy_wordpress_bench_coverage_wp_actions_snapshot(),
-			'table_counts_before'=> homeboy_wordpress_bench_coverage_table_counts( $options ),
-			'php_errors'         => array(),
+			'label'                  => $label,
+			'options'                => $options,
+			'started_at_unix_ms'     => (int) floor( microtime( true ) * 1000 ),
+			'started_at'             => microtime( true ),
+			'all_hooks'              => array(),
+			'actions_before'         => homeboy_wordpress_bench_coverage_wp_actions_snapshot(),
+			'table_counts_before'    => homeboy_wordpress_bench_coverage_table_counts( $options ),
+			'php_errors'             => array(),
 			'previous_error_handler' => null,
 		);
 
@@ -124,26 +487,26 @@ if ( ! function_exists( 'homeboy_wordpress_bench_coverage_snapshot' ) ) {
 		$table_after   = homeboy_wordpress_bench_coverage_table_counts( $options );
 
 		return array(
-			'schema'              => 'homeboy/wordpress-fuzz-coverage/v1',
-			'label'               => (string) $state['label'],
-			'active'              => true,
-			'started_at_unix_ms'  => (int) $state['started_at_unix_ms'],
-			'elapsed_ms'          => max( 0, ( microtime( true ) - (float) $state['started_at'] ) * 1000 ),
-			'hooks'               => array(
+			'schema'             => 'homeboy/wordpress-fuzz-coverage/v1',
+			'label'              => (string) $state['label'],
+			'active'             => true,
+			'started_at_unix_ms' => (int) $state['started_at_unix_ms'],
+			'elapsed_ms'         => max( 0, ( microtime( true ) - (float) $state['started_at'] ) * 1000 ),
+			'hooks'              => array(
 				'all'     => homeboy_wordpress_bench_query_profiler_top_counts( $all_hooks, $top ),
 				'actions' => homeboy_wordpress_bench_query_profiler_top_counts( $actions, $top ),
 				'filters' => homeboy_wordpress_bench_query_profiler_top_counts( $filters, $top ),
 			),
-			'db'                  => array(
+			'db'                 => array(
 				'query_count'      => (int) ( $query_profile['query_count'] ?? 0 ),
 				'operations'       => $query_profile['operations'] ?? array(),
 				'tables'           => $query_profile['tables'] ?? array(),
 				'categories'       => $query_profile['categories'] ?? array(),
 				'top_query_shapes' => $query_profile['signatures'] ?? array(),
 			),
-			'mutations'           => homeboy_wordpress_bench_coverage_mutation_summary( $state['table_counts_before'], $table_after, $query_profile ),
-			'php_errors'          => homeboy_wordpress_bench_coverage_php_error_summary( $state['php_errors'], $top ),
-			'coverage_gaps'       => homeboy_wordpress_bench_coverage_gaps(),
+			'mutations'          => homeboy_wordpress_bench_coverage_mutation_summary( $state['table_counts_before'], $table_after, $query_profile ),
+			'php_errors'         => homeboy_wordpress_bench_coverage_php_error_summary( $state['php_errors'], $top ),
+			'coverage_gaps'      => homeboy_wordpress_bench_coverage_gaps(),
 		);
 	}
 }
@@ -182,8 +545,8 @@ if ( ! function_exists( 'homeboy_wordpress_bench_coverage_record_php_error' ) ) 
 
 		if ( ! empty( $GLOBALS['homeboy_wordpress_bench_coverage_state']['active'] ) ) {
 			$state =& $GLOBALS['homeboy_wordpress_bench_coverage_state']['active'];
-			$kind   = homeboy_wordpress_bench_coverage_error_kind( $severity );
-			$key    = $kind . ':' . $message;
+			$kind  = homeboy_wordpress_bench_coverage_error_kind( $severity );
+			$key   = $kind . ':' . $message;
 			if ( ! isset( $state['php_errors'][ $key ] ) ) {
 				$state['php_errors'][ $key ] = array(
 					'kind'     => $kind,

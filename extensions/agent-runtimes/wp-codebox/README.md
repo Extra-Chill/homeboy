@@ -14,10 +14,24 @@ override through the provider contract or task conversion options:
 - `workspace_tools` declares the default read-only and read-write workspace tool ids.
 - `component_path_defaults` maps runtime component contracts, legacy aliases, and
   discovery hints into generic runtime component path keys.
+- `provider_metadata` declares the operator-facing provider ids, executor backend,
+  runtime id, model fields, and provider-plugin guidance without requiring Homeboy
+  core to know WordPress or Codebox provider details.
 
 The JavaScript executor consumes these manifest fields instead of owning product
 policy in code. Callers can supply generic manifest values without adding new
 runtime-specific branches.
+
+Runtime selection and provider selection are separate concerns:
+
+- `executor.backend` selects the generic executor backend, currently `codebox` for
+  this runtime.
+- `runtime_id` selects the runtime package, currently `wp-codebox`.
+- `executor.config.provider` selects the WordPress AI provider id, such as
+  `openai`, `codex`, or `claude-code`.
+- `executor.config.model` or `executor.model` carries the provider model name as
+  opaque runtime metadata. The runtime forwards it to WP Codebox and provider
+  plugins; Homeboy core does not interpret model names.
 
 ## Adapter Boundary
 

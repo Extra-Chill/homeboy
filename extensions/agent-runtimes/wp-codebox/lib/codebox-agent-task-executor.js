@@ -316,7 +316,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const workspaceMaterialization = defaultWorkspaceMaterialization(defaults.workspaceRoot, request, config, inputs, runtimeOptions);
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
-  const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs);
+  const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs, runtimeOptions);
   const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || runtimeOptions.mounts || []);
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
@@ -1686,7 +1686,7 @@ function firstValue(...candidates) {
   return candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== '');
 }
 
-function recipeConfigFromAgentTaskRequest(request, config, inputs) {
+function recipeConfigFromAgentTaskRequest(request, config, inputs, runtimeOptions = {}) {
   const explicit = firstObject(
     inputs.recipe,
     inputs.recipe_pack,
@@ -1717,12 +1717,134 @@ function recipeConfigFromAgentTaskRequest(request, config, inputs) {
     target_repo: explicit.target_repo || explicit.targetRepo || firstValue(inputs.target_repo, inputs.targetRepo, config.target_repo, config.targetRepo, sourceRef.repo),
     target_pr: explicit.target_pr || explicit.targetPr || firstValue(inputs.target_pr, inputs.targetPr, config.target_pr, config.targetPr, sourceRef.pr, sourceRef.number),
     target_branch: explicit.target_branch || explicit.targetBranch || firstValue(inputs.target_branch, inputs.targetBranch, config.target_branch, config.targetBranch),
-    inputs: explicit.inputs || inputs.recipe_inputs || inputs.recipeInputs || config.recipe_inputs || config.recipeInputs,
+    inputs: recipeInputsFromAgentTaskRequest(config, inputs, explicit, runtimeOptions),
     secret_env: explicit.secret_env || explicit.secretEnv || inputs.recipe_secret_env || inputs.recipeSecretEnv || config.recipe_secret_env || config.recipeSecretEnv,
     metadata: explicit.metadata,
   }).filter(([, value]) => value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)));
 
   return recipe.pack || recipe.name || recipe.path || recipe.repository || recipe.target_ref ? recipe : {};
+}
+
+function recipeInputsFromAgentTaskRequest(config = {}, inputs = {}, explicit = {}, runtimeOptions = {}) {
+  const recipeInputs = firstObject(explicit.inputs, inputs.recipe_inputs, inputs.recipeInputs, config.recipe_inputs, config.recipeInputs) || {};
+  const matrixInputs = roleCapabilityMatrixRecipeInputs(config, inputs, runtimeOptions);
+  if (!matrixInputs.fixtureUsers && !matrixInputs.userSessions) {
+    return Object.keys(recipeInputs).length > 0 ? recipeInputs : undefined;
+  }
+  return {
+    ...recipeInputs,
+    fixtureUsers: mergeRecipeEntriesByName(recipeInputs.fixtureUsers, matrixInputs.fixtureUsers),
+    userSessions: mergeRecipeEntriesByName(recipeInputs.userSessions, matrixInputs.userSessions),
+  };
+}
+
+function roleCapabilityMatrixRecipeInputs(config = {}, inputs = {}, runtimeOptions = {}) {
+  const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
+  const runtimeProfile = firstObject(runtimeOptions.runtimeProfile) || {};
+  const matrix = firstDefined(
+    inputs.role_matrix,
+    inputs.roleMatrix,
+    inputs.capability_matrix,
+    inputs.capabilityMatrix,
+    config.role_matrix,
+    config.roleMatrix,
+    config.capability_matrix,
+    config.capabilityMatrix,
+    runtimeRequirements.role_matrix,
+    runtimeRequirements.roleMatrix,
+    runtimeRequirements.capability_matrix,
+    runtimeRequirements.capabilityMatrix,
+    runtimeProfile.role_matrix,
+    runtimeProfile.roleMatrix,
+    runtimeProfile.capability_matrix,
+    runtimeProfile.capabilityMatrix
+  );
+  const entries = roleCapabilityMatrixEntries(matrix);
+  if (entries.length === 0) {
+    return {};
+  }
+  return {
+    fixtureUsers: entries.map((entry) => roleMatrixFixtureUser(entry)),
+    userSessions: entries.map((entry) => roleMatrixUserSession(entry)),
+  };
+}
+
+function roleCapabilityMatrixEntries(matrix) {
+  if (Array.isArray(matrix)) {
+    return matrix.map((entry) => normalizeRoleCapabilityMatrixEntry(entry)).filter(Boolean);
+  }
+  if (!matrix || typeof matrix !== 'object') {
+    return [];
+  }
+  return Object.entries(matrix).map(([role, value]) => normalizeRoleCapabilityMatrixEntry({ role, value })).filter(Boolean);
+}
+
+function normalizeRoleCapabilityMatrixEntry(entry) {
+  if (typeof entry === 'string') {
+    return { role: entry, name: sanitizeRecipeName(entry), capabilities: [] };
+  }
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return null;
+  }
+  const value = entry.value && typeof entry.value === 'object' && !Array.isArray(entry.value) ? entry.value : {};
+  const role = firstValue(entry.role, value.role, entry.name, value.name);
+  const name = sanitizeRecipeName(firstValue(entry.name, value.name, role));
+  if (!role || !name) {
+    return null;
+  }
+  return {
+    name,
+    role: String(role),
+    username: firstValue(entry.username, value.username),
+    email: firstValue(entry.email, value.email),
+    displayName: firstValue(entry.displayName, entry.display_name, value.displayName, value.display_name),
+    password: firstValue(entry.password, value.password),
+    capabilities: normalizeArray(firstDefined(entry.capabilities, entry.capability, value.capabilities, value.capability, Array.isArray(entry.value) ? entry.value : [])).map(String),
+    sessionName: sanitizeRecipeName(firstValue(entry.session, entry.sessionName, entry.session_name, value.session, value.sessionName, value.session_name, `${name}-session`)),
+  };
+}
+
+function roleMatrixFixtureUser(entry) {
+  return withoutEmptyObjectValues({
+    name: entry.name,
+    username: entry.username || `fixture-${entry.name}`,
+    email: entry.email,
+    role: entry.role,
+    displayName: entry.displayName,
+    password: entry.password,
+    metadata: withoutEmptyObjectValues({ capabilities: entry.capabilities }),
+  });
+}
+
+function roleMatrixUserSession(entry) {
+  return withoutEmptyObjectValues({
+    name: entry.sessionName,
+    user: entry.name,
+    metadata: withoutEmptyObjectValues({ role: entry.role, capabilities: entry.capabilities }),
+  });
+}
+
+function mergeRecipeEntriesByName(explicitEntries, generatedEntries) {
+  const entries = [];
+  const seen = new Set();
+  for (const entry of [...normalizeArray(explicitEntries), ...normalizeArray(generatedEntries)]) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      continue;
+    }
+    const name = entry.name ? String(entry.name) : '';
+    if (name && seen.has(name)) {
+      continue;
+    }
+    if (name) {
+      seen.add(name);
+    }
+    entries.push(entry);
+  }
+  return entries.length > 0 ? entries : undefined;
+}
+
+function sanitizeRecipeName(value) {
+  return String(value || '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
