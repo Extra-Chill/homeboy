@@ -50,7 +50,7 @@ pub(crate) fn artifact_locator(artifact: &Value) -> Option<&str> {
         "public_url",
         "url",
     ] {
-        if let Some(value) = string_value(artifact, &[key]) {
+        if let Some(value) = string_value(artifact, &[key]).filter(|value| !value.is_empty()) {
             return Some(value);
         }
     }
