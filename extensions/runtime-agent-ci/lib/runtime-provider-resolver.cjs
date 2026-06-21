@@ -193,6 +193,8 @@ function resolveExecutor(manifest, repoRoot, options = {}) {
 		status: provider?.status || '',
 		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities : [],
 		path: scriptArg ? scriptArg.replace('{{runtime_path}}', path.join(repoRoot, 'agent-runtimes', manifest.id)) : '',
+		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities.filter(Boolean) : [],
+		runtime_execution_contracts: provider?.runtime_execution_contracts || provider?.execution_contracts || {},
 	};
 }
 

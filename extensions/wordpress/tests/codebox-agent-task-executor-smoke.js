@@ -441,10 +441,16 @@ assert.equal(provider.capabilities.includes('browser_runtime'), true);
 assert.equal(provider.capabilities.includes('workspace_tools'), true);
 assert.equal(provider.capabilities.includes('patch_artifacts'), true);
 assert.equal(provider.capabilities.includes('cleanup_observability'), true);
+assert.equal(provider.capabilities.includes('ability_execution'), true);
 assert.equal(provider.capabilities.includes('agent_bundle_execution'), true);
+assert.equal(provider.capabilities.includes('workflow_execution'), true);
 assert.equal(provider.capabilities.includes('typed_bundle_outputs'), true);
 assert.equal(provider.capabilities.includes('external_recipe_packs'), true);
 assert.equal(provider.capabilities.includes('recipe_probe_artifacts'), true);
+assert.deepEqual(provider.runtime_execution_contracts.bundle, {
+  ability_field: 'runtime_bundle_ability',
+  required_capabilities: ['agent_bundle_execution'],
+});
 for (const capability of repoLoopCapabilities) {
   assert.equal(provider.capabilities.includes(capability), false);
 }

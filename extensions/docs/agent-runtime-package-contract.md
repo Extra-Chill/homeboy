@@ -185,10 +185,41 @@ Use stable, backend-neutral names where possible, such as:
 - `patch_artifacts`
 - `verification_artifacts`
 - `browser_runtime`
+- `ability_execution`
+- `agent_bundle_execution`
+- `workflow_execution`
 
 Backend-specific capabilities are acceptable when they are intentionally part of
 selection, but they should not replace the generic capability when a generic one
 applies.
+
+## Runtime Execution Contracts
+
+Providers that can execute generic runtime descriptors should declare
+`runtime_execution_contracts` on the executor provider. Each key is a generic
+`runtime_execution.kind`; each value maps that kind to a provider-specific
+runtime-profile field and the capabilities required to use it:
+
+```json
+{
+  "runtime_execution_contracts": {
+    "bundle": {
+      "ability_field": "runtime_bundle_ability",
+      "required_capabilities": ["agent_bundle_execution"]
+    },
+    "workflow": {
+      "ability_field": "runtime_workflow_ability",
+      "required_capabilities": ["workflow_execution"]
+    }
+  }
+}
+```
+
+Caller configs can then use `runtime_execution: { "kind": "bundle", ... }`
+without embedding a provider-specific ability string. The selected adapter maps
+the generic kind to its own runtime-profile ability field and fails closed when
+the provider does not advertise the required capability. Direct `ability`
+execution remains explicit: callers supply the ability they intend to invoke.
 
 ## Workspace Materialization
 

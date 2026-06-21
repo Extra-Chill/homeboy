@@ -167,6 +167,7 @@ function providerContract(options = {}) {
     ...agentTaskProviderContractFields(),
     secret_env_requirements: options.secretEnvRequirements || runtimeSecretEnvRequirements(),
     capabilities: normalizeArray(options.capabilities || PROVIDER_CAPABILITIES),
+    runtime_execution_contracts: runtimeExecutionContracts(),
     workspace_materialization: {
       cwd: 'git_checkout',
     },
@@ -200,6 +201,10 @@ function runtimeCommandInvocation(options = {}) {
 
 function runtimeProviderCapabilities() {
   return normalizeArray(runtimeExecutorManifest().capabilities);
+}
+
+function runtimeExecutionContracts() {
+  return firstObject(runtimeExecutorManifest().runtime_execution_contracts, runtimeExecutorManifest().execution_contracts) || {};
 }
 
 function runtimeWorkspaceTools(options = {}) {
