@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use crate::core::agent_tasks::{
     provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
 };
-use crate::core::api_jobs::{Job, JobEvent, JobStatus, RemoteRunnerJobRequest};
+use crate::core::api_jobs::{
+    Job, JobArtifactMetadata, JobEvent, JobStatus, RemoteRunnerJobRequest,
+};
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
@@ -95,6 +97,8 @@ pub struct RunnerExecOutput {
     pub mirror_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<JobArtifactMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -570,6 +574,7 @@ fn exec_via_reverse_broker(
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
+            artifacts: job.artifacts.clone(),
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -723,6 +728,7 @@ fn exec_via_daemon(
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
+            artifacts: job.artifacts.clone(),
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -2028,6 +2034,7 @@ fn exec_output(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            artifacts: Vec::new(),
             metrics: output.metrics,
             capture: output.capture,
             diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
@@ -2420,6 +2427,7 @@ mod tests {
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: None,
             diagnostics: None,
