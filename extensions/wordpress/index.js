@@ -12,6 +12,7 @@ module.exports = {
 	...require('./lib/request-profiler'),
 	...require('./lib/rest-db-query-profiler'),
 	...require('./lib/db-inventory'),
+	...require('./lib/wordpress-discovery-inventory'),
 	...require('./lib/browser-request-coverage'),
 	...require('./lib/full-surface-coverage'),
 	...require('./lib/external-http-guardrail'),
