@@ -34,8 +34,8 @@ const config = buildConfig({
     id: 'codebox-workload',
     label: 'Codebox workload',
   }),
-  TOOL_POLICY: JSON.stringify({
-    schema: 'wp-codebox/tool-policy/v1',
+  TOOL_PROFILE: JSON.stringify({
+    schema: 'homeboy/runtime-tool-profile/v1',
     tools: { workspace_read: true },
   }),
   ARTIFACT_DECLARATIONS: JSON.stringify([
@@ -52,7 +52,7 @@ assert.deepEqual(config.workload, {
   label: 'Codebox workload',
 });
 assert.deepEqual(config.sandbox_tool_policy, {
-  schema: 'wp-codebox/tool-policy/v1',
+  schema: 'homeboy/runtime-tool-profile/v1',
   tools: { workspace_read: true },
 });
 assert.deepEqual(config.artifact_declarations, [
@@ -68,5 +68,22 @@ assert.deepEqual(config.artifact_declarations, [
     required: true,
   },
 ]);
+
+const legacyToolPolicyConfig = buildConfig({
+  GITHUB_WORKSPACE: workspace,
+  RUNNER_TEMP: runnerTemp,
+  WORKLOAD_ID: 'legacy-tool-policy',
+  TARGET_REPO: 'Extra-Chill/example',
+  RUNTIME: 'wp-codebox',
+  PROFILE: 'codebox-profile',
+  RUNTIME_PROFILES: JSON.stringify({
+    'codebox-profile': {
+      schema: 'wp-codebox/runtime-profile/v1',
+      id: 'codebox-profile',
+    },
+  }),
+  TOOL_POLICY: JSON.stringify({ tools: { workspace_write: false } }),
+});
+assert.deepEqual(legacyToolPolicyConfig.sandbox_tool_policy, { tools: { workspace_write: false } });
 
 console.log('runtime agent full-run Codebox inputs smoke passed');

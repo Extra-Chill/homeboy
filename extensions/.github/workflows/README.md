@@ -113,6 +113,12 @@ values. It also exposes `auth_mode`, which is `homeboy_app_token` when the
 workflow generated and used a Homeboy GitHub App installation token, or
 `github_token_fallback` when it used the repository-scoped GitHub Actions token.
 
+Callers that compose workflow inputs before invoking `runtime-agent-full-run.yml`
+can use `.github/actions/render-runtime-workflow-inputs`. The action accepts only
+`runtime`, `runtime_profile`, `runtime_profiles`, and `tool_profile`, then emits
+selected-runtime workflow input JSON without exposing WP Codebox ability names,
+CLI paths, schemas, or mount targets to the downstream workflow.
+
 ## GitHub auth modes
 
 The workflow keeps two GitHub authentication modes:
@@ -188,8 +194,9 @@ jobs:
 - `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
 - Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
 - `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the selected runtime profile.
-- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, and declarative runtime requirements. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
+- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to WP Codebox as runtime component requirements.
+- `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields; for WP Codebox that becomes the sandbox tool policy. `tool_policy` remains accepted as a compatibility alias.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.

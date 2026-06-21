@@ -22,6 +22,9 @@ const {
   runtimeAgentCiFirstNonEmptyObject,
   runtimeAgentCiTaskFromRequest,
 } = require('../../../runtime-agent-ci');
+const {
+  renderRuntimeWorkflowInputs,
+} = require('../../../runtime-agent-ci/lib/runtime-workflow-inputs.cjs');
 
 function main() {
   const config = buildConfig(process.env);
@@ -65,7 +68,7 @@ function buildConfig(env) {
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
   const workload = codeboxWorkloadFromEnv(env, workloadId);
-  const toolPolicy = parseJsonInput('tool_policy', env.TOOL_POLICY || '{}', 'object', {});
+  const toolProfile = parseJsonInput('tool_profile', env.TOOL_PROFILE || env.TOOL_POLICY || '{}', 'object', {});
   const runtimeOutputProjections = runtimeAgentCiFirstNonEmptyObject(
     parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {}),
     parseJsonInput('engine_data_outputs', env.ENGINE_DATA_OUTPUTS || '{}', 'object', {})
@@ -80,19 +83,19 @@ function buildConfig(env) {
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
-  const resolvedRuntimeProfile = runtimeProfiles[runtimeProfile] || {};
-  const effectiveRuntimeProfile = runtimeProfilePayload(runtime, {
-    id: runtimeProfile,
-    profile: resolvedRuntimeProfile,
+  const renderedRuntimeInputs = renderRuntimeWorkflowInputs({
+    runtimeProviderConfig: runtime,
+    runtime,
+    runtime_profile: runtimeProfile,
+    runtime_profiles: runtimeProfiles,
+    tool_profile: toolProfile,
     componentContracts,
     runtimeOverlays,
     runtimeEnv,
     providerPluginPaths,
   });
-  const effectiveRuntimeProfiles = {
-    ...runtimeProfiles,
-    [runtimeProfile]: effectiveRuntimeProfile,
-  };
+  const effectiveRuntimeProfile = renderedRuntimeInputs.runtime_requirements;
+  const effectiveRuntimeProfiles = renderedRuntimeInputs.runtime_profiles;
   const runnerWorkspace = parseJsonInput('runner_workspace', env.RUNNER_WORKSPACE_CONFIG || '{}', 'object', {});
   const runnerWorkspaceRepo = targetRepo.split('/')[1].replace(/\.git$/, '');
   const runnerWorkspaceGuestCheckout = `/workspace/${runnerWorkspaceRepo}`;
@@ -166,7 +169,7 @@ function buildConfig(env) {
     time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: artifactDeclarationsFromEnv(env, runtime),
-    sandbox_tool_policy: isCodeboxRuntime(runtime) && Object.keys(toolPolicy).length > 0 ? toolPolicy : undefined,
+    sandbox_tool_policy: renderedRuntimeInputs.workflow_inputs.sandbox_tool_policy,
     output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
     runtime_output_projections: runtimeOutputProjections,
     component_contracts: componentContracts,
@@ -258,14 +261,6 @@ function runtimeTaskFromEnv(env) {
 
 function isCodeboxRuntime(runtime) {
   return runtime?.id === 'wp-codebox' || runtime?.executor?.backend === 'codebox';
-}
-
-function runtimeProfilePayload(runtime, options) {
-  if (!isCodeboxRuntime(runtime)) {
-    return options.profile;
-  }
-  const { codeboxRuntimeProfilePayload } = require('../../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
-  return codeboxRuntimeProfilePayload(options);
 }
 
 function runtimePathRequired(runtime, pathName) {
