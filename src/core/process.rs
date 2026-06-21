@@ -1,5 +1,5 @@
 use crate::core::error::{Error, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,29 +33,6 @@ impl ProcessStep {
     }
 }
 
-/// Resolve a process step's working directory inside a containment root.
-///
-/// When a step omits a working directory, the normalized root becomes the
-/// effective working directory. This gives local commands, extensions, and rigs
-/// one reusable path policy without requiring filesystem canonicalization.
-pub(crate) fn prepare_contained_process_step(
-    root: impl AsRef<Path>,
-    step: ProcessStep,
-) -> Result<ProcessStep> {
-    let root = crate::core::paths::normalize_local_path(root);
-    let working_dir = match step.working_dir.as_deref() {
-        Some(working_dir) => {
-            crate::core::paths::resolve_contained_local_path(&root, working_dir, "working_dir")?
-        }
-        None => root,
-    };
-
-    Ok(ProcessStep {
-        working_dir: Some(working_dir),
-        ..step
-    })
-}
-
 pub fn pid_is_running(pid: u32) -> bool {
     if pid > i32::MAX as u32 {
         return false;
@@ -87,48 +64,6 @@ pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<
         stop.store(true, Ordering::SeqCst);
     })
     .map_err(|err| Error::internal_unexpected(format!("install {context} signal handler: {err}")))
-}
-
-#[cfg(test)]
-mod containment_tests {
-    use super::*;
-
-    #[test]
-    fn process_step_defaults_to_root_working_dir() {
-        let step = prepare_contained_process_step("/repo/./worktree", ProcessStep::new("cargo"))
-            .expect("prepared step");
-
-        assert_eq!(step.working_dir, Some(PathBuf::from("/repo/worktree")));
-    }
-
-    #[test]
-    fn process_step_accepts_relative_working_dir_inside_root() {
-        let step = prepare_contained_process_step(
-            "/repo/worktree",
-            ProcessStep::new("cargo")
-                .args(["test"])
-                .working_dir("crates/core/.."),
-        )
-        .expect("prepared step");
-
-        assert_eq!(step.program, "cargo");
-        assert_eq!(step.args, vec!["test".to_string()]);
-        assert_eq!(
-            step.working_dir,
-            Some(PathBuf::from("/repo/worktree/crates"))
-        );
-    }
-
-    #[test]
-    fn process_step_rejects_working_dir_escape() {
-        let err = prepare_contained_process_step(
-            "/repo/worktree",
-            ProcessStep::new("cargo").working_dir("../outside"),
-        )
-        .expect_err("cwd escape should fail");
-
-        assert!(err.to_string().contains("escapes root '/repo/worktree'"));
-    }
 }
 
 pub fn process_group_is_running(pgid: i32) -> bool {

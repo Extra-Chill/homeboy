@@ -9,10 +9,7 @@
 //! execution run.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-use crate::core::execution::ChangeArtifactProvenance as ExecutionChangeArtifactProvenance;
-use crate::core::execution::{ApprovalScope, ChangeArtifact as ExecutionChangeArtifact};
 use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -114,64 +111,6 @@ impl ChangeArtifact {
             schema: self.schema.clone(),
             provenance: self.provenance.clone(),
             digest: self.digest.clone(),
-        }
-    }
-
-    /// Project this apply-wire artifact into the lifecycle artifact envelope.
-    ///
-    /// The projection is intentionally lossy: source snapshot, schema, and
-    /// digest remain in metadata while the lifecycle artifact carries the
-    /// review-facing id/type/files/diff/provenance fields.
-    pub(crate) fn to_execution_change_artifact(
-        &self,
-        fallback_id: impl Into<String>,
-        artifact_type: impl Into<String>,
-    ) -> ExecutionChangeArtifact {
-        let artifact_id = self
-            .provenance
-            .as_ref()
-            .and_then(|provenance| provenance.artifact_id.clone())
-            .unwrap_or_else(|| fallback_id.into());
-        let artifact_type = artifact_type.into();
-        let mut metadata = HashMap::new();
-        metadata.insert("schema".to_string(), serde_json::json!(self.schema.clone()));
-        metadata.insert(
-            "source_snapshot".to_string(),
-            serde_json::to_value(&self.source_snapshot).unwrap_or(serde_json::Value::Null),
-        );
-        if let Some(digest) = &self.digest {
-            metadata.insert(
-                "digest".to_string(),
-                serde_json::to_value(digest).unwrap_or(serde_json::Value::Null),
-            );
-        }
-
-        ExecutionChangeArtifact {
-            id: artifact_id.clone(),
-            artifact_type,
-            provenance: self.provenance.as_ref().map_or_else(
-                || ExecutionChangeArtifactProvenance {
-                    source: "apply_change_artifact".to_string(),
-                    run_id: None,
-                    step_id: None,
-                    command: None,
-                    captured_at: None,
-                },
-                |provenance| ExecutionChangeArtifactProvenance {
-                    source: provenance.producer.clone(),
-                    run_id: provenance.run_id.clone(),
-                    step_id: None,
-                    command: provenance.command.as_ref().map(|command| command.join(" ")),
-                    captured_at: None,
-                },
-            ),
-            title: None,
-            summary: None,
-            path: None,
-            files: self.files(),
-            diff: self.patch.as_ref().map(|patch| patch.content.clone()),
-            approval_scope: Some(ApprovalScope::Artifact { artifact_id }),
-            metadata,
         }
     }
 
@@ -320,55 +259,6 @@ mod tests {
         );
         assert_eq!(UNIFIED_DIFF_PATCH_FORMAT, "unified_diff");
         assert_eq!(DIGEST_ALGORITHM_SHA256, "sha256");
-    }
-
-    #[test]
-    fn apply_artifact_projects_to_execution_lifecycle_artifact() {
-        let artifact = ChangeArtifact {
-            schema: CHANGE_ARTIFACT_SCHEMA.to_string(),
-            source_snapshot: source_snapshot(),
-            patch: None,
-            delta: Some(ChangeDelta {
-                files: vec![ChangeDeltaFile {
-                    path: "src/lib.rs".to_string(),
-                    content_base64: Some("Zm9vCg==".to_string()),
-                    delete: false,
-                }],
-            }),
-            provenance: Some(ChangeArtifactProvenance {
-                producer: "runner.capture_patch".to_string(),
-                run_id: Some("run-1".to_string()),
-                artifact_id: Some("patch.diff".to_string()),
-                command: Some(vec!["homeboy".to_string(), "lab".to_string()]),
-            }),
-            digest: Some(ChangeArtifactDigest {
-                algorithm: DIGEST_ALGORITHM_SHA256.to_string(),
-                value: "abc123".to_string(),
-            }),
-        };
-
-        let execution_artifact =
-            artifact.to_execution_change_artifact("fallback.patch", "runner.apply.change_artifact");
-
-        assert_eq!(execution_artifact.id, "patch.diff");
-        assert_eq!(
-            execution_artifact.artifact_type,
-            "runner.apply.change_artifact"
-        );
-        assert_eq!(execution_artifact.provenance.source, "runner.capture_patch");
-        assert_eq!(
-            execution_artifact.provenance.command.as_deref(),
-            Some("homeboy lab")
-        );
-        assert_eq!(execution_artifact.files, vec!["src/lib.rs"]);
-        assert_eq!(
-            execution_artifact.metadata["schema"],
-            serde_json::json!(CHANGE_ARTIFACT_SCHEMA)
-        );
-        assert_eq!(
-            execution_artifact.metadata["digest"]["algorithm"],
-            DIGEST_ALGORITHM_SHA256
-        );
     }
 
     fn source_snapshot() -> SourceSnapshot {

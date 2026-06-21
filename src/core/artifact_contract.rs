@@ -82,22 +82,6 @@ impl ArtifactContract {
             .or(self.path.as_deref())
     }
 
-    pub(crate) fn into_evidence_contract(self) -> Option<EvidenceContract> {
-        let target = self.target()?.to_string();
-        let label = self.label.clone().unwrap_or_else(|| self.kind.clone());
-        Some(EvidenceContract {
-            schema: EVIDENCE_CONTRACT_SCHEMA.to_string(),
-            kind: self.kind.clone(),
-            target,
-            label,
-            role: self.role.clone(),
-            semantic_key: self.semantic_key.clone(),
-            artifact: Some(self),
-            metadata: Value::Null,
-            extra: BTreeMap::new(),
-        })
-    }
-
     pub fn to_artifact_ref(&self, id: impl Into<String>, run_id: impl Into<String>) -> ArtifactRef {
         ArtifactRef {
             schema: crate::core::artifact_ref::ARTIFACT_REF_SCHEMA.to_string(),
@@ -287,30 +271,6 @@ mod tests {
         .expect_err("target error");
 
         assert!(err.contains("path, url, or public_url"));
-    }
-
-    #[test]
-    fn artifact_contract_can_become_evidence_contract() {
-        let evidence = ArtifactContract::from_value(json!({
-            "kind": "summary",
-            "role": "summary",
-            "semantic_key": "controller.summary",
-            "public_url": "https://artifacts.example.test/summary.json"
-        }))
-        .expect("artifact contract")
-        .into_evidence_contract()
-        .expect("evidence contract");
-
-        assert_eq!(evidence.schema, EVIDENCE_CONTRACT_SCHEMA);
-        assert_eq!(evidence.kind, "summary");
-        assert_eq!(
-            evidence.target,
-            "https://artifacts.example.test/summary.json"
-        );
-        assert_eq!(evidence.label, "summary");
-        assert_eq!(evidence.role.as_deref(), Some("summary"));
-        assert_eq!(evidence.semantic_key.as_deref(), Some("controller.summary"));
-        assert!(evidence.artifact.is_some());
     }
 
     #[test]
