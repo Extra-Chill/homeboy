@@ -123,6 +123,29 @@ if [ -f "${NESTED_PACKAGE_ARTIFACTS}/wordpress-dependency-plugin-preflight-diagn
     exit 1
 fi
 
+MONOREPO_DEP="${TMP_ROOT}/blocks-engine"
+mkdir -p "${MONOREPO_DEP}/php-transformer"
+cat > "${MONOREPO_DEP}/php-transformer/blocks-engine-php-transformer.php" <<'PHP'
+<?php
+/**
+ * Plugin Name: Blocks Engine PHP Transformer Fixture
+ */
+PHP
+
+MONOREPO_PACKAGE_ROOT=$(_homeboy_validation_dependency_package_root "$MONOREPO_DEP" "php-transformer")
+if [ "$MONOREPO_PACKAGE_ROOT" != "${MONOREPO_DEP}/php-transformer" ]; then
+    echo "ERROR: package_path resolution did not return the monorepo plugin package root." >&2
+    exit 1
+fi
+
+MONOREPO_ENTRY=$(jq -nc --arg source "$MONOREPO_DEP" '{source: $source, plugin_slug: "blocks-engine-php-transformer", package_path: "php-transformer"}')
+MONOREPO_RESOLVED=$(_homeboy_resolve_validation_dependency_entry_path "$MONOREPO_ENTRY")
+if [ "$MONOREPO_RESOLVED" != "${MONOREPO_DEP}/php-transformer" ]; then
+    echo "ERROR: validation dependency object package_path did not resolve to the plugin package root." >&2
+    echo "Resolved: $MONOREPO_RESOLVED" >&2
+    exit 1
+fi
+
 SANITIZE_KEY_DEP="${TMP_ROOT}/sanitize-key-plugin"
 mkdir -p "$SANITIZE_KEY_DEP"
 cat > "${SANITIZE_KEY_DEP}/sanitize-key-plugin.php" <<'PHP'
