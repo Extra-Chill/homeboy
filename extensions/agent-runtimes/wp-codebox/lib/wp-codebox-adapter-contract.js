@@ -1,35 +1,31 @@
 'use strict';
 
+const {
+  providerRuntimeInvocationContract,
+  runtimeContractSchemas,
+} = require('./wp-codebox-runtime-contract-source');
+
+const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
+const RUNTIME_INVOCATION_CONTRACT = providerRuntimeInvocationContract();
+
 const WP_CODEBOX_TASK_REQUEST_SCHEMA = 'wp-codebox/task-input/v1';
 const WP_CODEBOX_PROVIDER_ID = 'wordpress.codebox-agent-task-executor';
 const WP_CODEBOX_PROVIDER_LABEL = 'WP Codebox agent task executor';
 const WP_CODEBOX_BACKEND = 'codebox';
-const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = 'wp-codebox/provider-runtime-invocation-contract/v1';
+const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.providerRuntime.invocation;
 const WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA = 'wp-codebox/provider-credential-boundary/v1';
 
 const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
-  workspaceCapture: 'wp-codebox.runner-workspace.capture',
-  workspaceCommand: 'wp-codebox.runner-workspace.command',
-  workspacePublish: 'wp-codebox.runner-workspace.publish',
-  toolCallTranscriptRecord: 'wp-codebox.tool-call-transcript.record',
-  artifactHandoff: 'wp-codebox.artifact-handoff',
+  ...RUNTIME_INVOCATION_CONTRACT.tasks,
 };
 
 const WP_CODEBOX_PROVIDER_RUNTIME_ABILITY_NAMES = {
-  workspaceCapture: 'wp-codebox/runner-workspace-capture',
-  workspaceCommand: 'wp-codebox/runner-workspace-command',
-  workspacePublish: 'wp-codebox/runner-workspace-publish',
-  toolCallTranscriptRecord: 'wp-codebox/record-tool-call-transcript',
-  artifactHandoff: 'wp-codebox/handoff-artifacts',
+  ...RUNTIME_INVOCATION_CONTRACT.abilities,
 };
 
 const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS = {
-  workspace_capture: 'wp-codebox/runner-workspace-capture-result/v1',
-  workspace_command: 'wp-codebox/runner-workspace-command-result/v1',
-  workspace_publication: 'wp-codebox/runner-workspace-publication-result/v1',
-  tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
-  evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
-  artifact_result_envelope: 'wp-codebox/artifact-result-envelope/v1',
+  ...RUNTIME_INVOCATION_CONTRACT.result_schemas,
+  artifact_result_envelope: RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope,
 };
 
 const WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMA_KEYS = {

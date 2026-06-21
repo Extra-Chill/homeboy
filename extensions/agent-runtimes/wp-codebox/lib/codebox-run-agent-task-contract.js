@@ -3,9 +3,14 @@
 const {
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
 } = require('./wp-codebox-adapter-contract');
+const {
+  runtimeContractSchemas,
+} = require('./wp-codebox-runtime-contract-source');
+
+const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 
 const WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA = 'wp-codebox/run-agent-task/v1';
-const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = 'wp-codebox/agent-task-run-result/v1';
+const WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.agentTask.runResult;
 const WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA = 'wp-codebox/agent-task-run/v1';
 const WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA = WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA;
 const WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND = 'run-agent-task';
