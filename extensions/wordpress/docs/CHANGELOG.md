@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.7.62] - 2026-06-21
+
+### Changed
+- Tighten Codebox runtime adapter boundary
+
 ## [3.7.61] - 2026-06-21
 
 ### Changed
