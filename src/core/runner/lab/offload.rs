@@ -667,6 +667,9 @@ fn run_runner_resident_lab_offload(
         stderr.push('\n');
     }
     stderr.push_str(&exec_output.stderr);
+    if exit_code != 0 {
+        append_runner_failure_context_summary(&mut stderr, &exec_output);
+    }
 
     Ok(LabOffloadOutcome::Offloaded {
         plan,
@@ -1507,6 +1510,7 @@ fn run_lab_offload_inner(
         stderr.push_str(&format!(
             "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
         ));
+        append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = agent_task_run_id.as_deref() {
             if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
                 &exec_output.stdout,
@@ -2078,6 +2082,30 @@ fn missing_mutation_patch_error(
     error
 }
 
+fn append_runner_failure_context_summary(
+    stderr: &mut String,
+    exec_output: &crate::core::runner::RunnerExecOutput,
+) {
+    let Some(context) = exec_output.failure_context.as_ref() else {
+        return;
+    };
+    let job = context.job_id.as_deref().unwrap_or("unknown runner job");
+    let run = context
+        .persisted_run_id
+        .as_deref()
+        .unwrap_or("unknown persisted run");
+    let field = context
+        .contract_field
+        .as_deref()
+        .unwrap_or("unknown contract field");
+    stderr.push_str(&format!(
+        "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`; contract field `{field}`; reason: {}.\n",
+        context.command.join(" "),
+        context.runner_id,
+        context.reason
+    ));
+}
+
 fn mutation_return_unavailable_outcome(
     plan: HomeboyPlan,
     selection: &LabRunnerSelection,
@@ -2117,8 +2145,9 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+        RunnerExecFailureContext, RunnerExecMode, RunnerExecOutput, RunnerRequiredTool,
+        RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
+        RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -3281,6 +3310,7 @@ mod tests {
                 stderr: CaptureMetadata::default(),
             }),
             diagnostics: None,
+            failure_context: None,
         };
 
         let err = ensure_lab_offload_streams_not_truncated(&exec_output)
@@ -3291,6 +3321,52 @@ mod tests {
         assert_eq!(err.details["runner_id"], "lab-default");
         assert_eq!(err.details["job_id"], "job-123");
         assert_eq!(err.details["capture"]["stdout"]["truncated"], true);
+    }
+
+    #[test]
+    fn lab_offload_failure_summary_uses_runner_failure_context() {
+        let exec_output = RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "lab-default".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Daemon,
+            argv: vec!["homeboy".to_string(), "test".to_string()],
+            remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            job_id: Some("job-123".to_string()),
+            job_events: None,
+            mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+            patch: None,
+            metrics: None,
+            capture: None,
+            diagnostics: None,
+            failure_context: Some(RunnerExecFailureContext {
+                schema: "homeboy/runner-exec-failure-context/v1",
+                runner_id: "lab-default".to_string(),
+                job_id: Some("job-123".to_string()),
+                persisted_run_id: Some("runner-exec-lab-default-job-123".to_string()),
+                command: vec!["homeboy".to_string(), "test".to_string()],
+                exit_code: 2,
+                contract_field: Some("cwd".to_string()),
+                reason: "Missing required field: cwd".to_string(),
+                error_code: Some("validation.invalid_argument".to_string()),
+                error_message: Some("Missing required field: cwd".to_string()),
+            }),
+        };
+        let mut stderr = String::new();
+
+        append_runner_failure_context_summary(&mut stderr, &exec_output);
+
+        assert!(stderr.contains("command `homeboy test`"));
+        assert!(stderr.contains("runner job `job-123`"));
+        assert!(stderr.contains("persisted run `runner-exec-lab-default-job-123`"));
+        assert!(stderr.contains("contract field `cwd`"));
+        assert!(stderr.contains("Missing required field: cwd"));
     }
 
     #[test]
@@ -3322,6 +3398,7 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
+            failure_context: None,
         };
 
         let err = missing_mutation_patch_error(

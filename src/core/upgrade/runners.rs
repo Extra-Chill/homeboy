@@ -3016,6 +3016,7 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
+            failure_context: None,
         }
     }
 }

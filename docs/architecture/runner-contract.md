@@ -97,6 +97,36 @@ the wrapper process group is terminated and the runner command returns failure
 evidence promptly instead of waiting forever. Runners may include `message`,
 `error`, `summary`, or `failure.message` for the stderr detail surfaced by core.
 
+## Failure context
+
+Runner exec results expose a generic `failure_context` object when the executed
+command exits nonzero. The context is owned by the runner/result contract, not by
+any provider or command family, so Lab offload and direct runner commands can
+identify the same canonical failed nested command.
+
+Shape:
+
+```json
+{
+  "schema": "homeboy/runner-exec-failure-context/v1",
+  "runner_id": "homeboy-lab",
+  "job_id": "runner-daemon-job-id",
+  "persisted_run_id": "runner-exec-homeboy-lab-run-id",
+  "command": ["homeboy", "test", "sample-plugin"],
+  "exit_code": 2,
+  "contract_field": "cwd",
+  "reason": "Missing required field: cwd",
+  "error_code": "validation.invalid_argument",
+  "error_message": "Missing required field: cwd"
+}
+```
+
+`job_id` is the daemon or reverse-broker runner job id. `persisted_run_id` is the
+mirrored Homeboy run id when evidence persistence is available. `contract_field`
+is parsed from standard Homeboy JSON error envelopes (`error.details.field`,
+`error.field`, or `contract_field`) when present; otherwise it is omitted and the
+raw execution evidence remains under `execution`.
+
 Trace runners also receive trace-specific variables when invoked by `homeboy trace`:
 
 | Variable | Source | Meaning |

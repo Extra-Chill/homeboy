@@ -101,6 +101,27 @@ pub struct RunnerExecOutput {
     pub capture: Option<CommandCaptureMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_context: Option<RunnerExecFailureContext>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerExecFailureContext {
+    pub schema: &'static str,
+    pub runner_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted_run_id: Option<String>,
+    pub command: Vec<String>,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_field: Option<String>,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -399,6 +420,9 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     if let Some(runner_error) = runner_error {
         details["runner_error"] = runner_error;
     }
+    if let Some(failure_context) = output.failure_context.as_ref() {
+        details["failure_context"] = serde_json::to_value(failure_context).unwrap_or(Value::Null);
+    }
 
     Some(
         Error::new(
@@ -412,6 +436,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         .with_hint(format!(
             "Runner `{}` executed `{}` from `{}`.", output.runner_id, command, output.remote_cwd
         ))
+        .with_hint(runner_exec_failure_context_hint(output))
         .with_hint(
             "Homeboy parsed runner-side JSON errors from stdout, stderr, and job event messages when present; inspect error.details.execution for the full job evidence."
                 .to_string(),
@@ -542,14 +567,24 @@ fn exec_via_reverse_broker(
     let mirror =
         mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
-    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
 
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
         &job.id.to_string(),
-        mirror_run_id,
+        mirror_run_id.as_deref(),
         DaemonJobHandoffState::Terminal(job.status),
+    );
+    let failure_context = runner_exec_failure_context(
+        &runner.id,
+        Some(&job.id.to_string()),
+        mirror_run_id.as_deref(),
+        &command,
+        exit_code,
+        Some(&result),
+        &stdout,
+        &stderr,
     );
 
     Ok((
@@ -568,11 +603,12 @@ fn exec_via_reverse_broker(
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
-            mirror_run_id: mirror.map(|evidence| evidence.run.id),
+            mirror_run_id,
             patch,
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
+            failure_context,
         },
         exit_code,
     ))
@@ -696,13 +732,23 @@ fn exec_via_daemon(
 
     let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
-    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+    let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
         &job.id.to_string(),
-        mirror_run_id,
+        mirror_run_id.as_deref(),
         DaemonJobHandoffState::Terminal(job.status),
+    );
+    let failure_context = runner_exec_failure_context(
+        &runner.id,
+        Some(&job.id.to_string()),
+        mirror_run_id.as_deref(),
+        &command,
+        exit_code,
+        Some(&result),
+        &stdout,
+        &stderr,
     );
 
     Ok((
@@ -721,11 +767,12 @@ fn exec_via_daemon(
             job_id: Some(job.id.to_string()),
             job: Some(job),
             job_events: Some(events),
-            mirror_run_id: mirror.map(|evidence| evidence.run.id),
+            mirror_run_id,
             patch,
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
+            failure_context,
         },
         exit_code,
     ))
@@ -2010,6 +2057,9 @@ fn exec_output(
         redaction_env,
         secret_env_names,
     );
+    let failure_context = runner_exec_failure_context(
+        &runner.id, None, None, &command, exit_code, None, &stdout, &stderr,
+    );
     (
         RunnerExecOutput {
             variant: "exec",
@@ -2031,6 +2081,7 @@ fn exec_output(
             metrics: output.metrics,
             capture: output.capture,
             diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
+            failure_context,
         },
         exit_code,
     )
@@ -2225,6 +2276,116 @@ fn string_field(value: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn runner_exec_failure_context(
+    runner_id: &str,
+    job_id: Option<&str>,
+    persisted_run_id: Option<&str>,
+    command: &[String],
+    exit_code: i32,
+    result: Option<&Value>,
+    stdout: &str,
+    stderr: &str,
+) -> Option<RunnerExecFailureContext> {
+    if exit_code == 0 {
+        return None;
+    }
+
+    let runner_error = result
+        .and_then(find_homeboy_error_in_result_value)
+        .or_else(|| find_homeboy_error_in_text(stdout))
+        .or_else(|| find_homeboy_error_in_text(stderr));
+    let contract_field = runner_error
+        .as_ref()
+        .and_then(error_contract_field)
+        .map(str::to_string);
+    let error_code = runner_error
+        .as_ref()
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let error_message = runner_error
+        .as_ref()
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let reason = error_message
+        .clone()
+        .or_else(|| error_code.clone())
+        .or_else(|| first_non_empty_line(stderr).map(str::to_string))
+        .or_else(|| first_non_empty_line(stdout).map(str::to_string))
+        .unwrap_or_else(|| "runner command exited non-zero".to_string());
+
+    Some(RunnerExecFailureContext {
+        schema: "homeboy/runner-exec-failure-context/v1",
+        runner_id: runner_id.to_string(),
+        job_id: job_id.map(str::to_string),
+        persisted_run_id: persisted_run_id.map(str::to_string),
+        command: command.to_vec(),
+        exit_code,
+        contract_field,
+        reason,
+        error_code,
+        error_message,
+    })
+}
+
+fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> String {
+    let Some(context) = output.failure_context.as_ref() else {
+        return "Canonical failed command context was unavailable; inspect error.details.execution for raw runner evidence.".to_string();
+    };
+    let field = context
+        .contract_field
+        .as_deref()
+        .unwrap_or("unknown contract field");
+    let job = context.job_id.as_deref().unwrap_or("unknown runner job");
+    let run = context
+        .persisted_run_id
+        .as_deref()
+        .unwrap_or("unknown persisted run");
+    format!(
+        "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`; contract field: `{field}`; reason: {}.",
+        context.command.join(" "),
+        context.reason
+    )
+}
+
+fn error_contract_field(error: &Value) -> Option<&str> {
+    error
+        .get("details")
+        .and_then(|details| details.get("field"))
+        .and_then(Value::as_str)
+        .or_else(|| error.get("field").and_then(Value::as_str))
+        .or_else(|| {
+            error
+                .get("details")
+                .and_then(|details| details.get("contract_field"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| error.get("contract_field").and_then(Value::as_str))
+}
+
+fn find_homeboy_error_in_result_value(value: &Value) -> Option<Value> {
+    homeboy_error_from_envelope(value)
+        .or_else(|| {
+            value
+                .get("stdout")
+                .and_then(Value::as_str)
+                .and_then(find_homeboy_error_in_text)
+        })
+        .or_else(|| {
+            value
+                .get("stderr")
+                .and_then(Value::as_str)
+                .and_then(find_homeboy_error_in_text)
+        })
+        .or_else(|| {
+            value
+                .get("error")
+                .filter(|error| error.is_object())
+                .cloned()
+        })
 }
 
 fn first_non_empty_line(value: &str) -> Option<&str> {
@@ -2423,6 +2584,7 @@ mod tests {
             metrics: None,
             capture: None,
             diagnostics: None,
+            failure_context: None,
         }
     }
 
@@ -2518,10 +2680,67 @@ mod tests {
             Some("/srv/homeboy/project")
         );
         assert_eq!(err.details["exit_code"].as_i64(), Some(2));
+        assert_eq!(err.details["failure_context"], Value::Null);
         assert_eq!(
             err.details["execution"]["stdout"].as_str(),
             Some(output.stdout.as_str())
         );
+    }
+
+    #[test]
+    fn runner_exec_failure_error_surfaces_canonical_failure_context() {
+        let mut output = failed_runner_exec_output(
+            r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Missing required field: cwd","details":{"field":"cwd"}}}"#,
+            "",
+        );
+        output.mirror_run_id = Some("runner-exec-lab-job-123".to_string());
+        output.failure_context = runner_exec_failure_context(
+            &output.runner_id,
+            output.job_id.as_deref(),
+            output.mirror_run_id.as_deref(),
+            &output.argv,
+            output.exit_code,
+            None,
+            &output.stdout,
+            &output.stderr,
+        );
+
+        let err = runner_exec_failure_error(&output).expect("runner failure error");
+
+        assert_eq!(
+            err.details["failure_context"]["schema"].as_str(),
+            Some("homeboy/runner-exec-failure-context/v1")
+        );
+        assert_eq!(
+            err.details["failure_context"]["job_id"].as_str(),
+            Some("job-123")
+        );
+        assert_eq!(
+            err.details["failure_context"]["persisted_run_id"].as_str(),
+            Some("runner-exec-lab-job-123")
+        );
+        assert_eq!(
+            err.details["failure_context"]["contract_field"].as_str(),
+            Some("cwd")
+        );
+        assert_eq!(
+            err.details["failure_context"]["reason"].as_str(),
+            Some("Missing required field: cwd")
+        );
+        let hints = err
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("runner job: `job-123`")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("persisted run: `runner-exec-lab-job-123`")));
+        assert!(hints
+            .iter()
+            .any(|hint| hint.contains("contract field: `cwd`")));
     }
 
     #[test]
