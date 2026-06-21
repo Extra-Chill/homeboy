@@ -547,6 +547,7 @@ fn exec_via_reverse_broker(
         mirror_reverse_broker_evidence(runner, broker_url, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+    let artifacts = job.artifacts.clone();
 
     print_lab_offload_handoff(
         &runner.id,
@@ -574,7 +575,7 @@ fn exec_via_reverse_broker(
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
-            artifacts: job.artifacts.clone(),
+            artifacts,
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
@@ -702,6 +703,7 @@ fn exec_via_daemon(
     let mirror = mirror_daemon_evidence(runner, &cwd, &command, &job, &events, &result)?;
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.as_str());
+    let artifacts = job.artifacts.clone();
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
@@ -728,7 +730,7 @@ fn exec_via_daemon(
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
-            artifacts: job.artifacts.clone(),
+            artifacts,
             metrics,
             capture,
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
