@@ -53,6 +53,7 @@ pub mod build_identity;
 pub mod change_artifact;
 pub mod ci_plan;
 pub mod ci_profile;
+pub mod ci_scope;
 pub mod cleanup;
 pub mod code_audit;
 pub mod command_execution_plan;
