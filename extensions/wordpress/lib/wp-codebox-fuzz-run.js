@@ -4,6 +4,11 @@
  * Internal dependencies
  */
 const {
+	WORDPRESS_FUZZ_RESULT_SCHEMA,
+	normalizeWordPressFuzzResult,
+} = require('./wordpress-fuzz-schemas');
+
+const {
 	wordpressRuntimeTaskRequest,
 } = require('./wordpress-runtime-task-planner');
 
@@ -22,6 +27,7 @@ const FUZZ_ARTIFACT_SEMANTIC_KEYS = {
 	failing_case: 'fuzz.case.failing',
 	case_artifact: 'fuzz.case.artifact',
 	repro_case: 'fuzz.case.repro',
+	normalized_fuzz_result: 'fuzz.result.normalized',
 };
 
 function wpCodeboxFuzzRunInput(options = {}) {
@@ -69,6 +75,7 @@ function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 	const artifacts = normalizeWpCodeboxFuzzArtifacts(source, result);
 	const coverageSummary = normalizeCoverageSummary(source?.coverage_summary || source?.coverageSummary || source?.coverage?.summary);
 	const coverageGaps = normalizeCoverageGaps(source?.coverage_gaps || source?.coverageGaps || source?.coverage?.gaps);
+	const normalizedResult = normalizeEmbeddedWordPressFuzzResult(source);
 	return stripUndefined({
 		schema: WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA,
 		delegated_schema: WP_CODEBOX_FUZZ_RUN_SCHEMA,
@@ -79,6 +86,7 @@ function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 		coverage: source?.coverage,
 		coverage_summary: coverageSummary,
 		coverage_gaps: coverageGaps,
+		wordpress_fuzz_result: normalizedResult,
 		artifacts,
 		failures: normalizeArray(source?.failures || source?.errors),
 		metadata: objectOrUndefined(source?.metadata),
@@ -90,6 +98,7 @@ function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	appendArtifactCandidates(artifacts, source?.artifacts);
 	appendArtifactCandidates(artifacts, result?.artifacts);
 	appendNamedArtifact(artifacts, 'fuzz_report', source?.fuzz_report || source?.fuzzReport || source?.report || source?.summary_report || source?.summaryReport);
+	appendNamedArtifact(artifacts, 'normalized_fuzz_result', source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult);
 	appendCaseArtifacts(artifacts, source?.cases || source?.fuzz_cases || source?.fuzzCases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.failures || source?.errors || source?.failed_cases || source?.failedCases, 'failing_case');
 	appendCaseArtifacts(artifacts, source?.repro_cases || source?.reproCases || source?.reproductions, 'repro_case');
@@ -170,6 +179,9 @@ function normalizeFuzzArtifactRole(value) {
 	if (!label) {
 		return '';
 	}
+	if (['normalized_fuzz_result', 'wordpress_fuzz_result', 'normalized_result'].includes(label)) {
+		return 'normalized_fuzz_result';
+	}
 	if (['fuzz_report', 'fuzz_run_report', 'report', 'summary', 'summary_report', 'result', 'results'].includes(label)) {
 		return 'fuzz_report';
 	}
@@ -198,6 +210,42 @@ function normalizeFuzzArtifactRole(value) {
 		return 'fuzz_report';
 	}
 	return '';
+}
+
+function normalizeEmbeddedWordPressFuzzResult(source = {}) {
+	const candidate = source?.wordpress_fuzz_result || source?.wordpressFuzzResult || source?.normalized_result || source?.normalizedResult;
+	if (objectOrUndefined(candidate)) {
+		return normalizeWordPressFuzzResult({
+			...candidate,
+			status: normalizeWordPressFuzzStatus(candidate.status),
+		});
+	}
+	if (Array.isArray(source?.cases) || Array.isArray(source?.fuzz_cases) || Array.isArray(source?.fuzzCases)) {
+		return normalizeWordPressFuzzResult({
+			schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+			id: source.id || source.result_id || source.resultId || 'wp-codebox-wordpress-fuzz-result',
+			plan_id: source.plan_id || source.planId || source.workload?.plan_id,
+			status: normalizeWordPressFuzzStatus(source.status),
+			started_at: source.started_at || source.startedAt,
+			finished_at: source.finished_at || source.finishedAt,
+			cases: source.cases || source.fuzz_cases || source.fuzzCases,
+			artifacts: normalizeArray(source.artifacts),
+			provenance: source.provenance || source.workload_manifest || source.workloadManifest,
+			metadata: source.metadata,
+		});
+	}
+	return undefined;
+}
+
+function normalizeWordPressFuzzStatus(value) {
+	const status = String(value || '').toLowerCase();
+	if (['success', 'succeeded', 'ok'].includes(status)) {
+		return 'passed';
+	}
+	if (['failed', 'errored', 'partial', 'skipped', 'passed'].includes(status)) {
+		return status;
+	}
+	return undefined;
 }
 
 function normalizeCoverageSummary(value) {

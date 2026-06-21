@@ -61,8 +61,38 @@ runWpCodeboxFuzzRun({
 				},
 				coverage_gaps: [{ id: 'route:/wp/v2/users', type: 'rest_route', status: 'skipped' }],
 				coverage: { hooks: { actions: { init: 1 } } },
+				wordpress_fuzz_result: {
+					schema: 'wordpress-fuzz-result/v1',
+					id: 'normalized-result',
+					plan_id: 'generic-plan',
+					status: 'passed',
+					cases: [
+						{
+							id: 'case-000',
+							target_id: 'target-rest',
+							surface_id: 'surface-rest',
+							operation_id: 'rest:list-posts',
+							status: 'passed',
+							role_boundary: { role: 'subscriber', outcome: 'allowed_as_expected' },
+							db_query: { query_count: 1, rows_examined: 2, duration_ms: 3 },
+							http_guardrail: { blocked: 1 },
+						},
+						{
+							id: 'case-001',
+							target_id: 'target-admin',
+							surface_id: 'surface-admin',
+							operation_id: 'admin:settings',
+							status: 'skipped',
+							skip_reason: 'capability_unavailable',
+							destructive_reason: 'mutating_action',
+							admin_browser: { errors: [{ message: 'blocked navigation' }] },
+						},
+					],
+					provenance: { workload_manifest: 'workloads/generic-wordpress-fuzz.json' },
+				},
 				artifacts: {
 					fuzz_report: { path: 'reports/fuzz-report.json', content_type: 'application/json' },
+					normalized_fuzz_result: { path: 'reports/wordpress-fuzz-result.json', content_type: 'application/json' },
 					fuzz_case: { path: 'cases/case-000.json', case_id: 'case-000' },
 					failing_case: { path: 'cases/failing-case.json', case_id: 'case-002' },
 					case_artifact: { path: 'cases/case-001.json', case_id: 'case-001' },
@@ -79,9 +109,19 @@ runWpCodeboxFuzzRun({
 	assert.equal(summary.coverage.hooks.actions.init, 1);
 	assert.equal(summary.coverage_summary.surface_count, 3);
 	assert.equal(summary.coverage_summary.exercised_count, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.surface_count, 2);
+	assert.equal(summary.wordpress_fuzz_result.summary.operation_count, 2);
+	assert.equal(summary.wordpress_fuzz_result.summary.skipped_reason_codes.capability_unavailable, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.destructive_reason_codes.mutating_action, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.role_boundary_outcomes.by_outcome.allowed_as_expected, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.db_query_metrics.query_count, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.admin_browser_errors.errors, 1);
+	assert.equal(summary.wordpress_fuzz_result.summary.http_guardrail_outcomes.blocked, 1);
+	assert.equal(summary.wordpress_fuzz_result.provenance.workload_manifest, 'workloads/generic-wordpress-fuzz.json');
 	assert.equal(summary.coverage_gaps[0].status, 'skipped');
-	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case']);
+	assert.deepEqual(summary.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'normalized_fuzz_result', 'fuzz_case', 'failing_case', 'case_artifact', 'repro_case']);
 	assert.equal(summary.artifacts[0].semantic_key, 'fuzz.report');
+	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'normalized_fuzz_result').semantic_key, 'fuzz.result.normalized');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'fuzz_case').semantic_key, 'fuzz.case');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'failing_case').semantic_key, 'fuzz.case.failing');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
