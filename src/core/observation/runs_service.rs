@@ -30,6 +30,7 @@ use super::{
 };
 use crate::core::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use crate::core::execution_contract::EXECUTION_CONTRACT;
+use crate::core::runners::RunnerArtifactRef;
 use crate::core::Error;
 use crate::core::Result;
 
@@ -43,6 +44,8 @@ pub struct ArtifactFetchOutcome {
     pub content_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<RunnerArtifactRef>,
 }
 
 /// Look up a run and surface a stable validation error when it doesn't
@@ -321,6 +324,7 @@ pub fn copy_local_file_artifact(
         content_type: artifact.mime,
         size_bytes: artifact.size_bytes,
         sha256: artifact.sha256,
+        artifact_ref: None,
     })
 }
 
@@ -338,6 +342,7 @@ pub fn download_remote_artifact(
         content_type: download.content_type,
         size_bytes: download.size_bytes,
         sha256: download.sha256,
+        artifact_ref: Some(download.artifact_ref),
     })
 }
 

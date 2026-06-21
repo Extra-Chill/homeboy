@@ -29,8 +29,9 @@ use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
 use super::{
-    connect, load, select_runner_transport, status, Runner, RunnerCapabilityPreflight, RunnerKind,
-    RunnerTransport, RunnerTunnelMode,
+    connect, load, select_runner_transport, status, Runner, RunnerCapabilityPreflight,
+    RunnerHandoff, RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerResult, RunnerTransport,
+    RunnerTunnelMode,
 };
 use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
@@ -88,6 +89,8 @@ pub struct RunnerExecOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job: Option<Job>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_job: Option<RunnerJob>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_events: Option<Vec<JobEvent>>,
@@ -99,6 +102,10 @@ pub struct RunnerExecOutput {
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CommandCaptureMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_result: Option<RunnerResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<RunnerHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerExecDiagnostics>,
 }
@@ -419,6 +426,51 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     )
 }
 
+fn runner_result(
+    job: Option<&Job>,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    mirror_run_id: Option<&str>,
+) -> RunnerResult {
+    RunnerResult {
+        exit_code,
+        status: job.map(|job| job.status).unwrap_or_else(|| {
+            if exit_code == 0 {
+                JobStatus::Succeeded
+            } else {
+                JobStatus::Failed
+            }
+        }),
+        stdout_bytes: Some(stdout.len()),
+        stderr_bytes: Some(stderr.len()),
+        mirror_run_id: mirror_run_id.map(str::to_string),
+        artifact_refs: job
+            .map(|job| job.artifacts.iter().map(Into::into).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn runner_handoff(
+    runner: &Runner,
+    transport: &str,
+    job: Option<RunnerJob>,
+    result: Option<RunnerResult>,
+) -> RunnerHandoff {
+    RunnerHandoff {
+        runner_id: runner.id.clone(),
+        transport: transport.to_string(),
+        lifecycle_owner: match transport {
+            "local" => RunnerLifecycleOwner::Local,
+            "reverse_broker" => RunnerLifecycleOwner::Broker,
+            _ => RunnerLifecycleOwner::Controller,
+        },
+        job,
+        workspace_lease: None,
+        result,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn exec_via_reverse_broker(
     runner: &Runner,
@@ -552,6 +604,15 @@ fn exec_via_reverse_broker(
         DaemonJobHandoffState::Terminal(job.status),
     );
 
+    let runner_job = RunnerJob::from_job(&runner.id, "broker", &command, Some(cwd.clone()), &job);
+    let runner_result = runner_result(Some(&job), exit_code, &stdout, &stderr, mirror_run_id);
+    let handoff = runner_handoff(
+        runner,
+        "reverse_broker",
+        Some(runner_job.clone()),
+        Some(runner_result.clone()),
+    );
+
     Ok((
         RunnerExecOutput {
             variant: "exec",
@@ -567,11 +628,14 @@ fn exec_via_reverse_broker(
             source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
+            runner_job: Some(runner_job),
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
             capture,
+            runner_result: Some(runner_result),
+            handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -705,6 +769,15 @@ fn exec_via_daemon(
         DaemonJobHandoffState::Terminal(job.status),
     );
 
+    let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
+    let runner_result = runner_result(Some(&job), exit_code, &stdout, &stderr, mirror_run_id);
+    let handoff = runner_handoff(
+        runner,
+        "daemon",
+        Some(runner_job.clone()),
+        Some(runner_result.clone()),
+    );
+
     Ok((
         RunnerExecOutput {
             variant: "exec",
@@ -720,11 +793,14 @@ fn exec_via_daemon(
             source_snapshot: Some(source_snapshot.clone()),
             job_id: Some(job.id.to_string()),
             job: Some(job),
+            runner_job: Some(runner_job),
             job_events: Some(events),
             mirror_run_id: mirror.map(|evidence| evidence.run.id),
             patch,
             metrics,
             capture,
+            runner_result: Some(runner_result),
+            handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         exit_code,
@@ -2010,6 +2086,14 @@ fn exec_output(
         redaction_env,
         secret_env_names,
     );
+    let transport = match mode {
+        RunnerExecMode::Daemon => "daemon",
+        RunnerExecMode::Local => "local",
+        RunnerExecMode::ReverseBroker => "reverse_broker",
+        RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
+    };
+    let runner_result = runner_result(None, exit_code, &stdout, &stderr, None);
+    let handoff = runner_handoff(runner, transport, None, Some(runner_result.clone()));
     (
         RunnerExecOutput {
             variant: "exec",
@@ -2024,12 +2108,15 @@ fn exec_output(
             stderr,
             source_snapshot: source_snapshot.clone(),
             job: None,
+            runner_job: None,
             job_id: None,
             job_events: None,
             mirror_run_id: None,
             patch: None,
             metrics: output.metrics,
             capture: output.capture,
+            runner_result: Some(runner_result),
+            handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, source_snapshot.as_ref(), &require_paths),
         },
         exit_code,
@@ -2416,12 +2503,15 @@ mod tests {
             stderr: stderr.to_string(),
             source_snapshot: None,
             job: None,
+            runner_job: None,
             job_id: Some("job-123".to_string()),
             job_events: None,
             mirror_run_id: None,
             patch: None,
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: None,
         }
     }
