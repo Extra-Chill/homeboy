@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const {
+  homeboySettings,
   parseWpCodeboxJson,
   recipeEventName,
   runWpCodeboxRecipe,
@@ -34,6 +35,9 @@ fs.chmodSync(fixtureBin, 0o755);
 
 (async () => {
   assert.equal(wpCodeboxBin({ env: { HOMEBOY_WP_CODEBOX_BIN: fixtureBin } }), fixtureBin);
+  assert.equal(wpCodeboxBin({ env: { HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_bin: fixtureBin }) } }), fixtureBin);
+  assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: '{"wp_codebox_bin":"/bin/wp-codebox"}' }), { wp_codebox_bin: '/bin/wp-codebox' });
+  assert.deepEqual(homeboySettings({ HOMEBOY_SETTINGS_JSON: 'not json' }), {});
   assert.equal(wpCodeboxBin({ env: {} }), 'wp-codebox');
   assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.cjs'), { command: process.execPath, args: ['/tmp/wp-codebox.cjs'] });
   assert.deepEqual(wpCodeboxCommand('wp-codebox'), { command: 'wp-codebox', args: [] });
