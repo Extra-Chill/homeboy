@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.8.3] - 2026-06-21
+
+### Changed
+- Extract generic fanout reconcile runtime surface
+
 ## [3.8.2] - 2026-06-21
 
 ### Changed
