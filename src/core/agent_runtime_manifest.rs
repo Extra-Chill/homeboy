@@ -7,8 +7,8 @@ use crate::core::agent_task_provider::{
     AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
     AgentTaskProviderWorkspaceMaterialization,
 };
-use crate::core::extension::{load_all_extensions, ExtensionManifest};
-use crate::core::{config, paths};
+use crate::core::extension::{load_all_extensions, load_extension, ExtensionManifest};
+use crate::core::{config, paths, Error, Result};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
 pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
@@ -254,6 +254,89 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         }
     }
     providers
+}
+
+pub(crate) fn validate_installed_extension_agent_runtime_provider_discovery(
+    extension_id: &str,
+) -> Result<()> {
+    let extension = load_extension(extension_id)?;
+    let expected = expected_agent_runtime_provider_refs(&extension)?;
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let discovered = discover_agent_task_executor_providers();
+    let missing: Vec<_> = expected
+        .iter()
+        .filter(|expected| {
+            !discovered.iter().any(|provider| {
+                provider.extension_id.as_deref() == Some(extension_id)
+                    && provider.runtime_id.as_deref() == Some(expected.runtime_id.as_str())
+                    && provider.id == expected.provider_id
+                    && provider.backend == expected.backend
+            })
+        })
+        .cloned()
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "source",
+        format!(
+            "Extension '{}' declares agent runtime providers that were not discoverable after install/setup",
+            extension_id
+        ),
+        Some(extension_id.to_string()),
+        None,
+    )
+    .with_hint(format!(
+        "Missing provider discovery: {}",
+        missing
+            .iter()
+            .map(|entry| format!(
+                "runtime={} provider={} backend={}",
+                entry.runtime_id, entry.provider_id, entry.backend
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedAgentRuntimeProviderRef {
+    runtime_id: String,
+    provider_id: String,
+    backend: String,
+}
+
+fn expected_agent_runtime_provider_refs(
+    extension: &ExtensionManifest,
+) -> Result<Vec<ExpectedAgentRuntimeProviderRef>> {
+    let mut expected = Vec::new();
+    for runtime in &extension.agent_runtimes {
+        for value in &runtime.agent_task_executors {
+            let provider: AgentTaskExecutorProvider = serde_json::from_value(value.clone()).map_err(|err| {
+                Error::validation_invalid_argument(
+                    "agent_runtimes.agent_task_executors",
+                    format!(
+                        "Extension '{}' declares an agent runtime provider that cannot be parsed: {}",
+                        extension.id, err
+                    ),
+                    Some(runtime.id.clone()),
+                    None,
+                )
+            })?;
+            expected.push(ExpectedAgentRuntimeProviderRef {
+                runtime_id: runtime.id.clone(),
+                provider_id: provider.id,
+                backend: provider.backend,
+            });
+        }
+    }
+    Ok(expected)
 }
 
 fn parse_agent_task_executor_providers(values: &[Value]) -> Vec<AgentTaskExecutorProvider> {

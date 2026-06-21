@@ -10,6 +10,7 @@ pub struct InstallResult {
     pub extension_id: String,
     pub url: String,
     pub path: PathBuf,
+    pub manifest_path: PathBuf,
     pub source_revision: Option<String>,
 }
 
@@ -216,6 +217,51 @@ mod tests {
             format!(
                 r#"{{"name":"{} extension","version":"1.0.0","executable":{{"runtime":{{"setup_command":"printf setup >> setup-count.txt"}}}}}}"#,
                 id
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn write_extension_fixture_with_agent_runtime_provider(root: &Path, id: &str) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).expect("extension dir");
+        fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(
+                r#"{{
+  "name": "{} extension",
+  "version": "1.0.0",
+  "agent_runtimes": [{{
+    "id": "{}-runtime",
+    "agent_task_executors": [{{
+      "id": "{}.default",
+      "backend": "{}"
+    }}]
+  }}]
+}}"#,
+                id, id, id, id
+            ),
+        )
+        .expect("extension manifest");
+    }
+
+    fn write_extension_fixture_with_invalid_agent_runtime_provider(root: &Path, id: &str) {
+        let dir = root.join(id);
+        fs::create_dir_all(&dir).expect("extension dir");
+        fs::write(
+            dir.join(format!("{}.json", id)),
+            format!(
+                r#"{{
+  "name": "{} extension",
+  "version": "1.0.0",
+  "agent_runtimes": [{{
+    "id": "{}-runtime",
+    "agent_task_executors": [{{
+      "id": "{}.default"
+    }}]
+  }}]
+}}"#,
+                id, id, id
             ),
         )
         .expect("extension manifest");
@@ -756,6 +802,54 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn linked_install_reports_manifest_path_and_discovers_declared_provider() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture_with_agent_runtime_provider(&source, "wordpress");
+
+            let result = install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect("install linked extension");
+
+            assert_eq!(
+                result.manifest_path,
+                home.join(".config/homeboy/extensions/wordpress/wordpress.json")
+            );
+            let providers =
+                crate::core::agent_runtime_manifest::discover_agent_task_executor_providers();
+            assert!(providers.iter().any(|provider| {
+                provider.extension_id.as_deref() == Some("wordpress")
+                    && provider.runtime_id.as_deref() == Some("wordpress-runtime")
+                    && provider.id == "wordpress.default"
+                    && provider.backend == "wordpress"
+            }));
+        });
+    }
+
+    #[test]
+    fn linked_install_fails_and_rolls_back_when_declared_provider_is_not_discoverable() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source-repo");
+            fs::create_dir_all(&source).expect("source repo");
+            write_extension_fixture_with_invalid_agent_runtime_provider(&source, "wordpress");
+
+            let err = install(
+                &source.join("wordpress").to_string_lossy(),
+                Some("wordpress"),
+            )
+            .expect_err("install should fail invalid provider declaration");
+
+            assert!(err.message.contains("cannot be parsed"));
+            assert!(!home.join(".config/homeboy/extensions/wordpress").exists());
         });
     }
 
