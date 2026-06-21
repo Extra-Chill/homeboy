@@ -215,6 +215,17 @@ impl HomeboyProofArtifactRef {
 
 pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
     let mut diagnostics = Vec::new();
+    let value = match unwrap_command_envelope(value, &mut diagnostics) {
+        Some(value) => value,
+        None => {
+            return HomeboyProofValidationReport {
+                schema: HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string(),
+                valid: false,
+                diagnostics,
+            };
+        }
+    };
+
     match value.get("schema").and_then(Value::as_str) {
         Some(HOMEBOY_PROOF_SCHEMA) => match serde_json::from_value::<HomeboyProof>(value) {
             Ok(proof) => validate_homeboy_proof(&proof, &mut diagnostics),
@@ -247,6 +258,52 @@ pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
         valid: diagnostics.is_empty(),
         diagnostics,
     }
+}
+
+fn unwrap_command_envelope(
+    value: Value,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) -> Option<Value> {
+    let Some(success) = value.get("success") else {
+        return Some(value);
+    };
+    let Some(success) = success.as_bool() else {
+        diagnostics.push(diagnostic(
+            "malformed_command_envelope",
+            "command envelope success field must be a boolean",
+            path("/success"),
+        ));
+        return None;
+    };
+    if !success {
+        diagnostics.push(diagnostic(
+            "command_envelope_failed",
+            command_envelope_failure_message(&value),
+            path("/success"),
+        ));
+        return None;
+    }
+    if let Some(data) = value.get("data") {
+        return Some(data.clone());
+    }
+    if let Some(value) = value.get("value") {
+        return Some(value.clone());
+    }
+    diagnostics.push(diagnostic(
+        "command_envelope_payload_missing",
+        "successful command envelope must include data or value for proof validation",
+        None,
+    ));
+    None
+}
+
+fn command_envelope_failure_message(value: &Value) -> String {
+    let detail = value
+        .get("error")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("command reported success=false");
+    format!("cannot validate failed command envelope: {detail}")
 }
 
 fn validate_homeboy_proof(
@@ -579,6 +636,53 @@ mod tests {
     }
 
     #[test]
+    fn proof_validation_accepts_successful_command_envelope_data() {
+        let report = validate_proof_value(json!({
+            "success": true,
+            "data": valid_materialized_spec()
+        }));
+
+        assert!(report.valid, "{report:?}");
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_accepts_successful_command_envelope_value() {
+        let report = validate_proof_value(json!({
+            "success": true,
+            "value": valid_materialized_spec()
+        }));
+
+        assert!(report.valid, "{report:?}");
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_rejects_failed_command_envelope() {
+        let report = validate_proof_value(json!({
+            "success": false,
+            "error": "materialization failed"
+        }));
+
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics[0].code, "command_envelope_failed");
+        assert!(report.diagnostics[0]
+            .message
+            .contains("materialization failed"));
+    }
+
+    #[test]
+    fn proof_validation_rejects_malformed_command_envelope() {
+        let report = validate_proof_value(json!({
+            "success": "true",
+            "data": valid_materialized_spec()
+        }));
+
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics[0].code, "malformed_command_envelope");
+    }
+
+    #[test]
     fn proof_validation_accepts_materialized_controller_gates_and_metrics() {
         let report = validate_proof_value(json!({
             "schema": "homeboy/agent-task-loop-spec-materialization/v1",
@@ -635,5 +739,19 @@ mod tests {
             .collect();
         assert!(codes.contains(&"completion_outcome_missing"));
         assert!(codes.contains(&"completion_has_pending_actions"));
+    }
+
+    fn valid_materialized_spec() -> Value {
+        json!({
+            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+            "spec": {
+                "loop_id": "example/simple",
+                "config_version": "v1",
+                "workflows": [{
+                    "workflow_id": "brief",
+                    "prompt": "Draft a concise update."
+                }]
+            }
+        })
     }
 }
