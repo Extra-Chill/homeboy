@@ -11,6 +11,7 @@ const {
   runWpCodeboxRecipe,
   wpCodeboxBin,
   wpCodeboxCommand,
+  wpCodeboxPluginStateStep,
 } = require('../lib/wp-codebox-recipe-helper');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-recipe-helper-'));
@@ -42,6 +43,13 @@ fs.chmodSync(fixtureBin, 0o755);
   assert.equal(wpCodeboxBin({ env: {} }), 'wp-codebox');
   assert.deepEqual(wpCodeboxCommand('/tmp/wp-codebox.cjs'), { command: process.execPath, args: ['/tmp/wp-codebox.cjs'] });
   assert.deepEqual(wpCodeboxCommand('wp-codebox'), { command: 'wp-codebox', args: [] });
+  assert.deepEqual(
+    wpCodeboxPluginStateStep({ activate: ['source-plugin/source-plugin.php'], deactivate: [{ slug: 'old-plugin' }] }),
+    {
+      command: 'wordpress.plugin-state',
+      args: ['plugin-state-json={"activate":[{"plugin":"source-plugin/source-plugin.php"}],"deactivate":[{"slug":"old-plugin","plugin":"old-plugin"}],"report":true}'],
+    }
+  );
   assert.equal(recipeEventName('start'), 'recipe.start');
   assert.equal(recipeEventName('start', { eventPrefix: 'sandbox.recipe' }), 'sandbox.recipe.start');
   assert.deepEqual(parseWpCodeboxJson(' {"ok": true}\n'), { ok: true });
