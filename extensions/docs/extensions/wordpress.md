@@ -95,6 +95,17 @@ that still consume `wp-codebox/task-input/v1`. Select it with
 `request_kind: "wp-codebox"` flag. New callers should prefer the generic
 agent-task request schema and make runtime selection outside the adapter.
 
+## WordPress Hook Surface Discovery
+
+`wordpress-hook-surface-discovery` statically extracts literal WordPress
+`add_action()`, `add_filter()`, `wp_schedule_event()`, and
+`wp_schedule_single_event()` calls for generic fuzz planning. The helper reports
+surface metadata and conservative invocation guidance without product-specific
+semantics. Zero-argument actions are emitted as automatic `do_action` candidates;
+filters, cron events, dynamic hook names, and callbacks that accept arguments are
+preserved as skipped planning records with explicit `skip_reason` metadata so
+callers can add fixtures before invoking them.
+
 ## Test failure sidecar
 
 When Homeboy sets `HOMEBOY_TEST_FAILURES_FILE`, the WordPress PHPUnit runners write a JSON sidecar with parsed failure details. Existing Homeboy analysis fields are preserved, and each failure also includes normalized sidecar fields for cross-runner consumers:
