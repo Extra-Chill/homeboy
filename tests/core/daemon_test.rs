@@ -999,6 +999,7 @@ fn runner_exec_rejects_requests_that_violate_runner_policy_before_daemon_dispatc
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            detach_after_handoff: false,
         },
     )
     .expect_err("policy denied");
