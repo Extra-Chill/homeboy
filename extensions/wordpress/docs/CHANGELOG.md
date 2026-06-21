@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.10.0] - 2026-06-21
+
+### Added
+- expand generic WordPress fuzz coverage artifacts
+
 ## [3.9.8] - 2026-06-21
 
 ### Fixed
