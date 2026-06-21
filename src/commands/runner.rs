@@ -84,6 +84,39 @@ pub enum RunnerCommandOutput {
     Job(RunnerJobOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
+    Broker(RunnerBrokerOutput),
+}
+
+/// Result of a broker auth/pairing management command. The plaintext `token` is
+/// present only on a successful `pair` and is the single time it is ever shown.
+#[derive(Debug, Serialize)]
+pub struct RunnerBrokerOutput {
+    pub command: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// One-time plaintext bearer token (only on `pair`). Never re-displayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<RunnerBrokerCredentialSummary>,
+    pub store_path: String,
+}
+
+/// Non-secret summary of a stored broker credential. Token hashes are never
+/// surfaced.
+#[derive(Debug, Serialize)]
+pub struct RunnerBrokerCredentialSummary {
+    pub id: String,
+    pub runner_id: String,
+    pub scopes: Vec<String>,
+    pub revoked: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -398,6 +431,12 @@ enum RunnerCommand {
         #[arg(long)]
         broker_url: String,
 
+        /// Paired broker bearer token. Falls back to the HOMEBOY_BROKER_TOKEN
+        /// environment variable when omitted. Required when the broker enforces
+        /// auth; omit only for loopback-open smoke setups.
+        #[arg(long)]
+        broker_token: Option<String>,
+
         /// Optional project filter for claimed jobs
         #[arg(long)]
         project: Option<String>,
@@ -431,6 +470,39 @@ enum RunnerCommand {
         #[command(subcommand)]
         command: workspace::RunnerWorkspaceCommand,
     },
+    /// Manage reverse runner broker authentication and pairing
+    Broker {
+        #[command(subcommand)]
+        command: RunnerBrokerCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunnerBrokerCommand {
+    /// Pair a runner with the broker, minting a one-time scoped bearer token
+    Pair {
+        /// Stable credential id used for later revocation
+        id: String,
+
+        /// Runner id this credential authorizes (worker routes must match it)
+        #[arg(long)]
+        runner_id: String,
+
+        /// Grant the controller submit scope (POST /runner/jobs)
+        #[arg(long)]
+        submit: bool,
+
+        /// Grant the worker scope (register/claim/event/finish/heartbeat)
+        #[arg(long)]
+        work: bool,
+    },
+    /// Revoke a paired credential by id
+    Revoke {
+        /// Credential id to revoke
+        id: String,
+    },
+    /// List paired broker credentials (never prints tokens)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -636,6 +708,7 @@ pub fn run(
         RunnerCommand::Work {
             runner_id,
             broker_url,
+            broker_token,
             project,
             lease_ms,
             r#loop,
@@ -647,9 +720,11 @@ pub fn run(
             let concurrency_limit = runner::load(&runner_id)
                 .ok()
                 .and_then(|runner| runner.settings.concurrency_limit);
+            let broker_token = broker_token.or_else(runner::broker_token_from_env);
             map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
                 runner_id,
                 broker_url,
+                broker_token,
                 project_id: project,
                 lease_ms,
                 concurrency_limit,
@@ -662,7 +737,104 @@ pub fn run(
         }
         RunnerCommand::Workspace { command } => workspace::run(command)
             .map(|(output, exit_code)| (RunnerCommandOutput::Workspace(output), exit_code)),
+        RunnerCommand::Broker { command } => {
+            run_broker(command).map(|output| (RunnerCommandOutput::Broker(output), 0))
+        }
     }
+}
+
+fn run_broker(command: RunnerBrokerCommand) -> Result<RunnerBrokerOutput, homeboy::core::Error> {
+    use std::collections::BTreeSet;
+
+    let mut store = runner::BrokerAuthStore::load()?;
+    match command {
+        RunnerBrokerCommand::Pair {
+            id,
+            runner_id,
+            submit,
+            work,
+        } => {
+            let mut scopes: BTreeSet<runner::BrokerScope> = BTreeSet::new();
+            if submit {
+                scopes.insert(runner::BrokerScope::Submit);
+            }
+            if work {
+                scopes.insert(runner::BrokerScope::Work);
+            }
+            if scopes.is_empty() {
+                // Default to a worker credential, the most common pairing.
+                scopes.insert(runner::BrokerScope::Work);
+            }
+            let minted = store.pair(id, runner_id, scopes)?;
+            let store_path = store.save()?;
+            let scope_labels = scope_labels(&store, &minted.id);
+            Ok(RunnerBrokerOutput {
+                command: "runner.broker.pair",
+                credential_id: Some(minted.id),
+                runner_id: Some(minted.runner_id),
+                scopes: scope_labels,
+                token: Some(minted.token),
+                revoked: None,
+                credentials: Vec::new(),
+                store_path: store_path.display().to_string(),
+            })
+        }
+        RunnerBrokerCommand::Revoke { id } => {
+            let revoked = store.revoke(&id);
+            let store_path = store.save()?;
+            Ok(RunnerBrokerOutput {
+                command: "runner.broker.revoke",
+                credential_id: Some(id),
+                runner_id: None,
+                scopes: Vec::new(),
+                token: None,
+                revoked: Some(revoked),
+                credentials: Vec::new(),
+                store_path: store_path.display().to_string(),
+            })
+        }
+        RunnerBrokerCommand::List => {
+            let credentials = store
+                .credentials
+                .iter()
+                .map(|cred| RunnerBrokerCredentialSummary {
+                    id: cred.id.clone(),
+                    runner_id: cred.runner_id.clone(),
+                    scopes: cred.scopes.iter().map(scope_label).collect(),
+                    revoked: cred.revoked_at.is_some(),
+                    created_at: cred.created_at.clone(),
+                })
+                .collect();
+            // Listing does not mutate; resolve the path without rewriting.
+            let path = runner::broker_auth_store_path()?;
+            Ok(RunnerBrokerOutput {
+                command: "runner.broker.list",
+                credential_id: None,
+                runner_id: None,
+                scopes: Vec::new(),
+                token: None,
+                revoked: None,
+                credentials,
+                store_path: path.display().to_string(),
+            })
+        }
+    }
+}
+
+fn scope_label(scope: &runner::BrokerScope) -> String {
+    match scope {
+        runner::BrokerScope::Submit => "submit".to_string(),
+        runner::BrokerScope::Work => "work".to_string(),
+    }
+}
+
+fn scope_labels(store: &runner::BrokerAuthStore, id: &str) -> Vec<String> {
+    store
+        .credentials
+        .iter()
+        .find(|cred| cred.id == id)
+        .map(|cred| cred.scopes.iter().map(scope_label).collect())
+        .unwrap_or_default()
 }
 
 pub fn run_command_output(args: RunnerArgs, _global: &super::GlobalArgs) -> JsonCommandRun {
