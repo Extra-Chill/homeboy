@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.0] - 2026-06-21
+
+### Added
+- account for expected WordPress fuzz surfaces
+
+### Changed
+- Add generic WordPress fuzz primitives
+
 ## [3.11.1] - 2026-06-21
 
 ### Changed
