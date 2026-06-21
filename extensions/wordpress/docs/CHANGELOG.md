@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.9.5] - 2026-06-21
+
+### Fixed
+- keep wordpress recipe helper packaged
+
 ## [3.9.4] - 2026-06-21
 
 ### Fixed
