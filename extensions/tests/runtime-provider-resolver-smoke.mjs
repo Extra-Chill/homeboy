@@ -14,9 +14,15 @@ const {
 } = require('../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 
 const registry = runtimeRegistry({ repoRoot: rootDir });
-assert.equal(DEFAULT_RUNTIME_ID, 'wp-codebox');
-assert.ok(registry['wp-codebox'], 'wp-codebox is registered as the default runtime provider');
+assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
+assert.ok(registry['local-shell'], 'local-shell is registered as the default runtime provider');
+assert.ok(registry['wp-codebox'], 'wp-codebox is registered as a selectable runtime provider');
 assert.ok(registry.opencode, 'opencode is registered as a selectable runtime provider');
+
+const defaultRuntime = resolveRuntimeProvider(undefined, { repoRoot: rootDir, workspace });
+assert.equal(defaultRuntime.id, 'local-shell');
+assert.equal(defaultRuntime.executor.backend, 'local-shell');
+assert.equal(defaultRuntime.executor.path, path.join(rootDir, 'agent-runtimes/local-shell/scripts/agent/homeboy-local-shell-agent-task-executor.cjs'));
 
 const runtime = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,

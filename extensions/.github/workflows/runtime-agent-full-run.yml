@@ -12,11 +12,11 @@ name: Runtime Agent Full Run (reusable)
         type: boolean
         default: true
       runtime_provider:
-        description: Runtime provider identifier. Prefer runtime for new callers.
+        description: Compatibility alias for runtime; new callers should use runtime. Empty selects the neutral local-shell runtime.
         type: string
-        default: wp-codebox
+        default: ''
       runtime:
-        description: Agent runtime id. Preferred alias for runtime_provider.
+        description: Agent runtime id. Defaults to the neutral local-shell runtime; pass wp-codebox for WordPress/WP Codebox runs.
         type: string
         default: ''
       backend:
@@ -100,7 +100,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '{}'
       workload:
-        description: JSON Codebox workload DTO forwarded to the runtime config. Falls back to workload_id/workload_label when empty.
+        description: JSON workload DTO forwarded to the selected runtime config. Falls back to workload_id/workload_label when empty.
         type: string
         default: '{}'
       tool_policy:
@@ -124,7 +124,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '{}'
       component_contracts:
-        description: JSON array of runtime component contracts forwarded to WP Codebox.
+        description: JSON array of runtime component contracts forwarded to the selected runtime adapter.
         type: string
         default: '[]'
       required_abilities:
@@ -180,7 +180,7 @@ name: Runtime Agent Full Run (reusable)
         type: string
         default: '[]'
       artifact_declarations:
-        description: JSON array of Codebox artifact declaration DTOs.
+        description: JSON array of artifact declaration DTOs. WP Codebox runtimes accept legacy Codebox declaration aliases.
         type: string
         default: '[]'
       transcript_artifact_name:
@@ -594,7 +594,7 @@ jobs:
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
         run: |
           set -euo pipefail
-          node .ci/homeboy-extensions/wordpress/scripts/agent/run-host-runner-lifecycle.cjs \
+          node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/run-host-runner-lifecycle.cjs \
             --results "$RESULTS_FILE" \
             --config "$CONFIG_FILE" \
             --scenario "${{ inputs.workload_id }}" \
@@ -607,7 +607,7 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
           set -euo pipefail
-          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+          bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
             --results "$RESULTS_FILE" \
             --scenario "${{ inputs.workload_id }}" \
             --field job_status=metadata.job_status \
@@ -624,7 +624,7 @@ jobs:
           CONFIG_FILE: ${{ steps.config.outputs.config_path }}
         run: |
           set -euo pipefail
-          node .ci/homeboy-extensions/wordpress/scripts/agent/update-runner-workspace-pr.cjs \
+          node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/update-runner-workspace-pr.cjs \
             --results "$RESULTS_FILE" \
             --config "$CONFIG_FILE" \
             --scenario "${{ inputs.workload_id }}"
@@ -636,7 +636,7 @@ jobs:
           RESULTS_FILE: ${{ runner.temp }}/run-results.json
         run: |
           set -euo pipefail
-          bash .ci/homeboy-extensions/wordpress/scripts/agent/extract-engine-data.sh \
+          bash .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/extract-engine-data.sh \
             --results "$RESULTS_FILE" \
             --scenario "${{ inputs.workload_id }}" \
             --field job_status=metadata.job_status \

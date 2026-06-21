@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DEFAULT_RUNTIME_ID = 'wp-codebox';
+const DEFAULT_RUNTIME_ID = 'local-shell';
 const RUNTIME_ID_ALIASES = {
 	codebox: 'wp-codebox',
 };

@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+'use strict';
+
+/* eslint-disable no-console */
+
+/**
+ * External dependencies
+ */
+const fs = require('node:fs');
+const path = require('node:path');
+
+/**
+ * Internal dependencies
+ */
+const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
+const {
+  runGenericAgentLoop,
+  writeGenericAgentLoopArtifacts,
+} = require('../../../runtime-agent-ci');
+
+const SCRIPT_DIR = __dirname;
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '..', '..', '..');
+
+function readConfigPath() {
+  const configPath = process.argv[2] || process.env.HOMEBOY_RUNTIME_AGENT_CONFIG_PATH || '';
+  if (!configPath) {
+    throw new Error('Pass a runtime agent config JSON path as argv[1] or HOMEBOY_RUNTIME_AGENT_CONFIG_PATH.');
+  }
+  return configPath;
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+try {
+  const configPath = readConfigPath();
+  const config = readJson(configPath);
+  const runtime = resolveRuntimeProvider(config.runtime_id || process.env.RUNTIME || process.env.RUNTIME_PROVIDER || process.env.BACKEND || DEFAULT_RUNTIME_ID, { repoRoot: REPO_ROOT, workspace: config.component_path || process.cwd(), executor: config.executor || {} });
+  const result = runGenericAgentLoop({
+    plan: config,
+    runtime,
+    configPath,
+    repoRoot: REPO_ROOT,
+    extensionPath: REPO_ROOT,
+    replayBundleDir: process.env.HOMEBOY_RUNTIME_AGENT_REPLAY_BUNDLE_DIR,
+    validate: false,
+    validationPolicy: {
+      scenario_id: config.workload_id,
+      success_requires_pr: config.success_requires_pr,
+      success_completion_outcomes: config.success_completion_outcomes,
+    },
+  });
+  writeGenericAgentLoopArtifacts({
+    outcome: result.outcome,
+    results: result.results,
+    outcomeFile: process.env.HOMEBOY_AGENT_TASK_OUTCOME_FILE || '',
+    resultsFile: process.env.HOMEBOY_RUNTIME_AGENT_RESULTS_FILE || '',
+  });
+  process.stdout.write(`${JSON.stringify(result.outcome, null, 2)}\n`);
+  process.exitCode = result.outcome.status === 'succeeded' || result.outcome.status === 'no_op' ? 0 : 1;
+} catch (error) {
+  console.error(error && error.message ? error.message : String(error));
+  process.exitCode = 1;
+}

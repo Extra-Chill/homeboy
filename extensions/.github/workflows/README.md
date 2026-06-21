@@ -49,16 +49,17 @@ evidence.
 runtime-backed agent run. It owns the GitHub Actions orchestration that callers
 should not repeat: dependency materialization, provider/runtime setup, runner
 workspace lifecycle, transcript/replay artifact upload, PR comments,
-`callback_data_json`, before/after workload hooks, extra mounts, and runtime
-config defines. The runtime execution primitive is
+output/evidence projections, `callback_data_json`, before/after workload hooks,
+extra mounts, and runtime config defines. The runtime execution primitive is
 `runtime-agent-ci/scripts/run-headless-loop.cjs`, which materializes task
 requests, runs the selected runtime provider, validates gates, and emits durable
 JSON results/events outside GitHub Actions.
 
 The generic workflow requires callers to provide their domain runtime profile,
 runtime component dependencies, required abilities, and runtime task/execution
-descriptor. Homeboy Extensions only assumes the runtime provider contract;
-domain ability names and component stacks are caller inputs.
+descriptor. Homeboy Extensions assumes the runtime provider contract only;
+WordPress/WP Codebox behavior is selected by passing `runtime: wp-codebox`.
+Domain ability names and component stacks are caller inputs.
 
 ```yaml
 jobs:
@@ -96,7 +97,7 @@ Use this mapping when updating old wrapper workflow bodies:
 
 | Old wrapper concept | Generic `runtime-agent-full-run.yml` input |
 | --- | --- |
-| Runtime selection | `runtime` (`runtime_provider` compatibility alias), `runtime_ref`, `runtime_wordpress_version` |
+| Runtime selection | `runtime` (`runtime_provider` compatibility alias), `runtime_ref`; `runtime_wordpress_version` only applies to WordPress-capable runtimes |
 | Flow identity | `workload_id`, `workload_label`, `callback_data` |
 | Bundle execution | `runtime_execution: {"kind":"bundle","source":"..."}` |
 | Direct ability execution | `runtime_task` or `ability_request` / `ability_input` |
@@ -139,9 +140,10 @@ and whether the caller required a Homeboy App token. Tokens are never printed.
 
 ## Runtime Bundle Example
 
-Workflows that need a runtime-backed bundle can pass the runtime profile,
+Workflows that need a WP Codebox-backed bundle can pass the runtime profile,
 dependencies, WordPress sandbox configuration, pre-run bootstrap work, and extra
-ability assertions through generic full-run inputs.
+ability assertions through the generic full-run inputs by selecting
+`runtime: wp-codebox`.
 
 ```yaml
 jobs:
@@ -187,7 +189,7 @@ jobs:
 
 ## Inputs worth calling out
 
-- Agent CI runs through the selected `runtime`. `runtime_provider` remains a compatibility alias, and `codebox` resolves to `wp-codebox` for older callers. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
+- Agent CI runs through the selected `runtime`. Empty runtime input selects `local-shell`, `runtime_provider` remains a compatibility alias, and `codebox` resolves to `wp-codebox` for older callers. Runtime metadata is discovered from `agent-runtimes/<runtime>/<runtime>.json` or another manifest JSON adjacent to the runtime.
 - `profile` is the preferred runtime profile selector. `runtime_profile` remains supported for existing callers.
 - `runtime_ref` controls the selected runtime ref.
 - `runtime_execution` declares bundle, workflow, or ability execution. When `runtime_task` or `ability_request` is supplied, the workflow builds a direct runtime task instead.
@@ -195,9 +197,9 @@ jobs:
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
 - `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
 - Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
-- `component_contracts` forwards explicit runtime component/plugin contracts to WP Codebox through the `wp-codebox/runtime-profile/v1` payload. Use it for caller-owned fixture ability providers or runtime components that are not part of the selected runtime profile.
-- Generic WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
-- `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to WP Codebox as runtime component requirements.
+- `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter. WP Codebox maps them through its `wp-codebox/runtime-profile/v1` payload.
+- WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
+- `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
 - `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields; for WP Codebox that becomes the sandbox tool policy. `tool_policy` remains accepted as a compatibility alias.
 - `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
@@ -216,7 +218,7 @@ jobs:
 - `ability_tools` adds WordPress ability-backed tools to the agent loop. It must be a JSON array.
 - `evidence_projections` maps provider operation results to named runtime outputs or artifact refs. `tool_recorders` remains a legacy alias for callers that also need forced parameters.
 - `pipeline_step_patches` and `flow_step_patches` modify imported bundle step config before the flow runs. They must be JSON arrays.
-- `runner_workspace` provisions a WP Codebox-managed runner workspace before the agent runs. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the WP Codebox runner publication API after completion.
+- `runner_workspace` provisions a selected-runtime runner workspace before the agent runs. WP Codebox uses its runner workspace API for this path. By default it is agent-visible: the runner prepends the workspace handle and branch to the prompt and forces workspace tools to that handle. Set `expose_to_agent: false` for runner-owned capture mode; the natural prompt is preserved, workspace tools remain scoped when used, and the runner publishes captured workspace changes through the selected runtime after completion.
 - `runner_workspace.capture_changes` defaults to `true` only when `expose_to_agent: false`; set it explicitly to disable hidden-mode publication or to enable runner-owned capture while still exposing the workspace handle.
 - `verification_commands` and `drift_checks` run through the WP Codebox runner workspace command API, so remote runner workspaces do not require Homeboy to know backend-local paths.
 - If runner-owned workspace publication is unavailable or fails, the run fails as `write_without_pr`; Homeboy does not compose alternate PR fallback calls.

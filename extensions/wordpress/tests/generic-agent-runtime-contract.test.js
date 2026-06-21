@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
 	normalizeRuntimeId,
+	DEFAULT_RUNTIME_ID,
 	resolveRuntimeProvider,
 	runtimeRegistry,
 } = require('../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
@@ -27,12 +28,15 @@ const repoRoot = path.join(__dirname, '..', '..');
 const registry = runtimeRegistry({ repoRoot });
 
 assert.equal(registry['wp-codebox'].id, 'wp-codebox');
+assert.equal(registry['local-shell'].id, 'local-shell');
 assert.equal(registry['fake-runtime'], undefined);
-assert.equal(registry['local-shell'], undefined);
 assert.equal(registry['package'], undefined);
 assert.equal(registry['homeboy-agent-task-core-contract'], undefined);
 assert.equal(normalizeRuntimeId('codebox'), 'wp-codebox');
+assert.equal(DEFAULT_RUNTIME_ID, 'local-shell');
+assert.equal(resolveRuntimeProvider(undefined, { repoRoot, registry }).id, 'local-shell');
 assert.equal(resolveRuntimeProvider('codebox', { repoRoot, registry }).id, 'wp-codebox');
+assert.equal(resolveRuntimeProvider('local-shell', { repoRoot, registry }).executor.backend, 'local-shell');
 
 const wpCodeboxRuntime = resolveRuntimeProvider('wp-codebox', { repoRoot, registry });
 assert.equal(wpCodeboxRuntime.id, 'wp-codebox');
