@@ -15,9 +15,6 @@ const {
 } = require('./lib/common.cjs');
 const { DEFAULT_RUNTIME_ID, resolveRuntimeProvider } = require('../../../runtime-agent-ci/lib/runtime-provider-resolver.cjs');
 const {
-  normalizeCodeboxArtifactDeclaration,
-} = require('../../../agent-runtimes/wp-codebox/lib/codebox-artifact-contract');
-const {
   runtimeAgentCiFirstNonEmptyArray,
   runtimeAgentCiFirstNonEmptyObject,
   runtimeAgentCiTaskFromRequest,
@@ -67,7 +64,7 @@ function buildConfig(env) {
 
   const runtimeTask = runtimeTaskFromEnv(env);
   const runtimeExecution = parseJsonInput('runtime_execution', env.RUNTIME_EXECUTION || '{}', 'object', {});
-  const workload = codeboxWorkloadFromEnv(env, workloadId);
+  const workload = runtimeWorkloadFromEnv(env, workloadId);
   const toolProfile = parseJsonInput('tool_profile', env.TOOL_PROFILE || env.TOOL_POLICY || '{}', 'object', {});
   const runtimeOutputProjections = runtimeAgentCiFirstNonEmptyObject(
     parseJsonInput('runtime_output_projections', env.RUNTIME_OUTPUT_PROJECTIONS || '{}', 'object', {}),
@@ -109,8 +106,15 @@ function buildConfig(env) {
   const effectiveRunnerWorkspace = runnerWorkspace.enabled === true ? { ...runnerWorkspace, checkout_path: runnerWorkspaceGuestCheckout } : runnerWorkspace;
   const appTokenRepos = splitCsv(env.APP_TOKEN_REPOS || targetRepo);
   const allowedRepos = parseJsonInput('allowed_repos', env.ALLOWED_REPOS || '[]', 'array', []);
-  const transcriptHostDir = path.join(workspace, 'runtime-agent-artifacts', workloadId);
-  const transcriptGuestDir = `/wordpress/wp-content/plugins/${componentId}/runtime-agent-artifacts/${workloadId}`;
+  const runtimeProjection = projectRuntimeConfig({
+    env,
+    runtime,
+    workspace,
+    componentId,
+    componentPath,
+    workloadId,
+    runnerWorkspaceGuestCheckout,
+  });
 
   return {
     ...runtimeConfig,
@@ -125,13 +129,13 @@ function buildConfig(env) {
     runtime_profile: runtimeProfile,
     runtime_profiles: effectiveRuntimeProfiles,
     runtime_ref: env.RUNTIME_REF || 'main',
-    runtime_wordpress_version: env.RUNTIME_WORDPRESS_VERSION || '7.0',
+    ...runtimeProjection.runtime_fields,
     execution_kind: env.EXECUTION_KIND || (runtimeTask ? 'runtime_task' : 'runtime_execution'),
     runtime_mounts: [
       ...normalizePathSources(parseJsonInput('runtime_mounts', env.RUNTIME_MOUNTS || '[]', 'array', []), workspace),
       ...runnerWorkspaceMounts,
     ],
-    wp_config_defines: parseJsonInput('extra_wp_config_defines', env.EXTRA_WP_CONFIG_DEFINES || '{}', 'object', {}),
+    wp_config_defines: runtimeProjection.wp_config_defines,
     runtime_overlays: runtimeOverlays,
     workload_run_before: parseJsonInput('workload_run_before', env.WORKLOAD_RUN_BEFORE || '[]', 'array', []),
     workload_run_after: parseJsonInput('workload_run_after', env.WORKLOAD_RUN_AFTER || '[]', 'array', []),
@@ -168,7 +172,7 @@ function buildConfig(env) {
     step_budget: Number(env.STEP_BUDGET || 16),
     time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
-    artifact_declarations: artifactDeclarationsFromEnv(env, runtime),
+    artifact_declarations: runtimeProjection.artifact_declarations,
     sandbox_tool_policy: renderedRuntimeInputs.workflow_inputs.sandbox_tool_policy,
     output_mappings: parseJsonInput('output_mappings', env.OUTPUT_MAPPINGS || '{}', 'object', {}),
     runtime_output_projections: runtimeOutputProjections,
@@ -199,8 +203,8 @@ function buildConfig(env) {
       ...parseJsonInput('artifact_export_config', env.ARTIFACT_EXPORT_CONFIG || '{}', 'object', {}),
     },
     dry_run: env.DRY_RUN === 'true',
-    transcript_dir: transcriptGuestDir,
-    transcript_host_dir: transcriptHostDir,
+    transcript_dir: runtimeProjection.transcript_dir,
+    transcript_host_dir: runtimeProjection.transcript_host_dir,
     bench_env: {
       GITHUB_TOKEN: env.GITHUB_REPOSITORY_TOKEN_VALUE || '',
       HOMEBOY_GITHUB_APP_TOKEN: env.GITHUB_APP_TOKEN_VALUE || '',
@@ -212,19 +216,9 @@ function buildConfig(env) {
   };
 }
 
-function codeboxWorkloadFromEnv(env, fallbackId) {
+function runtimeWorkloadFromEnv(env, fallbackId) {
   const workload = parseJsonInput('workload', env.WORKLOAD || '{}', 'object', {});
   return Object.keys(workload).length > 0 ? workload : { id: fallbackId };
-}
-
-function artifactDeclarationsFromEnv(env, runtime) {
-  const declarations = parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []);
-  if (!isCodeboxRuntime(runtime)) {
-    return declarations;
-  }
-  return declarations
-    .map((declaration, index) => normalizeCodeboxArtifactDeclaration(`artifact_${index + 1}`, declaration))
-    .filter(Boolean);
 }
 
 function validationPaths(workspace, providerPlugin, provider) {
@@ -259,13 +253,111 @@ function runtimeTaskFromEnv(env) {
   );
 }
 
-function isCodeboxRuntime(runtime) {
-  return runtime?.id === 'wp-codebox' || runtime?.executor?.backend === 'codebox';
-}
-
 function runtimePathRequired(runtime, pathName) {
   const requiredPaths = runtime?.manifest?.ci_materialization?.required_paths;
-  return isCodeboxRuntime(runtime) || (Array.isArray(requiredPaths) && requiredPaths.includes(pathName));
+  return Array.isArray(requiredPaths) && requiredPaths.includes(pathName);
+}
+
+function projectRuntimeConfig({ env, runtime, workspace, componentId, componentPath, workloadId, runnerWorkspaceGuestCheckout }) {
+  const projection = runtime?.manifest?.runner_config_projection || {};
+  const artifactDeclarations = parseJsonInput('artifact_declarations', env.ARTIFACT_DECLARATIONS || '[]', 'array', []);
+  const context = {
+    component_id: componentId,
+    component_path: componentPath,
+    workload_id: workloadId,
+    workspace,
+    runner_workspace_guest_checkout: runnerWorkspaceGuestCheckout,
+  };
+  const manifestProjection = {
+    artifact_declarations: artifactDeclarations,
+    transcript_host_dir: renderTemplate(
+      projection.transcript_host_dir_template,
+      context,
+      path.join(workspace, 'runtime-agent-artifacts', workloadId)
+    ),
+    transcript_dir: renderTemplate(
+      projection.transcript_guest_dir_template,
+      context,
+      `${runnerWorkspaceGuestCheckout}/runtime-agent-artifacts/${workloadId}`
+    ),
+    wp_config_defines: {
+      ...(plainObject(projection.wp_config_defines) ? projection.wp_config_defines : {}),
+      ...parseJsonInput('extra_wp_config_defines', env.EXTRA_WP_CONFIG_DEFINES || '{}', 'object', {}),
+    },
+    runtime_fields: runtimeFieldsFromProjection(projection.runtime_fields, env),
+  };
+  const adapter = runtimeProjectionAdapter(runtime, projection);
+  if (!adapter) {
+    return manifestProjection;
+  }
+  const adapterProjection = adapter({
+    env,
+    runtime,
+    workspace,
+    componentId,
+    componentPath,
+    workloadId,
+    runnerWorkspaceGuestCheckout,
+    artifactDeclarations,
+    manifestProjection,
+  });
+  return mergeProjection(manifestProjection, adapterProjection);
+}
+
+function runtimeProjectionAdapter(runtime, projection) {
+  const adapter = projection.adapter;
+  if (!plainObject(adapter) || !adapter.module) {
+    return null;
+  }
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const adapterPath = path.resolve(repoRoot, adapter.module);
+  const loaded = require(adapterPath);
+  const exportName = adapter.export || 'projectRuntimeConfig';
+  if (typeof loaded[exportName] !== 'function') {
+    throw new Error(`Runtime ${runtime.id} projection adapter ${adapter.module} does not export ${exportName}`);
+  }
+  return loaded[exportName];
+}
+
+function runtimeFieldsFromProjection(fields, env) {
+  if (!plainObject(fields)) {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(fields).map(([key, definition]) => {
+    if (plainObject(definition)) {
+      return [key, env[definition.env] || definition.default];
+    }
+    return [key, definition];
+  }).filter(([, value]) => value !== undefined && value !== ''));
+}
+
+function mergeProjection(base, override) {
+  if (!plainObject(override)) {
+    return base;
+  }
+  return {
+    ...base,
+    ...override,
+    wp_config_defines: {
+      ...base.wp_config_defines,
+      ...(plainObject(override.wp_config_defines) ? override.wp_config_defines : {}),
+    },
+    runtime_fields: {
+      ...base.runtime_fields,
+      ...(plainObject(override.runtime_fields) ? override.runtime_fields : {}),
+    },
+  };
+}
+
+function renderTemplate(template, values, fallback) {
+  if (typeof template !== 'string' || template.length === 0) {
+    return fallback;
+  }
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_match, key) => values[key] || '');
+}
+
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function withoutInternalKeys(config) {
@@ -288,4 +380,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, isCodeboxRuntime, runtimePathRequired };
+module.exports = { buildConfig, projectRuntimeConfig, runtimePathRequired };
