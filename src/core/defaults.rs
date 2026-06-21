@@ -1,14 +1,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
-use std::sync::{OnceLock, RwLock};
-
-use crate::core::engine::local_files;
-use crate::core::paths;
 
 #[path = "defaults/builtins.rs"]
 mod builtins;
+mod io;
+mod policy;
+
+pub use io::{config_exists, config_path, load_config, reset_config, save_config};
+pub(crate) use policy::resolve_release_gate_local_hot_policy_from;
+pub use policy::{
+    resolve_release_gate_local_hot_policy, BenchConfig, BenchLocalExecutionPolicy,
+    ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,
+};
+
+#[cfg(test)]
+pub(crate) use io::reset_config_cache_for_test;
 
 pub(crate) use builtins::deploy_generated_build_dir;
 pub(crate) use builtins::extension_provided_direct_test_file_suffixes;
@@ -114,103 +121,6 @@ impl Default for HomeboyConfig {
 
 pub fn default_true() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BenchConfig {
-    #[serde(default)]
-    pub local_execution: BenchLocalExecutionPolicy,
-}
-
-impl Default for BenchConfig {
-    fn default() -> Self {
-        Self {
-            local_execution: BenchLocalExecutionPolicy::Allowed,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum BenchLocalExecutionPolicy {
-    #[default]
-    Allowed,
-    Denied,
-}
-
-impl BenchLocalExecutionPolicy {
-    pub fn is_denied(self) -> bool {
-        matches!(self, Self::Denied)
-    }
-}
-
-/// Release-gate routing safety policy.
-///
-/// Release gates are the quality-check hot commands (lint/test/audit) whose
-/// routing fidelity matters for validating a release. When a default Lab
-/// runner is configured, silently bypassing Lab routing to run these gates
-/// locally (via `--force-hot --allow-local-hot` or a stale-runner fallback)
-/// produces a gate result that is not faithful to the configured runner
-/// policy. This config makes such bypasses fail closed with a clear
-/// diagnostic instead of silently executing locally. See issues #4603 / #4605.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct ReleaseGateConfig {
-    /// Whether release-gate hot commands may be bypassed to local execution
-    /// when a default Lab runner is configured.
-    ///
-    /// - `fail_closed` (default): the bypass is rejected with a diagnostic.
-    /// - `allowed`: the bypass runs locally and is recorded in the offload
-    ///   metadata (the operator-only override).
-    #[serde(default)]
-    pub local_hot: ReleaseGateLocalHotPolicy,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum ReleaseGateLocalHotPolicy {
-    /// Reject force-local bypass and stale-runner local fallback for release
-    /// gates when a default Lab runner is configured.
-    #[default]
-    FailClosed,
-    /// Allow release gates to run locally; recorded in offload metadata.
-    Allowed,
-}
-
-impl ReleaseGateLocalHotPolicy {
-    pub fn is_allowed(self) -> bool {
-        matches!(self, Self::Allowed)
-    }
-}
-
-/// Environment variable override for `/release_gate/local_hot`.
-///
-/// Takes precedence over the config file so operators can re-enable a
-/// local-hot bypass for a single invocation without editing config. This is
-/// the explicit operator-only override: it must be set in the environment, not
-/// via a convenience CLI flag, so it cannot become a habit bypass.
-pub const RELEASE_GATE_LOCAL_HOT_ENV: &str = "HOMEBOY_RELEASE_GATE_LOCAL_HOT";
-
-/// Resolve the effective release-gate local-hot policy from the environment
-/// override (precedence) then the config file, falling back to the default.
-pub fn resolve_release_gate_local_hot_policy() -> ReleaseGateLocalHotPolicy {
-    resolve_release_gate_local_hot_policy_from(&load_config())
-}
-
-pub(crate) fn resolve_release_gate_local_hot_policy_from(
-    config: &HomeboyConfig,
-) -> ReleaseGateLocalHotPolicy {
-    if let Ok(raw) = std::env::var(RELEASE_GATE_LOCAL_HOT_ENV) {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "allowed" | "allow" | "true" | "1" => return ReleaseGateLocalHotPolicy::Allowed,
-            "fail_closed" | "fail-closed" | "denied" | "false" | "0" => {
-                return ReleaseGateLocalHotPolicy::FailClosed;
-            }
-            _ => {}
-        }
-    }
-    config.release_gate.local_hot
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -388,149 +298,6 @@ pub struct PermissionModes {
 /// If the product config file is missing or invalid, silently returns built-in defaults.
 pub fn load_defaults() -> Defaults {
     load_config().defaults
-}
-
-/// Load the full product config, falling back to defaults on any error.
-/// Warns to stderr if the file exists but fails to parse, so the user knows
-/// their config is being ignored rather than silently resetting to defaults.
-pub fn load_config() -> HomeboyConfig {
-    if let Some(config) = cached_config() {
-        return config;
-    }
-
-    let config = load_config_uncached();
-    store_cached_config(&config);
-    config
-}
-
-fn load_config_uncached() -> HomeboyConfig {
-    match load_config_from_file() {
-        Ok(config) => config,
-        Err(err) => {
-            // Only warn if the file actually exists — missing file is expected
-            if config_exists() {
-                log_status!(
-                    "config",
-                    "Warning: failed to load {} ({}), using defaults",
-                    crate::core::product_identity::PRODUCT_IDENTITY.config_filename,
-                    err.message
-                );
-            }
-            HomeboyConfig::default()
-        }
-    }
-}
-
-fn config_cache() -> &'static RwLock<Option<HomeboyConfig>> {
-    static CONFIG: OnceLock<RwLock<Option<HomeboyConfig>>> = OnceLock::new();
-    CONFIG.get_or_init(|| RwLock::new(None))
-}
-
-fn cached_config() -> Option<HomeboyConfig> {
-    match config_cache().read() {
-        Ok(slot) => slot.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
-}
-
-fn store_cached_config(config: &HomeboyConfig) {
-    match config_cache().write() {
-        Ok(mut slot) => *slot = Some(config.clone()),
-        Err(poisoned) => *poisoned.into_inner() = Some(config.clone()),
-    }
-}
-
-fn clear_config_cache() {
-    match config_cache().write() {
-        Ok(mut slot) => *slot = None,
-        Err(poisoned) => *poisoned.into_inner() = None,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn reset_config_cache_for_test() {
-    clear_config_cache();
-}
-
-/// Attempt to load config from the product config file.
-fn load_config_from_file() -> crate::core::Result<HomeboyConfig> {
-    let path = paths::homeboy_json()?;
-
-    if !path.exists() {
-        return Err(crate::core::Error::internal_io(
-            format!(
-                "{} not found",
-                crate::core::product_identity::PRODUCT_IDENTITY.config_filename
-            ),
-            Some(path.display().to_string()),
-        ));
-    }
-
-    let content = local_files::read_file(&path, &format!("read {}", path.display()))?;
-
-    let config: HomeboyConfig = serde_json::from_str(&content).map_err(|e| {
-        crate::core::Error::validation_invalid_json(
-            e,
-            Some(format!(
-                "parse {}",
-                crate::core::product_identity::PRODUCT_IDENTITY.config_filename
-            )),
-            Some(content.chars().take(200).collect::<String>()),
-        )
-    })?;
-
-    Ok(config)
-}
-
-/// Save config to the product config file (creates if missing).
-pub fn save_config(config: &HomeboyConfig) -> crate::core::Result<()> {
-    let path = paths::homeboy_json()?;
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            crate::core::Error::internal_io(
-                e.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-
-    let content = crate::core::config::to_string_pretty(config)?;
-
-    local_files::write_file_atomic(&path, &content, &format!("write {}", path.display()))?;
-    store_cached_config(config);
-
-    Ok(())
-}
-
-/// Check if the product config file exists.
-pub fn config_exists() -> bool {
-    paths::homeboy_json().map(|p| p.exists()).unwrap_or(false)
-}
-
-/// Delete the product config file (reset to defaults).
-pub fn reset_config() -> crate::core::Result<bool> {
-    let path = paths::homeboy_json()?;
-
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| {
-            crate::core::Error::internal_io(
-                e.to_string(),
-                Some(format!("delete {}", path.display())),
-            )
-        })?;
-        clear_config_cache();
-        Ok(true)
-    } else {
-        clear_config_cache();
-        Ok(false)
-    }
-}
-
-/// Get the product config path (for display purposes).
-pub fn config_path() -> crate::core::Result<String> {
-    Ok(paths::homeboy_json()?.display().to_string())
 }
 
 /// Get built-in defaults (ignoring any file config)
