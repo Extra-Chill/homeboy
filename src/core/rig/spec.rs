@@ -452,6 +452,24 @@ impl BenchMetricGateCondition {
     }
 }
 
+/// Shared trace phase-preset configuration.
+///
+/// The `{ trace_phase_presets, trace_span_metadata, trace_default_phase_preset }`
+/// group is declared once here and flattened into every spec that carries it
+/// (`WorkloadSpec`, `WorkloadDefaultsSpec`, `TracePhaseTemplateSpec`), so the
+/// on-disk JSON keys stay flat while the field group lives in a single type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TraceConfig {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_phase_presets: HashMap<String, Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_default_phase_preset: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSpec {
     pub path: String,
@@ -471,14 +489,8 @@ pub struct WorkloadSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_leases: Vec<String>,
 
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_phase_presets: HashMap<String, Vec<String>>,
-
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_default_phase_preset: Option<String>,
+    #[serde(flatten)]
+    pub trace: TraceConfig,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
@@ -513,14 +525,8 @@ pub struct WorkloadDefaultsSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub named_leases: Vec<String>,
 
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_phase_presets: HashMap<String, Vec<String>>,
-
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_default_phase_preset: Option<String>,
+    #[serde(flatten)]
+    pub trace: TraceConfig,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
@@ -540,14 +546,8 @@ pub struct WorkloadDefaultsSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TracePhaseTemplateSpec {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_phase_presets: HashMap<String, Vec<String>>,
-
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_span_metadata: HashMap<String, TraceSpanMetadata>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_default_phase_preset: Option<String>,
+    #[serde(flatten)]
+    pub trace: TraceConfig,
 }
 
 impl WorkloadSpec {
@@ -564,8 +564,9 @@ impl WorkloadSpec {
         if self.port_range_size.is_none() {
             self.port_range_size = defaults.port_range_size;
         }
-        if self.trace_default_phase_preset.is_none() {
-            self.trace_default_phase_preset = defaults.trace_default_phase_preset.clone();
+        if self.trace.trace_default_phase_preset.is_none() {
+            self.trace.trace_default_phase_preset =
+                defaults.trace.trace_default_phase_preset.clone();
         }
 
         prepend_missing(&mut self.named_leases, &defaults.named_leases);
@@ -573,17 +574,30 @@ impl WorkloadSpec {
         prepend_missing(&mut self.trace_probes, &defaults.trace_probes);
         prepend_missing(&mut self.dependencies, &defaults.dependencies);
         prepend_missing(&mut self.runner_capabilities, &defaults.runner_capabilities);
-        merge_defaults_map(&mut self.trace_phase_presets, &defaults.trace_phase_presets);
-        merge_defaults_map(&mut self.trace_span_metadata, &defaults.trace_span_metadata);
+        merge_defaults_map(
+            &mut self.trace.trace_phase_presets,
+            &defaults.trace.trace_phase_presets,
+        );
+        merge_defaults_map(
+            &mut self.trace.trace_span_metadata,
+            &defaults.trace.trace_span_metadata,
+        );
         merge_defaults_map(&mut self.trace_variants, &defaults.trace_variants);
     }
 
     pub fn apply_phase_template(&mut self, template: &TracePhaseTemplateSpec) {
-        if self.trace_default_phase_preset.is_none() {
-            self.trace_default_phase_preset = template.trace_default_phase_preset.clone();
+        if self.trace.trace_default_phase_preset.is_none() {
+            self.trace.trace_default_phase_preset =
+                template.trace.trace_default_phase_preset.clone();
         }
-        merge_defaults_map(&mut self.trace_phase_presets, &template.trace_phase_presets);
-        merge_defaults_map(&mut self.trace_span_metadata, &template.trace_span_metadata);
+        merge_defaults_map(
+            &mut self.trace.trace_phase_presets,
+            &template.trace.trace_phase_presets,
+        );
+        merge_defaults_map(
+            &mut self.trace.trace_span_metadata,
+            &template.trace.trace_span_metadata,
+        );
     }
 }
 
@@ -899,12 +913,14 @@ mod tests {
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
-            trace_phase_presets: HashMap::from([(
-                "startup".to_string(),
-                vec!["launch".to_string(), "ready".to_string()],
-            )]),
-            trace_span_metadata: HashMap::new(),
-            trace_default_phase_preset: None,
+            trace: TraceConfig {
+                trace_phase_presets: HashMap::from([(
+                    "startup".to_string(),
+                    vec!["launch".to_string(), "ready".to_string()],
+                )]),
+                trace_span_metadata: HashMap::new(),
+                trace_default_phase_preset: None,
+            },
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
@@ -1068,9 +1084,11 @@ mod tests {
             check_groups: None,
             port_range_size: None,
             named_leases: Vec::new(),
-            trace_phase_presets: HashMap::new(),
-            trace_span_metadata: HashMap::new(),
-            trace_default_phase_preset: Some("startup".to_string()),
+            trace: TraceConfig {
+                trace_phase_presets: HashMap::new(),
+                trace_span_metadata: HashMap::new(),
+                trace_default_phase_preset: Some("startup".to_string()),
+            },
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
@@ -1093,9 +1111,11 @@ mod tests {
             check_groups: None,
             port_range_size: Some(8),
             named_leases: Vec::new(),
-            trace_phase_presets: HashMap::new(),
-            trace_span_metadata: HashMap::new(),
-            trace_default_phase_preset: None,
+            trace: TraceConfig {
+                trace_phase_presets: HashMap::new(),
+                trace_span_metadata: HashMap::new(),
+                trace_default_phase_preset: None,
+            },
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),
@@ -1118,9 +1138,11 @@ mod tests {
             check_groups: None,
             port_range_size: None,
             named_leases: vec!["browser-profile".to_string()],
-            trace_phase_presets: HashMap::new(),
-            trace_span_metadata: HashMap::new(),
-            trace_default_phase_preset: None,
+            trace: TraceConfig {
+                trace_phase_presets: HashMap::new(),
+                trace_span_metadata: HashMap::new(),
+                trace_default_phase_preset: None,
+            },
             trace_variants: HashMap::new(),
             trace_guardrails: Vec::new(),
             trace_probes: Vec::new(),

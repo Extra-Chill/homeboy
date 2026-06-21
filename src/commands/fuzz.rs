@@ -1,7 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
@@ -328,19 +328,13 @@ fn push_opt_env(env: &mut Vec<(String, String)>, key: &str, value: Option<&Strin
     }
 }
 
-struct FuzzRigContext {
-    spec: RigSpec,
-    package_root: Option<PathBuf>,
-}
+type FuzzRigContext = rig::RigSourceContext;
 
 fn load_rig(rig_id: Option<&str>) -> homeboy::core::Result<Option<FuzzRigContext>> {
     let Some(rig_id) = rig_id else {
         return Ok(None);
     };
-    let spec = rig::load(rig_id)?;
-    let package_root =
-        rig::read_source_metadata(&spec.id).map(|metadata| PathBuf::from(metadata.package_path));
-    Ok(Some(FuzzRigContext { spec, package_root }))
+    Ok(Some(rig::RigSourceContext::load(rig_id)?))
 }
 
 fn resolve_component_id(
@@ -660,7 +654,7 @@ mod tests {
         let component = rig_component_for_fuzz(&spec, "package").expect("rig component");
         let context = FuzzRigContext {
             spec,
-            package_root: Some(PathBuf::from("/tmp/homeboy-rigs/package")),
+            package_root: Some(std::path::PathBuf::from("/tmp/homeboy-rigs/package")),
         };
 
         let workloads = fuzz_workloads(&component, Some(&context), Some("generic"));
