@@ -75,8 +75,8 @@ name, runtime output file name, dispatch function, and artifact normalization.
 ## Audit Fanout Runtime Boundary
 
 Audit fanout extraction is split from runtime execution. Generic fanout planning
-and reconcile code groups audit findings, templates opaque task requests, and
-matches provider records back to groups. The exported
+and reconcile primitives live in `runtime-agent-ci/lib`; they group items,
+template opaque task requests, and match provider records back to groups. The exported
 `audit-fanout-runtime-provider` interface defines dispatch/apply operations
 without naming runtime package names, provider credentials, sandbox recipes, or
 provider task schemas.
@@ -86,7 +86,7 @@ quarantined `audit-wp-codebox-fanout` module and CLI map grouped audit findings
 to `wp-codebox/task-input/v1`, execute those requests through Codebox-owned task
 runner contracts, and normalize Codebox artifacts/outcomes back into fanout
 records. Keep new executor-neutral extraction behavior in
-`runtime-agent-ci/generic-fanout-reconcile-workflow`; keep Codebox request/session/artifact
+`runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js`; keep Codebox request/session/artifact
 details inside the Codebox audit fanout lane.
 
 ## Static Site Fanout Adapter

@@ -1,10 +1,19 @@
 'use strict';
 
+/* eslint-disable no-console */
+
+/**
+ * External dependencies
+ */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+
+/**
+ * Internal dependencies
+ */
 const {
   createFindingPacketFanoutPlan,
   createFindingPacketReconcileInput,
@@ -12,7 +21,7 @@ const {
   createGenericFanoutReconcileResult,
   materializeFindingPacketFanoutConfig,
   normalizeFindingPacketItems,
-} = require('../lib/generic-fanout-reconcile-workflow');
+} = require('../../runtime-agent-ci/lib/generic-fanout-reconcile-workflow');
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
