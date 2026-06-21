@@ -120,13 +120,7 @@ pub fn start(spec: PreviewClientStartSpec) -> Result<PreviewClientReport> {
         .map_err(|err| {
             Error::internal_unexpected(format!("build preview client HTTP client: {err}"))
         })?;
-    let local_client = Client::builder()
-        .timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| {
-            Error::internal_unexpected(format!("build local-origin HTTP client: {err}"))
-        })?;
+    let local_client = build_local_origin_client()?;
 
     register_session(&client, &spec, &token)?;
     if spec.ready_stdout {
@@ -354,6 +348,42 @@ fn forward_to_local_origin_result(
     })
 }
 
+/// Maximum number of attempts (initial + retries) for a single local-origin
+/// request when the upstream fails with a transient connection-level error.
+const LOCAL_ORIGIN_MAX_ATTEMPTS: u32 = 4;
+
+/// Build the HTTP client used to forward requests to the local preview origin.
+///
+/// Keep-alive connection pooling is disabled (`pool_max_idle_per_host(0)`): under
+/// a parallel asset fan-out (a browser firing many static-asset requests at once)
+/// reusing a pooled keep-alive connection that the upstream (e.g. a local
+/// dev/app server or worker pool) has already closed produces intermittent
+/// "connection closed before message completed" / reset errors that surface as
+/// 502s. Forcing a fresh connection per request trades a small amount of
+/// connection overhead for reliable parallel delivery, which is the correct
+/// trade-off for a preview proxy that must not drop assets mid-trace.
+fn build_local_origin_client() -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build local-origin HTTP client: {err}")))
+}
+
+/// Classify a `reqwest` send error as a transient connection-level failure that
+/// is safe to retry. These are not application errors from the origin; they are
+/// connection establishment / reset / incomplete-message failures that occur
+/// when the origin momentarily refuses or drops a connection under a parallel
+/// request burst. We deliberately do NOT retry timeouts (the request may have
+/// already been partially serviced and is more likely a genuinely slow path).
+fn is_transient_local_origin_error(error: &reqwest::Error) -> bool {
+    if error.is_timeout() || error.is_status() || error.is_redirect() {
+        return false;
+    }
+    error.is_connect() || error.is_request()
+}
+
 fn open_local_origin_response(
     client: &Client,
     local_origin: &str,
@@ -362,27 +392,42 @@ fn open_local_origin_response(
     (u16, Vec<(String, String)>, reqwest::blocking::Response),
     PreviewClientForwardError,
 > {
-    let method = request
-        .method
-        .parse()
-        .map_err(|err| PreviewClientForwardError {
-            kind: "invalid_method".to_string(),
-            message: format!("invalid ingress request method: {err}"),
-        })?;
+    let method: reqwest::Method =
+        request
+            .method
+            .parse()
+            .map_err(|err| PreviewClientForwardError {
+                kind: "invalid_method".to_string(),
+                message: format!("invalid ingress request method: {err}"),
+            })?;
     let url = local_request_url(local_origin, &request.path)?;
     let body = decode_body(request.body_base64.as_deref())?;
-    let mut local_request = client
-        .request(method, url)
-        .headers(forward_request_headers(&request.headers));
-    if let Some(body) = body {
-        local_request = local_request.body(body);
-    }
-    let response = local_request
-        .send()
-        .map_err(|err| PreviewClientForwardError {
-            kind: "local_origin_request_failed".to_string(),
-            message: err.to_string(),
-        })?;
+
+    let mut attempt = 0_u32;
+    let response = loop {
+        attempt += 1;
+        let mut local_request = client
+            .request(method.clone(), url.clone())
+            .headers(forward_request_headers(&request.headers));
+        if let Some(body) = body.clone() {
+            local_request = local_request.body(body);
+        }
+        match local_request.send() {
+            Ok(response) => break response,
+            Err(err) => {
+                if attempt < LOCAL_ORIGIN_MAX_ATTEMPTS && is_transient_local_origin_error(&err) {
+                    // Small linear backoff to let the origin recover from a
+                    // momentary connection-accept stall during a parallel burst.
+                    thread::sleep(Duration::from_millis(25 * u64::from(attempt)));
+                    continue;
+                }
+                return Err(PreviewClientForwardError {
+                    kind: "local_origin_request_failed".to_string(),
+                    message: err.to_string(),
+                });
+            }
+        }
+    };
     let status = response.status().as_u16();
     let headers = cors_headers(response_headers(response.headers()), &request.path);
     Ok((status, headers, response))
@@ -807,6 +852,53 @@ mod tests {
         assert_eq!(response.status, 502);
         let error = response.error.expect("error");
         assert_eq!(error.kind, "local_origin_request_failed");
+    }
+
+    #[test]
+    fn retries_transient_local_origin_connection_reset() {
+        // Simulate a parallel-burst transient failure: the origin accepts and
+        // then immediately drops the first connection (resetting it) before
+        // serving the asset successfully on the retry. The proxy must recover
+        // and deliver the asset rather than surfacing a 502.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local origin");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            // First attempt: accept then drop the connection without responding.
+            let (first, _) = listener.accept().expect("accept first attempt");
+            drop(first);
+            // Second attempt: serve the asset normally.
+            let (mut stream, _) = listener.accept().expect("accept retry");
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer).expect("read retry request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: 11\r\n\r\nasset-bytes",
+                )
+                .expect("write retry response");
+        });
+
+        let client = build_local_origin_client().expect("local-origin client");
+        let response = forward_to_local_origin(
+            &client,
+            &format!("http://127.0.0.1:{port}"),
+            PreviewIngressRequest {
+                request_id: "req-retry".to_string(),
+                method: "GET".to_string(),
+                path: "/wp-content/plugins/example/build/asset.js?ver=1".to_string(),
+                headers: BTreeMap::new(),
+                body_base64: None,
+            },
+        );
+
+        server.join().expect("server finished");
+        assert_eq!(response.status, 200, "retry should recover the asset");
+        assert!(response.error.is_none(), "no error after successful retry");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(response.body_base64)
+                .expect("decode response"),
+            b"asset-bytes"
+        );
     }
 
     #[test]
