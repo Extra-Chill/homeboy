@@ -16,6 +16,7 @@ use homeboy::core::runners::{
     RunnerTunnelMode,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
+use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::{EntityCrudOutput, MergeOutput};
 
 use super::output_runtime::{CommandPresentation, JsonCommandRun};
@@ -1286,18 +1287,6 @@ fn exec(
 /// truncation metadata records when the source exceeded the limit (#5238).
 const RUNNER_EXEC_SCRIPT_LIMIT_BYTES: usize = 1024 * 1024;
 
-/// Truncation metadata describing how much of a captured script was retained.
-/// Mirrors the bounded-capture pattern used elsewhere in the codebase (the
-/// `CaptureMetadata`/`BoundedCapture` shape) so the retained bytes cannot grow
-/// without an explicit limit and the overflow is observable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScriptCaptureMetadata {
-    limit_bytes: usize,
-    seen_bytes: usize,
-    retained_bytes: usize,
-    truncated: bool,
-}
-
 /// Read a stream into memory with an explicit retained-byte bound, returning the
 /// retained bytes plus truncation metadata. Reads one byte past the limit so an
 /// overflow is detectable without retaining the entire (potentially unbounded)
@@ -1305,7 +1294,7 @@ struct ScriptCaptureMetadata {
 fn read_bounded(
     mut reader: impl Read,
     limit_bytes: usize,
-) -> io::Result<(Vec<u8>, ScriptCaptureMetadata)> {
+) -> io::Result<(Vec<u8>, StreamCaptureMetadata)> {
     let mut retained = Vec::new();
     let read = reader
         .by_ref()
@@ -1315,7 +1304,7 @@ fn read_bounded(
     if truncated {
         retained.truncate(limit_bytes);
     }
-    let metadata = ScriptCaptureMetadata {
+    let metadata = StreamCaptureMetadata {
         limit_bytes,
         seen_bytes: read,
         retained_bytes: retained.len(),

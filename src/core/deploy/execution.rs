@@ -11,6 +11,7 @@ use crate::core::extension::build::resolve_artifact_path_from_root;
 use crate::core::git;
 use crate::core::project::Project;
 use crate::core::release::version;
+use crate::core::stream_capture::StreamCaptureMetadata;
 
 use super::effect::remote_version_after_deploy_effect;
 use super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
@@ -33,15 +34,6 @@ use super::version_overrides::{
 /// (#5363). The cap is generous: a real version manifest is a few kilobytes, so
 /// the trailing window still contains any plausible version string.
 const ARTIFACT_VERSION_READ_LIMIT_BYTES: usize = 65_536;
-
-/// Truncation metadata describing how much of a captured stream was retained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StreamCaptureMetadata {
-    limit_bytes: usize,
-    seen_bytes: usize,
-    retained_bytes: usize,
-    truncated: bool,
-}
 
 /// Read at most `limit` bytes from `reader`, keeping the trailing tail (the most
 /// relevant window for a version string that lives near the end of a manifest)

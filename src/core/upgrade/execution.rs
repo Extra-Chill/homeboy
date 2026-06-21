@@ -1,5 +1,6 @@
 use crate::core::defaults;
 use crate::core::error::{Error, Result};
+use crate::core::stream_capture::StreamCaptureMetadata;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -20,15 +21,6 @@ const UPGRADE_CAPTURE_LIMIT_BYTES: usize = 65_536;
 pub(crate) struct ActiveBinaryInfo {
     pub version: Option<String>,
     pub build_identity: Option<String>,
-}
-
-/// Truncation metadata describing how much of a captured stream was retained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StreamCaptureMetadata {
-    pub limit_bytes: usize,
-    pub seen_bytes: usize,
-    pub retained_bytes: usize,
-    pub truncated: bool,
 }
 
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes

@@ -3,6 +3,7 @@ use crate::core::engine::run_dir::RunDir;
 use crate::core::error::{Error, Result};
 use crate::core::extension::ExtensionCapability;
 use crate::core::observation::ActiveObservation;
+use crate::core::stream_capture::StreamCaptureMetadata;
 use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
 use std::io::{Read, Write};
@@ -23,16 +24,8 @@ pub struct SelfCheckOutput {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SelfCheckCaptureMetadata {
-    pub stdout: SelfCheckStreamCaptureMetadata,
-    pub stderr: SelfCheckStreamCaptureMetadata,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SelfCheckStreamCaptureMetadata {
-    pub limit_bytes: usize,
-    pub seen_bytes: usize,
-    pub retained_bytes: usize,
-    pub truncated: bool,
+    pub stdout: StreamCaptureMetadata,
+    pub stderr: StreamCaptureMetadata,
 }
 
 #[cfg(test)]
@@ -206,8 +199,8 @@ impl BoundedCapture {
         String::from_utf8_lossy(&self.retained).to_string()
     }
 
-    fn metadata(&self) -> SelfCheckStreamCaptureMetadata {
-        SelfCheckStreamCaptureMetadata {
+    fn metadata(&self) -> StreamCaptureMetadata {
+        StreamCaptureMetadata {
             limit_bytes: self.limit,
             seen_bytes: self.seen,
             retained_bytes: self.retained.len(),

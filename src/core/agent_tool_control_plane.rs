@@ -10,6 +10,7 @@ use crate::core::agent_task::{
     AgentTaskDiagnostic, AgentToolExecutionLocation, AgentToolPolicy, AgentToolRequest,
     AgentToolResult, AgentToolResultStatus, AGENT_TOOL_RESULT_SCHEMA,
 };
+use crate::core::stream_capture::StreamCaptureMetadata;
 use crate::core::{git, worktree};
 
 pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispatch-evidence/v1";
@@ -21,15 +22,6 @@ pub const AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA: &str = "homeboy/agent-tool-dispat
 /// bounded-capture pattern used by `agent_task_promotion` / runner exec captures
 /// (#5363).
 const COMMAND_CAPTURE_LIMIT_BYTES: usize = 65_536;
-
-/// Truncation metadata describing how much of a captured stream was retained.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-struct StreamCaptureMetadata {
-    limit_bytes: usize,
-    seen_bytes: usize,
-    retained_bytes: usize,
-    truncated: bool,
-}
 
 /// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
 /// (the most relevant tail for a failure message) and returning the retained
