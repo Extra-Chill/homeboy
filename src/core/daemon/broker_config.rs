@@ -77,8 +77,8 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         safe_exposure: BrokerExposure {
             loopback_only: true,
             private_tunnel_safe: true,
-            public_reverse_proxy_blocked_by: "https://github.com/Extra-Chill/homeboy/issues/2990".to_string(),
-            reason: "Current broker routes do not enforce production auth/pairing, so keep the service on loopback and reach it through a private tunnel until #2990 lands.".to_string(),
+            public_reverse_proxy_blocked_by: "broker auth pairing (homeboy runner broker pair)".to_string(),
+            reason: "Broker /runner/* routes now require scoped bearer tokens (#2990). Pair every runner with `homeboy runner broker pair` before exposing the broker via a reverse proxy; keep it loopback-only until credentials are configured. Private tunnels remain the simplest hardening.".to_string(),
         },
         systemd_unit: render_systemd_unit(&options, &listen),
         private_tunnel_examples: vec![
@@ -89,7 +89,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
                 "cloudflared tunnel --url http://{listen} # protect with Zero Trust before use"
             ),
             format!(
-                "tailscale funnel is not recommended until #2990; use tailnet-only access to http://{listen}"
+                "tailscale funnel exposes the broker publicly; only use it once every runner is paired (homeboy runner broker pair), otherwise keep tailnet-only access to http://{listen}"
             ),
         ],
         nginx_site: domain.as_ref().map(|domain| render_nginx_site(domain, &listen)),
@@ -163,8 +163,9 @@ WantedBy=multi-user.target
 
 fn render_nginx_site(domain: &str, listen_addr: &str) -> String {
     format!(
-        r#"# Blocked for public Internet use until Homeboy broker auth/pairing lands in #2990.
-# Use only behind private network controls or keep this site disabled.
+        r#"# Only expose publicly after pairing every runner with `homeboy runner broker pair` (#2990).
+# Until credentials are configured the broker rejects /runner/* with broker.auth_denied;
+# keep this site disabled or behind private network controls otherwise.
 server {{
     listen 443 ssl http2;
     server_name {domain};
@@ -183,8 +184,9 @@ server {{
 
 fn render_caddy_site(domain: &str, listen_addr: &str) -> String {
     format!(
-        r#"# Blocked for public Internet use until Homeboy broker auth/pairing lands in #2990.
-# Use only behind private network controls or keep this site disabled.
+        r#"# Only expose publicly after pairing every runner with `homeboy runner broker pair` (#2990).
+# Until credentials are configured the broker rejects /runner/* with broker.auth_denied;
+# keep this site disabled or behind private network controls otherwise.
 {domain} {{
     reverse_proxy http://{listen_addr}
 }}
@@ -213,7 +215,7 @@ mod tests {
         assert!(config
             .safe_exposure
             .public_reverse_proxy_blocked_by
-            .ends_with("/2990"));
+            .contains("broker auth"));
         assert!(config.nginx_site.is_none());
     }
 
@@ -231,8 +233,10 @@ mod tests {
         assert!(nginx.contains("broker.example.com"));
         assert!(nginx.contains("proxy_pass http://127.0.0.1:7421"));
         assert!(nginx.contains("#2990"));
+        assert!(nginx.contains("homeboy runner broker pair"));
         assert!(caddy.contains("reverse_proxy http://127.0.0.1:7421"));
         assert!(caddy.contains("#2990"));
+        assert!(caddy.contains("homeboy runner broker pair"));
     }
 
     #[test]

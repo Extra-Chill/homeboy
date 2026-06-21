@@ -204,11 +204,13 @@ where
     })?;
     let state = write_state(local_addr)?;
     let job_store = JobStore::open(paths::daemon_jobs_file()?)?;
+    let loopback_bind = local_addr.ip().is_loopback();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let _ = handle_connection(stream, &job_store, analysis_runner.clone());
+                let _ =
+                    handle_connection(stream, &job_store, analysis_runner.clone(), loopback_bind);
             }
             Err(err) => {
                 return Err(Error::internal_io(
@@ -251,6 +253,30 @@ fn route_with_job_store_and_body_and_runner<R>(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
     analysis_runner: R,
+) -> HttpResponse
+where
+    R: AnalysisJobRunner,
+{
+    // In-process dispatch (CLI internals, tests) is already inside the trust
+    // boundary; only the network entry point (`handle_connection`) authenticates
+    // broker traffic against the on-disk auth store.
+    route_with_job_store_and_body_and_runner_and_auth(
+        method,
+        path,
+        body,
+        job_store,
+        analysis_runner,
+        remote_runner::BrokerAuthContext::trusted_local(),
+    )
+}
+
+fn route_with_job_store_and_body_and_runner_and_auth<R>(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+    analysis_runner: R,
+    broker_auth: remote_runner::BrokerAuthContext,
 ) -> HttpResponse
 where
     R: AnalysisJobRunner,
@@ -298,16 +324,18 @@ where
         ("POST", "/runner/sessions")
         | ("POST", "/runner/jobs")
         | ("POST", "/runner/jobs/reconcile")
-        | ("POST", "/runner/jobs/claim") => remote_runner::route(method, path, body, job_store),
+        | ("POST", "/runner/jobs/claim") => {
+            remote_runner::route(method, path, body, job_store, &broker_auth)
+        }
         ("GET", "/runner/sessions")
         | ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
         | ("GET", "/runner/jobs/claim") => method_not_allowed(),
         ("GET", path) if path.starts_with("/runner/jobs/") => {
-            remote_runner::route(method, path, body, job_store)
+            remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("POST", path) if path.starts_with("/runner/jobs/") => {
-            remote_runner::route(method, path, body, job_store)
+            remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
@@ -587,6 +615,7 @@ fn handle_connection<R>(
     mut stream: TcpStream,
     job_store: &JobStore,
     analysis_runner: R,
+    loopback_bind: bool,
 ) -> std::io::Result<()>
 where
     R: AnalysisJobRunner,
@@ -597,6 +626,7 @@ where
     let mut headers_and_body = request.splitn(2, "\r\n\r\n");
     let headers = headers_and_body.next().unwrap_or_default();
     let body = headers_and_body.next().unwrap_or_default();
+    let broker_token = crate::core::runner::extract_bearer_token(headers);
     let mut parts = headers
         .lines()
         .next()
@@ -623,12 +653,18 @@ where
             }
         }
     };
-    let response = route_with_job_store_and_body_and_runner(
+    let broker_auth = remote_runner::BrokerAuthContext {
+        token: broker_token,
+        loopback_bind,
+        trusted_local: false,
+    };
+    let response = route_with_job_store_and_body_and_runner_and_auth(
         method,
         path,
         parsed_body,
         job_store,
         analysis_runner,
+        broker_auth,
     );
     write_http_response(stream, response)
 }
@@ -651,6 +687,8 @@ fn write_http_response(mut stream: TcpStream, response: HttpResponse) -> std::io
     let status_text = match response.status_code {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Internal Server Error",

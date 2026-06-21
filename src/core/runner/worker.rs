@@ -23,6 +23,9 @@ const BROKER_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub struct ReverseRunnerWorkerOptions {
     pub runner_id: String,
     pub broker_url: String,
+    /// Paired broker bearer token. Required when the broker enforces auth;
+    /// omitted for loopback-open smoke setups.
+    pub broker_token: Option<String>,
     pub project_id: Option<String>,
     pub lease_ms: u64,
     pub concurrency_limit: Option<usize>,
@@ -275,7 +278,12 @@ fn run_once_output(
         ));
     };
 
-    if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+    if let Some(job) = cancelled_job_snapshot(
+        &client,
+        &options.broker_url,
+        options.broker_token.as_deref(),
+        &claim.job,
+    )? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -286,7 +294,13 @@ fn run_once_output(
         ));
     }
 
-    append_progress(&client, &options.broker_url, &options.runner_id, &claim.job)?;
+    append_progress(
+        &client,
+        &options.broker_url,
+        options.broker_token.as_deref(),
+        &options.runner_id,
+        &claim.job,
+    )?;
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
     // starting execution, so a missing tool fails before remote dispatch instead
@@ -299,6 +313,7 @@ fn run_once_output(
         finish_job(
             &client,
             &options.broker_url,
+            options.broker_token.as_deref(),
             &options.runner_id,
             &claim.job,
             result,
@@ -327,16 +342,26 @@ fn run_once_output(
                 return cancel_seen;
             }
             last_cancel_poll = Instant::now();
-            cancel_seen = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)
-                .map(|job| job.is_some())
-                .unwrap_or(false);
+            cancel_seen = cancelled_job_snapshot(
+                &client,
+                &options.broker_url,
+                options.broker_token.as_deref(),
+                &claim.job,
+            )
+            .map(|job| job.is_some())
+            .unwrap_or(false);
             cancel_seen
         },
     );
     let (exec_output, exit_code) = match exec_result {
         Ok(result) => result,
         Err(err) => {
-            if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+            if let Some(job) = cancelled_job_snapshot(
+                &client,
+                &options.broker_url,
+                options.broker_token.as_deref(),
+                &claim.job,
+            )? {
                 return Ok(cancelled_output(
                     options,
                     iterations,
@@ -372,7 +397,12 @@ fn run_once_output(
             ));
         }
     };
-    if let Some(job) = cancelled_job_snapshot(&client, &options.broker_url, &claim.job)? {
+    if let Some(job) = cancelled_job_snapshot(
+        &client,
+        &options.broker_url,
+        options.broker_token.as_deref(),
+        &claim.job,
+    )? {
         return Ok(cancelled_output(
             options,
             iterations,
@@ -522,6 +552,7 @@ fn claim_job(
             "concurrency_limit": options.concurrency_limit,
         }),
         "claim reverse runner job",
+        options.broker_token.as_deref(),
     )?;
     let claim = data["claim"].clone();
     if claim.is_null() {
@@ -535,7 +566,13 @@ fn claim_job(
     })
 }
 
-fn append_progress(client: &Client, broker_url: &str, runner_id: &str, job: &Job) -> Result<()> {
+fn append_progress(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    job: &Job,
+) -> Result<()> {
     let claim_id = remote_runner_claim_id(job)?;
     broker_http::post_json(
         client,
@@ -548,6 +585,7 @@ fn append_progress(client: &Client, broker_url: &str, runner_id: &str, job: &Job
             "message": "reverse runner worker started execution",
         }),
         "append reverse runner progress event",
+        token,
     )?;
     Ok(())
 }
@@ -555,6 +593,7 @@ fn append_progress(client: &Client, broker_url: &str, runner_id: &str, job: &Job
 fn finish_job(
     client: &Client,
     broker_url: &str,
+    token: Option<&str>,
     runner_id: &str,
     job: &Job,
     result: RemoteRunnerJobResult,
@@ -570,6 +609,7 @@ fn finish_job(
             "result": result,
         }),
         "finish reverse runner job",
+        token,
     )?;
     serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
@@ -579,12 +619,18 @@ fn finish_job(
     })
 }
 
-fn cancelled_job_snapshot(client: &Client, broker_url: &str, job: &Job) -> Result<Option<Job>> {
+fn cancelled_job_snapshot(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    job: &Job,
+) -> Result<Option<Job>> {
     let data = broker_http::get_json(
         client,
         broker_url,
         &format!("/jobs/{}", job.id),
         "inspect reverse runner job cancellation state",
+        token,
     )?;
     let snapshot: Job = serde_json::from_value(data["job"].clone()).map_err(|err| {
         Error::internal_json(
@@ -624,6 +670,7 @@ mod tests {
         ReverseRunnerWorkerOptions {
             runner_id: "lab".to_string(),
             broker_url,
+            broker_token: None,
             project_id: None,
             lease_ms: 30_000,
             concurrency_limit: None,

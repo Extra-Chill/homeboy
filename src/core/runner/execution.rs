@@ -452,6 +452,7 @@ fn exec_via_reverse_broker(
         })),
         require_paths: require_paths.clone(),
     };
+    let broker_token = super::broker_auth::broker_token_from_env();
     let data = broker_http::post_json(
         &client,
         broker_url,
@@ -463,6 +464,7 @@ fn exec_via_reverse_broker(
             )
         })?,
         "submit reverse runner job",
+        broker_token.as_deref(),
     )?;
     let job_value = data
         .get("job")
@@ -958,6 +960,7 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
             &path,
             json!({}),
             "cancel reverse runner broker job",
+            super::broker_auth::broker_token_from_env().as_deref(),
         )?
     } else {
         return Err(runner_job_cancel_unsupported(
@@ -1078,16 +1081,22 @@ fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value
                 ]),
             ));
         };
+        let broker_token = super::broker_auth::broker_token_from_env();
         return match method {
-            "GET" => {
-                broker_http::get_json(&client, broker_url, path, "query reverse runner broker")
-            }
+            "GET" => broker_http::get_json(
+                &client,
+                broker_url,
+                path,
+                "query reverse runner broker",
+                broker_token.as_deref(),
+            ),
             "POST" => broker_http::post_json(
                 &client,
                 broker_url,
                 path,
                 json!({}),
                 "query reverse runner broker",
+                broker_token.as_deref(),
             ),
             _ => Err(Error::internal_unexpected(format!(
                 "unsupported daemon API method {method}"

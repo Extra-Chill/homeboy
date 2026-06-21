@@ -33,6 +33,7 @@ pub enum ErrorCode {
     RigNotFound,
     RunnerNotFound,
     RunnerPolicyDenied,
+    BrokerAuthDenied,
     ServiceTunnelNotFound,
     RigPipelineFailed,
     RigServiceFailed,
@@ -84,6 +85,7 @@ impl ErrorCode {
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RunnerNotFound => "runner.not_found",
             ErrorCode::RunnerPolicyDenied => "runner.policy_denied",
+            ErrorCode::BrokerAuthDenied => "broker.auth_denied",
             ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
@@ -445,6 +447,32 @@ impl Error {
 
     pub fn runner_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::RunnerNotFound, "Runner", id, suggestions)
+    }
+
+    /// Reverse runner broker authentication/authorization rejection.
+    ///
+    /// Secrets (tokens) are never embedded in the message or details; only the
+    /// non-sensitive reason and any matched runner id are surfaced so the broker
+    /// can return a structured `broker.auth_denied` error.
+    pub fn broker_auth_denied(
+        reason: impl Into<String>,
+        runner_id: Option<String>,
+        hints: Vec<String>,
+    ) -> Self {
+        let reason_str = reason.into();
+        let details = serde_json::json!({
+            "reason": reason_str,
+            "runner_id": runner_id,
+        });
+        let mut error = Self::new(
+            ErrorCode::BrokerAuthDenied,
+            format!("Reverse runner broker rejected request: {reason_str}"),
+            details,
+        );
+        for hint in hints {
+            error = error.with_hint(hint);
+        }
+        error
     }
 
     pub fn service_tunnel_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {

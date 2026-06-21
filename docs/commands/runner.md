@@ -212,6 +212,39 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
+#### Broker authentication and pairing
+
+Every `/runner/*` broker route requires an authenticated, scoped bearer token
+(#2990). The trust model is:
+
+- **Pairing.** On the broker host, mint a credential with
+  `homeboy runner broker pair <id> --runner-id <runner-id> [--work] [--submit]`.
+  Pairing prints a one-time bearer token and stores only its SHA-256 hash in
+  `~/.config/homeboy/broker_auth.json` (`0600`). The plaintext token is shown
+  once and never re-displayed or logged.
+- **Scopes.** `--work` authorizes worker routes (register, claim, events,
+  finish, heartbeat); `--submit` authorizes controller job submission and
+  cancellation (`POST /runner/jobs`, `POST /runner/jobs/<id>/cancel`). A
+  credential may carry both. When neither flag is given, `--work` is assumed.
+- **Runner-id binding.** Worker routes carry a `runner_id`; the presented token
+  must belong to a credential paired to that exact `runner_id`, so a paired
+  runner can never claim, progress, or finish another runner's jobs.
+- **Revocation.** `homeboy runner broker revoke <id>` disables a credential.
+  `homeboy runner broker list` shows non-secret credential metadata (never
+  tokens or hashes).
+- **Secure by default.** With no credentials configured, the broker rejects all
+  `/runner/*` traffic with a structured `broker.auth_denied` (`401`) error. To
+  keep an existing loopback-only smoke setup working without auth, set
+  `"allow_unauthenticated_loopback": true` in `broker_auth.json`; this is only
+  honored when the broker is bound to loopback.
+
+Workers send the token via `--broker-token <token>` or the
+`HOMEBOY_BROKER_TOKEN` environment variable; controllers read their submit token
+from `HOMEBOY_BROKER_TOKEN`. Tokens travel as both `X-Homeboy-Broker-Token` and
+`Authorization: Bearer <token>` so they survive proxies that strip one form.
+Unauthenticated, mismatched-runner, or wrong-scope requests are rejected with a
+structured `broker.auth_denied` error and never expose the stored secret.
+
 Daemon and broker HTTP responses use one canonical envelope. The outer response
 reports transport success and the endpoint payload always lives under
 `data.body`; runner clients require that shape and do not parse legacy direct
@@ -240,10 +273,14 @@ broker exposure.
 ### `work`
 
 ```sh
-homeboy runner work <runner-id> --broker-url <url>
+homeboy runner work <runner-id> --broker-url <url> --broker-token <token>
 homeboy runner work <runner-id> --broker-url <url> --project <project-id> --lease-ms 30000
-homeboy runner work <runner-id> --broker-url <url> --loop
+HOMEBOY_BROKER_TOKEN=<token> homeboy runner work <runner-id> --broker-url <url> --loop
 ```
+
+Pass the paired token with `--broker-token` or the `HOMEBOY_BROKER_TOKEN`
+environment variable. The token is required whenever the broker enforces auth;
+omit it only for a loopback-open smoke broker.
 
 Claims one brokered reverse-runner job for the runner, executes it on the runner
 machine under the runner's local policy, streams a progress event, and finishes
@@ -264,6 +301,22 @@ queues use exponential backoff controlled by `--idle-backoff-ms` and
 Transient broker failures sleep for `--broker-failure-backoff-ms` and exit
 non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
 `SIGTERM` request graceful shutdown after the current claim attempt or job.
+
+### `broker`
+
+```sh
+homeboy runner broker pair lab-1 --runner-id homeboy-lab --work
+homeboy runner broker pair ctrl-1 --runner-id homeboy-lab --submit
+homeboy runner broker revoke lab-1
+homeboy runner broker list
+```
+
+Manage reverse runner broker authentication and pairing on the broker host.
+`pair` mints a one-time scoped bearer token (printed once; only its SHA-256 hash
+is stored under `~/.config/homeboy/broker_auth.json`). `revoke` disables a
+credential by id, and `list` reports non-secret credential metadata. See
+[Broker authentication and pairing](#broker-authentication-and-pairing) for the
+full trust model.
 
 ### `job`
 
@@ -294,6 +347,7 @@ Wants=network-online.target
 Type=simple
 User=deploy
 WorkingDirectory=/home/user
+Environment=HOMEBOY_BROKER_TOKEN=<paired-token>
 ExecStart=/usr/local/bin/homeboy runner work homeboy-lab --broker-url https://controller.example.com --loop --idle-backoff-ms 1000 --max-idle-backoff-ms 30000 --broker-retry-limit 12
 Restart=on-failure
 RestartSec=10
@@ -303,9 +357,12 @@ KillSignal=SIGTERM
 WantedBy=multi-user.target
 ```
 
-The unit intentionally leaves authentication out until the broker auth contract
-lands; configure the broker URL and any future auth material using the production
-mechanism for issue #2990 rather than embedding secrets in the unit file.
+The worker authenticates with the broker using the paired bearer token. Prefer
+delivering it through `HOMEBOY_BROKER_TOKEN` — via a systemd
+`EnvironmentFile=/etc/homeboy/broker.env` with `0600` permissions rather than an
+inline `Environment=` line — so the secret never lands in `systemctl show`
+output. Pair the credential on the broker host with `homeboy runner broker pair`
+(see [Broker authentication and pairing](#broker-authentication-and-pairing)).
 
 ### `status`
 
