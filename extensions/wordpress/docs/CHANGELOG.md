@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.9.3] - 2026-06-21
+
+### Changed
+- Centralize WP Codebox adapter compatibility
+
 ## [3.9.2] - 2026-06-21
 
 ### Changed
