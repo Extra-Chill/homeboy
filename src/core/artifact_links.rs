@@ -6,7 +6,50 @@ use crate::core::execution_contract::encode_uri_component;
 use crate::core::observation::{ArtifactRecord, ArtifactViewerLink};
 
 pub const PUBLIC_ARTIFACT_BASE_URL_ENV: &str = "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL";
+pub const WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER: ArtifactViewerDescriptor =
+    ArtifactViewerDescriptor::new(
+        "wordpress-playground-blueprint",
+        "https://playground.wordpress.net/",
+        "blueprint-url",
+    );
 const PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactViewerDescriptor {
+    pub kind: &'static str,
+    pub base: &'static str,
+    pub public_artifact_url_parameter: &'static str,
+}
+
+impl ArtifactViewerDescriptor {
+    pub const fn new(
+        kind: &'static str,
+        base: &'static str,
+        public_artifact_url_parameter: &'static str,
+    ) -> Self {
+        Self {
+            kind,
+            base,
+            public_artifact_url_parameter,
+        }
+    }
+
+    pub fn to_metadata(self, replay: Option<Value>) -> Value {
+        let mut viewer = serde_json::json!({
+            "kind": self.kind,
+            "base": self.base,
+            "query": {
+                "parameter": self.public_artifact_url_parameter,
+                "value": { "source": "public-artifact-url" },
+                "encoding": "url"
+            }
+        });
+        if let Some(replay) = replay {
+            viewer["replay"] = replay;
+        }
+        viewer
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicArtifactUrlValidation {
@@ -249,6 +292,16 @@ mod tests {
             links[0].url,
             "https://viewer.example.test/?artifact-url=https%3A%2F%2Fartifacts.example.test%2Fa%20b.json"
         );
+    }
+
+    #[test]
+    fn playground_descriptor_produces_public_artifact_viewer_metadata() {
+        let viewer = WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None);
+
+        assert_eq!(viewer["kind"], "wordpress-playground-blueprint");
+        assert_eq!(viewer["base"], "https://playground.wordpress.net/");
+        assert_eq!(viewer["query"]["parameter"], "blueprint-url");
+        assert_eq!(viewer["query"]["value"]["source"], "public-artifact-url");
     }
 
     #[test]

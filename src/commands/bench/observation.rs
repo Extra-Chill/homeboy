@@ -856,15 +856,7 @@ mod tests {
             size_bytes: None,
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
-                "viewer": {
-                    "kind": "wordpress-playground-blueprint",
-                    "base": "https://playground.wordpress.net/",
-                    "query": {
-                        "parameter": "blueprint-url",
-                        "value": { "source": "public-artifact-url" },
-                        "encoding": "url"
-                    }
-                },
+                "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None),
                 "public_url_validation": {
                     "url": "https://artifacts.example.test/homeboy/runs/run-1/artifacts/artifact-1",
                     "reachable": false,
@@ -975,15 +967,10 @@ mod tests {
                     kind: Some("json".to_string()),
                     label: Some("Transcript".to_string()),
                     observation_artifact_id: None,
-                    viewer: Some(serde_json::json!({
-                        "kind": "wordpress-playground-blueprint",
-                        "base": "https://playground.wordpress.net/",
-                        "query": {
-                            "parameter": "blueprint-url",
-                            "value": { "source": "public-artifact-url" },
-                            "encoding": "url"
-                        }
-                    })),
+                    viewer: Some(
+                        homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER
+                            .to_metadata(None),
+                    ),
                     ..BenchArtifact::default()
                 },
             );
