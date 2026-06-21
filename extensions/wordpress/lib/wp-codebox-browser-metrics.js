@@ -11,6 +11,8 @@ const ARTIFACT_KEYS = {
   memory: 'browser_memory',
   performance: 'browser_performance',
   checkpoints: 'browser_checkpoints',
+  html: 'browser_html',
+  screenshot: 'browser_screenshot',
 };
 
 function runWpCodeboxBrowserMetrics(artifactsDirectory, wpCodeboxBin = 'wp-codebox') {

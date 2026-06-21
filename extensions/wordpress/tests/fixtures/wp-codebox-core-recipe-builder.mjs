@@ -11,6 +11,7 @@ export function buildWordPressBenchRecipe(options = {}) {
 			blueprint: options.blueprint ?? {},
 		},
 		workflow: {
+			...(Array.isArray(options.prepareSteps) && options.prepareSteps.length > 0 ? { before: options.prepareSteps } : {}),
 			steps: [{
 				command: 'fixture.wordpress.bench',
 				args: [
@@ -18,7 +19,7 @@ export function buildWordPressBenchRecipe(options = {}) {
 					`lifecycle-json=${JSON.stringify(options.lifecycle ?? {})}`,
 					`reset-policy-json=${JSON.stringify(options.resetPolicy ?? {})}`,
 				],
-			}],
+			}, ...(options.postSteps ?? [])],
 		},
 	};
 }

@@ -62,6 +62,8 @@ withTempDirectory((root) => {
       memory: { path: 'files/browser/memory.json', kind: 'json' },
       performance: { path: 'files/browser/performance.json', kind: 'json' },
       checkpoints: { path: 'files/browser/checkpoints.jsonl', kind: 'jsonl' },
+      html: { path: 'files/browser/snapshot.html', kind: 'html' },
+      screenshot: { path: 'files/browser/screenshot.png', kind: 'png' },
     },
   };
   writeFakeWpCodebox(fakeWpCodebox, cliOutput);
@@ -83,6 +85,8 @@ withTempDirectory((root) => {
       browser_memory: { path: 'files/browser/memory.json', kind: 'json' },
       browser_performance: { path: 'files/browser/performance.json', kind: 'json' },
       browser_checkpoints: { path: 'files/browser/checkpoints.jsonl', kind: 'jsonl' },
+      browser_html: { path: 'files/browser/snapshot.html', kind: 'html' },
+      browser_screenshot: { path: 'files/browser/screenshot.png', kind: 'png' },
     });
 
     const enriched = enrichBenchResultsWithBrowserMetrics({
@@ -96,6 +100,7 @@ withTempDirectory((root) => {
     assert.equal(enriched.scenarios[0].metrics.browser_peak_used_js_heap_bytes, undefined);
     assert.equal(enriched.scenarios[1].metrics.browser_peak_used_js_heap_bytes, 9000);
     assert.equal(enriched.scenarios[1].artifacts.browser_summary.path, 'files/browser/summary.json');
+    assert.equal(enriched.scenarios[1].artifacts.browser_screenshot.path, 'files/browser/screenshot.png');
     assert.equal(enriched.scenarios[1].artifacts.transcript.path, 'transcript.json');
   } finally {
     if (previousArgsPath === undefined) {
