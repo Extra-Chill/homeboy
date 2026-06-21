@@ -6,23 +6,29 @@
 //! otherwise requires updating scattered dispatch contracts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
 
-use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::CodebaseSnapshot;
 
 use super::conventions::AuditFinding;
 use super::findings::{Finding, Severity};
 
 const MIN_MATCHES: usize = 2;
 
-pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
-    let config = ScanConfig {
-        extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
-        ..Default::default()
-    };
+/// Run enum-dispatch contract detection over the shared audit source snapshot.
+///
+/// Consumes the in-memory `(path, content)` view built once during discovery
+/// instead of re-walking and re-reading the tree. Behavior is preserved: the
+/// snapshot is a superset of the `.rs` files this detector previously walked,
+/// so filtering to Rust source files here yields the identical input set in
+/// walk order.
+pub(in crate::core::code_audit) fn run(snapshot: &CodebaseSnapshot) -> Vec<Finding> {
+    let root = snapshot.root();
     let mut files = Vec::new();
 
-    for file_path in codebase_scan::walk_files(root, &config) {
+    for (file_path, content) in snapshot.iter() {
+        if file_path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
         let Ok(relative_path) = file_path.strip_prefix(root) else {
             continue;
         };
@@ -30,12 +36,9 @@ pub(in crate::core::code_audit) fn run(root: &Path) -> Vec<Finding> {
         if super::walker::is_test_path(&relative_path) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&file_path) else {
-            continue;
-        };
         files.push(SourceFile {
             relative_path,
-            content,
+            content: content.to_string(),
         });
     }
 
@@ -651,7 +654,15 @@ mod tests {
         )
         .expect("write fixture");
 
-        let findings = run(dir.path());
+        use crate::core::engine::codebase_scan::{ExtensionFilter, ScanConfig};
+        let snapshot = CodebaseSnapshot::build(
+            dir.path(),
+            &ScanConfig {
+                extensions: ExtensionFilter::Only(vec!["rs".to_string()]),
+                ..Default::default()
+            },
+        );
+        let findings = run(&snapshot);
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, AuditFinding::RepeatedEnumDispatchContract);

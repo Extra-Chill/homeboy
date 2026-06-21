@@ -566,8 +566,7 @@ fn audit_internal(
     // Phase 1: Auto-discover file groups (always full codebase for convention detection)
     let discovery_started = std::time::Instant::now();
     let source_snapshot_started = std::time::Instant::now();
-    let source_snapshot =
-        walker::walk_shared_audit_files_snapshot(root, structural::source_extensions());
+    let source_snapshot = build_shared_source_snapshot(root, &audit_config);
     timing.push_ok("source_snapshot", source_snapshot_started.elapsed());
     if scoped_execution.is_scoped() {
         log_status!(
@@ -1016,7 +1015,7 @@ fn audit_internal(
         &mut timing,
         "detector.field_patterns",
         plan.run_field_patterns(),
-        || field_patterns::run(root, &audit_config.detector_profile),
+        || field_patterns::run(&source_snapshot, &audit_config.detector_profile),
         Vec::new,
     );
     if !field_pattern_findings.is_empty() {
@@ -1267,7 +1266,7 @@ fn audit_internal(
         &mut timing,
         "detector.enum_dispatch_contracts",
         plan.run_enum_dispatch_contracts(),
-        || enum_dispatch_contracts::run(root),
+        || enum_dispatch_contracts::run(&source_snapshot),
         Vec::new,
     );
     if !enum_dispatch_findings.is_empty() {
@@ -1517,6 +1516,31 @@ fn audit_internal(
     })
 }
 
+/// Build the shared audit source snapshot consumed by whole-tree detectors.
+///
+/// The snapshot is a single walk/read of the codebase whose extension set is a
+/// superset of every snapshot-backed detector's inputs (structural source
+/// extensions plus the field-pattern detector's resolved scan tokens). This
+/// lets those detectors filter the shared snapshot instead of each re-walking
+/// and re-reading the tree, while keeping their inputs — and therefore their
+/// findings — identical.
+fn build_shared_source_snapshot(
+    root: &Path,
+    audit_config: &AuditConfig,
+) -> crate::core::engine::codebase_scan::CodebaseSnapshot {
+    let mut additional: Vec<String> = structural::source_extensions()
+        .iter()
+        .map(|ext| (*ext).to_string())
+        .collect();
+    additional.extend(field_patterns::scan_token_extensions(
+        &audit_config.detector_profile,
+    ));
+    additional.sort();
+    additional.dedup();
+    let additional_refs: Vec<&str> = additional.iter().map(|s| s.as_str()).collect();
+    walker::walk_shared_audit_files_snapshot(root, &additional_refs)
+}
+
 fn audit_root_only(
     component_id: &str,
     source_path: &str,
@@ -1534,11 +1558,27 @@ fn audit_root_only(
         all_fingerprints: &[],
     };
 
+    // Build the shared source snapshot once for the root-only path so the
+    // whole-tree detectors below (structural, field patterns) consume a single
+    // walk/read instead of each re-walking and re-reading the tree. Built only
+    // when at least one snapshot-backed detector is enabled.
+    let source_snapshot = if plan.run_structural() || plan.run_field_patterns() {
+        let snapshot_started = std::time::Instant::now();
+        let snapshot = build_shared_source_snapshot(root, &audit_config);
+        timing.push_ok("source_snapshot", snapshot_started.elapsed());
+        Some(snapshot)
+    } else {
+        None
+    };
+
     let structural_findings = time_audit_detector(
         timing,
         "detector.structural",
         plan.run_structural(),
-        || structural::analyze_structure(root),
+        || match source_snapshot.as_ref() {
+            Some(snapshot) => structural::analyze_snapshot(root, snapshot),
+            None => structural::analyze_structure(root),
+        },
         Vec::new,
     );
     if !structural_findings.is_empty() {
@@ -1610,7 +1650,10 @@ fn audit_root_only(
         timing,
         "detector.field_patterns",
         plan.run_field_patterns(),
-        || field_patterns::run(root, &audit_config.detector_profile),
+        || match source_snapshot.as_ref() {
+            Some(snapshot) => field_patterns::run(snapshot, &audit_config.detector_profile),
+            None => Vec::new(),
+        },
         Vec::new,
     );
     if !field_pattern_findings.is_empty() {

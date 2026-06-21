@@ -27,10 +27,9 @@ mod field_patterns_data_contracts {
 }
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use crate::core::component::DetectorProfileConfig;
-use crate::core::engine::codebase_scan::{self, ExtensionFilter, ScanConfig};
+use crate::core::engine::codebase_scan::CodebaseSnapshot;
 
 use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
@@ -43,8 +42,25 @@ const MIN_OCCURRENCES: usize = 3;
 /// Minimum number of fields in a group to report.
 const MIN_GROUP_SIZE: usize = 2;
 
+/// Resolve the file-extension scan tokens this detector would walk for a given
+/// profile. Used by the audit pipeline to ensure the shared source snapshot is a
+/// superset of the detector's inputs, so filtering the snapshot here reproduces
+/// the detector's previous independent walk exactly.
+pub(in crate::core::code_audit) fn scan_token_extensions(
+    config: &DetectorProfileConfig,
+) -> Vec<String> {
+    ResolvedFieldScan::from_config(config).scan_tokens
+}
+
+/// Run repeated-field-pattern detection over the shared audit source snapshot.
+///
+/// Consumes the in-memory `(path, content)` view built once during discovery
+/// rather than re-walking and re-reading the tree. The shared snapshot is a
+/// superset of the extensions this detector scans, so filtering by the resolved
+/// scan tokens reproduces the previous per-file input set (in walk order),
+/// keeping findings identical.
 pub(in crate::core::code_audit) fn run(
-    root: &Path,
+    snapshot: &CodebaseSnapshot,
     config: &DetectorProfileConfig,
 ) -> Vec<Finding> {
     let settings = ResolvedFieldScan::from_config(config);
@@ -54,7 +70,7 @@ pub(in crate::core::code_audit) fn run(
         // detector stays inert until a component declares its languages.
         return Vec::new();
     }
-    detect_repeated_field_patterns(root, &settings)
+    detect_repeated_field_patterns(snapshot, &settings)
 }
 
 /// Resolved field-scan settings. Concrete language/extension tokens come from
@@ -172,16 +188,22 @@ enum FieldSyntax {
     TypeBeforeName,
 }
 
-fn detect_repeated_field_patterns(root: &Path, settings: &ResolvedFieldScan) -> Vec<Finding> {
-    let config = ScanConfig {
-        extensions: ExtensionFilter::Only(settings.scan_tokens.clone()),
-        ..Default::default()
-    };
-    let files = codebase_scan::walk_files(root, &config);
-
+fn detect_repeated_field_patterns(
+    snapshot: &CodebaseSnapshot,
+    settings: &ResolvedFieldScan,
+) -> Vec<Finding> {
+    let root = snapshot.root();
     let mut all_structs: Vec<StructDef> = Vec::new();
 
-    for file_path in &files {
+    for (file_path, content) in snapshot.iter() {
+        // Filter the shared snapshot to the detector's scan-token extensions,
+        // matching the `ExtensionFilter::Only(scan_tokens)` walk this detector
+        // previously performed.
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !settings.scan_tokens.iter().any(|token| token == ext) {
+            continue;
+        }
+
         let relative = match file_path.strip_prefix(root) {
             Ok(p) => p.to_string_lossy().replace('\\', "/"),
             Err(_) => continue,
@@ -192,14 +214,10 @@ fn detect_repeated_field_patterns(root: &Path, settings: &ResolvedFieldScan) -> 
             continue;
         }
 
-        let Ok(content) = std::fs::read_to_string(file_path) else {
-            continue;
-        };
-
         let scan_content = if settings.needs_inline_test_strip(&relative) {
-            strip_rust_cfg_test_modules(&content)
+            std::borrow::Cow::Owned(strip_rust_cfg_test_modules(content))
         } else {
-            content
+            std::borrow::Cow::Borrowed(content)
         };
 
         let syntax = settings.syntax_for_path(&relative);
@@ -823,11 +841,31 @@ mod tests {
         }
     }
 
+    /// Build a shared-style codebase snapshot over the multi-language source
+    /// extensions these tests use, mirroring how the audit pipeline now feeds
+    /// the detector an already-walked `(path, content)` view.
+    fn snapshot_of(root: &std::path::Path) -> CodebaseSnapshot {
+        use crate::core::engine::codebase_scan::{ExtensionFilter, ScanConfig};
+        CodebaseSnapshot::build(
+            root,
+            &ScanConfig {
+                extensions: ExtensionFilter::Only(vec![
+                    "rs".to_string(),
+                    "php".to_string(),
+                    "ts".to_string(),
+                    "js".to_string(),
+                    "go".to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+    }
+
     #[test]
     fn test_run() {
         let dir = tempfile::tempdir().unwrap();
         // Empty profile (no tokens, builtin defaults on) → still empty on empty dir.
-        assert!(run(dir.path(), &DetectorProfileConfig::default()).is_empty());
+        assert!(run(&snapshot_of(dir.path()), &DetectorProfileConfig::default()).is_empty());
     }
 
     #[test]
@@ -843,7 +881,7 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            run(dir.path(), &config).is_empty(),
+            run(&snapshot_of(dir.path()), &config).is_empty(),
             "no scan tokens declared and builtin defaults off → inert"
         );
     }
@@ -979,7 +1017,7 @@ class {} {{
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "presentation arrays and WP_CLI call sites are not extractable field groups: {:?}",
@@ -1059,7 +1097,7 @@ class {} {{
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "PHP self::class registration arguments should not be reported as fields"
@@ -1096,7 +1134,7 @@ struct FindingRecord {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "small scalar coordinate overlaps across boundary records are not extractable: {:?}",
@@ -1152,7 +1190,7 @@ struct Foo {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "inline Rust test fixtures should not be scanned as production structs: {:?}",
@@ -1256,7 +1294,7 @@ struct Foo {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             !findings.is_empty(),
             "Should detect repeated [verbose, quiet] pattern"
@@ -1330,7 +1368,7 @@ struct ReviewArgs {
         )
         .unwrap();
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "boundary DTO overlap across command/workflow/refactor layers should not suggest extraction: {:?}",
@@ -1352,10 +1390,11 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path(), &test_scan())
-            .into_iter()
-            .map(|finding| finding.description)
-            .collect();
+        let descriptions: Vec<String> =
+            detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan())
+                .into_iter()
+                .map(|finding| finding.description)
+                .collect();
         assert!(
             descriptions
                 .iter()
@@ -1420,7 +1459,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "generic DTO field pairs across unrelated modules should not become extraction work: {:?}",
@@ -1469,7 +1508,7 @@ struct ReviewArgs {
             std::fs::write(file, format!("struct {name} {{\n    {fields}\n}}\n")).unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "boundary data contract field overlaps should not suggest extraction: {:?}",
@@ -1505,10 +1544,11 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let descriptions: Vec<String> = detect_repeated_field_patterns(dir.path(), &test_scan())
-            .into_iter()
-            .map(|finding| finding.description)
-            .collect();
+        let descriptions: Vec<String> =
+            detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan())
+                .into_iter()
+                .map(|finding| finding.description)
+                .collect();
 
         assert!(
             descriptions
@@ -1543,7 +1583,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             !findings.is_empty(),
             "Should detect repeated [alpha, middle, zebra] pattern"
@@ -1581,7 +1621,7 @@ struct ReviewArgs {
             .unwrap();
         }
 
-        let findings = detect_repeated_field_patterns(dir.path(), &test_scan());
+        let findings = detect_repeated_field_patterns(&snapshot_of(dir.path()), &test_scan());
         assert!(
             findings.is_empty(),
             "Two occurrences should be below threshold"
