@@ -23,6 +23,7 @@
 - [extension](extension.md)
 - [file](file.md) — remote file operations, downloads, uploads, copies, and syncs
 - [fleet](fleet.md)
+- [fuzz](fuzz.md) — generic fuzz workload discovery, execution, and evidence
 - [git](git.md)
 - [http](http.md) — generic proxied authenticated HTTP requests
 - [issues](issues.md) — reconcile findings against issue trackers
