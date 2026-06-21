@@ -28,6 +28,8 @@ assert.equal(typeof wordpress.normalizeWordPressFuzzResult, 'function');
 assert.equal(typeof wordpress.normalizeWordPressCrudOperation, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFixturePersona, 'function');
 assert.equal(typeof wordpress.normalizeWordPressPerformanceObservation, 'function');
+assert.equal(typeof wordpress.normalizeWordPressRuntimeSurfaceDiscovery, 'function');
+assert.equal(typeof wordpress.buildWordPressRuntimeSurfaceCoverageManifest, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzPlanFromSurfaces, 'function');
 assert.equal(typeof wordpress.buildWordPressFuzzRunnerResult, 'function');
 assert.equal(typeof wordpress.wpCodebox, 'object');
