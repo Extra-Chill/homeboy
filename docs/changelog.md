@@ -4,6 +4,48 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.250.1] - 2026-06-22
+
+### Changed
+- Pass rig fuzz workload invocation context
+- Apply Enterprise proxy to release gh calls
+- Add fuzz replay metadata contract
+- Improve Lab registry drift diagnostics
+- Fail release packages missing frontend assets
+- Validate file dependencies before release package
+- Reuse release assets during deploy
+- Ignore generated release artifacts in deploy gate
+- Add CI failure triage digest
+- Add fuzz inventory artifact contract
+- Add dependent PR refresh helper
+- Explain PR merge readiness states
+- Add CI failure log triage helper
+- Improve PR CI status next actions
+- Support generated controller materialize specs
+- Add ordered PR landing rebase plans
+- Make changed-since Lab routing use git scope
+- Persist fuzz run evidence records
+- Add PR landing train command
+- Add baseline-red differential CI gate
+- Add PR CI readiness triage summary
+- Refine PR landing blocker summary
+- Add PR fleet landing helper
+- Surface rustfmt files in lint failures
+- Add PR mergeability reconcile command
+- Handle baseline-red differential CI results
+- Write structured lint test failure sidecars
+- Apply current Rust formatting
+- Add generic deterministic loop primitives
+
+### Fixed
+- resolve dead-code in phase_timing (#5844)
+- Fix Lab offload contract borrowing
+- Fix controller reconciliation import
+- actually replace active binary on --method source and fail loudly if swap fails (#5772)
+- Fix controller proof spec validation
+- Fix agent task prompt command results
+- Fix deterministic loop checkpoint borrows
+
 ## [0.250.0] - 2026-06-22
 
 ### Added
