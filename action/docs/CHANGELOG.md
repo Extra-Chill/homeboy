@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.1] - 2026-06-22
+
+### Fixed
+- classify red baselines in differential CI
+
 ## [2.8.0] - 2026-06-21
 
 ### Added
