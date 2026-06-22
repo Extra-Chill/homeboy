@@ -206,6 +206,32 @@ fn local_execution_denied_error(reason: &str, runner_id: Option<&str>) -> Error 
     )
 }
 
+fn is_build_command(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == "build")
+}
+
+fn build_lab_replacement_hints(runner_id: Option<&str>) -> Vec<String> {
+    let runner = runner_id.unwrap_or("<runner-id>");
+    vec![
+        format!(
+            "Materialize the build workspace first: homeboy runner workspace sync {runner} --path <local-worktree> --mode snapshot"
+        ),
+        format!(
+            "Then run the build in the returned runner_path: homeboy runner exec {runner} --cwd <runner_path> -- homeboy build <component>"
+        ),
+    ]
+}
+
+fn unsupported_build_lab_error(field: &'static str, runner_id: Option<&str>) -> Error {
+    Error::validation_invalid_argument(
+        field,
+        "homeboy build is not Lab-portable yet; it requires an explicit runner workspace sync and runner exec handoff instead of --runner/--lab-only on build."
+            .to_string(),
+        runner_id.map(str::to_string),
+        Some(build_lab_replacement_hints(runner_id)),
+    )
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -222,12 +248,18 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     let mut plan = base_lab_plan(request.command.as_ref());
     let Some(contract) = request.command.clone() else {
         if let Some(runner_id) = request.explicit_runner {
+            if is_build_command(request.normalized_args) {
+                return Err(unsupported_build_lab_error("runner", Some(runner_id)));
+            }
             return Err(unsupported_runner_error(
                 runner_id,
                 lab_runner_support_summary().unsupported_message,
             ));
         }
         if request.local_policy.deny_local_execution() {
+            if is_build_command(request.normalized_args) {
+                return Err(unsupported_build_lab_error("lab_only", None));
+            }
             return Err(local_execution_denied_error(
                 "command has no Lab contract",
                 None,
@@ -3659,6 +3691,78 @@ mod tests {
         };
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("Lab-only execution refused"));
+    }
+
+    #[test]
+    fn build_runner_error_gives_managed_runner_replacement() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &[
+                "homeboy".to_string(),
+                "build".to_string(),
+                "homeboy".to_string(),
+            ],
+            explicit_runner: Some("homeboy-lab"),
+            force_hot: false,
+            local_policy: LabLocalExecutionPolicy::default(),
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+        });
+
+        let Err(err) = outcome else {
+            panic!("build --runner should fail before local execution");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("homeboy build is not Lab-portable yet"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains(
+                "homeboy runner workspace sync homeboy-lab --path <local-worktree> --mode snapshot"
+            )
+        )));
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains(
+                "homeboy runner exec homeboy-lab --cwd <runner_path> -- homeboy build <component>"
+            )
+        )));
+    }
+
+    #[test]
+    fn build_lab_only_error_gives_managed_runner_replacement() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &[
+                "homeboy".to_string(),
+                "build".to_string(),
+                "homeboy".to_string(),
+            ],
+            explicit_runner: None,
+            force_hot: false,
+            local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+        });
+
+        let Err(err) = outcome else {
+            panic!("build --lab-only should fail before local execution");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("homeboy build is not Lab-portable yet"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains(
+                "homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot"
+            )
+        )));
+        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
+            |hint| hint.contains(
+                "homeboy runner exec <runner-id> --cwd <runner_path> -- homeboy build <component>"
+            )
+        )));
     }
 
     #[test]
