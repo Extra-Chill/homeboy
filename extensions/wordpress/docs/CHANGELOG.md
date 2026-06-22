@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.23] - 2026-06-22
+
+### Changed
+- Mount WP Codebox for fuzz runtime tasks
+
 ## [3.12.22] - 2026-06-22
 
 ### Changed
