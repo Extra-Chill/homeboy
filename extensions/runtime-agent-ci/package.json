@@ -5,6 +5,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js"
   },
