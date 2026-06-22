@@ -1014,6 +1014,42 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_controller_run_from_spec_supports_lab_only_runner_routing() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "--lab-only",
+            "agent-task",
+            "controller",
+            "run-from-spec",
+            "loop.json",
+            "--max-actions",
+            "1",
+        ]);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+        let local_policy = runners::LabLocalExecutionPolicy::from_flags(
+            cli.allow_local_hot,
+            cli.allow_local_fallback,
+            cli.lab_only,
+        );
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert!(local_policy.deny_local_execution());
+        assert_eq!(
+            command.hot_label,
+            "agent-task controller from-spec --resume/run-from-spec/materialize"
+        );
+        assert!(command.portable);
+        assert!(!command.routing_policy.default_lab_offload);
+        assert_eq!(
+            command.workspace_mode_policy,
+            runners::LabOffloadWorkspaceModePolicy::GitCheckoutRequired
+        );
+    }
+
+    #[test]
     fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_only() {
         let normalized = vec![
             "homeboy".to_string(),
