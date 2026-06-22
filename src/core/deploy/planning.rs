@@ -278,6 +278,10 @@ fn validate_deploy_plan(config: &DeployConfig, plan: &DeployComponentPlan) -> Re
             ));
         }
 
+        if !config.check {
+            validate_deploy_together_selection(plan)?;
+        }
+
         return Ok(());
     }
 
@@ -297,6 +301,10 @@ fn validate_deploy_plan(config: &DeployConfig, plan: &DeployComponentPlan) -> Re
         ));
     }
 
+    if !config.check {
+        validate_deploy_together_selection(plan)?;
+    }
+
     if plan
         .plan
         .steps
@@ -309,6 +317,89 @@ fn validate_deploy_plan(config: &DeployConfig, plan: &DeployComponentPlan) -> Re
     }
 
     Ok(())
+}
+
+fn validate_deploy_together_selection(plan: &DeployComponentPlan) -> Result<()> {
+    let selected = plan
+        .ready_components()
+        .into_iter()
+        .map(|component| component.id)
+        .collect::<HashSet<_>>();
+    if selected.is_empty() {
+        return Ok(());
+    }
+
+    let mut graph = plan
+        .components
+        .keys()
+        .map(|id| (id.clone(), HashSet::<String>::new()))
+        .collect::<HashMap<_, _>>();
+
+    for component in plan.components.values() {
+        for companion in &component.deploy_together {
+            if companion == &component.id {
+                continue;
+            }
+            graph
+                .entry(component.id.clone())
+                .or_default()
+                .insert(companion.clone());
+            graph
+                .entry(companion.clone())
+                .or_default()
+                .insert(component.id.clone());
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut violations = Vec::new();
+
+    for component_id in graph.keys() {
+        if visited.contains(component_id) {
+            continue;
+        }
+
+        let mut stack = vec![component_id.clone()];
+        let mut group = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            group.insert(id.clone());
+            if let Some(neighbors) = graph.get(&id) {
+                for neighbor in neighbors {
+                    if !visited.contains(neighbor) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+
+        if group.len() <= 1 || group.is_disjoint(&selected) || group.is_subset(&selected) {
+            continue;
+        }
+
+        let mut selected_members = group.intersection(&selected).cloned().collect::<Vec<_>>();
+        let mut missing_members = group.difference(&selected).cloned().collect::<Vec<_>>();
+        selected_members.sort();
+        missing_members.sort();
+        violations.push(format!(
+            "Selected [{}] without deploy-together component(s) [{}]",
+            selected_members.join(", "),
+            missing_members.join(", ")
+        ));
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "deploy_together",
+        "Deploy selection omits coupled components",
+        None,
+        Some(violations),
+    ))
 }
 
 fn deploy_plan(mode: &str, config: &DeployConfig, steps: Vec<PlanStep>) -> HomeboyPlan {
@@ -844,6 +935,15 @@ mod tests {
         )
     }
 
+    fn coupled_component(id: &str, path: &Path, deploy_together: &[&str]) -> Component {
+        let mut component = component(id, path);
+        component.deploy_together = deploy_together
+            .iter()
+            .map(|component_id| (*component_id).to_string())
+            .collect();
+        component
+    }
+
     fn versioned_component(id: &str, path: &Path, version: &str) -> Component {
         std::fs::write(path.join("VERSION"), format!("{}\n", version)).expect("version file");
         let mut component = component(id, path);
@@ -929,6 +1029,54 @@ mod tests {
         assert_eq!(plan.plan.kind, PlanKind::Deploy);
         assert_eq!(step(&plan, "selected").status, PlanStepStatus::Ready);
         assert_eq!(plan.ready_components()[0].id, "selected");
+    }
+
+    #[test]
+    fn validate_deploy_plan_rejects_partial_deploy_together_selection() {
+        let temp = TempDir::new().expect("temp dir");
+        let plugin = coupled_component("studio-plugin", temp.path(), &["studio-theme"]);
+        let theme = component("studio-theme", temp.path());
+        let config = DeployConfig {
+            component_ids: vec!["studio-plugin".to_string()],
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            &[plugin, theme],
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        let err = validate_deploy_plan(&config, &plan).expect_err("partial group should fail");
+        assert!(err
+            .message
+            .contains("Deploy selection omits coupled components"));
+        assert!(err.details.to_string().contains("studio-theme"));
+    }
+
+    #[test]
+    fn validate_deploy_plan_accepts_complete_deploy_together_selection() {
+        let temp = TempDir::new().expect("temp dir");
+        let plugin = coupled_component("studio-plugin", temp.path(), &["studio-theme"]);
+        let theme = component("studio-theme", temp.path());
+        let config = DeployConfig {
+            component_ids: vec!["studio-plugin".to_string(), "studio-theme".to_string()],
+            ..deploy_config()
+        };
+
+        let plan = plan_component_deploys(
+            &config,
+            &[plugin, theme],
+            &[],
+            &project(),
+            "/var/www/example",
+            &ssh_client(),
+        );
+
+        validate_deploy_plan(&config, &plan).expect("complete group should pass");
     }
 
     #[test]
