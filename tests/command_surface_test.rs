@@ -51,6 +51,8 @@ fn agent_task_prompt_store_commands_parse() {
         "cook",
         "--repo",
         "homeboy",
+        "--to-worktree",
+        "homeboy@prompt-ref-test",
         "--prompt",
         "prompt:issue-123",
         "--verify",
