@@ -359,6 +359,7 @@ mod tests {
             required_secrets: RunnerWorkloadSecrets {
                 categories: Vec::new(),
             },
+            required_extensions: vec!["browser".to_string()],
             mutation_policy: RunnerWorkloadMutationPolicy {
                 capture_patch: false,
                 mutation_flag: None,
@@ -405,6 +406,10 @@ mod tests {
         assert_eq!(
             metadata["runner_workload"]["assignment"]["runner_id"],
             "lab"
+        );
+        assert_eq!(
+            metadata["runner_workload"]["required_extensions"][0],
+            "browser"
         );
     }
 

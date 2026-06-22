@@ -25,7 +25,7 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
-    if is_lab_command_local_runner_option(&cli.command) {
+    if is_command_local_runner_option(&cli.command) {
         return Ok(None);
     }
 
@@ -128,15 +128,6 @@ fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
             args.tasks.len()
                 + usize::from(args.prompt.is_some())
                 + usize::from(args.core.tasks_json.is_some()),
-        ),
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::Loop(args),
-        }) => (
-            "agent-task loop local fanout",
-            args.dispatch.concurrency,
-            args.dispatch.tasks.len()
-                + usize::from(args.dispatch.prompt.is_some())
-                + usize::from(args.dispatch.core.tasks_json.is_some()),
         ),
         _ => return None,
     };
@@ -364,13 +355,12 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
         })
 }
 
-fn is_lab_command_local_runner_option(command: &Commands) -> bool {
+fn is_command_local_runner_option(command: &Commands) -> bool {
     matches!(
         command,
-        Commands::Lab(_)
-            | Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
-            })
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
+        })
     )
 }
 
@@ -718,65 +708,6 @@ mod tests {
         assert_eq!(outcome, None);
     }
 
-    #[test]
-    fn lab_extension_sync_runner_option_routes_to_lab_command_handler() {
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-        let normalized = vec![
-            "homeboy".to_string(),
-            "lab".to_string(),
-            "extension-sync".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--source".to_string(),
-            "/tmp/wordpress-extension".to_string(),
-            "--id".to_string(),
-            "wordpress".to_string(),
-            "--ref".to_string(),
-            "main".to_string(),
-        ];
-        let cli = Cli::parse_from(&normalized);
-
-        let outcome = route_after_parse(&cli, &normalized, None)
-            .expect("lab extension-sync owns its runner option locally");
-
-        assert_eq!(outcome, None);
-    }
-
-    #[test]
-    fn lab_extension_sync_runner_with_force_hot_routes_locally() {
-        // Regression for #4343: `lab extension-sync --runner <id> --force-hot`
-        // must NOT be rejected by the global runner validation. The command owns
-        // runner selection locally and routes through its own handler.
-        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-        let normalized = vec![
-            "homeboy".to_string(),
-            "lab".to_string(),
-            "extension-sync".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--source".to_string(),
-            "https://github.com/Extra-Chill/homeboy-extensions.git".to_string(),
-            "--id".to_string(),
-            "wordpress".to_string(),
-            "--ref".to_string(),
-            "44426b5874df018a7bdb9742098f936f53b1c0ff".to_string(),
-            "--force-hot".to_string(),
-        ];
-        let cli = Cli::parse_from(&normalized);
-
-        // The global `--runner` flag is populated (global = true), but the lab
-        // command short-circuits to local routing instead of the offload path
-        // that would reject a runner on a non-portable command.
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-
-        let outcome = route_after_parse(&cli, &normalized, None)
-            .expect("lab extension-sync --runner --force-hot must route locally, not reject");
-
-        assert_eq!(outcome, None);
-        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-    }
-
-    #[test]
     fn agent_task_doctor_runner_option_routes_locally() {
         let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![

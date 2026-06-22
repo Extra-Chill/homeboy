@@ -95,21 +95,11 @@ pub struct RunnerWorkload {
     pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
     pub required_capabilities: Vec<RunnerWorkloadCapability>,
     pub required_secrets: RunnerWorkloadSecrets,
+    pub required_extensions: Vec<String>,
     pub mutation_policy: RunnerWorkloadMutationPolicy,
     pub assignment: RunnerWorkloadAssignment,
     pub state: RunnerWorkloadState,
     pub result_refs: RunnerWorkloadResultRefs,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunnerWorkloadInput {
-    pub workload_id: String,
-    pub plan_id: String,
-    pub assignment: RunnerWorkloadAssignment,
-    pub state: RunnerWorkloadState,
-    pub mutation_policy: RunnerWorkloadMutationPolicy,
-    pub workspace_mapping_ref: Option<String>,
-    pub proof_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -258,9 +248,7 @@ impl LabLocalExecutionPolicy {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
-const AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON: &str =
-    "agent-task loop requires at least one deterministic --verify or --private-verify gate";
-const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/loop/run-plan/retry --run";
+const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/run-plan/retry --run";
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
@@ -297,8 +285,8 @@ pub struct LabRunnerSupportSummary {
 const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
-        message_label: "agent-task dispatch/cook/loop/run-plan",
-        hint_label: "agent-task dispatch/cook/loop/run-plan",
+        message_label: "agent-task dispatch/cook/run-plan",
+        hint_label: "agent-task dispatch/cook/run-plan",
     },
     LabSupportedCommandSummary {
         contract_labels: &[
@@ -468,20 +456,6 @@ impl Commands {
                 LAB_NO_EXTRA_TOOLS,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Loop(args),
-            }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
-                AGENT_TASK_RUN_LAB_LABEL,
-                AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Loop(_),
-            }) => LabCommandContract::portable(
-                AGENT_TASK_RUN_LAB_LABEL,
-                None,
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
@@ -613,12 +587,7 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(args)
-        | agent_task::AgentTaskCommand::Dispatch(args)
-        | agent_task::AgentTaskCommand::Loop(agent_task::AgentTaskLoopArgs {
-            dispatch: args,
-            ..
-        }) => {
+        agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
             let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
                 || args
                     .workspace
@@ -683,60 +652,6 @@ impl LabCommandContract {
             command: self,
             required_extensions,
             requires_playwright,
-        }
-    }
-
-    pub fn runner_workload(&self, input: RunnerWorkloadInput) -> RunnerWorkload {
-        RunnerWorkload {
-            schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
-            workload_id: input.workload_id,
-            kind: RunnerWorkloadKind {
-                command_label: self.hot_label.to_string(),
-                command_family: RunnerWorkloadCommandFamily::from_command_label(self.hot_label),
-            },
-            workspace_mappings: RunnerWorkloadWorkspaceMappings {
-                source_path_mode: self.source_path_mode.label().to_string(),
-                workspace_mode_policy: self.workspace_mode_policy.label().to_string(),
-                mapping_ref: input.workspace_mapping_ref.clone(),
-            },
-            required_capabilities: self.required_capabilities(),
-            required_secrets: RunnerWorkloadSecrets {
-                categories: self.required_secret_categories(),
-            },
-            mutation_policy: input.mutation_policy,
-            assignment: input.assignment,
-            state: input.state,
-            result_refs: RunnerWorkloadResultRefs {
-                plan_id: input.plan_id,
-                proof_id: input.proof_id,
-                workspace_mapping_ref: input.workspace_mapping_ref,
-            },
-        }
-    }
-
-    fn required_capabilities(&self) -> Vec<RunnerWorkloadCapability> {
-        let mut capabilities = Vec::new();
-        if self.routing_policy.requires_extension_parity {
-            capabilities.push(RunnerWorkloadCapability {
-                name: "extension_parity".to_string(),
-                required: true,
-            });
-        }
-        for tool in self.extra_required_tools {
-            capabilities.push(RunnerWorkloadCapability {
-                name: tool.label().to_string(),
-                required: true,
-            });
-        }
-        capabilities
-    }
-
-    fn required_secret_categories(&self) -> Vec<String> {
-        match self.hot_label {
-            label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
-            TRACE_LAB_LABEL => vec!["trace".to_string()],
-            label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
-            _ => Vec::new(),
         }
     }
 
@@ -851,34 +766,6 @@ impl LabCommandContract {
     pub(crate) const fn release_gate(mut self) -> Self {
         self.routing_policy.release_gate = true;
         self
-    }
-}
-
-impl LabSourcePathMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CwdOrPathFlag => "cwd_or_path_flag",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
-}
-
-impl LabWorkspaceModePolicy {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
-            Self::Git => "git",
-            Self::GitCheckoutRequired => "git_checkout_required",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
-}
-
-impl LabCommandRequiredTool {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Playwright => "playwright",
-        }
     }
 }
 

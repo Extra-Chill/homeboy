@@ -19,12 +19,6 @@
 use std::path::Path;
 
 use crate::command_contract::lab_runner_support_summary;
-use crate::command_contract::{
-    RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
-    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
-    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
-    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
-};
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
@@ -75,6 +69,7 @@ use super::super::{
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
+use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
     lab_pre_dispatch_failure_message, materialize_inline_agent_task_plan_arg,
@@ -83,10 +78,7 @@ use super::agent_task_bridge::{
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
-use super::secrets::{
-    hydrate_agent_task_secret_env, hydrate_trace_secret_env, hydrate_tunnel_secret_env,
-    preflight_agent_task_runner_secret_env,
-};
+use super::secrets::{build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env};
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 use super::workspace_plan::{lab_workspace_sync_mode, preflight_required_git_checkout_workspace};
 #[cfg(test)]
@@ -623,11 +615,10 @@ fn run_runner_resident_lab_offload(
         "runner_cwd": runner_workspace_root,
         "command_paths": "runner_side",
     });
+    let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
+    lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    let tunnel_secret_env = hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
-    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
-    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
+    env.extend(secret_env_handoff.env_delta);
 
     let (exec_output, exit_code) = exec(
         runner_id,
@@ -637,7 +628,7 @@ fn run_runner_resident_lab_offload(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: Vec::new(),
+            secret_env_names: secret_env_handoff.secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: None,
@@ -1399,17 +1390,26 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
-    lab_metadata["runner_workload"] = serde_json::to_value(runner_workload_metadata(
-        &plan,
-        &contract,
-        &request,
-        runner_id,
-        status_tunnel_mode(&runner_status).metadata_value(),
-        selection.source.metadata_value(),
-        &remote_cwd,
-        &lab_metadata,
-    ))
-    .unwrap_or(serde_json::json!(null));
+    lab_metadata["runner_workload"] =
+        serde_json::to_value(build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &contract,
+            capture_patch: request.capture_patch,
+            mutation_flag: request.mutation_flag,
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+            runner_id,
+            runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
+            assignment_source: selection.source.metadata_value(),
+            status: "offloaded",
+            remote_workspace: Some(&remote_cwd),
+            fallback_reason: None,
+            workspace_mapping_ref: Some("workspace_mapping"),
+            proof_id: lab_metadata
+                .get("proof")
+                .and_then(|proof| proof.get("id"))
+                .and_then(|id| id.as_str()),
+        }))
+        .unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -1421,20 +1421,18 @@ fn run_lab_offload_inner(
         &workspace_mapping_metadata,
         &synced_rigs,
     );
-    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
-    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
-    let agent_task_secret_env =
-        hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
-    let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
-    let tunnel_secret_env = hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
-    lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
-    lab_metadata["trace_secret_env"] = trace_secret_env;
-    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
+    let mut env_delta = std::collections::HashMap::new();
+    let rig_component_path_env =
+        forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;
+    apply_rig_component_path_overrides(&mut env_delta, &rig_component_path_overrides);
+    let secret_env_handoff =
+        build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
+    lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["rig_component_path_overrides"] =
         rig_component_path_overrides_metadata(&rig_component_path_overrides);
-    lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
+    lab_metadata["settings_env"] =
+        settings_env_diagnostics(&remapped_args, &secret_env_handoff.env_delta);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["source_checkout"] = source_checkout.clone();
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -1451,12 +1449,8 @@ fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
-    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    forward_rig_component_path_env(&mut env, &workspace_mapping)?;
-    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
-    hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
-    hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
-    hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
+    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
+    env.extend(secret_env_handoff.env_delta.clone());
     preflight_agent_task_runner_secret_env(
         runner_id,
         &runner,
@@ -1496,7 +1490,7 @@ fn run_lab_offload_inner(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: Vec::new(),
+            secret_env_names: secret_env_handoff.secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
@@ -1822,109 +1816,6 @@ fn lab_materialization_proof_metadata(
         "workspace_mapping": workspace_mapping,
         "rigs": synced_rigs,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn runner_workload_metadata(
-    plan: &HomeboyPlan,
-    contract: &LabOffloadCommand,
-    request: &LabOffloadRequest<'_>,
-    runner_id: &str,
-    runner_mode: &str,
-    assignment_source: &str,
-    remote_workspace: &str,
-    lab_metadata: &serde_json::Value,
-) -> RunnerWorkload {
-    RunnerWorkload {
-        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
-        workload_id: format!("{}.runner_workload", plan.id),
-        kind: RunnerWorkloadKind {
-            command_label: contract.hot_label.to_string(),
-            command_family: RunnerWorkloadCommandFamily::from_command_label(contract.hot_label),
-        },
-        workspace_mappings: RunnerWorkloadWorkspaceMappings {
-            source_path_mode: contract.source_path_mode.label().to_string(),
-            workspace_mode_policy: contract.workspace_mode_policy.label().to_string(),
-            mapping_ref: Some("workspace_mapping".to_string()),
-        },
-        required_capabilities: runner_workload_required_capabilities(contract),
-        required_secrets: RunnerWorkloadSecrets {
-            categories: runner_workload_required_secret_categories(contract.hot_label),
-        },
-        mutation_policy: RunnerWorkloadMutationPolicy {
-            capture_patch: request.capture_patch,
-            mutation_flag: request.mutation_flag.map(str::to_string),
-            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-        },
-        assignment: RunnerWorkloadAssignment {
-            runner_id: Some(runner_id.to_string()),
-            runner_mode: Some(runner_mode.to_string()),
-            source: Some(assignment_source.to_string()),
-        },
-        state: RunnerWorkloadState {
-            status: "offloaded".to_string(),
-            remote_workspace: Some(remote_workspace.to_string()),
-            fallback_reason: None,
-        },
-        result_refs: RunnerWorkloadResultRefs {
-            plan_id: plan.id.clone(),
-            proof_id: lab_metadata
-                .get("proof")
-                .and_then(|proof| proof.get("id"))
-                .and_then(|id| id.as_str())
-                .map(str::to_string),
-            workspace_mapping_ref: Some("workspace_mapping".to_string()),
-        },
-    }
-}
-
-fn runner_workload_required_capabilities(
-    contract: &LabOffloadCommand,
-) -> Vec<RunnerWorkloadCapability> {
-    let mut capabilities = Vec::new();
-    if contract.routing_policy.requires_extension_parity || !contract.required_extensions.is_empty()
-    {
-        capabilities.push(RunnerWorkloadCapability {
-            name: "extension_parity".to_string(),
-            required: true,
-        });
-    }
-    if contract.requires_playwright {
-        capabilities.push(RunnerWorkloadCapability {
-            name: "playwright".to_string(),
-            required: true,
-        });
-    }
-    capabilities
-}
-
-fn runner_workload_required_secret_categories(hot_label: &str) -> Vec<String> {
-    match hot_label {
-        label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
-        "trace" => vec!["trace".to_string()],
-        label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
-        _ => Vec::new(),
-    }
-}
-
-impl LabOffloadSourcePathMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CwdOrPathFlag => "cwd_or_path_flag",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
-}
-
-impl LabOffloadWorkspaceModePolicy {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
-            Self::Git => "git",
-            Self::GitCheckoutRequired => "git_checkout_required",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
@@ -3466,7 +3357,7 @@ mod tests {
     fn non_release_gate_command_keeps_allow_local_hot_bypass() {
         // Non-gate portable commands (e.g. agent-task) keep the existing
         // --force-hot --allow-local-hot bypass behavior.
-        let command = portable_lab_command("agent-task dispatch/cook/loop/run-plan");
+        let command = portable_lab_command("agent-task dispatch/cook/run-plan");
 
         assert!(resolve_lab_runner_selection_from_default(
             &command,

@@ -29,8 +29,8 @@ pub use args::{
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
-    AgentTaskFanoutPlanArgs, AgentTaskFanoutPlaneArg, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs,
+    AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, AgentTaskLoopCommand, AgentTaskLoopDefineArgs,
+    AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs,
     ContractFormat, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs,
     ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
@@ -42,7 +42,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::Cook(dispatch_args) => {
             super::agent_task_dispatch::cook(dispatch_args, global)
         }
-        AgentTaskCommand::Loop(loop_args) => run::run_loop(loop_args),
+        AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::Dispatch(dispatch_args) => {
             super::agent_task_dispatch::run(dispatch_args, global)
         }
