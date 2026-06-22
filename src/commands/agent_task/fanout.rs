@@ -3,10 +3,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchCommand, DispatchCoreInputs};
+use homeboy::core::agent_tasks::dispatch_service::{
+    self, AgentTaskDispatchCommand, DispatchCoreInputs,
+};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::provider;
-use homeboy::core::agent_tasks::service::{self as agent_task_service, AgentTaskCookServiceOptions};
+use homeboy::core::agent_tasks::service::{
+    self as agent_task_service, AgentTaskCookServiceOptions,
+};
 use homeboy::core::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
@@ -305,7 +309,10 @@ impl BatchCookSpec {
                 queue_only: false,
             },
         };
-        let title = self.title.clone().unwrap_or_else(|| default_cook_title(self));
+        let title = self
+            .title
+            .clone()
+            .unwrap_or_else(|| default_cook_title(self));
         let commit_message = self
             .commit_message
             .clone()
@@ -331,7 +338,10 @@ impl BatchCookSpec {
                 source_refs: self.task_url.clone().into_iter().collect(),
                 protected_branches: self.protected_branches.clone(),
                 ai_tool: self.ai_tool.clone(),
-                ai_model: self.model.clone().or_else(|| ai_model_from_tool(&self.ai_tool)),
+                ai_model: self
+                    .model
+                    .clone()
+                    .or_else(|| ai_model_from_tool(&self.ai_tool)),
                 ai_used_for: self.ai_used_for.clone(),
             },
         })
@@ -511,8 +521,14 @@ mod tests {
             .expect("cook invocation");
         assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
         assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
-        assert_eq!(invocation.dispatch.run_id.as_deref(), Some("cook-5929-docs"));
-        assert_eq!(invocation.options.gates.verify, vec!["homeboy test homeboy"]);
+        assert_eq!(
+            invocation.dispatch.run_id.as_deref(),
+            Some("cook-5929-docs")
+        );
+        assert_eq!(
+            invocation.options.gates.verify,
+            vec!["homeboy test homeboy"]
+        );
         assert!(invocation
             .dispatch
             .core
