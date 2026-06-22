@@ -1490,10 +1490,11 @@ fn fuzz_runner_workload_path(
     expand_fuzz_workload_strings(&mut value, rig_context);
     inject_fuzz_runtime_context(&mut value, rig_context);
 
-    let output_path = run_dir.step_file(format!(
+    let output_file = format!(
         "fuzz-workload-{}.json",
         sanitize_workload_file_segment(&workload.id)
-    ));
+    );
+    let output_path = run_dir.step_file(&output_file);
     let json = serde_json::to_string_pretty(&value).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
             "failed to encode expanded fuzz workload: {error}"
