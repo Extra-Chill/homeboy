@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.40] - 2026-06-22
+
+### Changed
+- Preserve fuzz agent task goals
+
 ## [3.12.39] - 2026-06-22
 
 ### Changed
