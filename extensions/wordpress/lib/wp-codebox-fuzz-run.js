@@ -158,7 +158,34 @@ function normalizeWpCodeboxFuzzResultSource(source = {}) {
 		source?.outputs?.fuzz_result,
 		source?.outputs?.fuzzResult,
 	];
-	return candidates.find((candidate) => candidate?.schema === WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA) || source;
+	return candidates.map((candidate) => findWpCodeboxFuzzSuiteResult(candidate)).find(Boolean) || source;
+}
+
+function findWpCodeboxFuzzSuiteResult(source, seen = new Set()) {
+	if (!objectOrUndefined(source) || seen.has(source)) {
+		return null;
+	}
+	if (source.schema === WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA) {
+		return source;
+	}
+	seen.add(source);
+	const candidates = [
+		source.result,
+		source.agent_task_result?.result,
+		source.agentTaskResult?.result,
+		source.agent_result?.result,
+		source.agentResult?.result,
+		source.outputs?.result,
+		source.outputs?.fuzz_result,
+		source.outputs?.fuzzResult,
+	];
+	for (const candidate of candidates) {
+		const found = findWpCodeboxFuzzSuiteResult(candidate, seen);
+		if (found) {
+			return found;
+		}
+	}
+	return null;
 }
 
 const normalizeWpCodeboxFuzzSuiteResult = normalizeWpCodeboxFuzzRunResult;
