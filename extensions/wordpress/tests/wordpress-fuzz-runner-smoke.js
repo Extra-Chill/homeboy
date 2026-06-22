@@ -6,6 +6,7 @@ const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { runtimeContractSchemas } = require('../../agent-runtimes/wp-codebox');
 
 const originalLoad = Module._load;
 Module._load = function loadWithoutRuntimeAgentCi(request, parent, isMain) {
@@ -180,36 +181,45 @@ assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suit
 
 const fakeCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-wp-codebox.js');
 fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
-fs.mkdirSync(path.join(tempDir, 'packages/wordpress-plugin'), { recursive: true });
-fs.writeFileSync(path.join(tempDir, 'packages/wordpress-plugin/wp-codebox.php'), '<?php // fixture');
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
 const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-if (request.schema !== 'wp-codebox/run-agent-task/v1' || !request.goal || !request.runtime_task) {
+if (request.schema !== '${runtimeContractSchemas().agentTask.runRequest}' || request.task_id !== 'dispatch-cli-run') {
   process.stderr.write('invalid run-agent-task input');
   process.exit(1);
 }
-if (request.sandbox_tool_policy?.schema !== 'wp-codebox/sandbox-tool-policy/v1' || request.sandbox_tool_policy?.version !== 1 || !request.sandbox_tool_policy?.tools?.length) {
-  process.stderr.write('invalid sandbox tool policy');
+if (request.runtime_task || request.artifact_declarations || request.sandbox_tool_policy || request.extra_plugins) {
+  process.stderr.write('runner rebuilt the Codebox task payload instead of delegating to the adapter');
   process.exit(1);
 }
-if (!request.extra_plugins?.some((plugin) => plugin.slug === 'wp-codebox' && plugin.activate === true)) {
-  process.stderr.write('missing wp-codebox extra plugin');
+if (request.task_input?.schema !== 'wp-codebox/task-input/v1') {
+  process.stderr.write('missing delegated task input');
+  process.exit(1);
+}
+if (request.task_input?.runtime_task?.ability !== 'wp-codebox/run-fuzz-suite' || request.task_input?.runtime_task?.input?.schema !== 'wp-codebox/fuzz-suite/v1') {
+  process.stderr.write('missing fuzz runtime task');
+  process.exit(1);
+}
+if (request.task_input?.artifact_declarations?.[0]?.name !== 'wp-codebox-fuzz-suite-result' || !request.task_input?.expected_artifacts?.includes('wordpress-fuzz-coverage')) {
+  process.stderr.write('missing delegated artifact contract');
+  process.exit(1);
+}
+if (request.task_input?.parent_request?.task_id !== 'dispatch-cli-run') {
+  process.stderr.write('missing parent request metadata');
   process.exit(1);
 }
 process.stdout.write(JSON.stringify({
   success: true,
-  agent_task_result: {
-    raw: {
-      result: {
-        schema: 'wp-codebox/fuzz-suite-result/v1',
-        request_id: request.id,
-        status: 'succeeded',
-        artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
-        coverage_summary: { surface_count: 1, exercised_count: 1 }
-      }
+  agent_task_run_result: {
+    schema: '${runtimeContractSchemas().agentTask.runResult}',
+    result: {
+      schema: 'wp-codebox/fuzz-suite-result/v1',
+      request_id: request.task_id,
+      status: 'succeeded',
+      artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+      coverage_summary: { surface_count: 1, exercised_count: 1 }
     }
   }
 }));
