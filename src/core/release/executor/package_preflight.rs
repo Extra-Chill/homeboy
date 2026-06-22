@@ -19,6 +19,7 @@ pub(crate) fn run_package_preflight(
     // build copy below excludes `.git`, so this committed-state check must run
     // against the source tree before we mutate or build anything.
     super::lockfile_guard::guard_committed_lockfiles(Path::new(component_local_path))?;
+    super::lockfile_guard::guard_local_file_dependencies(Path::new(component_local_path))?;
 
     let temp = create_release_preflight_tempdir()?;
     let temp_component_path = temp.join("component");
