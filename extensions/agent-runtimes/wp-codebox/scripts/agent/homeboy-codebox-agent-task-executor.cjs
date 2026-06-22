@@ -548,14 +548,17 @@ function missingModelPreflightPayload(taskInput) {
 
 async function loadCodeboxCoreNormalizers() {
   const module = await loadWpCodeboxCore(WP_CODEBOX_RUN_RESULTS_MODULE_OPTIONS);
-  if (typeof module?.normalizeAgentTaskRunResult === 'function' || typeof module?.normalizeRecipeRunSummary === 'function') {
-    return {
-      normalizeAgentTaskRunResult: typeof module.normalizeAgentTaskRunResult === 'function' ? module.normalizeAgentTaskRunResult : null,
-      normalizeRecipeRunSummary: typeof module.normalizeRecipeRunSummary === 'function' ? module.normalizeRecipeRunSummary : null,
-    };
-  }
-
-  return {};
+  return Object.fromEntries(Object.entries({
+    normalizeAgentTaskRunResult: module?.normalizeAgentTaskRunResult,
+    normalizeRecipeRunSummary: module?.normalizeRecipeRunSummary,
+    normalizeRuntimeProfile: module?.normalizeRuntimeProfile,
+    normalizeRuntimeProfilePayload: module?.normalizeRuntimeProfilePayload,
+    normalizeTypedArtifactEntry: module?.normalizeTypedArtifactEntry,
+    normalizeTypedArtifactDto: module?.normalizeTypedArtifactDto,
+    normalizeTypedArtifactDTO: module?.normalizeTypedArtifactDTO,
+    normalizeTypedArtifacts: module?.normalizeTypedArtifacts,
+    normalizeTypedArtifactMap: module?.normalizeTypedArtifactMap,
+  }).filter(([, value]) => typeof value === 'function'));
 }
 
 function runtimeOverlayConfigFailurePayload(error) {
@@ -580,7 +583,7 @@ async function runTaskRunner(request) {
   const config = request.executor?.config || {};
   let taskInput;
   try {
-    taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
+    taskInput = codeboxTaskRequestFromAgentTaskRequest(request, coreNormalizers);
   } catch (error) {
     const validationPayload = runtimeOverlayConfigFailurePayload(error);
     if (validationPayload) {

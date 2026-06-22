@@ -690,6 +690,8 @@ function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, de
     providerPluginPaths,
     runtimeStateMounts: firstDefined(config.runtime_state_mounts, config.runtimeStateMounts, config.wp_codebox_runtime_state_mounts, runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, defaults.runtimeStateMounts),
     runtimeConfigMounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts),
+    normalizeRuntimeProfile: options.normalizeRuntimeProfile,
+    normalizeRuntimeProfilePayload: options.normalizeRuntimeProfilePayload,
   });
 }
 

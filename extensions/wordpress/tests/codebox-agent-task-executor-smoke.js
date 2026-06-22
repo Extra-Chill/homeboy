@@ -100,6 +100,17 @@ process.stdout.write(JSON.stringify({
   success: true,
   status: 'completed',
   summary: 'Sandbox completed.',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    typed_artifacts: [
+      {
+        name: 'fixture_report',
+        type: 'FixtureReport',
+        artifact_schema: 'example/fixture-report/v1',
+        payload: { ok: true }
+      }
+    ]
+  },
   artifacts: [{ id: 'artifact-1', kind: 'screenshot', path: '/artifacts/screenshot.png' }],
   evidence_refs: [{ kind: 'preview', uri: 'https://example.test/preview', label: 'Preview' }],
   run: {
@@ -2683,6 +2694,7 @@ try {
   assert.equal(normalizedOutcome.metadata.decision_evidence.run_id, 'fixture-run-1');
   assert.equal(normalizedOutcome.metadata.decision_evidence.runtime_status, 'destroyed');
   assert.equal(normalizedOutcome.metadata.decision_evidence.patch_sha256, 'fixture-patch-sha');
+  assert.equal(normalizedOutcome.metadata.typed_artifacts.fixture_report.metadata.fixture_typed_artifact_normalizer, true);
   assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/fixture-normalized/patch.diff'), true);
   assert.equal(normalizedOutcome.artifacts.some((artifact) => artifact.kind === 'recipe-probe-result' && artifact.path === '/tmp/fixture-normalized/recipe-probe.json'), true);
   assert.equal(normalizedOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'fixture.normalizer'), true);
@@ -2709,6 +2721,7 @@ try {
   assert.equal(captured.request.schema, 'wp-codebox/task-input/v1');
   assert.equal(captured.request.orchestrator.agent_task_id, 'task-123');
   assert.equal(captured.request.runtime_overlays[0].kind, 'bundled-library');
+  assert.equal(captured.request.runtime_requirements.metadata.fixture_runtime_profile_normalizer, true);
 
   const recipeCliResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,

@@ -79,3 +79,34 @@ export function normalizeRecipeRunSummary(raw, options = {}) {
     },
   };
 }
+
+export function normalizeRuntimeProfilePayload(payload) {
+  return {
+    ...payload,
+    metadata: {
+      ...(payload.metadata || {}),
+      fixture_runtime_profile_normalizer: true,
+    },
+  };
+}
+
+export function normalizeTypedArtifactEntry(name, raw) {
+  const artifact = raw && typeof raw === 'object' ? raw : {};
+  const artifactName = artifact.name || name;
+  if (!artifactName) {
+    return null;
+  }
+  return {
+    schema: 'homeboy/agent-task-typed-artifact/v1',
+    name: artifactName,
+    type: artifact.type || artifact.kind,
+    artifact_schema: artifact.artifact_schema || artifact.artifactSchema || artifact.schema,
+    payload: artifact.payload !== undefined ? artifact.payload : artifact.data,
+    provenance: artifact.provenance || {},
+    file_refs: artifact.file_refs || artifact.fileRefs || [],
+    metadata: {
+      ...(artifact.metadata || {}),
+      fixture_typed_artifact_normalizer: true,
+    },
+  };
+}
