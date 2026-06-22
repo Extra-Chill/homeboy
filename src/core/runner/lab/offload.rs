@@ -1994,18 +1994,35 @@ fn in_flight_daemon_disconnect_error(
     reason: &str,
     err: &Error,
 ) -> Error {
+    let runner_exec_prefix = "homeboy runner exec ".to_string() + runner_id + " --";
+    let runner_runs_list =
+        format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
+    let runner_job_logs = format!("homeboy runner job logs {runner_id} {job_id} --follow");
+    let runner_job_cancel = format!("homeboy runner job cancel {runner_id} {job_id}");
+    let runner_run_show = format!("{runner_exec_prefix} homeboy runs show <run-id>");
+    let runner_run_evidence = format!("{runner_exec_prefix} homeboy runs evidence <run-id>");
+    let runner_run_artifacts = format!("{runner_exec_prefix} homeboy runs artifacts <run-id>");
     let mut disconnected = Error::new(
-        ErrorCode::InternalUnexpected,
+        ErrorCode::RunnerControllerDisconnected,
         format!(
-            "Lab offload controller disconnected while runner `{runner_id}` daemon job `{job_id}` was still in flight: {}",
+            "Lab offload controller disconnected while runner `{runner_id}` daemon job `{job_id}` was still in flight; recover from the durable runner job id: {}",
             err.message
         ),
         serde_json::json!({
-            "status": "followup_required",
+            "status": "recoverable_followup_required",
             "runner_id": runner_id,
             "job_id": job_id,
             "durable_run_id": run_id,
             "reason": reason,
+            "recovery": {
+                "mode": "durable_runner_job",
+                "job_logs": runner_job_logs,
+                "job_cancel": runner_job_cancel,
+                "runner_runs_list": runner_runs_list,
+                "runner_run_show": runner_run_show,
+                "runner_run_evidence": runner_run_evidence,
+                "runner_run_artifacts": runner_run_artifacts,
+            },
             "source": err.details,
         }),
     );
@@ -2019,7 +2036,7 @@ fn in_flight_daemon_disconnect_error(
     ) {
         disconnected = disconnected.with_hint(hint);
     }
-    disconnected.retryable = Some(false);
+    disconnected.retryable = Some(true);
     disconnected
 }
 
@@ -2615,11 +2632,24 @@ mod tests {
             &source,
         );
 
-        assert_eq!(err.code, ErrorCode::InternalUnexpected);
-        assert_eq!(err.retryable, Some(false));
+        assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+        assert_eq!(err.retryable, Some(true));
         assert_eq!(err.details["runner_id"], "homeboy-lab");
         assert_eq!(err.details["job_id"], "job-123");
-        assert_eq!(err.details["status"], "followup_required");
+        assert_eq!(err.details["status"], "recoverable_followup_required");
+        assert_eq!(err.details["recovery"]["mode"], "durable_runner_job");
+        assert_eq!(
+            err.details["recovery"]["job_logs"],
+            "homeboy runner job logs homeboy-lab job-123 --follow"
+        );
+        assert_eq!(
+            err.details["recovery"]["runner_runs_list"],
+            "homeboy runner exec homeboy-lab -- homeboy runs list --status running --limit 20"
+        );
+        assert_eq!(
+            err.details["recovery"]["runner_run_artifacts"],
+            "homeboy runner exec homeboy-lab -- homeboy runs artifacts <run-id>"
+        );
         assert!(err.message.contains("still in flight"));
         assert!(err.hints.iter().any(|hint| hint
             .message
