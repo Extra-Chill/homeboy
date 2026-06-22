@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.52] - 2026-06-22
+
+### Changed
+- Forward Agents API runtime requirements to Codebox
+
 ## [3.12.51] - 2026-06-22
 
 ### Changed
