@@ -655,8 +655,8 @@ pub(super) fn apply_lab_contract_to_descriptor(
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
         });
-    descriptor.lab_offload_captures_mutation_patch = contract
-        .is_some_and(|contract| contract.capture_mutation_patch);
+    descriptor.lab_offload_captures_mutation_patch =
+        contract.is_some_and(|contract| contract.capture_mutation_patch);
     descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
 }
 
