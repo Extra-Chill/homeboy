@@ -104,12 +104,7 @@ impl GhClient {
     }
 
     pub fn probe(&self, args: &[&str]) -> bool {
-        self.command(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        command_probe_succeeds(self.command(args))
     }
 
     pub fn run(&self, args: &[String]) -> Result<String> {
@@ -164,6 +159,22 @@ impl GhClient {
         let combined = if stderr.is_empty() { stdout } else { stderr };
         Error::git_command_failed(format!("{action} failed: {combined}"))
     }
+}
+
+/// Run a prepared `gh`/CLI command swallowing stdout/stderr, returning whether
+/// it exited successfully.
+///
+/// This is the single probe primitive shared by both [`GhClient::probe`] (which
+/// configures host/repo/env on the command) and the free [`gh_probe_succeeds`]
+/// helper (which runs a bare `gh` invocation). Both only care about the exit
+/// code, so they consolidate on this `null stdio + status` pattern here.
+pub fn command_probe_succeeds(mut command: Command) -> bool {
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)> {

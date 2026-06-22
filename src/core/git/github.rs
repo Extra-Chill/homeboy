@@ -1112,13 +1112,9 @@ pub(super) fn resolve_component_github(
 /// Public so other modules can consolidate on one probe helper instead of
 /// reimplementing the same `Command::new + null stdio + status` pattern.
 pub fn gh_probe_succeeds(args: &[&str]) -> bool {
-    Command::new("gh")
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let mut command = Command::new("gh");
+    command.args(args);
+    super::gh_client::command_probe_succeeds(command)
 }
 
 /// Resolve a GitHub token for scripts that require `GH_TOKEN` explicitly.
