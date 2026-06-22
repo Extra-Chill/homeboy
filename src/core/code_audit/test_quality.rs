@@ -85,7 +85,7 @@ fn detect_vacuous_tests(file: &str, content: &str) -> Vec<Finding> {
             severity: Severity::Info,
             file: file_path.clone(),
             description: format!(
-                "Unreachable test `{}` is nested inside another item near line {}; Rust's test harness will not discover it",
+                "Unreachable test `{}` is nested inside another item near line {}; the test harness will not discover it",
                 test.name, test.line
             ),
             suggestion: format!(

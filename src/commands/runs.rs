@@ -35,6 +35,8 @@ use homeboy::core::validation_progress::{ValidationCommandSummary, ValidationPro
 use homeboy::core::Error;
 use homeboy::core::{api_jobs, runners as runner};
 
+use homeboy::core::artifact_links::ArtifactViewerDescriptor;
+
 use super::{CmdResult, GlobalArgs};
 pub use bench::{bench_compare, bench_history, BenchCompareOutput, BenchHistoryOutput};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
@@ -71,6 +73,18 @@ pub(crate) use refs::{
 };
 
 const DEFAULT_LIMIT: i64 = 20;
+
+/// Command-layer artifact viewer for WordPress Playground blueprint artifacts.
+///
+/// The viewer is an ecosystem-specific presentation concern, so it lives in the
+/// command layer (which composes ecosystem integrations) rather than in core,
+/// which stays agnostic and only owns the generic [`ArtifactViewerDescriptor`].
+pub const WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER: ArtifactViewerDescriptor =
+    ArtifactViewerDescriptor::new(
+        "wordpress-playground-blueprint",
+        "https://playground.wordpress.net/",
+        "blueprint-url",
+    );
 
 #[derive(Args, Clone)]
 pub struct RunsArgs {
@@ -1338,7 +1352,7 @@ mod tests {
                             "algorithm": "sha256",
                             "value": "abc123"
                         },
-                        "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(Some(serde_json::json!({
+                        "viewer": WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(Some(serde_json::json!({
                                 "status": "partial",
                                 "limitations": ["fixture limitation"]
                         })))
@@ -1424,7 +1438,7 @@ mod tests {
                     "bench_artifact",
                     &artifact_path,
                     serde_json::json!({
-                        "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None)
+                        "viewer": WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None)
                     }),
                 )
                 .expect("record artifact");

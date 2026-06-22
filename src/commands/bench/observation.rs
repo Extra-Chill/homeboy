@@ -856,7 +856,7 @@ mod tests {
             size_bytes: None,
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
-                "viewer": homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None),
+                "viewer": crate::commands::runs::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None),
                 "public_url_validation": {
                     "url": "https://artifacts.example.test/homeboy/runs/run-1/artifacts/artifact-1",
                     "reachable": false,
@@ -968,7 +968,7 @@ mod tests {
                     label: Some("Transcript".to_string()),
                     observation_artifact_id: None,
                     viewer: Some(
-                        homeboy::core::artifact_links::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER
+                        crate::commands::runs::WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER
                             .to_metadata(None),
                     ),
                     ..BenchArtifact::default()

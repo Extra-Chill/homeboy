@@ -6,12 +6,6 @@ use crate::core::execution_contract::encode_uri_component;
 use crate::core::observation::{ArtifactRecord, ArtifactViewerLink};
 
 pub const PUBLIC_ARTIFACT_BASE_URL_ENV: &str = "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL";
-pub const WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER: ArtifactViewerDescriptor =
-    ArtifactViewerDescriptor::new(
-        "wordpress-playground-blueprint",
-        "https://playground.wordpress.net/",
-        "blueprint-url",
-    );
 const PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
