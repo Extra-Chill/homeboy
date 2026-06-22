@@ -559,6 +559,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            formatting_findings: None,
             findings: Some(findings),
             producer_summaries: Vec::new(),
             summary: None,
