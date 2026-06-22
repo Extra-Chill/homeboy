@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.6] - 2026-06-22
+
+### Changed
+- Add runtime execution kind contracts
+- Extract generic fanout reconcile primitives
+
 ## [3.12.5] - 2026-06-22
 
 ### Fixed
