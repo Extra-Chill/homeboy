@@ -592,7 +592,10 @@ function normalizeWpCodeboxFuzzArtifacts(source = {}, result = {}) {
 	appendNamedArtifact(artifacts, 'fuzz_report', source?.fuzz_report || source?.fuzzReport || source?.report || source?.summary_report || source?.summaryReport);
 	appendNamedArtifact(artifacts, 'coverage', source?.coverage_artifact || source?.coverageArtifact || source?.wordpress_fuzz_coverage || source?.wordpressFuzzCoverage);
 	appendNamedArtifact(artifacts, 'normalized_fuzz_result', source?.wordpress_fuzz_result_artifact || source?.wordpressFuzzResultArtifact || source?.normalized_fuzz_result || source?.normalizedFuzzResult);
+	appendArtifactCandidates(artifacts, source?.wordpress_fuzz_result?.artifacts || source?.wordpressFuzzResult?.artifacts);
+	appendArtifactCandidates(artifacts, source?.wordpress_fuzz_result?.artifactRefs || source?.wordpress_fuzz_result?.artifact_refs || source?.wordpressFuzzResult?.artifactRefs || source?.wordpressFuzzResult?.artifact_refs);
 	appendCaseArtifacts(artifacts, source?.cases || source?.fuzz_cases || source?.fuzzCases, 'fuzz_case');
+	appendCaseArtifacts(artifacts, source?.wordpress_fuzz_result?.cases || source?.wordpressFuzzResult?.cases, 'fuzz_case');
 	appendCaseArtifacts(artifacts, source?.failures || source?.errors || source?.failed_cases || source?.failedCases, 'failing_case');
 	appendCaseArtifacts(artifacts, source?.repro_cases || source?.reproCases || source?.reproductions, 'repro_case');
 	return dedupeArtifacts(artifacts.map(normalizeFuzzArtifact).filter(Boolean));

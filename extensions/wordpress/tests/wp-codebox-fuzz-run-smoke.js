@@ -364,6 +364,25 @@ runWpCodeboxFuzzSuite({
 	});
 	assert.equal(nested.succeeded, true);
 	assert.equal(nested.metadata.suite.id, 'nested-suite');
+	const embeddedArtifactOnly = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			suite: { id: 'embedded-artifact-suite' },
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			wordpress_fuzz_result: {
+				schema: 'wordpress-fuzz-result/v1',
+				status: 'passed',
+				cases: [{
+					id: 'case-with-artifact-ref',
+					status: 'passed',
+					artifactRefs: [{ name: 'case_report', path: 'case/report.json', kind: 'fuzz_report', contentType: 'application/json' }],
+				}],
+			},
+		},
+	}, { request: taskRequest });
+	assert.equal(embeddedArtifactOnly.succeeded, true);
+	assert.equal(embeddedArtifactOnly.artifacts[0].path, 'case/report.json');
 	const doubleNested = normalizeWpCodeboxFuzzRunResult({
 		json: {
 			schema: 'wp-codebox/agent-task-run/v1',
