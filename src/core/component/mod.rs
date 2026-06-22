@@ -209,6 +209,31 @@ fn is_default_github_config(config: &GithubConfig) -> bool {
     config.hosts.is_empty()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ComponentDeployConfig<'a> {
+    pub local_path: &'a str,
+    pub remote_path: &'a str,
+    pub build_artifact: Option<&'a str>,
+    pub extract_command: Option<&'a str>,
+    pub remote_owner: Option<&'a str>,
+    pub deploy_strategy: Option<&'a str>,
+    pub git_deploy: Option<&'a GitDeployConfig>,
+    pub remote_url: Option<&'a str>,
+    pub cli_path: Option<&'a str>,
+    pub artifact_inputs: &'a [ArtifactInput],
+    pub cleanup_artifacts: &'a [CleanupArtifactDeclaration],
+}
+
+impl ComponentDeployConfig<'_> {
+    pub fn is_git_deploy(&self) -> bool {
+        self.deploy_strategy == Some("git")
+    }
+
+    pub fn is_file_deploy(&self) -> bool {
+        self.deploy_strategy == Some("file")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CleanupArtifactDeclaration {
     pub label: String,
@@ -692,8 +717,37 @@ impl Component {
     /// File components use `deploy_strategy: "file"` and are deployed via
     /// atomic SCP instead of rsync. They skip build, git sync, and tag checkout.
     pub fn is_file_component(&self) -> bool {
-        self.deploy_strategy.as_deref() == Some("file")
-            || (std::path::Path::new(&self.local_path).is_file() && self.deploy_strategy.is_none())
+        self.deploy_config().is_file_deploy()
+            || (std::path::Path::new(&self.local_path).is_file()
+                && self.deploy_strategy().is_none())
+    }
+
+    pub fn deploy_config(&self) -> ComponentDeployConfig<'_> {
+        ComponentDeployConfig {
+            local_path: &self.local_path,
+            remote_path: &self.remote_path,
+            build_artifact: self.build_artifact.as_deref(),
+            extract_command: self.extract_command.as_deref(),
+            remote_owner: self.remote_owner.as_deref(),
+            deploy_strategy: self.deploy_strategy.as_deref(),
+            git_deploy: self.git_deploy.as_ref(),
+            remote_url: self.remote_url.as_deref(),
+            cli_path: self.cli_path.as_deref(),
+            artifact_inputs: &self.artifact_inputs,
+            cleanup_artifacts: &self.cleanup_artifacts,
+        }
+    }
+
+    pub fn deploy_strategy(&self) -> Option<&str> {
+        self.deploy_config().deploy_strategy
+    }
+
+    pub fn git_deploy_config(&self) -> Option<&GitDeployConfig> {
+        self.deploy_config().git_deploy
+    }
+
+    pub fn remote_url(&self) -> Option<&str> {
+        self.deploy_config().remote_url
     }
 
     pub fn script_commands(
@@ -920,6 +974,104 @@ mod tests {
         let parsed: Component = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.priority_labels, Some(vec!["urgent".to_string()]));
+    }
+
+    #[test]
+    fn component_deploy_config_reads_legacy_flat_fields() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "sample-plugin",
+            "local_path": "/repo/sample-plugin",
+            "remote_path": "wp-content/plugins/sample-plugin",
+            "build_artifact": "dist/sample-plugin.zip",
+            "extract_command": "unzip -o dist/sample-plugin.zip",
+            "remote_owner": "www-data",
+            "deploy_strategy": "git",
+            "git_deploy": {
+                "remote": "upstream",
+                "branch": "stable",
+                "post_pull": ["wp cache flush"],
+                "tag_pattern": "v{{version}}"
+            },
+            "remote_url": "https://github.com/example/sample-plugin.git",
+            "cli_path": "studio wp",
+            "artifact_inputs": [{
+                "component": "builder",
+                "artifact": "zip",
+                "target": "dist/sample-plugin.zip",
+                "sha256": "abc123"
+            }],
+            "cleanup_artifacts": [{
+                "label": "package",
+                "path": "dist/sample-plugin.zip"
+            }]
+        }))
+        .unwrap();
+
+        let deploy = component.deploy_config();
+        assert_eq!(deploy.local_path, "/repo/sample-plugin");
+        assert_eq!(deploy.remote_path, "wp-content/plugins/sample-plugin");
+        assert_eq!(deploy.build_artifact, Some("dist/sample-plugin.zip"));
+        assert_eq!(
+            deploy.extract_command,
+            Some("unzip -o dist/sample-plugin.zip")
+        );
+        assert_eq!(deploy.remote_owner, Some("www-data"));
+        assert_eq!(deploy.deploy_strategy, Some("git"));
+        assert!(deploy.is_git_deploy());
+        assert_eq!(component.deploy_strategy(), Some("git"));
+        assert_eq!(
+            component.remote_url(),
+            Some("https://github.com/example/sample-plugin.git")
+        );
+        assert_eq!(deploy.cli_path, Some("studio wp"));
+        assert_eq!(deploy.artifact_inputs.len(), 1);
+        assert_eq!(deploy.artifact_inputs[0].component, "builder");
+        assert_eq!(deploy.cleanup_artifacts.len(), 1);
+        assert_eq!(deploy.cleanup_artifacts[0].label, "package");
+
+        let git_deploy = component.git_deploy_config().expect("git deploy config");
+        assert_eq!(git_deploy.remote, "upstream");
+        assert_eq!(git_deploy.branch, "stable");
+        assert_eq!(git_deploy.post_pull, vec!["wp cache flush".to_string()]);
+        assert_eq!(git_deploy.tag_pattern.as_deref(), Some("v{{version}}"));
+    }
+
+    #[test]
+    fn component_deploy_config_serializes_as_legacy_flat_fields() {
+        let mut component = Component::new(
+            "sample-plugin".to_string(),
+            "/repo/sample-plugin".to_string(),
+            "wp-content/plugins/sample-plugin".to_string(),
+            Some("dist/sample-plugin.zip".to_string()),
+        );
+        component.deploy_strategy = Some("git".to_string());
+        component.git_deploy = Some(GitDeployConfig {
+            remote: "upstream".to_string(),
+            branch: "stable".to_string(),
+            post_pull: vec!["wp cache flush".to_string()],
+            tag_pattern: Some("v{{version}}".to_string()),
+        });
+        component.remote_url = Some("https://github.com/example/sample-plugin.git".to_string());
+
+        let json = serde_json::to_value(&component).unwrap();
+        assert!(json.get("deploy").is_none());
+        assert_eq!(json["deploy_strategy"], serde_json::json!("git"));
+        assert_eq!(
+            json["build_artifact"],
+            serde_json::json!("dist/sample-plugin.zip")
+        );
+        assert_eq!(
+            json["remote_url"],
+            serde_json::json!("https://github.com/example/sample-plugin.git")
+        );
+        assert_eq!(json["git_deploy"]["remote"], serde_json::json!("upstream"));
+        assert_eq!(json["git_deploy"]["branch"], serde_json::json!("stable"));
+
+        let reparsed: Component = serde_json::from_value(json).unwrap();
+        let deploy = reparsed.deploy_config();
+        assert_eq!(deploy.deploy_strategy, Some("git"));
+        assert!(deploy.is_git_deploy());
+        assert_eq!(deploy.build_artifact, Some("dist/sample-plugin.zip"));
     }
 
     #[test]
