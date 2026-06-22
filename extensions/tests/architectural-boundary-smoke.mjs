@@ -15,6 +15,7 @@ const quarantineManifest = JSON.parse(
 const scannedRoots = [
   '.github/scripts',
   '.github/workflows',
+  'datamachine-agent-ci',
   'runtime-agent-ci',
   'wordpress/lib',
   'wordpress/scripts/agent',

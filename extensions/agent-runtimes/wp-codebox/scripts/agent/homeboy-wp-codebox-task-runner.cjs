@@ -334,8 +334,7 @@ function siblingPath(workspaceRoot, sibling) {
 }
 
 function workspaceRootFromMounts(mounts) {
-  const legacyWorkspaceKind = ['homeboy', 'dmc', 'workspace'].join('-');
-  const mountedWorkspace = mounts.find((mount) => ['homeboy-runtime-workspace', legacyWorkspaceKind].includes(mount?.metadata?.kind)) || mounts[0];
+  const mountedWorkspace = mounts.find((mount) => mount?.metadata?.kind === 'homeboy-runtime-workspace') || mounts[0];
   return mountedWorkspace?.source || '';
 }
 

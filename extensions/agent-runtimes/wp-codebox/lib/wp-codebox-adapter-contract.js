@@ -16,7 +16,6 @@ const WP_CODEBOX_PROVIDER_RUNTIME_INVOCATION_CONTRACT_SCHEMA = RUNTIME_CONTRACT_
 const WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA = 'wp-codebox/provider-credential-boundary/v1';
 const WP_CODEBOX_RECIPE_RUN_CLI_COMMAND = 'recipe-run';
 const WP_CODEBOX_WORKSPACE_MOUNT_KIND = 'homeboy-runtime-workspace';
-const WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND = ['homeboy', 'dmc', 'workspace'].join('-');
 
 const WP_CODEBOX_PROVIDER_RUNTIME_TASK_NAMES = {
   ...RUNTIME_INVOCATION_CONTRACT.tasks,
@@ -226,7 +225,6 @@ module.exports = {
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
-  WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationConfig,
   wpCodeboxProviderRuntimeOperationEntry,

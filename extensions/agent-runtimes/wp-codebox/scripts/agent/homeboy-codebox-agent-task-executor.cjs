@@ -366,16 +366,12 @@ function workspaceMountKind(mount) {
   return mount?.metadata?.kind;
 }
 
-function legacyWorkspaceMountKind() {
-  return ['homeboy', 'dmc', 'workspace'].join('-');
-}
-
 function hasWorkspaceMount(taskInput) {
   return workspaceMounts(taskInput).some((mount) => {
     if (!mount || typeof mount !== 'object') {
       return false;
     }
-    if (workspaceMountKind(mount) === 'homeboy-runtime-workspace' || workspaceMountKind(mount) === legacyWorkspaceMountKind()) {
+    if (workspaceMountKind(mount) === 'homeboy-runtime-workspace') {
       return Boolean(mount.source);
     }
     return Boolean(mount.source) && /^\/workspace(?:\/|$)/.test(String(mount.target || ''));

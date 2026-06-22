@@ -818,7 +818,10 @@ assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox works
 assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
 assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
 assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
-assert.equal(repoLoopWorkspaceMount.metadata.legacy_kinds.includes(['homeboy', 'dmc', 'workspace'].join('-')), true);
+assert.deepEqual(repoLoopWorkspaceMount.metadata, {
+  kind: 'homeboy-runtime-workspace',
+  workspace_slug: path.basename(repoLoopWorkspaceRoot),
+});
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {
   repo: 'example-repo@example-loop-main-20260616',

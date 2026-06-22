@@ -53,7 +53,6 @@ const {
   WP_CODEBOX_TASK_REQUEST_SCHEMA,
   WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
   WP_CODEBOX_WORKSPACE_MOUNT_KIND,
-  WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
   wpCodeboxProviderRuntimeInvocationContract,
   wpCodeboxProviderRuntimeOperationEntry,
 } = require('./wp-codebox-adapter-contract');
@@ -1623,7 +1622,7 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
       source: workspaceRoot,
       target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, legacy_kinds: [WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND], workspace_slug: workspaceSlug(workspaceRoot) },
+      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot) },
     },
   ];
 }

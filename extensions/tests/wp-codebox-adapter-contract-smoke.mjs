@@ -20,15 +20,10 @@ const {
 	WP_CODEBOX_TASK_REQUEST_SCHEMA,
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS,
 	WP_CODEBOX_WORKSPACE_MOUNT_KIND,
-	WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND,
 	wpCodeboxProviderRuntimeInvocationContract,
 	wpCodeboxProviderRuntimeOperationConfig,
 	wpCodeboxProviderRuntimeOperationEntry,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-adapter-contract.js'));
-const {
-	DATAMACHINE_AGENT_BUNDLE_KEYS,
-	DATAMACHINE_RUNTIME_COMPONENT_ALIASES,
-} = require(path.join(rootDir, 'datamachine-agent-ci', 'lib', 'wp-codebox-compat.js'));
 const {
 	wpCodeboxBin,
 	wpCodeboxCliDescriptor,
@@ -42,7 +37,6 @@ assert.equal(WP_CODEBOX_PROVIDER_CREDENTIAL_BOUNDARY_SCHEMA, 'wp-codebox/provide
 assert.equal(WP_CODEBOX_TASK_REQUEST_SCHEMA, 'wp-codebox/task-input/v1');
 assert.equal(WP_CODEBOX_RECIPE_RUN_CLI_COMMAND, 'recipe-run');
 assert.equal(WP_CODEBOX_WORKSPACE_MOUNT_KIND, 'homeboy-runtime-workspace');
-assert.equal(WP_CODEBOX_LEGACY_WORKSPACE_MOUNT_KIND, ['homeboy', 'dmc', 'workspace'].join('-'));
 
 const cliDescriptor = wpCodeboxCliDescriptor();
 assert.equal(cliDescriptor.schema, 'wp-codebox/cli-descriptor/v1');
@@ -100,16 +94,12 @@ assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) =>
 ]);
 assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
-	'consume_canonical_envelope_with_explicit_legacy_result_compatibility'
+	'consume_canonical_public_envelope_only'
 );
 assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'preview-materialization').adapter_behavior,
 	'delegate_contained_site_open_without_constructing_playground_urls'
 );
 assert.doesNotMatch(JSON.stringify(cliDescriptor), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
-
-assert.deepEqual(DATAMACHINE_AGENT_BUNDLE_KEYS, ['data_machine_bundle', 'dataMachineBundle']);
-assert.equal(DATAMACHINE_RUNTIME_COMPONENT_ALIASES.data_machine_path, 'agent_runtime');
-assert.equal(DATAMACHINE_RUNTIME_COMPONENT_ALIASES.data_machine_code_path, 'agent_runtime_tools');
 
 console.log('wp-codebox adapter contract smoke passed');
