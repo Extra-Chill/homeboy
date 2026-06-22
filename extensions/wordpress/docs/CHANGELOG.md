@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.45] - 2026-06-22
+
+### Changed
+- Mount fuzz workload runtime plugins
+
 ## [3.12.44] - 2026-06-22
 
 ### Changed
