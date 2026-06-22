@@ -71,6 +71,22 @@ path to runners as `HOMEBOY_FUZZ_INVENTORY_FILE`. The inventory contract is
 product-neutral; product-specific details belong in `metadata` or flattened extra
 fields on the inventory items.
 
+Operations keep the free-form `kind` string for product-owned semantics and can
+also carry a canonical `family` for cross-runner coverage reporting. When
+`family` is omitted, Homeboy normalizes known neutral kinds and HTTP-style verbs
+to families such as `read`, `create`, `update`, `delete`, `list`, `search`,
+`navigate`, `render`, `query`, `load`, `submit`, `block_render`, and
+`performance_probe`. Unknown `kind` values remain valid and are preserved without
+a canonical family.
+
+```json
+{
+  "id": "endpoint-list",
+  "kind": "GET",
+  "family": "read"
+}
+```
+
 Campaigns can include a product-neutral coverage summary:
 
 ```json

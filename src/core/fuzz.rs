@@ -41,6 +41,8 @@ pub struct FuzzCoreContract {
     pub version: u32,
     pub schemas: FuzzContractSchemas,
     pub safety_classes: Vec<FuzzSafetyClass>,
+    #[serde(default = "default_fuzz_operation_families")]
+    pub operation_families: Vec<FuzzOperationFamily>,
     pub finding_statuses: Vec<FuzzFindingStatus>,
 }
 
@@ -73,6 +75,24 @@ pub enum FuzzSafetyClass {
     Idempotent,
     IsolatedMutation,
     Destructive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FuzzOperationFamily {
+    Read,
+    Create,
+    Update,
+    Delete,
+    List,
+    Search,
+    Navigate,
+    Render,
+    Query,
+    Load,
+    Submit,
+    BlockRender,
+    PerformanceProbe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +145,8 @@ pub struct FuzzOperation {
     pub id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<FuzzOperationFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -136,10 +158,33 @@ impl FuzzOperation {
     fn normalize(&mut self) -> std::result::Result<(), String> {
         self.id = required_trimmed("operation.id", &self.id)?;
         self.kind = required_trimmed("operation.kind", &self.kind)?;
+        if self.family.is_none() {
+            self.family = canonical_operation_family(&self.kind);
+        }
         self.target_id = normalize_optional_string(self.target_id.take());
         self.label = normalize_optional_string(self.label.take());
         self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
         Ok(())
+    }
+}
+
+pub fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
+    let normalized = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match normalized.as_str() {
+        "get" | "read" => Some(FuzzOperationFamily::Read),
+        "post" | "create" => Some(FuzzOperationFamily::Create),
+        "put" | "patch" | "update" => Some(FuzzOperationFamily::Update),
+        "delete" => Some(FuzzOperationFamily::Delete),
+        "list" => Some(FuzzOperationFamily::List),
+        "search" => Some(FuzzOperationFamily::Search),
+        "navigate" => Some(FuzzOperationFamily::Navigate),
+        "render" => Some(FuzzOperationFamily::Render),
+        "query" => Some(FuzzOperationFamily::Query),
+        "load" => Some(FuzzOperationFamily::Load),
+        "submit" => Some(FuzzOperationFamily::Submit),
+        "block_render" => Some(FuzzOperationFamily::BlockRender),
+        "performance_probe" => Some(FuzzOperationFamily::PerformanceProbe),
+        _ => None,
     }
 }
 
@@ -695,6 +740,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             FuzzSafetyClass::IsolatedMutation,
             FuzzSafetyClass::Destructive,
         ],
+        operation_families: default_fuzz_operation_families(),
         finding_statuses: vec![
             FuzzFindingStatus::Open,
             FuzzFindingStatus::Confirmed,
@@ -702,6 +748,24 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             FuzzFindingStatus::Suppressed,
         ],
     }
+}
+
+fn default_fuzz_operation_families() -> Vec<FuzzOperationFamily> {
+    vec![
+        FuzzOperationFamily::Read,
+        FuzzOperationFamily::Create,
+        FuzzOperationFamily::Update,
+        FuzzOperationFamily::Delete,
+        FuzzOperationFamily::List,
+        FuzzOperationFamily::Search,
+        FuzzOperationFamily::Navigate,
+        FuzzOperationFamily::Render,
+        FuzzOperationFamily::Query,
+        FuzzOperationFamily::Load,
+        FuzzOperationFamily::Submit,
+        FuzzOperationFamily::BlockRender,
+        FuzzOperationFamily::PerformanceProbe,
+    ]
 }
 
 pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
@@ -1053,7 +1117,51 @@ mod tests {
         assert!(contract
             .safety_classes
             .contains(&FuzzSafetyClass::IsolatedMutation));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::Read));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::PerformanceProbe));
         assert!(contract.finding_statuses.contains(&FuzzFindingStatus::Open));
+    }
+
+    #[test]
+    fn core_contract_deserializes_without_operation_families() {
+        let contract: FuzzCoreContract = serde_json::from_value(json!({
+            "schema": FUZZ_CORE_CONTRACT_SCHEMA,
+            "version": FUZZ_CONTRACT_VERSION,
+            "schemas": {
+                "surface": FUZZ_SURFACE_SCHEMA,
+                "target": FUZZ_TARGET_SCHEMA,
+                "workload": FUZZ_WORKLOAD_SCHEMA,
+                "campaign": FUZZ_CAMPAIGN_SCHEMA,
+                "case": FUZZ_CASE_SCHEMA,
+                "seed": FUZZ_SEED_SCHEMA,
+                "coverage": FUZZ_COVERAGE_SCHEMA,
+                "finding": FUZZ_FINDING_SCHEMA,
+                "artifact": FUZZ_ARTIFACT_SCHEMA,
+                "threshold": FUZZ_THRESHOLD_SCHEMA,
+                "provenance": FUZZ_PROVENANCE_SCHEMA,
+                "replay": FUZZ_REPLAY_SCHEMA,
+                "coverage_summary": FUZZ_COVERAGE_SUMMARY_SCHEMA,
+                "target_inventory": FUZZ_TARGET_INVENTORY_SCHEMA,
+                "execution_request": FUZZ_EXECUTION_REQUEST_SCHEMA,
+                "result_envelope": FUZZ_RESULT_ENVELOPE_SCHEMA,
+                "required_artifact": FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+                "gate": FUZZ_GATE_SCHEMA
+            },
+            "safety_classes": ["read_only"],
+            "finding_statuses": ["open"]
+        }))
+        .expect("old contract payload");
+
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::Read));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::BlockRender));
     }
 
     #[test]
@@ -1107,8 +1215,84 @@ mod tests {
             Some("https://example.test/resource")
         );
         assert_eq!(surface.operations[0].tags, vec!["stable"]);
+        assert_eq!(
+            surface.operations[0].family,
+            Some(FuzzOperationFamily::Read)
+        );
         assert_eq!(surface.inputs[0].constraints, vec!["max:64"]);
         assert_eq!(surface.extra["owner"], "extension");
+    }
+
+    #[test]
+    fn operation_deserializes_old_payload_and_preserves_custom_kind() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "custom-1", "kind": "domain_specific_probe" }
+            ]
+        }))
+        .expect("surface contract");
+
+        assert_eq!(surface.operations[0].kind, "domain_specific_probe");
+        assert_eq!(surface.operations[0].family, None);
+    }
+
+    #[test]
+    fn operation_normalizes_canonical_families_from_kind() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "read-1", "kind": " GET " },
+                { "id": "create-1", "kind": "post" },
+                { "id": "update-1", "kind": "PATCH" },
+                { "id": "delete-1", "kind": "delete" },
+                { "id": "block-render-1", "kind": "block-render" },
+                { "id": "performance-1", "kind": "performance probe" }
+            ]
+        }))
+        .expect("surface contract");
+
+        let families: Vec<Option<FuzzOperationFamily>> = surface
+            .operations
+            .iter()
+            .map(|operation| operation.family)
+            .collect();
+
+        assert_eq!(
+            families,
+            vec![
+                Some(FuzzOperationFamily::Read),
+                Some(FuzzOperationFamily::Create),
+                Some(FuzzOperationFamily::Update),
+                Some(FuzzOperationFamily::Delete),
+                Some(FuzzOperationFamily::BlockRender),
+                Some(FuzzOperationFamily::PerformanceProbe),
+            ]
+        );
+        assert_eq!(surface.operations[0].kind, "GET");
+    }
+
+    #[test]
+    fn operation_preserves_declared_canonical_family() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "custom-search", "kind": "bespoke_lookup", "family": "search" }
+            ]
+        }))
+        .expect("surface contract");
+
+        assert_eq!(surface.operations[0].kind, "bespoke_lookup");
+        assert_eq!(
+            surface.operations[0].family,
+            Some(FuzzOperationFamily::Search)
+        );
     }
 
     #[test]
@@ -1129,6 +1313,7 @@ mod tests {
                 operations: vec![FuzzOperation {
                     id: "operation-1".to_string(),
                     kind: "read".to_string(),
+                    family: Some(FuzzOperationFamily::Read),
                     target_id: Some("target-1".to_string()),
                     label: None,
                     tags: Vec::new(),
