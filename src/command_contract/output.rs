@@ -96,6 +96,13 @@ pub struct CommandRegistryEntry {
     pub lab_notes: &'static str,
 }
 
+impl CommandRegistryEntry {
+    pub fn docs_path(&self) -> Option<String> {
+        self.docs_slug
+            .map(|slug| format!("docs/commands/{slug}.md"))
+    }
+}
+
 const fn command_registry_entry(
     name: &'static str,
     json_family: CommandJsonFamily,
@@ -486,6 +493,10 @@ mod tests {
         assert_eq!(
             parsed_command(&["homeboy", "manifest"]).response_mode(false),
             CommandResponseMode::Json
+        );
+        assert_eq!(
+            parsed_command(&["homeboy", "changelog"]).response_mode(false),
+            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
     }
 
