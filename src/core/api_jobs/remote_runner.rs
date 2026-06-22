@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +28,8 @@ pub struct JobArtifactMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
@@ -53,6 +55,23 @@ pub struct RemoteRunnerJobRequest {
     pub require_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+}
+
+impl RemoteRunnerJobRequest {
+    pub(crate) fn public_metadata(&self) -> Self {
+        let mut public = self.clone();
+        let secret_env_names = self
+            .secret_env_names
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        for (name, value) in public.env.iter_mut() {
+            if secret_env_names.contains(name.as_str()) {
+                *value = "<redacted>".to_string();
+            }
+        }
+        public
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +107,8 @@ pub struct RemoteRunnerJobResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredRemoteRunnerJob {
+    #[serde(default, skip)]
+    pub(super) execution_request: Option<RemoteRunnerJobRequest>,
     pub(super) request: RemoteRunnerJobRequest,
 }
 
@@ -131,13 +152,17 @@ impl JobStore {
             artifacts: Vec::new(),
         };
 
+        let public_request = request.public_metadata();
         let mut inner = self.inner.lock().expect("job store mutex poisoned");
         inner.jobs.insert(
             job.id,
             StoredJob {
                 job: job.clone(),
                 events: Vec::new(),
-                remote_runner: Some(StoredRemoteRunnerJob { request }),
+                remote_runner: Some(StoredRemoteRunnerJob {
+                    execution_request: Some(request),
+                    request: public_request,
+                }),
             },
         );
         drop(inner);
@@ -214,11 +239,14 @@ impl JobStore {
                 stored.job.claimed_by_runner_id = Some(runner_id.to_string());
                 stored.job.claimed_at_ms = Some(now);
                 stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
-                let request = stored
+                let remote_runner = stored
                     .remote_runner
                     .as_ref()
-                    .expect("filtered remote runner job has request")
-                    .request
+                    .expect("filtered remote runner job has request");
+                let request = remote_runner
+                    .execution_request
+                    .as_ref()
+                    .unwrap_or(&remote_runner.request)
                     .clone();
                 claimed = Some((stored.job.id, request));
             }
@@ -289,7 +317,14 @@ impl JobStore {
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
-            stored.job.artifacts = result.artifacts;
+            stored.job.artifacts = result
+                .artifacts
+                .into_iter()
+                .map(|mut artifact| {
+                    artifact.content_base64 = None;
+                    artifact
+                })
+                .collect();
         }
         self.persist()?;
 

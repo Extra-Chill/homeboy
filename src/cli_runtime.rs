@@ -210,18 +210,6 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        // Show help for changelog when neither subcommand nor --self is provided.
-        if let Commands::Changelog(ref args) = cli.command {
-            if args.command.is_none() && !args.show_self {
-                let cmd = self.build_augmented_command();
-                if let Some(mut changelog_cmd) = cmd.find_subcommand("changelog").cloned() {
-                    changelog_cmd.print_help().expect("Failed to print help");
-                    println!();
-                    return std::process::ExitCode::SUCCESS;
-                }
-            }
-        }
-
         let exit_code = commands::response::run(cli.command, &global, output_file.as_deref());
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
     }

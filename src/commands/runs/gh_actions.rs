@@ -614,10 +614,6 @@ struct GhArtifactRaw {
     name: String,
     #[serde(default)]
     expired: bool,
-    #[serde(default)]
-    size_in_bytes: Option<u64>,
-    #[serde(default)]
-    archive_download_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -625,10 +621,6 @@ struct GhArtifact {
     id: u64,
     name: String,
     expired: bool,
-    #[allow(dead_code)]
-    size_in_bytes: Option<u64>,
-    #[allow(dead_code)]
-    archive_download_url: Option<String>,
 }
 
 fn list_run_artifacts(gh: &GhClient, gh_run_id: u64) -> homeboy::core::Result<Vec<GhArtifact>> {
@@ -669,8 +661,6 @@ fn list_run_artifacts(gh: &GhClient, gh_run_id: u64) -> homeboy::core::Result<Ve
                 id: raw_artifact.id,
                 name: raw_artifact.name,
                 expired: raw_artifact.expired,
-                size_in_bytes: raw_artifact.size_in_bytes,
-                archive_download_url: raw_artifact.archive_download_url,
             });
         }
     }

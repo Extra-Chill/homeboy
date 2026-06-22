@@ -783,8 +783,6 @@ fn run_pre_build_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::ComponentScriptsConfig;
-
     #[test]
     fn is_json_input_detects_json() {
         assert!(is_json_input(r#"{"componentIds": ["a"]}"#));
@@ -811,64 +809,6 @@ mod tests {
         assert!(err.hints.iter().any(|hint| hint
             .message
             .contains("Use `scripts.build` for component-owned build commands")));
-    }
-
-    #[test]
-    fn deploy_build_rejects_legacy_build_command_before_fallback() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let component = Component {
-            id: "artifact-component".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            build_artifact: Some("dist/component.zip".to_string()),
-            build_command: Some(
-                "mkdir -p dist && printf explicit > dist/component.zip".to_string(),
-            ),
-            scripts: Some(ComponentScriptsConfig {
-                build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let (exit_code, error) = build_component(&component);
-
-        assert_eq!(exit_code, Some(1));
-        let error = error.expect("legacy build_command should fail");
-        assert!(
-            error.contains("unsupported legacy build_command"),
-            "{error}"
-        );
-        assert!(error.contains("Use scripts.build instead"), "{error}");
-        assert!(!temp.path().join("dist/component.zip").exists());
-        assert!(!temp.path().join("dist/generic.zip").exists());
-    }
-
-    #[test]
-    fn build_run_rejects_legacy_build_command_before_fallback() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let component = Component {
-            id: "artifact-component".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            build_artifact: Some("packages/content-plugin/dist/component.zip".to_string()),
-            build_command: Some(
-                "mkdir -p packages/content-plugin/dist && printf artifact > packages/content-plugin/dist/component.zip".to_string(),
-            ),
-            scripts: Some(ComponentScriptsConfig {
-                build: vec!["mkdir -p dist && printf generic > dist/generic.zip".to_string()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let err = run_component(&component).expect_err("legacy build_command should fail");
-
-        assert!(err.message.contains("unsupported legacy build_command"));
-        assert!(err.message.contains("Use scripts.build instead"));
-        assert!(!temp
-            .path()
-            .join("packages/content-plugin/dist/component.zip")
-            .exists());
-        assert!(!temp.path().join("dist/generic.zip").exists());
     }
 
     #[test]

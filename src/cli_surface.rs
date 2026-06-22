@@ -774,11 +774,7 @@ fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> 
 
     let command = path.first()?;
 
-    registered_command(command).and_then(|entry| {
-        entry
-            .docs_slug
-            .map(|slug| format!("docs/commands/{slug}.md"))
-    })
+    registered_command(command).and_then(|entry| entry.docs_path())
 }
 
 fn dynamic_command_for_path<'a>(
@@ -816,11 +812,18 @@ fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<Command
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn command_doc(command: &str) -> String {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(root.join("docs/commands").join(format!("{command}.md")))
             .unwrap_or_else(|error| panic!("failed to read docs for {command}: {error}"))
+    }
+
+    fn commands_index() -> String {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(root.join("docs/commands/commands-index.md"))
+            .unwrap_or_else(|error| panic!("failed to read docs command index: {error}"))
     }
 
     fn root_command(command: &str) -> clap::Command {
@@ -1032,6 +1035,107 @@ mod tests {
         assert!(bench.lab.supported);
         assert!(bench.lab.notes.contains("portable Lab offload"));
         assert_eq!(bench.docs.path.as_deref(), Some("docs/commands/bench.md"));
+    }
+
+    #[test]
+    fn command_registry_docs_paths_exist_and_are_indexed() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let index = commands_index();
+
+        for entry in crate::command_contract::COMMAND_REGISTRY {
+            let Some(path) = entry.docs_path() else {
+                continue;
+            };
+            let Some(slug) = entry.docs_slug else {
+                continue;
+            };
+
+            assert!(
+                root.join(&path).is_file(),
+                "registered command `{}` points at missing docs path {path}",
+                entry.name
+            );
+            assert!(
+                index.contains(&format!("[{slug}]({slug}.md)")),
+                "docs/commands/commands-index.md is missing registered command `{}`",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn command_registry_manifest_and_docs_metadata_align() {
+        let parser_names = Cli::command()
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name().to_string())
+            .collect::<BTreeSet<_>>();
+        let registry_names = crate::command_contract::COMMAND_REGISTRY
+            .iter()
+            .map(|entry| entry.name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registry_names, parser_names);
+
+        let manifest = current_command_safety_manifest();
+        for entry in crate::command_contract::COMMAND_REGISTRY {
+            let manifest_entry = manifest
+                .find_path(&[entry.name])
+                .unwrap_or_else(|| panic!("manifest missing registered command `{}`", entry.name));
+            let output_notes_overridden_for_safety = matches!(entry.name, "release" | "upgrade");
+
+            assert_eq!(
+                manifest_entry.docs.path,
+                entry.docs_path(),
+                "manifest docs path drifted from registry for `{}`",
+                entry.name
+            );
+            if !output_notes_overridden_for_safety {
+                assert_eq!(
+                    manifest_entry.output.notes, entry.output_notes,
+                    "manifest output notes drifted from registry for `{}`",
+                    entry.name
+                );
+            }
+            assert_eq!(
+                manifest_entry.lab.supported, entry.lab_supported,
+                "manifest Lab support drifted from registry for `{}`",
+                entry.name
+            );
+            assert_eq!(
+                manifest_entry.lab.notes, entry.lab_notes,
+                "manifest Lab notes drifted from registry for `{}`",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn core_command_docs_do_not_drift_from_registry() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let registered_docs = crate::command_contract::COMMAND_REGISTRY
+            .iter()
+            .filter_map(|entry| entry.docs_slug)
+            .collect::<BTreeSet<_>>();
+        let extension_or_support_docs =
+            BTreeSet::from(["audit-rules", "cargo", "commands-index", "rig-spec", "wp"]);
+
+        for doc in
+            std::fs::read_dir(root.join("docs/commands")).expect("failed to read docs/commands")
+        {
+            let doc = doc.expect("failed to read docs/commands entry");
+            let path = doc.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            let slug = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("command docs filename should be valid UTF-8");
+            assert!(
+                registered_docs.contains(slug) || extension_or_support_docs.contains(slug),
+                "docs/commands/{slug}.md is not registered as a core command doc or known extension/support doc"
+            );
+        }
     }
 
     #[test]

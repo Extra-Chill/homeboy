@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::core::redaction::RedactionPolicy;
 use crate::core::{Error, Result};
 
 use super::execution::RUNNER_EXEC_WAIT_TIMEOUT_ENV;
@@ -255,23 +256,8 @@ fn parse_setting_pair(source: &'static str, raw: &str) -> Option<ParsedSettingAr
 }
 
 fn should_redact_setting(key: &str, value: &str) -> bool {
-    let lower_key = key.to_ascii_lowercase();
-    let lower_value = value.to_ascii_lowercase();
-    [
-        "secret",
-        "token",
-        "password",
-        "passwd",
-        "credential",
-        "authorization",
-        "auth",
-        "cookie",
-        "api_key",
-        "apikey",
-        "private_key",
-    ]
-    .iter()
-    .any(|needle| lower_key.contains(needle) || lower_value.contains(needle))
+    let policy = RedactionPolicy::default();
+    policy.is_sensitive_key(key) || policy.redact_string(value) != value
 }
 
 fn redacted_value_preview(value: &str, redacted: bool) -> String {

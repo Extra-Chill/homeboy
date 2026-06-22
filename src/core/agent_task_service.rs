@@ -986,7 +986,15 @@ where
     E: AgentTaskExecutorAdapter,
 {
     let mut plan = agent_task_lifecycle::load_plan(&run_id)?;
-    prepare_plan_for_execution(&mut plan, Some(&run_id))?;
+    if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "prepare_plan_for_execution",
+            &error,
+        )?;
+        return Err(error);
+    }
     run_prepared_claimed(run_id, plan, executor)
 }
 
@@ -1339,6 +1347,7 @@ mod tests {
     };
     use crate::core::agent_task_lifecycle::{status as lifecycle_status, AgentTaskRunState};
     use crate::core::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskState};
+    use crate::core::run_lifecycle_record::RunExecutionState;
     use crate::test_support::with_isolated_home;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -1442,6 +1451,34 @@ mod tests {
                 Some("fixture@fix-service-task")
             );
             assert!(Path::new(&record.worktree_path).is_dir());
+        });
+    }
+
+    #[test]
+    fn run_next_records_failed_lifecycle_when_prepare_after_claim_fails() {
+        with_isolated_home(|_| {
+            let mut plan = test_plan();
+            plan.tasks[0]
+                .executor
+                .secret_env
+                .push("__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__".to_string());
+            std::env::remove_var("__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__");
+            agent_task_lifecycle::submit_plan(&plan, Some("run-next-preexecution-fails"))
+                .expect("submitted");
+
+            let error = run_next(SucceedingExecutor).expect_err("prepare failure returned");
+            let record = lifecycle_status("run-next-preexecution-fails").expect("status persisted");
+
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert_eq!(record.state, AgentTaskRunState::Failed);
+            assert_eq!(record.tasks[0].state, AgentTaskState::Failed);
+            assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
+            assert!(record.lifecycle.execution.finished_at.is_some());
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                "prepare_plan_for_execution"
+            );
+            assert!(record.aggregate_path.is_some());
         });
     }
 

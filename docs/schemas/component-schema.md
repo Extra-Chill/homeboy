@@ -11,6 +11,7 @@ Component configuration defines buildable and deployable units stored in `compon
   "local_path": "string",
   "remote_path": "string",
   "build_artifact": "string",
+  "deploy_together": ["component-id"],
   "artifact_inputs": [
     {
       "component": "string",
@@ -81,6 +82,9 @@ Component configuration defines buildable and deployable units stored in `compon
   - **`target`** (string): Relative path where the producer artifact is placed inside the consumer artifact
   - **`sha256`** (string, optional): Expected producer artifact SHA-256; comparison is case-insensitive
   - The resolved input metadata is generic (`component`, resolved `artifact`, `target`, `sha256`). The current writer implementation supports ZIP consumer artifacts and writes each input at `target` inside the ZIP.
+- **`deploy_together`** (array): Component IDs that must be deployed in the same operation as this component
+  - Use this when separately tracked components form one runtime contract, such as a WordPress plugin and theme that must stay in sync.
+  - Deploy planning fails closed when a selection includes only part of a declared group. Select all coupled components explicitly or use `--all` for the project.
 - **`release`** (object): Component-scoped release configuration
   - **`enabled`** (boolean): Whether release pipeline is enabled
   - **`steps`** (array): Release step definitions

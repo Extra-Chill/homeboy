@@ -38,7 +38,7 @@ use homeboy::core::{api_jobs, runners as runner};
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 
 use super::{CmdResult, GlobalArgs};
-pub use bench::{bench_compare, bench_history, BenchCompareOutput, BenchHistoryOutput};
+pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 use bundle::{
     export_runs, import_runs, RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput,
@@ -110,6 +110,8 @@ enum RunsCommand {
     LatestRun(RunsLatestRunArgs),
     /// Compare selected metrics across persisted run history
     Compare(RunsCompareArgs),
+    /// Compare two persisted benchmark runs by exact run id
+    BenchCompare(RunsBenchCompareArgs),
     /// Mark orphaned running observation records stale
     Reconcile(RunsReconcileArgs),
     /// Show one persisted observation run
@@ -165,6 +167,9 @@ pub struct RunsListArgs {
     /// Rig ID
     #[arg(long)]
     pub rig: Option<String>,
+    /// Benchmark scenario ID. Only applies to bench metadata.
+    #[arg(long = "scenario")]
+    pub scenario_id: Option<String>,
     /// Run status
     #[arg(long)]
     pub status: Option<String>,
@@ -193,7 +198,6 @@ pub enum RunsOutput {
     Findings(RunsFindingsOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
-    BenchHistory(BenchHistoryOutput),
     BenchCompare(BenchCompareOutput),
     Reconcile(RunsReconcileOutput),
     Export(RunsExportOutput),
@@ -369,6 +373,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         }
         RunsCommand::LatestRun(args) => latest::latest_run(args),
         RunsCommand::Compare(args) => compare_runs(args),
+        RunsCommand::BenchCompare(args) => bench::bench_compare_from_args(args),
         RunsCommand::Reconcile(args) => reconcile_runs(args),
         RunsCommand::Show { run_id, json: _ } => show_run(&run_id),
         RunsCommand::ResumePlan { run_id } => resume_plan(&run_id),
@@ -501,6 +506,14 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
         rig_id: args.rig,
         limit: Some(args.limit),
     })?;
+    let run_records = run_records
+        .into_iter()
+        .filter(|run| {
+            args.scenario_id
+                .as_deref()
+                .is_none_or(|scenario| run_contains_scenario(run, scenario))
+        })
+        .collect::<Vec<_>>();
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
     if args.include_active_runner_jobs {
@@ -833,6 +846,7 @@ mod tests {
                     kind: Some("bench".to_string()),
                     component_id: Some("homeboy".to_string()),
                     rig: Some("studio".to_string()),
+                    scenario_id: None,
                     status: Some("pass".to_string()),
                     limit: 20,
                     include_active_runner_jobs: false,
@@ -864,6 +878,7 @@ mod tests {
                     kind: Some("bench".to_string()),
                     component_id: Some("homeboy".to_string()),
                     rig: Some("studio".to_string()),
+                    scenario_id: None,
                     status: None,
                     limit: 20,
                     include_active_runner_jobs: false,
@@ -1646,14 +1661,26 @@ mod tests {
                 .finish_run(&new.id, RunStatus::Pass, None)
                 .expect("finish new");
 
-            let (output, _) =
-                bench_history("homeboy", Some("cold"), Some("studio"), 20).expect("history");
-            let RunsOutput::BenchHistory(output) = output else {
+            let (output, _) = list_runs(
+                RunsListArgs {
+                    runner: None,
+                    kind: Some("bench".to_string()),
+                    component_id: Some("homeboy".to_string()),
+                    rig: Some("studio".to_string()),
+                    scenario_id: Some("cold".to_string()),
+                    status: None,
+                    limit: 20,
+                    include_active_runner_jobs: false,
+                },
+                "runs.list",
+            )
+            .expect("history");
+            let RunsOutput::List(output) = output else {
                 panic!("expected history output");
             };
             assert_eq!(output.runs.len(), 2);
-            assert_eq!(output.runs[0].summary.id, new.id);
-            assert_eq!(output.runs[1].summary.id, old.id);
+            assert_eq!(output.runs[0].id, new.id);
+            assert_eq!(output.runs[1].id, old.id);
         });
     }
 

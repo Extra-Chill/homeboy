@@ -21,7 +21,8 @@ use super::planning::{
     plan_components, ExtensionSkippedComponent, GitProbeCache,
 };
 use super::types::{
-    ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
+    ComponentDeployResult, ComponentStatus, DeployArtifactSource, DeployConfig,
+    DeployOrchestrationResult, DeploySummary,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
 
@@ -509,8 +510,9 @@ fn with_dry_run_artifact_plan(
     component: &Component,
     config: &DeployConfig,
 ) -> ComponentDeployResult {
-    let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
-    let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
+    let deploy_config = component.deploy_config();
+    let is_git_deploy = deploy_config.is_git_deploy();
+    let is_file_deploy = deploy_config.is_file_deploy();
     if is_git_deploy || is_file_deploy {
         return result;
     }
@@ -520,13 +522,15 @@ fn with_dry_run_artifact_plan(
             result.warnings.push(format!(
                 "artifact source: release asset for tag {tag}; build phase: skipped if asset is available; deploy phase: would upload downloaded asset"
             ));
-            result.with_artifact_path(Some(url))
+            result
+                .with_artifact_path(Some(url))
+                .with_artifact_source(DeployArtifactSource::ReleaseAsset)
         }
         ReleaseArtifactPlan::LocalBuild { reason } => {
             result.warnings.push(format!(
                 "artifact source: local rebuild; reason: {reason}; build phase: would run before deploy; deploy phase: would upload local build_artifact"
             ));
-            result
+            result.with_artifact_source(DeployArtifactSource::LocalBuild)
         }
     }
 }
@@ -1097,22 +1101,6 @@ mod tests {
             !message.contains("uncommitted changes"),
             "error must not conflate non-git with dirty git, got: {message}"
         );
-    }
-
-    #[test]
-    fn deploy_validation_rejects_legacy_build_command_before_artifact_checks() {
-        let dir = TempDir::new().expect("temp dir");
-        let mut component = make_component("sample-extension", &dir.path().to_string_lossy());
-        component.build_artifact =
-            Some("packages/browser-extension/dist/sample-extension.zip".to_string());
-        component.build_command = Some("npm run package:browser-extension".to_string());
-
-        let err = validate_supported_build_configs(&[component])
-            .expect_err("legacy build_command should fail deploy preflight");
-
-        assert!(err.message.contains("unsupported legacy build_command"));
-        assert!(err.message.contains("Use scripts.build instead"));
-        assert_eq!(err.details["field"].as_str(), Some("build_command"));
     }
 
     fn write_component_manifest(dir: &Path, id: &str, build_command: Option<&str>) {

@@ -8,7 +8,7 @@ use crate::core::project::Project;
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
-use super::super::types::{ComponentDeployResult, DeployConfig};
+use super::super::types::{ComponentDeployResult, DeployArtifactSource, DeployConfig};
 use super::super::version_overrides::is_self_deploy;
 use super::preflight::{resolve_preflight_artifact_path, validate_preflight_file_artifact};
 use super::release_plan::{
@@ -24,6 +24,7 @@ pub(crate) struct PreparedComponentDeploy {
     pub remote_version: Option<String>,
     pub build_exit_code: Option<i32>,
     pub artifact_path: Option<PathBuf>,
+    pub artifact_source: Option<DeployArtifactSource>,
     pub cleanup_local_artifact: bool,
 }
 
@@ -54,7 +55,8 @@ pub(crate) fn prepare_component_deploy(
                             remote_version,
                             None,
                             error,
-                        ));
+                        )
+                        .with_artifact_source(DeployArtifactSource::ReleaseAsset));
                     }
                 }
             }
@@ -70,6 +72,13 @@ pub(crate) fn prepare_component_deploy(
                 None
             }
         };
+    let artifact_source = if is_git_deploy || is_file_deploy {
+        None
+    } else if release_artifact.is_some() {
+        Some(DeployArtifactSource::ReleaseAsset)
+    } else {
+        Some(DeployArtifactSource::LocalBuild)
+    };
 
     let cleanup_generated_artifacts = !is_git_deploy
         && !is_file_deploy
@@ -191,6 +200,7 @@ pub(crate) fn prepare_component_deploy(
         remote_version,
         build_exit_code,
         artifact_path,
+        artifact_source,
         cleanup_local_artifact,
     })
 }

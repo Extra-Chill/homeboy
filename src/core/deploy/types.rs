@@ -79,6 +79,13 @@ pub struct DeployConfig {
     pub tagged: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployArtifactSource {
+    ReleaseAsset,
+    LocalBuild,
+}
+
 /// Reason why a component was selected for deployment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,6 +217,8 @@ pub struct ComponentDeployResult {
     pub warnings: Vec<String>,
     pub error: Option<String>,
     pub artifact_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_source: Option<DeployArtifactSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<ResolvedArtifactInput>,
     pub remote_path: Option<String>,
@@ -241,6 +250,7 @@ impl ComponentDeployResult {
             warnings: Vec::new(),
             error: None,
             artifact_path: component.build_artifact.clone(),
+            artifact_source: None,
             artifact_inputs: Vec::new(),
             remote_path: base_path::join_remote_path(Some(base_path), &component.remote_path).ok(),
             build_exit_code: None,
@@ -302,6 +312,11 @@ impl ComponentDeployResult {
 
     pub(super) fn with_artifact_path(mut self, path: Option<String>) -> Self {
         self.artifact_path = path;
+        self
+    }
+
+    pub(super) fn with_artifact_source(mut self, source: DeployArtifactSource) -> Self {
+        self.artifact_source = Some(source);
         self
     }
 
