@@ -790,34 +790,6 @@ impl LabCommandContract {
     }
 }
 
-impl LabSourcePathMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::CwdOrPathFlag => "cwd_or_path_flag",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
-}
-
-impl LabWorkspaceModePolicy {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
-            Self::Git => "git",
-            Self::GitCheckoutRequired => "git_checkout_required",
-            Self::RunnerResident => "runner_resident",
-        }
-    }
-}
-
-impl LabCommandRequiredTool {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Playwright => "playwright",
-        }
-    }
-}
-
 impl RunnerWorkloadCommandFamily {
     pub(crate) fn from_command_label(label: &str) -> Self {
         match label {
