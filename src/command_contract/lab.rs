@@ -42,7 +42,14 @@ pub struct LabRoutingPolicy {
     pub requires_extension_parity: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct LabCommandRouteContract {
+    pub command: LabCommandContract,
+    pub required_extensions: Vec<String>,
+    pub requires_playwright: bool,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub struct LabCommandContract {
     pub hot_label: &'static str,
     pub portability: LabCommandPortability,
@@ -54,19 +61,19 @@ pub struct LabCommandContract {
     pub routing_policy: LabRoutingPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum LabCommandPortability {
     Portable,
     LocalOnly(&'static str),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum LabSourcePathMode {
     CwdOrPathFlag,
     RunnerResident,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum LabWorkspaceModePolicy {
     ChangedSinceGitElseSnapshot,
     Git,
@@ -74,7 +81,7 @@ pub enum LabWorkspaceModePolicy {
     RunnerResident,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum LabCommandRequiredTool {
     Playwright,
 }
@@ -153,6 +160,87 @@ pub struct RunnerWorkloadResultRefs {
     pub plan_id: String,
     pub proof_id: Option<String>,
     pub workspace_mapping_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum LabLocalExecutionPolicy {
+    Allow {
+        local_hot: LabLocalHotPolicy,
+        selected_runner_fallback: LabSelectedRunnerFallbackPolicy,
+    },
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabLocalHotPolicy {
+    RequireRemoteWhenDefaultRunnerExists,
+    AllowControllerOverride,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabSelectedRunnerFallbackPolicy {
+    Deny,
+    AllowControllerFallback,
+}
+
+impl Default for LabLocalExecutionPolicy {
+    fn default() -> Self {
+        Self::Allow {
+            local_hot: LabLocalHotPolicy::RequireRemoteWhenDefaultRunnerExists,
+            selected_runner_fallback: LabSelectedRunnerFallbackPolicy::Deny,
+        }
+    }
+}
+
+impl LabLocalExecutionPolicy {
+    pub const fn from_flags(
+        allow_local_hot: bool,
+        allow_local_fallback: bool,
+        deny_local_execution: bool,
+    ) -> Self {
+        if deny_local_execution {
+            return Self::Deny;
+        }
+        Self::Allow {
+            local_hot: if allow_local_hot {
+                LabLocalHotPolicy::AllowControllerOverride
+            } else {
+                LabLocalHotPolicy::RequireRemoteWhenDefaultRunnerExists
+            },
+            selected_runner_fallback: if allow_local_fallback {
+                LabSelectedRunnerFallbackPolicy::AllowControllerFallback
+            } else {
+                LabSelectedRunnerFallbackPolicy::Deny
+            },
+        }
+    }
+
+    pub const fn allow_local_hot(self) -> bool {
+        matches!(
+            self,
+            Self::Allow {
+                local_hot: LabLocalHotPolicy::AllowControllerOverride,
+                ..
+            }
+        )
+    }
+
+    pub const fn allow_local_fallback(self) -> bool {
+        matches!(
+            self,
+            Self::Allow {
+                selected_runner_fallback: LabSelectedRunnerFallbackPolicy::AllowControllerFallback,
+                ..
+            }
+        )
+    }
+
+    pub const fn deny_local_execution(self) -> bool {
+        matches!(self, Self::Deny)
+    }
 }
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
@@ -558,6 +646,21 @@ pub(super) fn apply_lab_contract_to_descriptor(
 }
 
 impl LabCommandContract {
+    pub(crate) fn into_route_contract(
+        self,
+        required_extensions: Vec<String>,
+    ) -> LabCommandRouteContract {
+        let requires_playwright = self
+            .extra_required_tools
+            .iter()
+            .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright));
+        LabCommandRouteContract {
+            command: self,
+            required_extensions,
+            requires_playwright,
+        }
+    }
+
     pub fn runner_workload(
         &self,
         workload_id: impl Into<String>,
@@ -775,6 +878,14 @@ impl RunnerWorkloadCommandFamily {
 }
 
 impl Commands {
+    pub fn lab_route_contract(&self) -> crate::core::Result<Option<LabCommandRouteContract>> {
+        let Some(contract) = self.lab_contract() else {
+            return Ok(None);
+        };
+        let required_extensions = self.lab_required_extensions()?;
+        Ok(Some(contract.into_route_contract(required_extensions)))
+    }
+
     pub fn supports_lab_runner(&self) -> bool {
         self.lab_contract()
             .is_some_and(|contract| matches!(contract.portability, LabCommandPortability::Portable))

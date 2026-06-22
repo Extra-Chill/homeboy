@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::command_contract::{
-    LabCommandContract, LabCommandPortability, LabCommandRequiredTool, LabSourcePathMode,
+    LabCommandContract, LabCommandPortability, LabCommandRouteContract, LabSourcePathMode,
     LabWorkspaceModePolicy,
 };
 use crate::core::command_execution_plan::{
@@ -298,11 +298,19 @@ pub fn lab_offload_command_from_contract(
     contract: LabCommandContract,
     required_extensions: Vec<String>,
 ) -> runners::LabOffloadCommand {
-    let plan = lab_route_plan_from_contract(contract, required_extensions);
+    lab_offload_command_from_route_contract(contract.into_route_contract(required_extensions))
+}
+
+pub fn lab_offload_command_from_route_contract(
+    route_contract: LabCommandRouteContract,
+) -> runners::LabOffloadCommand {
+    let hot_label = route_contract.command.hot_label;
+    let portability = route_contract.command.portability;
+    let plan = lab_route_plan_from_route_contract(route_contract);
     runners::LabOffloadCommand {
-        hot_label: contract.hot_label,
+        hot_label,
         portable: matches!(plan.portability, CommandPortability::Portable),
-        unsupported_reason: match contract.portability {
+        unsupported_reason: match portability {
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
         },
@@ -340,6 +348,13 @@ pub(crate) fn lab_route_plan_from_contract(
     contract: LabCommandContract,
     required_extensions: Vec<String>,
 ) -> LabRoutePlan {
+    lab_route_plan_from_route_contract(contract.into_route_contract(required_extensions))
+}
+
+pub(crate) fn lab_route_plan_from_route_contract(
+    route_contract: LabCommandRouteContract,
+) -> LabRoutePlan {
+    let contract = route_contract.command;
     let mut plan = match contract.portability {
         LabCommandPortability::Portable => LabRoutePlan::portable(contract.hot_label),
         LabCommandPortability::LocalOnly(reason) => {
@@ -359,11 +374,8 @@ pub(crate) fn lab_route_plan_from_contract(
         LabWorkspaceModePolicy::GitCheckoutRequired => CommandWorkspacePolicy::GitCheckoutRequired,
         LabWorkspaceModePolicy::RunnerResident => CommandWorkspacePolicy::RunnerResident,
     };
-    plan.required_extensions = required_extensions;
-    plan.requires_playwright = contract
-        .extra_required_tools
-        .iter()
-        .any(|tool| matches!(tool, LabCommandRequiredTool::Playwright));
+    plan.required_extensions = route_contract.required_extensions;
+    plan.requires_playwright = route_contract.requires_playwright;
     plan
 }
 
