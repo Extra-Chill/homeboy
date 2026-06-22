@@ -122,6 +122,24 @@ impl LintArgs {
             && self.glob.is_none()
     }
 
+    pub(crate) fn should_use_self_check_dispatch(&self) -> bool {
+        !self.fix
+            && self.ci_job.is_none()
+            && !self.summary
+            && self.is_full_workspace_run()
+            && !self.sniff_filters.errors_only
+            && self.sniff_filters.sniffs.is_none()
+            && self.sniff_filters.exclude_sniffs.is_none()
+            && self.category.is_none()
+            && self.setting_args.setting.is_empty()
+            && self.setting_args.setting_json.is_empty()
+            && !self.baseline_args.baseline
+            && !self.baseline_args.ignore_baseline
+            && !self.baseline_args.ratchet
+            && self.precomputed_changed_files.is_none()
+            && self.lab_changed_files_json.is_none()
+    }
+
     /// Positional component id targeted by this run, if any (the
     /// `homeboy lint <component>` form). Returns `None` when the component is
     /// auto-detected from the working directory.
@@ -145,8 +163,7 @@ pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput>
         None,
     )?;
 
-    if !args.fix
-        && args.ci_job.is_none()
+    if args.should_use_self_check_dispatch()
         && source_ctx.component.has_script(ExtensionCapability::Lint)
     {
         let runner =
@@ -516,6 +533,35 @@ mod tests {
             .expect("lint should parse --ci-job");
 
         assert_eq!(cli.lint.ci_job.as_deref(), Some("lint-typecheck"));
+    }
+
+    #[test]
+    fn self_check_dispatch_only_allows_unscoped_default_lint() {
+        let default = TestCli::try_parse_from(["lint", "homeboy"])
+            .expect("default lint should parse")
+            .lint;
+        assert!(default.should_use_self_check_dispatch());
+
+        for argv in [
+            vec!["lint", "homeboy", "--changed-since", "origin/main"],
+            vec!["lint", "homeboy", "--changed-only"],
+            vec!["lint", "homeboy", "--file", "src/lib.rs"],
+            vec!["lint", "homeboy", "--glob", "src/**/*.rs"],
+            vec!["lint", "homeboy", "--errors-only"],
+            vec!["lint", "homeboy", "--sniffs", "WordPress.Security"],
+            vec!["lint", "homeboy", "--category", "security"],
+            vec!["lint", "homeboy", "--summary"],
+            vec!["lint", "homeboy", "--setting", "mode=strict"],
+            vec!["lint", "homeboy", "--baseline"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .unwrap_or_else(|error| panic!("lint args should parse for {argv:?}: {error}"))
+                .lint;
+            assert!(
+                !args.should_use_self_check_dispatch(),
+                "scoped or behavior-changing args must use main lint workflow: {argv:?}"
+            );
+        }
     }
 
     #[test]

@@ -105,6 +105,25 @@ impl TestArgs {
         LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
             .release_gate()
     }
+
+    pub(crate) fn should_use_self_check_dispatch(&self, cli_passthrough_args: &[String]) -> bool {
+        !self.skip_lint
+            && !self.coverage
+            && self.coverage_min.is_none()
+            && !self.analyze
+            && !self.drift
+            && !self.write
+            && self.changed_since.is_none()
+            && self.precomputed_changed_files.is_none()
+            && self.lab_changed_files_json.is_none()
+            && self.ci_job.is_none()
+            && cli_passthrough_args.is_empty()
+            && self.setting_args.setting.is_empty()
+            && self.setting_args.setting_json.is_empty()
+            && !self.baseline_args.baseline
+            && !self.baseline_args.ignore_baseline
+            && !self.baseline_args.ratchet
+    }
 }
 
 /// Filter out homeboy-owned flags from trailing args before passing to extension scripts.
@@ -130,9 +149,7 @@ pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput>
     )?;
     let cli_passthrough_args = filter_homeboy_flags(&args.args);
 
-    if !args.drift
-        && args.ci_job.is_none()
-        && cli_passthrough_args.is_empty()
+    if args.should_use_self_check_dispatch(&cli_passthrough_args)
         && source_ctx.component.has_script(ExtensionCapability::Test)
     {
         let runner =
@@ -542,6 +559,33 @@ mod tests {
             .expect("test should parse --ci-job");
 
         assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
+    }
+
+    #[test]
+    fn self_check_dispatch_only_allows_unscoped_default_test() {
+        let default = TestCli::try_parse_from(["test", "homeboy"])
+            .expect("default test should parse")
+            .test;
+        assert!(default.should_use_self_check_dispatch(&filter_homeboy_flags(&default.args)));
+
+        for argv in [
+            vec!["test", "homeboy", "--skip-lint"],
+            vec!["test", "homeboy", "--coverage"],
+            vec!["test", "homeboy", "--coverage-min", "80"],
+            vec!["test", "homeboy", "--analyze"],
+            vec!["test", "homeboy", "--changed-since", "origin/main"],
+            vec!["test", "homeboy", "--setting", "runner=ci"],
+            vec!["test", "homeboy", "--baseline"],
+            vec!["test", "homeboy", "--", "--filter=SmokeTest"],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .unwrap_or_else(|error| panic!("test args should parse for {argv:?}: {error}"))
+                .test;
+            assert!(
+                !args.should_use_self_check_dispatch(&filter_homeboy_flags(&args.args)),
+                "scoped or behavior-changing args must use main test workflow: {argv:?}"
+            );
+        }
     }
 
     #[test]
