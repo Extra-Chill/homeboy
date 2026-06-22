@@ -123,10 +123,9 @@ The provider command should emit `homeboy/agent-task-outcome/v1` with normalized
 recipe artifacts may be attached as artifacts, but Homeboy should not parse them
 to determine the terminal outcome.
 
-For WP Codebox specifically, Homeboy Extensions forwards runtime package,
-recipe, command, args, and env-name declarations to the Codebox executable
-contract, and Codebox returns the stable result envelope. WPCOM, Dolly, and
-product-specific semantics belong to callers or runtime packages.
+Runtime packages forward package-owned command, args, and env-name declarations
+through their executable contract and return stable result envelopes. Product
+semantics belong to callers or runtime packages.
 
 ## Homeboy Contract Adapter
 

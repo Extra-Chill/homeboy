@@ -3,105 +3,60 @@
 const path = require('node:path');
 const { existsSync } = require('node:fs');
 const { homedir } = require('node:os');
-const { pathToFileURL } = require('node:url');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const DEFAULT_CODEBOX_CONTRACTS_MODULE = '@automattic/wp-codebox-core/contracts';
 const RUNTIME_CONTRACT_MANIFEST_SCHEMA = 'wp-codebox/runtime-contract-manifest/v1';
 
-const DEPRECATED_RUNTIME_CONTRACT_FALLBACK = {
-  status: 'deprecated',
-  replacement: '@automattic/wp-codebox-core/contracts runtimeContractManifest()',
-  reason: 'Homeboy Extensions must consume WP Codebox public package contracts instead of carrying schema copies.',
-};
-
-const FALLBACK_RUNTIME_CONTRACT_SCHEMAS = {
-  providerRuntime: {
-    invocation: 'wp-codebox/provider-runtime-invocation-contract/v1',
-    credentialRequirements: 'wp-codebox/provider-credential-requirements/v1',
-    credentialPreflight: 'wp-codebox/provider-credential-preflight/v1',
-    credentialResolution: 'wp-codebox/provider-credential-resolution/v1',
-  },
-  agentTask: {
-    runRequest: 'wp-codebox/run-agent-task/v1',
-    runResult: 'wp-codebox/agent-task-run-result/v1',
-    legacyRunResponse: 'wp-codebox/agent-task-run/v1',
-  },
-  runtimeBoundary: {
-    profile: 'wp-codebox/runtime-profile/v1',
-    previewLease: 'wp-codebox/preview-lease/v1',
-    browserContainedSiteStatus: 'wp-codebox/browser-contained-site-status/v1',
-    browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1',
-    browserSessionProductDto: 'wp-codebox/browser-session-product-dto/v1',
-    browserPreviewBootConfig: 'wp-codebox/browser-preview-boot-config/v1',
-  },
-  artifact: {
-    resultEnvelope: 'wp-codebox/artifact-result-envelope/v1',
-  },
-  runnerWorkspace: {
-    prepareRequest: 'wp-codebox/runner-workspace-prepare-request/v1',
-    prepareResult: 'wp-codebox/runner-workspace-prepare-result/v1',
-    captureRequest: 'wp-codebox/runner-workspace-capture-request/v1',
-    captureResult: 'wp-codebox/runner-workspace-capture-result/v1',
-    commandRequest: 'wp-codebox/runner-workspace-command-request/v1',
-    commandResult: 'wp-codebox/runner-workspace-command-result/v1',
-    publicationRequest: 'wp-codebox/runner-workspace-publication-request/v1',
-    publicationResult: 'wp-codebox/runner-workspace-publication-result/v1',
-  },
-  fanoutAggregation: {
-    input: 'wp-codebox/fanout-aggregation-input/v1',
-    output: 'wp-codebox/fanout-aggregation-output/v1',
-  },
-};
-
-const FALLBACK_PROVIDER_RUNTIME_INVOCATION_CONTRACT = {
-  schema: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.providerRuntime.invocation,
-  version: 1,
-  tasks: {
-    workspacePrepare: 'wp-codebox.runner-workspace.prepare',
-    workspaceCapture: 'wp-codebox.runner-workspace.capture',
-    workspaceCommand: 'wp-codebox.runner-workspace.command',
-    workspacePublish: 'wp-codebox.runner-workspace.publish',
-    toolCallTranscriptRecord: 'wp-codebox.tool-call-transcript.record',
-    artifactHandoff: 'wp-codebox.artifact-handoff',
-  },
-  abilities: {
-    workspacePrepare: 'wp-codebox/runner-workspace-prepare',
-    workspaceCapture: 'wp-codebox/runner-workspace-capture',
-    workspaceCommand: 'wp-codebox/runner-workspace-command',
-    workspacePublish: 'wp-codebox/runner-workspace-publish',
-    toolCallTranscriptRecord: 'wp-codebox/record-tool-call-transcript',
-    artifactHandoff: 'wp-codebox/handoff-artifacts',
-  },
-  result_schemas: {
-    workspace_prepare: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.runnerWorkspace.prepareResult,
-    workspace_capture: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.runnerWorkspace.captureResult,
-    workspace_command: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.runnerWorkspace.commandResult,
-    workspace_publication: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.runnerWorkspace.publicationResult,
-    tool_call_transcript: 'wp-codebox/tool-call-transcript/v1',
-    evidence_artifact_envelope: 'wp-codebox/evidence-artifact-envelope/v1',
-    artifact_result_envelope: FALLBACK_RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope,
-  },
-};
-
-const FALLBACK_RUNTIME_CONTRACT_MANIFEST = {
-  schema: RUNTIME_CONTRACT_MANIFEST_SCHEMA,
-  version: 1,
-  schemas: FALLBACK_RUNTIME_CONTRACT_SCHEMAS,
-  providerRuntime: FALLBACK_PROVIDER_RUNTIME_INVOCATION_CONTRACT,
-};
+const REQUIRED_RUNTIME_CONTRACT_PATHS = [
+  'schemas.providerRuntime.invocation',
+  'schemas.providerRuntime.credentialRequirements',
+  'schemas.providerRuntime.credentialPreflight',
+  'schemas.providerRuntime.credentialResolution',
+  'schemas.agentTask.runRequest',
+  'schemas.agentTask.runResult',
+  'schemas.agentTask.legacyRunResponse',
+  'schemas.runtimeBoundary.profile',
+  'schemas.runtimeBoundary.previewLease',
+  'schemas.runtimeBoundary.browserContainedSiteStatus',
+  'schemas.runtimeBoundary.browserContainedSiteOpen',
+  'schemas.runtimeBoundary.browserSessionProductDto',
+  'schemas.runtimeBoundary.browserPreviewBootConfig',
+  'schemas.artifact.resultEnvelope',
+  'schemas.runnerWorkspace.prepareRequest',
+  'schemas.runnerWorkspace.prepareResult',
+  'schemas.runnerWorkspace.captureRequest',
+  'schemas.runnerWorkspace.captureResult',
+  'schemas.runnerWorkspace.commandRequest',
+  'schemas.runnerWorkspace.commandResult',
+  'schemas.runnerWorkspace.publicationRequest',
+  'schemas.runnerWorkspace.publicationResult',
+  'schemas.fanoutAggregation.input',
+  'schemas.fanoutAggregation.output',
+  'providerRuntime.schema',
+  'providerRuntime.tasks.workspacePrepare',
+  'providerRuntime.tasks.workspaceCapture',
+  'providerRuntime.tasks.workspaceCommand',
+  'providerRuntime.tasks.workspacePublish',
+  'providerRuntime.tasks.toolCallTranscriptRecord',
+  'providerRuntime.tasks.artifactHandoff',
+  'providerRuntime.abilities.workspacePrepare',
+  'providerRuntime.abilities.workspaceCapture',
+  'providerRuntime.abilities.workspaceCommand',
+  'providerRuntime.abilities.workspacePublish',
+  'providerRuntime.abilities.toolCallTranscriptRecord',
+  'providerRuntime.abilities.artifactHandoff',
+  'providerRuntime.result_schemas.workspace_prepare',
+  'providerRuntime.result_schemas.workspace_capture',
+  'providerRuntime.result_schemas.workspace_command',
+  'providerRuntime.result_schemas.workspace_publication',
+  'providerRuntime.result_schemas.tool_call_transcript',
+  'providerRuntime.result_schemas.evidence_artifact_envelope',
+  'providerRuntime.result_schemas.artifact_result_envelope',
+];
 
 function runtimeContractManifest() {
-  return clone(FALLBACK_RUNTIME_CONTRACT_MANIFEST);
-}
-
-function runtimeContractFallbackDiagnostic(details = {}) {
-  return withoutUndefinedValues({
-    ...DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
-    source: 'homeboy-extensions-fallback',
-    schema: RUNTIME_CONTRACT_MANIFEST_SCHEMA,
-    canonical_required_option: 'required',
-    details: Object.keys(details).length > 0 ? details : undefined,
-  });
+  return clone(loadCanonicalRuntimeContractSourceSync({ required: true }).manifest);
 }
 
 function runtimeContractSchemas() {
@@ -113,24 +68,14 @@ function providerRuntimeInvocationContract() {
 }
 
 async function loadRuntimeContractSource(options = {}) {
-  const canonical = await loadCanonicalRuntimeContractSource(options);
-  if (canonical) {
-    return canonical;
-  }
-  return {
-    source: 'homeboy-extensions-fallback',
-    manifest: runtimeContractManifest(),
-    normalizers: {},
-    canonical: false,
-    diagnostics: [runtimeContractFallbackDiagnostic()],
-  };
+  return loadCanonicalRuntimeContractSource({ ...options, required: true });
 }
 
 async function loadCanonicalRuntimeContractSource(options = {}) {
   const errors = [];
   for (const specifier of coreModuleCandidates(options)) {
     try {
-      const core = await import(specifier);
+      const core = moduleExports(await import(specifier));
       if (typeof core.runtimeContractManifest !== 'function') {
         errors.push({ specifier, message: 'missing runtimeContractManifest export' });
         continue;
@@ -156,6 +101,36 @@ async function loadCanonicalRuntimeContractSource(options = {}) {
   return null;
 }
 
+function loadCanonicalRuntimeContractSourceSync(options = {}) {
+  const errors = [];
+  for (const specifier of coreModuleCandidates(options)) {
+    try {
+      const core = moduleExports(require(requireSpecifier(specifier)));
+      if (typeof core.runtimeContractManifest !== 'function') {
+        errors.push({ specifier, message: 'missing runtimeContractManifest export' });
+        continue;
+      }
+      const manifest = core.runtimeContractManifest();
+      validateCanonicalRuntimeContractManifest(manifest);
+      return {
+        source: specifier,
+        manifest,
+        normalizers: core.RUNTIME_CONTRACT_NORMALIZERS || {},
+        canonical: true,
+      };
+    } catch (error) {
+      errors.push({ specifier, error, message: error.message });
+    }
+  }
+
+  if (options.required) {
+    const error = new Error('WP Codebox canonical runtime contract manifest is unavailable. Install @automattic/wp-codebox-core or configure HOMEBOY_WP_CODEBOX_CORE_MODULE.');
+    error.wpCodeboxRuntimeContractErrors = errors;
+    throw error;
+  }
+  return null;
+}
+
 function validateCanonicalRuntimeContractManifest(manifest) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new Error('WP Codebox canonical runtime contract manifest must be an object.');
@@ -163,21 +138,9 @@ function validateCanonicalRuntimeContractManifest(manifest) {
   if (manifest.schema !== RUNTIME_CONTRACT_MANIFEST_SCHEMA) {
     throw new Error(`WP Codebox canonical runtime contract manifest schema mismatch: ${manifest.schema || 'missing'}.`);
   }
-  assertContractSubset(manifest.schemas, FALLBACK_RUNTIME_CONTRACT_SCHEMAS, 'schemas');
-  assertContractSubset(manifest.providerRuntime, FALLBACK_PROVIDER_RUNTIME_INVOCATION_CONTRACT, 'providerRuntime');
-}
-
-function assertContractSubset(actual, expected, pathName) {
-  if (!actual || typeof actual !== 'object' || Array.isArray(actual)) {
-    throw new Error(`WP Codebox canonical runtime contract manifest missing ${pathName}.`);
-  }
-  for (const [key, expectedValue] of Object.entries(expected)) {
-    const currentPath = `${pathName}.${key}`;
-    const actualValue = actual[key];
-    if (expectedValue && typeof expectedValue === 'object' && !Array.isArray(expectedValue)) {
-      assertContractSubset(actualValue, expectedValue, currentPath);
-    } else if (actualValue !== expectedValue) {
-      throw new Error(`WP Codebox canonical runtime contract mismatch at ${currentPath}: expected ${expectedValue}, received ${actualValue || 'missing'}.`);
+  for (const pathName of REQUIRED_RUNTIME_CONTRACT_PATHS) {
+    if (typeof valueAtPath(manifest, pathName) !== 'string') {
+      throw new Error(`WP Codebox canonical runtime contract manifest missing ${pathName}.`);
     }
   }
 }
@@ -228,24 +191,36 @@ function isPathSpecifier(specifier) {
   return specifier.startsWith('.') || path.isAbsolute(specifier) || specifier.startsWith('~') || specifier.includes('\\') || existsSync(path.resolve(specifier));
 }
 
+function requireSpecifier(specifier) {
+  return specifier?.startsWith('file:') ? fileURLToPath(specifier) : specifier;
+}
+
+function moduleExports(value) {
+  if (!value || !value.default) {
+    return value;
+  }
+  if (typeof value.default === 'object') {
+    return { ...value.default, ...value };
+  }
+  return typeof value.runtimeContractManifest === 'function' ? value : value.default;
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function withoutUndefinedValues(value) {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+function valueAtPath(value, pathName) {
+  return pathName.split('.').reduce((current, part) => current?.[part], value);
 }
 
 module.exports = {
-  DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
-  FALLBACK_RUNTIME_CONTRACT_MANIFEST,
-  FALLBACK_RUNTIME_CONTRACT_SCHEMAS,
+  REQUIRED_RUNTIME_CONTRACT_PATHS,
   RUNTIME_CONTRACT_MANIFEST_SCHEMA,
   coreModuleCandidates,
   loadCanonicalRuntimeContractSource,
+  loadCanonicalRuntimeContractSourceSync,
   loadRuntimeContractSource,
   providerRuntimeInvocationContract,
-  runtimeContractFallbackDiagnostic,
   runtimeContractManifest,
   runtimeContractSchemas,
   validateCanonicalRuntimeContractManifest,
