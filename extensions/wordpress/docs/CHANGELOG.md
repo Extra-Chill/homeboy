@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.18] - 2026-06-22
+
+### Changed
+- Clean WordPress runtime adapter boundaries
+
 ## [3.12.17] - 2026-06-22
 
 ### Changed
