@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.8] - 2026-06-22
+
+### Changed
+- Add WordPress fuzz manifest contract
+
 ## [3.12.7] - 2026-06-22
 
 ### Changed
