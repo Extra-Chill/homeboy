@@ -72,6 +72,7 @@ const RUNTIME_MANIFEST_PATH = path.resolve(__dirname, '..', 'wp-codebox.json');
 const RUNTIME_OVERLAY_CANONICAL_SHAPE = 'runtime_overlays entries must be objects. WP Codebox owns the runtime overlay schema and reports field-level validation.';
 const RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 const PROVIDER_CAPABILITIES = runtimeProviderCapabilities();
+const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 'data-machine-code']);
 
 const AGENT_BUNDLE_CONFIG_FIELDS = [
   'bundle_path',
@@ -349,13 +350,15 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const timeoutMs = request.limits?.timeout_ms || request.limits?.max_runtime_ms;
   const timeoutFromMs = timeoutMs ? Math.ceil(timeoutMs / 1000) : undefined;
   const runtimeOverlays = runtimeOverlaysFromConfig(config, runtimeOptions, defaults);
-  const runtimeRequirements = codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays);
+  const runtimeRequirements = codeboxRuntimeRequirementsWithoutCodeboxOwnedSubstrate(
+    codeboxRuntimeRequirementsFromAgentTaskRequest(config, runtimeOptions, defaults, componentContracts, runtimeOverlays)
+  );
   componentContracts = codeboxRuntimeComponentContracts({
     componentContracts: [
       ...componentContracts,
       ...normalizeArray(runtimeRequirements.component_contracts),
     ],
-  });
+  }).filter((contract) => !isCodeboxOwnedSubstrateContract(contract));
   components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const context = {
     ...(inputs.context || {}),
@@ -685,7 +688,7 @@ function componentContractsFromAgentTaskRequest(request, config, options = {}) {
       ...normalizeArray(config.component_contracts),
       ...normalizeArray(options.componentContracts),
     ],
-  });
+  }).filter((contract) => !isCodeboxOwnedSubstrateContract(contract));
 }
 
 function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
@@ -1228,8 +1231,6 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const providerConfig = providerConfigFor(provider, settings, providerDefaults);
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
-  const agentsApiPath = defaultAgentsApiPath(settings, options, agentRuntimePath);
-  const chatHandlerPluginContracts = defaultChatHandlerPluginContracts(settings, options, providerConfig);
 
   return {
     agentRuntime: agentRuntimePath,
@@ -1243,7 +1244,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
-    runtimeRequirements: defaultRuntimeRequirements(agentsApiPath, chatHandlerPluginContracts),
+    runtimeRequirements: defaultRuntimeRequirements(),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -1287,24 +1288,25 @@ function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
   }] : [];
 }
 
-function defaultRuntimeRequirements(agentsApiPath = '', chatHandlerPluginContracts = []) {
-  const componentContracts = [
-    ...(agentsApiPath ? [{
-      slug: 'agents-api',
-      path: agentsApiPath,
-      pluginFile: 'agents-api/agents-api.php',
-      loadAs: 'mu-plugin',
-      activate: false,
-      metadata: { source: 'homeboy-extensions-codebox-runtime-default' },
-    }] : []),
-    ...normalizeArray(chatHandlerPluginContracts),
-  ];
-  if (componentContracts.length === 0) {
-    return {};
-  }
+function defaultRuntimeRequirements() {
   return {
     ability_requirements: ['agents/chat'],
-    component_contracts: componentContracts,
+  };
+}
+
+function isCodeboxOwnedSubstrateContract(contract) {
+  const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
+  return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
+}
+
+function codeboxRuntimeRequirementsWithoutCodeboxOwnedSubstrate(runtimeRequirements = {}) {
+  if (!runtimeRequirements || typeof runtimeRequirements !== 'object' || Array.isArray(runtimeRequirements)) {
+    return runtimeRequirements;
+  }
+  return {
+    ...runtimeRequirements,
+    component_contracts: normalizeArray(runtimeRequirements.component_contracts).filter((contract) => !isCodeboxOwnedSubstrateContract(contract)),
+    extra_plugins: normalizeArray(runtimeRequirements.extra_plugins).filter((contract) => !isCodeboxOwnedSubstrateContract(contract)),
   };
 }
 
@@ -1767,7 +1769,7 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
       source: workspaceRoot,
       target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot) },
+      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot), workspaceRef: path.basename(workspaceRoot) },
     },
   ];
 }
@@ -2064,6 +2066,9 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.outcome === 'no_op' || result?.no_op) {
     return 'no_op';
   }
+  if (agentRuntimeSucceeded(result)) {
+    return 'succeeded';
+  }
   return (publicEnvelope?.success ?? result?.success) === true ? 'succeeded' : 'failed';
 }
 
@@ -2122,11 +2127,22 @@ function agentRuntimeFailure(result) {
   return agentRuntimeResultCandidates(result).find(agentRuntimeCandidateFailed) || null;
 }
 
+function agentRuntimeSucceeded(result) {
+  return agentRuntimeResultCandidates(result).some(agentRuntimeCandidateSucceeded);
+}
+
+function agentRuntimeCandidateSucceeded(candidate) {
+  const runtime = candidate.agent_runtime || candidate.agentRuntime;
+  return runtime && typeof runtime === 'object' && !Array.isArray(runtime) && runtime.success === true;
+}
+
 function agentRuntimeCandidateFailed(candidate) {
+  const runtime = candidate.agent_runtime || candidate.agentRuntime;
   const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
   const status = String(candidate.status || candidate.outcome || '').toLowerCase();
   const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
   return candidate.success === false
+    || runtime?.success === false
     || candidate.completion_outcome?.success === false
     || candidate.completionOutcome?.success === false
     || terminalStatus === 'failed'

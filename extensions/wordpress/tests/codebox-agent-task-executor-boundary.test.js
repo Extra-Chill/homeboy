@@ -792,7 +792,9 @@ assert.deepEqual(legacyClientContextTaskInput.runtime_task.input, {
   dry_run: false,
 });
 
-const repoLoopWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-repo-loop-workspace-'));
+const repoLoopWorkspaceBase = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-repo-loop-workspace-'));
+const repoLoopWorkspaceRoot = path.join(repoLoopWorkspaceBase, 'wp-site-generator@wpsg-lab-proof-20260622-2102');
+fs.mkdirSync(repoLoopWorkspaceRoot, { recursive: true });
 const repoLoopWorkspaceTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'repo-loop-workspace-task-1',
@@ -816,11 +818,12 @@ const repoLoopWorkspaceMount = repoLoopWorkspaceTaskInput.mounts.find(
 );
 assert(repoLoopWorkspaceMount, 'repo-loop cwd is translated into a Codebox workspace mount');
 assert.equal(repoLoopWorkspaceMount.source, repoLoopWorkspaceRoot);
-assert.equal(repoLoopWorkspaceMount.target, `/workspace/${path.basename(repoLoopWorkspaceRoot)}`);
+assert.equal(repoLoopWorkspaceMount.target, '/workspace/wp-site-generator');
 assert.equal(repoLoopWorkspaceMount.mode, 'readwrite');
 assert.deepEqual(repoLoopWorkspaceMount.metadata, {
   kind: 'homeboy-runtime-workspace',
-  workspace_slug: path.basename(repoLoopWorkspaceRoot),
+  workspace_slug: 'wp-site-generator',
+  workspaceRef: 'wp-site-generator@wpsg-lab-proof-20260622-2102',
 });
 assert.equal(repoLoopWorkspaceTaskInput.allowed_tools.includes('workspace_apply_patch'), true);
 assert.deepEqual(repoLoopWorkspaceTaskInput.workspace_materialization, {

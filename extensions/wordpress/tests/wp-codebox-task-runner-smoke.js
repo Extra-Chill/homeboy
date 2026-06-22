@@ -872,7 +872,7 @@ try {
   const preparedLabRuntime = path.join(labRuntimeArtifacts, 'prepared-plugins', 'example-runtime');
   assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabRuntime);
   assert.equal(labRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
-  assert.equal(labRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
+  assert.equal((labRuntimeInput.component_contracts || []).some((contract) => contract.slug === 'agents-api'), false);
   assert.equal(fs.existsSync(path.join(preparedLabRuntime, 'example-runtime.php')), true);
 
   const runtimeComponentSource = path.join(root, 'runtime-components', 'example-runtime-tools');

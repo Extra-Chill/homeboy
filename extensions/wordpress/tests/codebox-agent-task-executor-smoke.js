@@ -1159,13 +1159,9 @@ try {
     agentRuntime: runtimePath,
     settings: {},
   });
-  const bundledAgentsApiContract = bundledAgentsApiRequest.runtime_requirements.component_contracts.find((contract) => contract.slug === 'agents-api');
-  assert.equal(bundledAgentsApiContract.path, bundledAgentsApiPath);
-  assert.equal(bundledAgentsApiContract.pluginFile, 'agents-api/agents-api.php');
-  assert.equal(bundledAgentsApiContract.loadAs, 'mu-plugin');
-  assert.equal(bundledAgentsApiContract.activate, false);
+  assert.equal(bundledAgentsApiRequest.runtime_requirements.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
   assert.deepEqual(bundledAgentsApiRequest.runtime_requirements.ability_requirements, ['agents/chat']);
-  assert.equal(bundledAgentsApiRequest.component_contracts.some((contract) => contract.slug === 'agents-api'), true);
+  assert.equal(bundledAgentsApiRequest.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
 
   const chatHandlerRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
@@ -1183,14 +1179,8 @@ try {
       wp_codebox_chat_handler_plugin_paths: [dataMachinePath],
     },
   });
-  const chatHandlerContract = chatHandlerRequest.runtime_requirements.component_contracts.find((contract) => contract.slug === 'data-machine');
-  assert.equal(chatHandlerContract.path, dataMachinePath);
-  assert.equal(chatHandlerContract.pluginFile, 'data-machine/data-machine.php');
-  assert.equal(chatHandlerContract.loadAs, 'plugin');
-  assert.equal(chatHandlerContract.activate, true);
-  assert.deepEqual(chatHandlerContract.metadata.registers, ['wp_agent_chat_handler']);
-  assert.deepEqual(chatHandlerRequest.runtime_requirements.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine']);
-  assert.deepEqual(chatHandlerRequest.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine']);
+  assert.deepEqual(chatHandlerRequest.runtime_requirements.component_contracts.map((contract) => contract.slug), []);
+  assert.deepEqual(chatHandlerRequest.component_contracts.map((contract) => contract.slug), []);
   assert.deepEqual(chatHandlerRequest.runtime_requirements.ability_requirements, ['agents/chat']);
 
   const configuredDefaultProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
@@ -1973,6 +1963,30 @@ const outputRuntimeFailureMetadataOutcome = agentTaskOutcomeFromCodeboxResult(re
 assert.equal(outputRuntimeFailureMetadataOutcome.status, 'failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].class, 'agent_runtime.failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
+
+const outputAgentRuntimeSuccessOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        agent_runtime: {
+          success: true,
+          result: {
+            reply: 'Static site candidate produced.',
+            messages: [],
+            run_id: 'dm-chat-run-1',
+          },
+        },
+      },
+    },
+  },
+});
+assert.equal(outputAgentRuntimeSuccessOutcome.status, 'succeeded');
+assert.equal(outputAgentRuntimeSuccessOutcome.failure_classification, undefined);
 
 const outputAgentRuntimeFailureWithoutTypedArtifactsOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
