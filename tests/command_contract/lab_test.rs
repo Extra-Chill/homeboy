@@ -54,7 +54,17 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             "refactor",
         ),
         (
-            parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--to-worktree",
+                "homeboy@cook",
+                "--verify",
+                "true",
+                "--prompt",
+                "cook",
+            ]),
             "agent-task cook/run-plan",
         ),
         (
@@ -114,7 +124,19 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "loop.json",
                 "--resume",
             ]),
-            "agent-task controller from-spec --resume/materialize/resume",
+            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "controller",
+                "run-from-spec",
+                "loop.json",
+                "--max-actions",
+                "1",
+            ]),
+            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
         ),
         (
             parsed_command(&[
@@ -124,11 +146,11 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
                 "materialize",
                 "loop.json",
             ]),
-            "agent-task controller from-spec --resume/materialize/resume",
+            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "controller", "resume", "loop-123"]),
-            "agent-task controller from-spec --resume/materialize/resume",
+            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
         ),
         (
             parsed_command(&[
@@ -216,7 +238,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
         lab_runner_supported_labels().as_slice(),
         &[
             "agent-task cook/run-plan",
-            "agent-task controller from-spec --resume/materialize/resume",
+            "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
             "agent-task retry --run",
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
             "agent-task auth status",
@@ -788,6 +810,32 @@ fn agent_task_git_checkout_policy_covers_controller_from_spec_resume_backend() {
         "from-spec",
         "loop.json",
         "--resume",
+        "--dispatch-backend",
+        "patch-provider",
+        "--dispatch-selector",
+        "selected",
+    ]);
+    let Commands::AgentTask(args) = command else {
+        panic!("expected agent-task command");
+    };
+
+    assert!(agent_task_provider_requires_cwd_git_checkout_with(
+        &args.command,
+        || None,
+        |backend, selector| backend == "patch-provider" && selector == Some("selected"),
+    ));
+}
+
+#[test]
+fn agent_task_git_checkout_policy_covers_controller_run_from_spec_backend() {
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "controller",
+        "run-from-spec",
+        "loop.json",
+        "--max-actions",
+        "1",
         "--dispatch-backend",
         "patch-provider",
         "--dispatch-selector",
