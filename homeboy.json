@@ -184,7 +184,9 @@
           "src/core/cleanup.rs",
           "src/core/cleanup/self_artifacts.rs",
           "src/core/runner/lab_args/tests.rs",
-          "src/core/release/executor/lockfile_guard.rs"
+          "src/core/release/executor/lockfile_guard.rs",
+          "src/core/triage/tests.rs",
+          "src/core/extension/bench/baseline.rs"
         ],
         "id": "core-agnostic-source",
         "ignore_after_line_equals": [
@@ -286,6 +288,20 @@
           {
             "match_mode": "literal",
             "value": "Action Scheduler"
+          },
+          {
+            "value": "playground"
+          },
+          {
+            "value": "codebox"
+          },
+          {
+            "match_mode": "literal",
+            "value": "wp-codebox"
+          },
+          {
+            "match_mode": "literal",
+            "value": "wpcom-codebox"
           }
         ],
         "type": "forbidden_terms"
