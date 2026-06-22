@@ -13,6 +13,7 @@ use self_artifacts::validate_homeboy_manifest_dir;
 use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[
+    ("build", "generated_build"),
     ("target", "build_target"),
     ("node_modules", "node_modules"),
     ("dist", "generated_dist"),
@@ -84,10 +85,10 @@ struct WorktreeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ArtifactDeclaration {
-    relative_path: String,
-    kind: String,
-    declared_by: String,
+pub(crate) struct ArtifactDeclaration {
+    pub(crate) relative_path: String,
+    pub(crate) kind: String,
+    pub(crate) declared_by: String,
 }
 
 #[derive(Debug, Default)]
@@ -251,7 +252,7 @@ fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
     Ok(worktrees)
 }
 
-fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>> {
+pub(crate) fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>> {
     let mut declarations = Vec::new();
     for (relative_path, kind) in BUILTIN_ARTIFACT_PATHS {
         declarations.push(ArtifactDeclaration {
@@ -407,7 +408,7 @@ fn skip_row(
     }
 }
 
-fn is_safe_artifact_path(relative_path: &str) -> bool {
+pub(crate) fn is_safe_artifact_path(relative_path: &str) -> bool {
     let path = Path::new(relative_path);
     !relative_path.is_empty()
         && relative_path != "."
