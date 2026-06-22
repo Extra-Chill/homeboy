@@ -14,6 +14,10 @@ const { spawn } = require('node:child_process');
 const { isPlainObject } = require('./shared');
 const { wpCodeboxPluginStateStep } = require('./wp-codebox-recipe-helper');
 
+const WORDPRESS_FIXTURE_STEP_SCHEMA = 'homeboy/wordpress-fixture-step/v1';
+const WORDPRESS_FIXTURE_PLUGIN_SCHEMA = 'homeboy/wordpress-fixture-plugin/v1';
+const WORDPRESS_FIXTURE_SITE_SEED_SCHEMA = 'homeboy/wordpress-fixture-site-seed/v1';
+
 function normalizeFixtureList(fixtures) {
 	if (fixtures === undefined || fixtures === null) {
 		return [];
@@ -61,6 +65,7 @@ function normalizeFixtureProfileSiteSeed(siteSeed, index) {
 	}
 
 	return {
+		schema: WORDPRESS_FIXTURE_SITE_SEED_SCHEMA,
 		type,
 		name,
 		...(siteSeed.source ? { source: siteSeed.source } : {}),
@@ -99,6 +104,7 @@ function normalizeFixtureStep(fixture, index) {
 
 	return {
 		...fixture,
+		schema: WORDPRESS_FIXTURE_STEP_SCHEMA,
 		type,
 		label: fixture.label || fixture.id || `${type}:${index + 1}`,
 	};
@@ -219,6 +225,7 @@ function normalizeFixturePlugin(plugin, index) {
 		: path.basename(pluginPath);
 	return {
 		...entry,
+		schema: WORDPRESS_FIXTURE_PLUGIN_SCHEMA,
 		path: pluginPath,
 		slug,
 		plugin: entry.plugin || slug,
@@ -559,6 +566,9 @@ function writeFixtureSummary(summary, options, error) {
 }
 
 module.exports = {
+	WORDPRESS_FIXTURE_PLUGIN_SCHEMA,
+	WORDPRESS_FIXTURE_SITE_SEED_SCHEMA,
+	WORDPRESS_FIXTURE_STEP_SCHEMA,
 	fixtureRecipeStep,
 	defaultRunCli,
 	installWordPressFixturePlugins,

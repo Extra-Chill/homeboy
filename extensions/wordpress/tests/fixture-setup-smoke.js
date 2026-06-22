@@ -24,12 +24,12 @@ const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-fixtures-')
 async function main() {
 	try {
 		assert.deepEqual(
-			normalizeFixtureList([{ path: 'fixtures/seed.php' }]).map((step) => ({ type: step.type, label: step.label })),
-			[{ type: 'wp-eval-file', label: 'wp-eval-file:1' }]
+			normalizeFixtureList([{ path: 'fixtures/seed.php' }]).map((step) => ({ schema: step.schema, type: step.type, label: step.label })),
+			[{ schema: 'homeboy/wordpress-fixture-step/v1', type: 'wp-eval-file', label: 'wp-eval-file:1' }]
 		);
 		assert.deepEqual(
-			normalizeFixturePluginList(['/tmp/example-plugin']).map((plugin) => ({ slug: plugin.slug, plugin: plugin.plugin, activate: plugin.activate })),
-			[{ slug: 'example-plugin', plugin: 'example-plugin', activate: true }]
+			normalizeFixturePluginList(['/tmp/example-plugin']).map((plugin) => ({ schema: plugin.schema, slug: plugin.slug, plugin: plugin.plugin, activate: plugin.activate })),
+			[{ schema: 'homeboy/wordpress-fixture-plugin/v1', slug: 'example-plugin', plugin: 'example-plugin', activate: true }]
 		);
 		assert.deepEqual(
 			normalizeFixtureProfileSiteSeeds({
@@ -39,6 +39,7 @@ async function main() {
 				activeTheme: true,
 			}),
 			[{
+				schema: 'homeboy/wordpress-fixture-site-seed/v1',
 				type: 'parent_site',
 				name: 'editorial-shape',
 				scopes: {
@@ -52,7 +53,7 @@ async function main() {
 			normalizeFixtureProfileSiteSeeds({
 				siteSeeds: [{ type: 'fixture', name: 'demo-content', source: 'fixtures/content.json', scopes: { posts: { slugs: ['home'] } } }],
 			}),
-			[{ type: 'fixture', name: 'demo-content', source: 'fixtures/content.json', scopes: { posts: { slugs: ['home'] } } }]
+			[{ schema: 'homeboy/wordpress-fixture-site-seed/v1', type: 'fixture', name: 'demo-content', source: 'fixtures/content.json', scopes: { posts: { slugs: ['home'] } } }]
 		);
 
 		const calls = [];

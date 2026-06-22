@@ -251,6 +251,25 @@ and verification are ordinary WordPress recipe steps, while visual comparison is
 carried as a verifier step that a runtime can implement with its own browser
 capture and artifact policy.
 
+The workload profile also carries the generic setup and evidence vocabulary used
+by rigs before they select a concrete runtime:
+
+- `fixture_plugins` normalizes to `homeboy/wordpress-fixture-plugin/v1` entries
+  with `path`, `slug`, `plugin`, `copy`, and `activate` fields.
+- `fixture_site_seeds` normalizes to `homeboy/wordpress-fixture-site-seed/v1`
+  entries for parent-site or fixture-sourced content/options/theme/plugin seeds.
+- `fixtures` normalizes to `homeboy/wordpress-fixture-step/v1` entries for
+  `wp-cli` and `wp-eval-file` setup actions.
+- `artifact_declarations` normalizes to
+  `homeboy/wordpress-workload-artifact-declaration/v1` records keyed by artifact
+  id, each with `path`, `kind`, `required`, `role`, and `metadata`.
+
+`workflowInputsFromWordPressWorkloadProfile()` projects those fields to
+`wordpress_fixture_plugins`, `wordpress_fixture_site_seeds`,
+`wordpress_fixture_steps`, and `artifact_declarations` JSON strings. Rigs should
+pass these declarations through unchanged and let the chosen WordPress runtime
+own execution, artifact capture, and retention.
+
 ### Portable fuzz manifest helper
 
 Fuzz callers that need one manifest across local scripts, CI, and agent runners
