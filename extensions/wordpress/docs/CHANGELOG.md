@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.9] - 2026-06-22
+
+### Fixed
+- remove codebox agents api defaults
+
 ## [3.12.8] - 2026-06-22
 
 ### Changed
