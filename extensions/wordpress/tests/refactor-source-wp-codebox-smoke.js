@@ -224,6 +224,9 @@ process.stdout.write(JSON.stringify({
   assert.equal(run.records[0].command.args.includes('--task-timeout-seconds'), true);
   assert.equal(run.records[0].command.args.includes('--homeboy'), true);
   assert.equal(run.records[0].command.args.includes('--homeboy-extensions'), true);
+  assert.equal(run.records[0].command.args.includes('--agents-api'), false);
+  assert.equal(run.records[0].command.args.includes('--data-machine'), false);
+  assert.equal(run.records[0].command.args.includes('--data-machine-code'), false);
   const artifactsIndex = run.records[0].command.args.indexOf('--artifacts');
   assert.notEqual(artifactsIndex, -1);
   assert.equal(pathInside(writeCommand.root, run.records[0].command.args[artifactsIndex + 1]), false);

@@ -695,8 +695,8 @@ if ( ! function_exists( 'homeboy_callback_data_output_event' ) ) {
 `;
 }
 
-function writeHomeboyCallbackDataPlugin(pluginDir) {
-  fs.writeFileSync(path.join(pluginDir, 'homeboy-runtime-callback-data.php'), homeboyCallbackDataPluginSource());
+function writeHomeboyCallbackDataPlugin(pluginDir, pluginFile = 'homeboy-runtime-callback-data.php') {
+  fs.writeFileSync(path.join(pluginDir, pluginFile), homeboyCallbackDataPluginSource());
 }
 
 function homeboyRuntimeToolBridgeServerSource() {
@@ -821,10 +821,11 @@ function injectHomeboyCallbackDataHelper(taskInput, artifacts) {
   fs.mkdirSync(path.dirname(callbackPath), { recursive: true });
   fs.writeFileSync(callbackPath, `${JSON.stringify({ data: plainObject(config.initial) ? config.initial : {}, events: [] }, null, 2)}\n`);
 
-  const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-callback-data-'));
-  const pluginDir = path.join(pluginRoot, 'homeboy-runtime-callback-data');
+  const pluginSlug = safePluginSlug(`homeboy-runtime-callback-data-${taskInput.sandbox_session_id || process.pid}`, 'homeboy-runtime-callback-data');
+  const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), `${pluginSlug}-`));
+  const pluginDir = path.join(pluginRoot, pluginSlug);
   fs.mkdirSync(pluginDir, { recursive: true });
-  writeHomeboyCallbackDataPlugin(pluginDir);
+  writeHomeboyCallbackDataPlugin(pluginDir, `${pluginSlug}.php`);
 
   return {
     input: {
@@ -833,8 +834,8 @@ function injectHomeboyCallbackDataHelper(taskInput, artifacts) {
         ...(Array.isArray(taskInput.extra_plugins) ? taskInput.extra_plugins : []),
         {
           source: pluginDir,
-          slug: 'homeboy-runtime-callback-data',
-          pluginFile: 'homeboy-runtime-callback-data/homeboy-runtime-callback-data.php',
+          slug: pluginSlug,
+          pluginFile: `${pluginSlug}/${pluginSlug}.php`,
           loadAs: 'mu-plugin',
           activate: false,
           metadata: { source: 'homeboy-runtime-callback-data' },

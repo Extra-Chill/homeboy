@@ -1006,17 +1006,12 @@ def apply_wp_codebox_fanout_artifacts(component_root, run, run_path='', workspac
 
 def wp_codebox_task_runner_args(data, settings, script_dir):
     component_root = data.get('root') or data.get('component_path') or os.getcwd()
-    agents_api_path = settings.get('wp_codebox_agents_api_path') or os.environ.get('HOMEBOY_WP_CODEBOX_AGENTS_API_PATH') or component_root
-    data_machine_path = settings.get('wp_codebox_data_machine_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_PATH') or default_sibling_path(component_root, 'data-machine')
-    data_machine_code_path = settings.get('wp_codebox_data_machine_code_path') or os.environ.get('HOMEBOY_WP_CODEBOX_DATA_MACHINE_CODE_PATH') or default_sibling_path(component_root, 'data-machine-code')
     homeboy_path = settings.get('wp_codebox_homeboy_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_PATH') or default_sibling_path(component_root, 'homeboy')
     homeboy_extensions_path = settings.get('wp_codebox_homeboy_extensions_path') or os.environ.get('HOMEBOY_WP_CODEBOX_HOMEBOY_EXTENSIONS_PATH') or default_sibling_path(component_root, 'homeboy-extensions')
+    extension_root = os.path.dirname(os.path.dirname(script_dir))
 
     args = [
-        os.path.join(script_dir, 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
-        '--agents-api', agents_api_path,
-        '--data-machine', data_machine_path,
-        '--data-machine-code', data_machine_code_path,
+        os.path.join(extension_root, 'agent-runtimes', 'wp-codebox', 'scripts', 'agent', 'homeboy-wp-codebox-task-runner.cjs'),
     ]
     if os.path.isdir(homeboy_path):
         args.extend(['--homeboy', homeboy_path])
