@@ -888,7 +888,10 @@ mod tests {
             .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
             .expect("example provider default source discovered for cook");
         assert_eq!(source.source, "json-file");
-        assert_eq!(source.path.as_deref(), Some("~/.example-provider/auth.json"));
+        assert_eq!(
+            source.path.as_deref(),
+            Some("~/.example-provider/auth.json")
+        );
         assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 
@@ -1107,8 +1110,7 @@ mod tests {
             .expect("provider default source should resolve on controller");
 
             assert!(matches!(
-                env.get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
-                    .map(String::as_str),
+                env.get("EXAMPLE_PROVIDER_ACCESS_TOKEN").map(String::as_str),
                 Some("controller-access-token")
             ));
             assert_eq!(
