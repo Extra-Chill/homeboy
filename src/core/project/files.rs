@@ -23,9 +23,12 @@ mod edit;
 const STDIN_CONTENT_LIMIT_BYTES: u64 = 1024 * 1024;
 
 pub use edit::{
-    edit_append, edit_delete_line, edit_delete_lines, edit_delete_pattern, edit_insert_after_line,
-    edit_insert_before_line, edit_prepend, edit_replace_line, edit_replace_pattern, EditResult,
-    LineChange,
+    edit_append, edit_append_with_options, edit_delete_line, edit_delete_line_with_options,
+    edit_delete_lines, edit_delete_lines_with_options, edit_delete_pattern,
+    edit_delete_pattern_with_options, edit_insert_after_line, edit_insert_after_line_with_options,
+    edit_insert_before_line, edit_insert_before_line_with_options, edit_prepend,
+    edit_prepend_with_options, edit_replace_line, edit_replace_line_with_options,
+    edit_replace_pattern, edit_replace_pattern_with_options, EditOptions, EditResult, LineChange,
 };
 
 #[derive(Debug, Clone, Serialize)]

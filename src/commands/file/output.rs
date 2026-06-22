@@ -58,6 +58,8 @@ pub struct FileEditOutput {
     pub(crate) project_id: String,
     pub(crate) base_path: Option<String>,
     pub(crate) path: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub(crate) dry_run: bool,
     pub(crate) changes_made: Vec<LineChange>,
     pub(crate) change_count: usize,
     pub(crate) success: bool,
