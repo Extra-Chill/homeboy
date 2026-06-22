@@ -29,6 +29,7 @@
 - [issues](issues.md) — reconcile findings against issue trackers
 - [lint](lint.md)
 - [logs](logs.md)
+- [manifest](manifest.md) — recursive command safety, docs, output, and Lab metadata
 - [observe](observe.md) — passive live observation into trace timeline evidence
 - [project](project.md)
 - [report](report.md) — render reports from structured output artifacts
@@ -63,7 +64,7 @@ Note: some extensions also expose additional top-level CLI commands at runtime
 when installed. Extension command docs, including `cargo` and `wp`, describe
 possible runtime-provided commands rather than guaranteed core subcommands.
 
-Agents and automation that need command safety metadata should read the recursive manifest with `homeboy list --json`. The `list` command is hidden and deprecated as a help alias, but `list --json` remains the compatibility entry point for the safety manifest.
+Agents and automation that need command safety metadata should read the recursive manifest with `homeboy manifest`.
 
 Related:
 

@@ -12,6 +12,7 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
+    assert!(surface.contains_path(&["manifest"]));
     assert!(surface.contains_path(&["report"]));
     assert!(surface.contains_path(&["git", "status"]));
     assert!(surface.contains_path(&["http", "get"]));
@@ -26,6 +27,7 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     assert!(!surface.contains_path(&["components"]));
     assert!(!surface.contains_path(&["stacks", "inspect"]));
     assert!(!surface.contains_path(&["audit", "code"]));
+    assert!(!surface.contains_path(&["list"]));
     assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
@@ -197,10 +199,11 @@ fn command_surface_depth_is_configurable() {
 }
 
 #[test]
-fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
-    let cli = Cli::try_parse_from(["homeboy", "list", "--json"])
-        .expect("hidden list --json should parse");
-    assert!(matches!(cli.command, Commands::List { json: true }));
+fn manifest_command_exposes_recursive_safety_manifest() {
+    let cli = Cli::try_parse_from(["homeboy", "manifest"])
+        .expect("manifest command should parse");
+    assert!(matches!(cli.command, Commands::Manifest(_)));
+    assert!(Cli::try_parse_from(["homeboy", "list", "--json"]).is_err());
 
     let value =
         serde_json::to_value(command_safety_manifest()).expect("safety manifest should serialize");
@@ -258,7 +261,7 @@ fn command_index_matches_top_level_command_surface() {
 #[test]
 fn command_safety_manifest_docs_paths_match_command_docs() {
     let manifest = command_safety_manifest();
-    let hidden_top_level_commands = BTreeSet::from(["lab", "list"]);
+    let hidden_top_level_commands = BTreeSet::from(["lab"]);
 
     for entry in &manifest.commands {
         if entry.hidden {

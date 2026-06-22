@@ -121,11 +121,11 @@ const fn lab_command_registry_entry(
     }
 }
 
-const fn raw_command_registry_entry(name: &'static str) -> CommandRegistryEntry {
+const fn manifest_command_registry_entry() -> CommandRegistryEntry {
     CommandRegistryEntry {
-        docs_slug: None,
-        output_notes: "hidden raw Markdown help alias",
-        ..command_registry_entry(name, CommandJsonFamily::RawOnly)
+        output_notes:
+            "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope",
+        ..command_registry_entry("manifest", CommandJsonFamily::Workspace)
     }
 }
 
@@ -155,6 +155,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("extension", CommandJsonFamily::Workspace),
     command_registry_entry("status", CommandJsonFamily::Ops),
     command_registry_entry("docs", CommandJsonFamily::Workspace),
+    manifest_command_registry_entry(),
     command_registry_entry("changelog", CommandJsonFamily::Workspace),
     command_registry_entry("cleanup", CommandJsonFamily::Workspace),
     command_registry_entry("git", CommandJsonFamily::Ops),
@@ -183,7 +184,6 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("api", CommandJsonFamily::Ops),
     command_registry_entry("http", CommandJsonFamily::Ops),
     command_registry_entry("upgrade", CommandJsonFamily::Ops),
-    raw_command_registry_entry("list"),
 ];
 
 pub fn registered_command(name: &str) -> Option<&'static CommandRegistryEntry> {
@@ -322,12 +322,6 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::List { .. } => CommandOutputDescriptor {
-                response_mode: CommandResponseMode::Raw(CommandRawOutputMode::Markdown),
-                output_file_mode,
-                json_family: CommandJsonFamily::RawOnly,
-                output_contract: CommandOutputContractKind::RawOnly,
-            },
             Commands::Test(args) => args.output_descriptor(output_file_mode),
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
@@ -348,6 +342,7 @@ impl Commands {
             | Commands::Component(_)
             | Commands::Config(_)
             | Commands::Extension(_)
+            | Commands::Manifest(_)
             | Commands::Changelog(_)
             | Commands::Cleanup(_)
             | Commands::Build(_)
@@ -491,8 +486,8 @@ mod tests {
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
         );
         assert_eq!(
-            (Commands::List { json: false }).response_mode(false),
-            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+            parsed_command(&["homeboy", "manifest"]).response_mode(false),
+            CommandResponseMode::Json
         );
     }
 
@@ -536,14 +531,14 @@ mod tests {
             CommandOutputContractKind::JsonEnvelope
         );
 
-        let list_descriptor = (Commands::List { json: false }).descriptor(false);
+        let manifest_descriptor = parsed_command(&["homeboy", "manifest"]).descriptor(false);
         assert_eq!(
-            list_descriptor.output.json_family,
-            CommandJsonFamily::RawOnly
+            manifest_descriptor.output.json_family,
+            CommandJsonFamily::Workspace
         );
         assert_eq!(
-            list_descriptor.output.response_mode,
-            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
+            manifest_descriptor.output.response_mode,
+            CommandResponseMode::Json
         );
     }
 
