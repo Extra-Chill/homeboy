@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.37] - 2026-06-22
+
+### Fixed
+- Fix fuzz runner Codebox core setting env
+
 ## [3.12.36] - 2026-06-22
 
 ### Changed
