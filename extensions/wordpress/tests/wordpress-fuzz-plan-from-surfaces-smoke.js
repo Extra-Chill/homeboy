@@ -22,8 +22,8 @@ const manifest = {
 	roles: [{ id: 'role:editor', role: 'editor', capability: 'edit_posts' }],
 	capabilities: [{ id: 'cap:manage-options', capability: 'manage_options' }],
 	database: {
-		tables: { posts: { table: 'wp_posts' } },
-		queries: { postsLookup: { query: 'SELECT ID FROM wp_posts WHERE post_type = ?' } },
+		tables: { posts: { table: 'wp_posts', mutations: [{ id: 'insert-sentinel-row', operation: 'insert' }] } },
+		queries: { postsLookup: { query: 'SELECT ID FROM wp_posts WHERE post_type = ?', mutation: { operation: 'update', statement: 'UPDATE wp_posts SET post_title = ? WHERE ID = ?' } } },
 	},
 	external_http: { requests: [{ id: 'http:api-example', url: 'https://api.example.test/v1/', method: 'GET' }] },
 	blocks: [{
@@ -68,6 +68,13 @@ assert.equal(targetTypes.role.cases[0].intent, 'check-role-boundary');
 assert.equal(targetTypes.capability.cases[0].intent, 'check-capability-boundary');
 assert.equal(targetTypes['database-table'].cases[0].intent, 'inspect-database-table');
 assert.equal(targetTypes['db-query'].cases[0].intent, 'profile-database-query');
+assert.equal(targetTypes['database-table'].cases[1].intent, 'mutate-database-table');
+assert.equal(targetTypes['database-table'].cases[1].executable, false);
+assert.deepEqual(targetTypes['database-table'].cases[1].required_capabilities, ['reset', 'snapshot', 'transaction']);
+assert.deepEqual(targetTypes['database-table'].cases[1].skip_reasons, ['requires-runtime-db-safety-capabilities']);
+assert.deepEqual(targetTypes['database-table'].cases[1].destructive_reasons, ['db-mutation']);
+assert.equal(targetTypes['db-query'].cases[1].intent, 'mutate-database-query');
+assert.equal(targetTypes['db-query'].cases[1].operation.statement, 'UPDATE wp_posts SET post_title = ? WHERE ID = ?');
 assert.equal(targetTypes['external-http'].cases[0].intent, 'exercise-external-http-guardrail');
 assert.equal(targetTypes['db-query'].cases[0].operation.query, 'SELECT ID FROM wp_posts WHERE post_type = ?');
 assert.equal(targetTypes['external-http'].cases[0].operation.url, 'https://api.example.test/v1/');

@@ -48,7 +48,7 @@ const plan = normalizeWordPressFuzzPlan({
 			route: '/wp/v2/posts',
 			cases: [
 				{ id: 'per-page-max', operation_id: 'rest:get-posts:per-page', query: { per_page: 100 } },
-				{ query: { search: '<script>' } },
+				{ query: { search: '<script>' }, requiredCapabilities: ['transaction', 'snapshot', 'snapshot'] },
 			],
 		},
 	],
@@ -60,6 +60,7 @@ assert.equal(plan.discovery_id, 'site-surfaces');
 assert.equal(plan.targets[0].operation_id, 'rest:get-posts');
 assert.equal(plan.targets[0].cases[0].operation_id, 'rest:get-posts:per-page');
 assert.equal(plan.targets[0].cases[1].id, 'case-2');
+assert.deepEqual(plan.targets[0].cases[1].required_capabilities, ['snapshot', 'transaction']);
 
 const result = normalizeWordPressFuzzResult({
 	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,

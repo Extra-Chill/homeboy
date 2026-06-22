@@ -86,12 +86,17 @@ function normalizeWordPressSurfaceDiscovery(discovery) {
 
 function normalizeFuzzCase(testCase, index, targetField) {
 	assertPlainObject(testCase, `${targetField}.cases[${index}]`);
-	return {
+	const normalized = {
 		...testCase,
 		id: normalizeId(testCase.id, `case-${index + 1}`, `${targetField}.cases[${index}].id`),
 		operation_id: testCase.operation_id || testCase.operationId || testCase.operation?.id || null,
 		metadata: { ...(testCase.metadata || {}) },
 	};
+	const requiredCapabilities = normalizeCapabilityCodes(testCase.required_capabilities || testCase.requiredCapabilities);
+	if (requiredCapabilities.length > 0) {
+		normalized.required_capabilities = requiredCapabilities;
+	}
+	return normalized;
 }
 
 function normalizeFuzzTarget(target, index) {
@@ -118,6 +123,13 @@ function normalizeReasonCodes(value) {
 		return [];
 	}
 	return [...new Set(asArray(Array.isArray(value) ? value : [value], 'reason_codes').map(String).filter(Boolean))].sort();
+}
+
+function normalizeCapabilityCodes(value) {
+	if (value === undefined || value === null) {
+		return [];
+	}
+	return [...new Set(asArray(Array.isArray(value) ? value : [value], 'required_capabilities').map(String).filter(Boolean))].sort();
 }
 
 function normalizeWordPressFuzzPlan(plan) {
