@@ -26,7 +26,13 @@ const manifest = {
 		queries: { postsLookup: { query: 'SELECT ID FROM wp_posts WHERE post_type = ?' } },
 	},
 	external_http: { requests: [{ id: 'http:api-example', url: 'https://api.example.test/v1/', method: 'GET' }] },
-	blocks: [{ id: 'block:core-paragraph', name: 'core/paragraph', block_name: 'core/paragraph' }],
+	blocks: [{
+		id: 'block:core-paragraph',
+		name: 'core/paragraph',
+		block_name: 'core/paragraph',
+		attributes: { content: { type: 'string' } },
+		attributes_sample: { content: 'Sample paragraph' },
+	}],
 	frontend: [{ id: 'front:home', path: '/' }],
 	admin: [{ id: 'admin:posts', path: '/wp-admin/edit.php' }],
 	rest: [{ id: 'rest:wp-v2-posts', method: 'GET', route: '/wp/v2/posts' }],
@@ -67,6 +73,14 @@ assert.equal(targetTypes['db-query'].cases[0].operation.query, 'SELECT ID FROM w
 assert.equal(targetTypes['external-http'].cases[0].operation.url, 'https://api.example.test/v1/');
 assert(targetTypes.role.operation_id.includes('check-role-boundary'));
 assert.equal(targetTypes.block.cases[0].operation.block_name, 'core/paragraph');
+assert.deepEqual(targetTypes.block.cases.map((testCase) => testCase.intent), ['render-block', 'serialize-parse-block', 'insert-block-in-editor']);
+assert.equal(targetTypes.block.cases[0].metadata.safety.mutation, 'read_only');
+assert.deepEqual(targetTypes.block.cases[1].metadata.attributes_schema, { content: { type: 'string' } });
+assert.deepEqual(targetTypes.block.cases[1].metadata.attributes_sample, { content: 'Sample paragraph' });
+assert.equal(targetTypes.block.cases[2].metadata.planned, true);
+assert.equal(targetTypes.block.cases[2].metadata.gated, true);
+assert.deepEqual(targetTypes.block.cases[2].metadata.requires_runtime, ['browser', 'block-editor']);
+assert(targetTypes.block.cases[2].skip_reasons.includes('requires_browser_editor_runtime'));
 assert.equal(targetTypes['frontend-url'].cases[0].operation.path, '/');
 assert.equal(targetTypes['admin-page'].cases[0].operation.path, '/wp-admin/edit.php');
 assert.equal(targetTypes['rest-route'].cases[0].operation.route, '/wp/v2/posts');
@@ -194,5 +208,10 @@ assert.equal(adminCases[2].intent, 'exercise-admin-page-read-only-interaction');
 assert.deepEqual(adminCases[2].skip_reasons, []);
 assert.deepEqual(adminCases[2].destructive_reasons, []);
 assert.equal(adminCases[2].metadata.executable, true);
+
+const minimalBlockPlan = buildWordPressFuzzPlanFromSurfaces({
+	blocks: [{ id: 'block:minimal', block_name: 'example/minimal' }],
+});
+assert.deepEqual(minimalBlockPlan.targets[0].cases.map((testCase) => testCase.intent), ['render-block', 'insert-block-in-editor']);
 
 console.log('WordPress fuzz plan from surfaces smoke passed.');

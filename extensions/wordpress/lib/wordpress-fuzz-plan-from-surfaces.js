@@ -234,6 +234,11 @@ function restMethodsForSurface(surface) {
 }
 
 function casesForSurface(surface, options = {}) {
+	if (surface.type === 'block') {
+		const operation = operationForSurface(surface);
+		const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
+		return blockCasesFromSurface(surface, operation, operationId, options);
+	}
 	const crudResource = crudResourceForSurface(surface);
 	if (!crudResource) {
 		return [genericCaseForSurface(surface, options)];
@@ -413,6 +418,56 @@ function rollbackPolicyForCrudAction(action) {
 	return { strategy: 'restore-snapshot', scope: 'operation', after_each_case: true };
 }
 
+function blockCasesFromSurface(surface, operation, operationId, options = {}) {
+	const shared = {
+		seed: options.seed,
+		skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
+		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
+	};
+	const attributeSample = blockAttributeSample(surface);
+	const surfaceMetadata = blockSurfaceMetadata(surface, attributeSample);
+	const cases = [
+		{
+			id: `${surface.id}-render-block`,
+			intent: 'render-block',
+			operation_id: `${operationId}:render`,
+			operation: stripUndefined({ ...operation, lifecycle: 'render', attributes_sample: attributeSample }),
+			...shared,
+			metadata: stripUndefined({ surface, safety: { mutation: 'read_only' }, attributes_sample: attributeSample }),
+		},
+	];
+
+	if (Object.keys(surfaceMetadata).length > 0) {
+		cases.push({
+			id: `${surface.id}-serialize-parse-block`,
+			intent: 'serialize-parse-block',
+			operation_id: `${operationId}:serialize-parse`,
+			operation: stripUndefined({ ...operation, lifecycle: 'serialize-parse', attributes_sample: attributeSample }),
+			...shared,
+			metadata: stripUndefined({ surface, safety: { mutation: 'read_only' }, ...surfaceMetadata }),
+		});
+	}
+
+	cases.push({
+		id: `${surface.id}-editor-insert-block`,
+		intent: 'insert-block-in-editor',
+		operation_id: `${operationId}:editor-insert`,
+		operation: stripUndefined({ ...operation, lifecycle: 'editor-insert', attributes_sample: attributeSample }),
+		...shared,
+		skip_reasons: reasonList([...shared.skip_reasons, 'requires_browser_editor_runtime']),
+		metadata: stripUndefined({
+			surface,
+			planned: true,
+			gated: true,
+			requires_runtime: ['browser', 'block-editor'],
+			safety: { mutation: 'requires_isolated_editor_draft' },
+			attributes_sample: attributeSample,
+		}),
+	});
+
+	return cases;
+}
+
 function collectAdminPageInteractions(surface) {
 	return [
 		...tagAdminPageInteractions(surface.interactions, 'interaction'),
@@ -543,6 +598,18 @@ function caseIntent(type) {
 	}[type] || 'exercise-wordpress-surface';
 }
 
+function blockAttributeSample(surface) {
+	return objectOrUndefined(surface.attributes_sample || surface.attributeSample || surface.sample_attributes || surface.sampleAttributes || surface.attributesSample || surface.example_attributes || surface.exampleAttributes);
+}
+
+function blockSurfaceMetadata(surface, attributeSample) {
+	return stripUndefined({
+		block_metadata: nonEmptyObjectOrUndefined(surface.block_metadata || surface.blockMetadata || surface.metadata),
+		attributes_schema: nonEmptyObjectOrUndefined(surface.attributes_schema || surface.attributesSchema || surface.attributes),
+		attributes_sample: attributeSample,
+	});
+}
+
 function reasonList(value) {
 	if (value === undefined || value === null) {
 		return [];
@@ -556,6 +623,14 @@ function stripUndefined(value) {
 
 function isObject(value) {
 	return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function objectOrUndefined(value) {
+	return isObject(value) ? value : undefined;
+}
+
+function nonEmptyObjectOrUndefined(value) {
+	return isObject(value) && Object.keys(value).length > 0 ? value : undefined;
 }
 
 function normalizeToken(value) {
