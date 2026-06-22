@@ -3,22 +3,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
+use homeboy::core::agent_tasks::dispatch_service::{self, AgentTaskDispatchCommand, DispatchCoreInputs};
+use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use homeboy::core::agent_tasks::provider;
+use homeboy::core::agent_tasks::service::{self as agent_task_service, AgentTaskCookServiceOptions};
 use homeboy::core::agent_tasks::{
     AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
     AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
 use homeboy::core::{config, Error, Result};
 
-use super::super::agent_task_dispatch::{DispatchArgs, DispatchCoreArgs};
 use super::super::CmdResult;
 use super::args::{
     AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, VerifyGateArgs,
+    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
 };
 use super::command_json_value;
-use super::run;
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     match args.command {
@@ -76,8 +76,22 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
     let mut failed = 0usize;
 
     for cook in &plan.cooks {
-        let (value, exit_code) =
-            run::run_loop_with_executor(cook.to_loop_args(&plan)?, executor.clone())?;
+        let invocation = cook.to_cook_invocation(&plan)?;
+        let (dispatch_value, _dispatch_exit) =
+            dispatch_service::run_dispatch_command(invocation.dispatch, executor.clone())?;
+        let run_id = dispatch_value["run_id"]
+            .as_str()
+            .ok_or_else(|| {
+                Error::internal_unexpected(
+                    "agent-task dispatch did not return a run_id".to_string(),
+                )
+            })?
+            .to_string();
+        let mut options = invocation.options;
+        options.initial_run_id = run_id;
+        let result = agent_task_service::run_cook(options, executor.clone())?;
+        let value = serde_json::to_value(result.value).unwrap_or(Value::Null);
+        let exit_code = result.exit_code;
         if exit_code != 0 {
             failed += 1;
         }
@@ -227,6 +241,12 @@ struct BatchCookSpec {
     ai_used_for: String,
 }
 
+#[derive(Debug, Clone)]
+struct BatchCookInvocation {
+    dispatch: AgentTaskDispatchCommand,
+    options: AgentTaskCookServiceOptions,
+}
+
 impl BatchCookSpec {
     fn apply_defaults(&mut self, args: &AgentTaskFanoutInputArgs) -> Result<()> {
         if self.cook_id.trim().is_empty() {
@@ -257,54 +277,86 @@ impl BatchCookSpec {
         format!("cook-{}", self.cook_id)
     }
 
-    fn to_loop_args(&self, plan: &BatchCookFanoutPlan) -> Result<AgentTaskLoopArgs> {
+    fn to_cook_invocation(&self, plan: &BatchCookFanoutPlan) -> Result<BatchCookInvocation> {
         if self.verify.is_empty() && self.private_verify.is_empty() {
             return Err(invalid_fanout(
                 "each fanout cook requires verify or private_verify so PR finalization has deterministic gates",
             ));
         }
-        Ok(AgentTaskLoopArgs {
-            dispatch: DispatchArgs {
-                prompt: self.prompt.clone(),
-                tasks: self.tasks.clone(),
-                cwd: self.cwd.clone(),
-                workspace: self.workspace.clone(),
-                repo: self.repo.clone(),
-                task_url: self.task_url.clone(),
-                backend: self.backend.clone(),
-                selector: self.selector.clone(),
-                model: self.model.clone(),
-                required_capabilities: Vec::new(),
-                secret_env: self.secret_env.clone(),
-                concurrency: self.concurrency,
-                run_id: Some(self.run_id()),
-                core: DispatchCoreArgs {
-                    tasks_json: None,
-                    provider_config: self.provider_config.clone(),
-                    client_context: Some(merged_client_context(plan, self)),
-                    attempts: self.attempts,
-                    queue_only: false,
+        let dispatch = AgentTaskDispatchCommand {
+            prompt: self.prompt.clone(),
+            tasks: self.tasks.clone(),
+            cwd: self.cwd.clone(),
+            workspace: self.workspace.clone(),
+            repo: self.repo.clone(),
+            task_url: self.task_url.clone(),
+            backend: self.backend.clone(),
+            selector: self.selector.clone(),
+            model: self.model.clone(),
+            required_capabilities: Vec::new(),
+            secret_env: self.secret_env.clone(),
+            concurrency: self.concurrency,
+            run_id: Some(self.run_id()),
+            core: DispatchCoreInputs {
+                tasks_json: None,
+                provider_config: self.provider_config.clone(),
+                client_context: Some(merged_client_context(plan, self)),
+                attempts: self.attempts,
+                queue_only: false,
+            },
+        };
+        let title = self.title.clone().unwrap_or_else(|| default_cook_title(self));
+        let commit_message = self
+            .commit_message
+            .clone()
+            .unwrap_or_else(|| default_cook_commit_message(self));
+        Ok(BatchCookInvocation {
+            dispatch,
+            options: AgentTaskCookServiceOptions {
+                cook_id: self.cook_id.clone(),
+                initial_run_id: self.run_id(),
+                to_worktree: self.to_worktree.clone(),
+                provider_command: self.provider_command.clone(),
+                gates: VerifyGateOptions {
+                    verify: self.verify.clone(),
+                    private_verify: self.private_verify.clone(),
+                    private_gate_reveal: self.private_gate_reveal,
                 },
+                max_attempts: self.max_attempts,
+                no_finalize: self.no_finalize,
+                base: self.base.clone(),
+                head: self.head.clone(),
+                title,
+                commit_message,
+                source_refs: self.task_url.clone().into_iter().collect(),
+                protected_branches: self.protected_branches.clone(),
+                ai_tool: self.ai_tool.clone(),
+                ai_model: self.model.clone().or_else(|| ai_model_from_tool(&self.ai_tool)),
+                ai_used_for: self.ai_used_for.clone(),
             },
-            goal: self.prompt.clone(),
-            to_worktree: self.to_worktree.clone(),
-            provider_command: self.provider_command.clone(),
-            gates: VerifyGateArgs {
-                verify: self.verify.clone(),
-                private_verify: self.private_verify.clone(),
-                private_gate_reveal: self.private_gate_reveal,
-            },
-            max_attempts: self.max_attempts,
-            no_finalize: self.no_finalize,
-            base: self.base.clone(),
-            head: self.head.clone(),
-            title: self.title.clone(),
-            commit_message: self.commit_message.clone(),
-            protected_branches: self.protected_branches.clone(),
-            ai_tool: self.ai_tool.clone(),
-            ai_used_for: self.ai_used_for.clone(),
         })
     }
+}
+
+fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+fn default_cook_title(cook: &BatchCookSpec) -> String {
+    let target = cook
+        .repo
+        .as_deref()
+        .or(cook.task_url.as_deref())
+        .unwrap_or("agent task");
+    format!("Cook {target}")
+}
+
+fn default_cook_commit_message(cook: &BatchCookSpec) -> String {
+    let target = cook.repo.as_deref().unwrap_or("agent task");
+    format!("fix: cook {target}")
 }
 
 fn client_context(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> String {
@@ -341,31 +393,17 @@ fn merged_client_context(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> St
     context.to_string()
 }
 
-fn cook_command(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec) -> Vec<String> {
-    let mut command = vec![
+fn cook_command(plan: &BatchCookFanoutPlan, _cook: &BatchCookSpec) -> Vec<String> {
+    vec![
         "homeboy".to_string(),
         "agent-task".to_string(),
-        "loop".to_string(),
-        "--to-worktree".to_string(),
-        cook.to_worktree.clone(),
-        "--run-id".to_string(),
-        cook.run_id(),
-        "--client-context".to_string(),
-        client_context(plan, cook),
-    ];
-    if let Some(prompt) = &cook.prompt {
-        command.push("--prompt".to_string());
-        command.push(prompt.clone());
-    }
-    if let Some(head) = &cook.head {
-        command.push("--head".to_string());
-        command.push(head.clone());
-    }
-    for verify in &cook.verify {
-        command.push("--verify".to_string());
-        command.push(verify.clone());
-    }
-    command
+        "fanout".to_string(),
+        "run-plan".to_string(),
+        "--input".to_string(),
+        "<batch-cook-plan.json>".to_string(),
+        "--record-run-id".to_string(),
+        plan.fanout_id.clone(),
+    ]
 }
 
 fn reject_generic_fanout_inputs(value: &Value) -> Result<()> {
@@ -468,12 +506,14 @@ mod tests {
         assert_eq!(plan.cooks.len(), 2);
         assert_eq!(plan.cooks[0].backend.as_deref(), Some("test"));
         assert_eq!(plan.cooks[0].selector.as_deref(), Some("fixture"));
-        let loop_args = plan.cooks[0].to_loop_args(&plan).expect("loop args");
-        assert_eq!(loop_args.to_worktree, "homeboy@fix-5929-docs");
-        assert_eq!(loop_args.head.as_deref(), Some("fix/5929-docs"));
-        assert_eq!(loop_args.dispatch.run_id.as_deref(), Some("cook-5929-docs"));
-        assert_eq!(loop_args.gates.verify, vec!["homeboy test homeboy"]);
-        assert!(loop_args
+        let invocation = plan.cooks[0]
+            .to_cook_invocation(&plan)
+            .expect("cook invocation");
+        assert_eq!(invocation.options.to_worktree, "homeboy@fix-5929-docs");
+        assert_eq!(invocation.options.head.as_deref(), Some("fix/5929-docs"));
+        assert_eq!(invocation.dispatch.run_id.as_deref(), Some("cook-5929-docs"));
+        assert_eq!(invocation.options.gates.verify, vec!["homeboy test homeboy"]);
+        assert!(invocation
             .dispatch
             .core
             .client_context
