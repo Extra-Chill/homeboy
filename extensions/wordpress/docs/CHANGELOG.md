@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.11] - 2026-06-22
+
+### Fixed
+- thin codebox workflow internals
+
 ## [3.12.10] - 2026-06-22
 
 ### Fixed
