@@ -16,6 +16,12 @@ function validateControllerLoopProof(input = {}) {
   const iterations = collectIterations(proof);
   const artifactResults = [];
 
+  const status = proof.status || proof.result?.status || proof.outcome?.status || '';
+  const allowedStatuses = normalizeArray(policy.allowed_statuses || spec.allowed_statuses || spec.statuses);
+  if (allowedStatuses.length > 0 && !allowedStatuses.includes(status)) {
+    failures.push(failure('proof.status_rejected', `Proof status is not allowed: ${status || '(missing)'}`, { status, allowed_statuses: allowedStatuses }));
+  }
+
   for (const declaration of artifactDeclarations) {
     const match = findArtifact(artifacts, declaration.id);
     const required = declaration.required !== false && (declaration.required === true || policy.require_declared_artifacts === true);
@@ -206,6 +212,8 @@ function collectArtifacts(proof) {
     ...normalizeArray(proof.artifacts),
     ...normalizeArray(proof.proof_artifacts),
     ...normalizeArray(proof.evidence_envelope?.artifacts),
+    ...normalizeArray(proof.iterations || proof.loop?.iterations).flatMap((iteration) => normalizeArray(iteration?.artifacts)),
+    ...normalizeArray(proof.evidence_envelope?.iterations).flatMap((iteration) => normalizeArray(iteration?.artifacts)),
   ].filter(isObject);
 }
 
@@ -215,6 +223,8 @@ function collectEvidence(proof) {
     ...normalizeArray(proof.evidence_refs),
     ...normalizeArray(proof.evidence_envelope?.evidence),
     ...normalizeArray(proof.evidence_envelope?.evidence_refs),
+    ...normalizeArray(proof.iterations || proof.loop?.iterations).flatMap((iteration) => normalizeArray(iteration?.evidence || iteration?.evidence_refs)),
+    ...normalizeArray(proof.evidence_envelope?.iterations).flatMap((iteration) => normalizeArray(iteration?.evidence || iteration?.evidence_refs)),
   ].filter(isObject);
 }
 

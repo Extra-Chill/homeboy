@@ -1,12 +1,11 @@
 'use strict';
 
-const { runGenericDeterministicLoop } = require('./generic-agent-loop-runner');
-
 const BOUNDED_PRODUCTION_LOOP_RESULT_SCHEMA = 'homeboy/bounded-production-loop-result/v1';
 const BOUNDED_PRODUCTION_LOOP_ITERATION_SCHEMA = 'homeboy/bounded-production-loop-iteration/v1';
 const BOUNDED_PRODUCTION_LOOP_EVIDENCE_SCHEMA = 'homeboy/bounded-production-loop-evidence/v1';
 
 function runBoundedProductionLoop(options = {}) {
+  const { runGenericDeterministicLoop } = require('./generic-agent-loop-runner');
   const loopId = options.loopId || options.loop_id || 'bounded-production-loop';
   const maxIterations = positiveInteger(options.maxIterations || options.max_iterations, 1);
   const executeIteration = requiredFunction(options.executeIteration || options.execute_iteration || options.execute, 'executeIteration');

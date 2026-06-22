@@ -113,6 +113,48 @@ assert.equal(result.loop.iterations.length, 1);
 assert.equal(result.loop.results.length, 1);
 assert.equal(result.loop.outcome.status, 'succeeded');
 
+const proofPolicy = { preview_required: true, publication_required: true };
+const validProofRun = genericLoopRunner.runGenericAgentLoop({
+  runtime,
+  plan: { ...plan, workload_id: 'valid-proof-workload' },
+  validate: true,
+  validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
+  execute: ({ request }) => proofOutcome(request, [
+    { kind: 'preview', url: 'https://example.test/preview/valid-proof-workload' },
+    { kind: 'publication', url: 'https://example.test/pull/123' },
+  ]),
+});
+assert.equal(validProofRun.productionProof.status, 'succeeded');
+assert.equal(validProofRun.controllerProofValidation.valid, true);
+assert.equal(validProofRun.results.scenarios[0].metadata.controller_loop_proof_validation.valid, true);
+
+assert.throws(() => genericLoopRunner.runGenericAgentLoop({
+  runtime,
+  plan: { ...plan, workload_id: 'missing-proof-evidence' },
+  validate: true,
+  validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
+  execute: ({ request }) => proofOutcome(request, [{ kind: 'preview', url: 'https://example.test/preview/missing-publication' }]),
+}), /PR or publication evidence is required/);
+
+assert.throws(() => genericLoopRunner.runGenericAgentLoop({
+  runtime,
+  plan: { ...plan, workload_id: 'missing-preview-evidence' },
+  validate: true,
+  validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
+  execute: ({ request }) => proofOutcome(request, [{ kind: 'publication', url: 'https://example.test/pull/125' }]),
+}), /Preview materialization evidence is required/);
+
+assert.throws(() => genericLoopRunner.runGenericAgentLoop({
+  runtime,
+  plan: { ...plan, workload_id: 'local-proof-evidence' },
+  validate: true,
+  validationPolicy: { success_completion_outcomes: ['done'], controller_loop_proof: proofPolicy },
+  execute: ({ request }) => proofOutcome(request, [
+    { kind: 'preview', url: 'http://localhost:8888/preview' },
+    { kind: 'publication', url: 'https://example.test/pull/124' },
+  ]),
+}), /Reviewer-facing evidence must use a durable non-local URL: preview/);
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-generic-agent-loop-'));
 try {
   const requestCapturePath = path.join(tmpRoot, 'request.json');
@@ -184,6 +226,30 @@ process.stdout.write(JSON.stringify({
   assert.deepEqual(nodeRun.outcome.metadata.runtime_invocation_result.argv, [nodeExecutorPath]);
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+function proofOutcome(request, evidenceRefs) {
+  return {
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: request.task_id,
+    status: 'succeeded',
+    summary: 'Fixture executor completed.',
+    evidence_refs: evidenceRefs,
+    metadata: {
+      results: {
+        scenarios: [{
+          id: request.task_id,
+          metrics: { generic_agent_task_executor_mean: 1 },
+          metadata: {
+            job_status: 'completed',
+            success_status: 'no_changes',
+            completion_outcome: 'done',
+            completion_outcome_satisfied: true,
+          },
+        }],
+      },
+    },
+  };
 }
 
 process.stdout.write('Generic agent loop runner behavior checks passed\n');
