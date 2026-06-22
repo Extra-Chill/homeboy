@@ -580,15 +580,26 @@ fn test_lab_command_contracts_cover_hot_commands() {
 
     for args in [
         ["homeboy", "audit", "--changed-since", "origin/main"].as_slice(),
-        ["homeboy", "lint", "--changed-since", "origin/main"].as_slice(),
-        ["homeboy", "lint", "--changed-only"].as_slice(),
-        ["homeboy", "test", "--changed-since", "origin/main"].as_slice(),
         ["homeboy", "review", "--changed-since", "origin/main"].as_slice(),
         ["homeboy", "review", "--changed-only"].as_slice(),
     ] {
         parsed_command(args)
             .lab_contract()
             .expect("scoped hot command should have a Lab plan contract");
+    }
+
+    for args in [
+        ["homeboy", "lint", "--changed-since", "origin/main"].as_slice(),
+        ["homeboy", "lint", "--changed-only"].as_slice(),
+        ["homeboy", "test", "--changed-since", "origin/main"].as_slice(),
+    ] {
+        let contract = parsed_command(args)
+            .lab_contract()
+            .expect("scoped hot command should have a Lab plan contract");
+        assert!(matches!(
+            contract.portability,
+            LabCommandPortability::Portable
+        ));
     }
 
     assert!(parsed_command(&["homeboy", "status"])
