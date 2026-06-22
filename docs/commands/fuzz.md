@@ -11,7 +11,7 @@ homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
-homeboy fuzz replay [<case>] [--run-id <id>] [-- <runner-args>]
+homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 ```
 
 ## Description
@@ -91,10 +91,32 @@ Campaigns can include a product-neutral coverage summary:
 }
 ```
 
-`homeboy fuzz replay` is reserved for a future generic replay contract. Today it
-returns a product-agnostic `not_implemented` JSON response and does not execute
-local fuzz code. Use the originating fuzz runner's replay command until Homeboy
-owns that contract.
+`homeboy fuzz replay` resolves replay metadata from a product-neutral campaign
+or result envelope artifact. Pass a `homeboy/fuzz-campaign/v1` or
+`homeboy/fuzz-result-envelope/v1` JSON file as the positional argument, or pass
+it with `--artifact <path>` and use the positional argument as the case id:
+
+```bash
+homeboy fuzz replay fuzz-results.json --case-id case-1
+homeboy fuzz replay case-1 --artifact fuzz-results.json
+```
+
+Replay currently returns a validated `dry_run` contract rather than executing a
+runner. The output includes the campaign/envelope ids, selected case id, matching
+`replay` metadata when present, passthrough args, and environment variables for
+the originating extension-owned replay runner:
+
+```text
+HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE
+HOMEBOY_FUZZ_REPLAY_CASE_ID
+HOMEBOY_FUZZ_REPLAY_ID
+HOMEBOY_FUZZ_REPLAY_SEED
+HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID
+HOMEBOY_FUZZ_RUN_ID
+```
+
+Homeboy does not fake replay execution without a resolved component/extension
+context. Extension scripts own concrete replay execution.
 
 Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
