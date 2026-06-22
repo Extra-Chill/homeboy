@@ -51,7 +51,7 @@ async function buildRunnerResult(env) {
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const env = wpCodeboxRuntimeEnv(process.env);
-	const command = env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || discoverWpCodeboxBin(env) || 'wp-codebox';
+	const command = wpCodeboxCommand(env);
 	const manifest = await discoverRuntimeContractManifest(env);
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
@@ -225,6 +225,10 @@ function discoverWpCodeboxBin(env) {
 	return '';
 }
 
+function wpCodeboxCommand(env) {
+	return env.HOMEBOY_WP_CODEBOX_BIN || discoverWpCodeboxBin(env) || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+}
+
 function parseJsonObject(value) {
 	if (!value) {
 		return null;
@@ -354,4 +358,5 @@ module.exports = {
 	resolveWpCodeboxRuntimePath,
 	wpCodeboxRuntimeEnv,
 	discoverWpCodeboxBin,
+	wpCodeboxCommand,
 };

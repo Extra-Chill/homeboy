@@ -162,7 +162,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'))
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
-const { discoverWpCodeboxBin, wpCodeboxRuntimeEnv } = require(runnerPath);
+const { discoverWpCodeboxBin, wpCodeboxCommand, wpCodeboxRuntimeEnv } = require(runnerPath);
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload)}\n`);
 
 assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
@@ -182,6 +182,22 @@ assert.equal(
 	discoverWpCodeboxBin({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot }),
 	cachedCodeboxBin,
 	'Fuzz runner should prefer the cached WP Codebox CLI over stale binaries on PATH'
+);
+assert.equal(
+	wpCodeboxCommand({
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
+		HOMEBOY_SETTINGS_WP_CODEBOX_BIN: '/stale/wp-codebox',
+	}),
+	cachedCodeboxBin,
+	'Homeboy-managed WP Codebox cache should beat stale persisted settings'
+);
+assert.equal(
+	wpCodeboxCommand({
+		HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
+	}),
+	'/explicit/wp-codebox',
+	'Explicit WP Codebox binary env should override cache discovery'
 );
 
 const cli = spawnSync(runnerPath, [], {
