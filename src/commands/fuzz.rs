@@ -324,7 +324,8 @@ fn run_fuzz_extension_script(
         .with_run_dir(run_dir)
         .script_args(&args.args);
 
-    let env = fuzz_runner_env(args, workload);
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+    let env = fuzz_runner_env(args, workload, &results_path);
     for (key, value) in env {
         runner = runner.env(&key, &value);
     }
@@ -335,8 +336,12 @@ fn run_fuzz_extension_script(
 fn fuzz_runner_env(
     args: &FuzzRunArgs,
     workload: Option<&FuzzWorkloadOutput>,
+    results_path: &Path,
 ) -> Vec<(String, String)> {
-    let mut env = Vec::new();
+    let mut env = vec![(
+        "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
+        results_path.to_string_lossy().to_string(),
+    )];
     if let Some(workload) = workload {
         env.push(("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), workload.id.clone()));
         if let Some(path) = workload.manifest_path.as_ref() {
@@ -753,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_runner_env_includes_selected_workload_path_and_generic_contract() {
+    fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_contract() {
         let args = FuzzRunArgs {
             comp: PositionalComponentArgs {
                 component: Some("component-a".to_string()),
@@ -779,11 +784,14 @@ mod tests {
             manifest_path: Some("/tmp/fuzz/parser.json".to_string()),
         };
 
-        let env = fuzz_runner_env(&args, Some(&workload));
+        let results_path = Path::new("/tmp/homeboy-run/fuzz-results.json");
 
-        assert!(env
-            .iter()
-            .all(|(key, _)| key != "HOMEBOY_FUZZ_RESULTS_FILE"));
+        let env = fuzz_runner_env(&args, Some(&workload), results_path);
+
+        assert!(env.contains(&(
+            "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
+            "/tmp/homeboy-run/fuzz-results.json".to_string()
+        )));
         assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
         assert!(env.contains(&(
             "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
