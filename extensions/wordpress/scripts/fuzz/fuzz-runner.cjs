@@ -67,11 +67,34 @@ function wpCodeboxRunAgentTaskInput(request) {
 			},
 		},
 		runtime_task: request.executor?.config?.runtime_task,
+		allowed_tools: ['homeboy/no-runtime-tools'],
+		sandbox_tool_policy: denyAllSandboxToolPolicy(),
 		artifact_declarations: request.artifact_declarations,
 		expected_artifacts: request.expected_artifacts,
 		metadata: {
 			...(request.metadata || {}),
 			homeboy_agent_task_request: request,
+		},
+	};
+}
+
+function denyAllSandboxToolPolicy() {
+	return {
+		schema: 'wp-codebox/sandbox-tool-policy/v1',
+		version: 1,
+		tools: [
+			{
+				id: 'homeboy/no-runtime-tools',
+				runtime_tool_id: 'homeboy_no_runtime_tools',
+				allowed: false,
+				runtime: {
+					environment: 'control_plane',
+					capability_scope: 'control_plane',
+				},
+			},
+		],
+		metadata: {
+			source: 'homeboy-extension-wordpress/fuzz-runner',
 		},
 	};
 }

@@ -187,6 +187,10 @@ if (request.schema !== 'wp-codebox/run-agent-task/v1' || !request.goal || !reque
   process.stderr.write('invalid run-agent-task input');
   process.exit(1);
 }
+if (request.sandbox_tool_policy?.schema !== 'wp-codebox/sandbox-tool-policy/v1' || request.sandbox_tool_policy?.version !== 1 || !request.sandbox_tool_policy?.tools?.length) {
+  process.stderr.write('invalid sandbox tool policy');
+  process.exit(1);
+}
 process.stdout.write(JSON.stringify({
   success: true,
   result: {
