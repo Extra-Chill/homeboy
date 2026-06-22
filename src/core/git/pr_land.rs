@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::core::error::{Error, Result};
 
 use super::gh_client::GhClient;
+use super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
 
 #[derive(Debug, Clone, Default)]
 pub struct PrLandOptions {
@@ -90,8 +91,18 @@ struct RawPrView {
     status_check_rollup: Vec<Value>,
     #[serde(default, rename = "headRefOid")]
     head_ref_oid: Option<String>,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: Option<String>,
+    #[serde(default, rename = "headRepository")]
+    head_repository: Option<RawHeadRepository>,
     #[serde(default, rename = "mergedAt")]
     merged_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawHeadRepository {
+    #[serde(default, rename = "nameWithOwner")]
+    name_with_owner: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +115,8 @@ struct PrView {
     checks: Option<String>,
     merge_state: Option<String>,
     head_sha: Option<String>,
+    head: Option<String>,
+    head_repository: Option<String>,
     merged_at: Option<String>,
 }
 
@@ -142,7 +155,7 @@ impl PrLandClient for GhPrLandClient {
             "-R".to_string(),
             self.repo.clone(),
             "--json".to_string(),
-            "number,title,url,state,isDraft,mergeStateStatus,statusCheckRollup,headRefOid,mergedAt"
+            "number,title,url,state,isDraft,mergeStateStatus,statusCheckRollup,headRefOid,headRefName,headRepository,mergedAt"
                 .to_string(),
         ])?;
         let parsed: RawPrView = serde_json::from_str(raw.trim()).map_err(|e| {
@@ -157,6 +170,10 @@ impl PrLandClient for GhPrLandClient {
             checks: summarize_checks(&parsed.status_check_rollup),
             merge_state: non_empty(parsed.merge_state_status),
             head_sha: non_empty(parsed.head_ref_oid),
+            head: non_empty(parsed.head_ref_name),
+            head_repository: parsed
+                .head_repository
+                .and_then(|repo| non_empty(repo.name_with_owner)),
             merged_at: parsed.merged_at,
         })
     }
@@ -168,18 +185,24 @@ impl PrLandClient for GhPrLandClient {
         method: &str,
         delete_branch: bool,
     ) -> Result<()> {
-        let mut args = vec![
-            "pr".to_string(),
-            "merge".to_string(),
-            number.to_string(),
-            "-R".to_string(),
-            self.repo.clone(),
-            format!("--{method}"),
-        ];
-        if delete_branch {
-            args.push("--delete-branch".to_string());
+        let branch_to_delete = if delete_branch {
+            let pr = self.view_pr(&self.repo.clone(), number)?;
+            (pr.head_repository.as_deref() == Some(self.repo.as_str()))
+                .then(|| pr.head.clone())
+                .flatten()
+        } else {
+            None
+        };
+
+        self.gh
+            .run(&pr_merge_api_args(&self.repo, number, method))?;
+        if let Some(branch) = branch_to_delete {
+            let _ = self
+                .gh
+                .run(&delete_branch_ref_api_args(&self.repo, &branch));
         }
-        self.gh.run(&args).map(|_| ())
+
+        Ok(())
     }
 
     fn refresh_pr(&mut self, repo: &str, pr: &PrView, helper: &PrLandRefreshHelper) -> Result<()> {
@@ -609,6 +632,8 @@ mod tests {
             checks: checks.map(str::to_string),
             merge_state: merge_state.map(str::to_string),
             head_sha: Some(format!("sha{number}")),
+            head: Some(format!("branch-{number}")),
+            head_repository: Some("Extra-Chill/homeboy".to_string()),
             merged_at: None,
         }
     }
