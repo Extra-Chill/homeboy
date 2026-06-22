@@ -319,7 +319,8 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   const target = defaultWorkspaceTargetPayload(inputs.target || request.workspace || {}, workspaceMaterialization);
   const agentBundle = agentBundleConfigFromAgentTaskRequest(request, config, inputs);
   const recipe = recipeConfigFromAgentTaskRequest(request, config, inputs, runtimeOptions);
-  const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || defaults.mounts || runtimeOptions.mounts || []);
+  const runtimeRequirementsForMounts = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
+  const mounts = agentBundleMounts(agentBundle, config.runtime_mounts || config.mounts || runtimeRequirementsForMounts.runtime_mounts || runtimeRequirementsForMounts.mounts || defaults.mounts || runtimeOptions.mounts || []);
   let componentContracts = componentContractsFromAgentTaskRequest(request, config, runtimeOptions);
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
@@ -486,6 +487,7 @@ function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
     runtimeEnvAliases: firstObject(runtimeRequirements.runtime_env_aliases, runtimeRequirements.runtimeEnvAliases, runtimeProfile.runtime_env_aliases, runtimeProfile.runtimeEnvAliases, options.runtimeEnvAliases, options.runtime_env_aliases),
     runtimeStateMounts: firstDefined(runtimeRequirements.runtime_state_mounts, runtimeProfile.runtime_state_mounts, options.runtimeStateMounts, options.runtime_state_mounts),
     runtimeConfigMounts: firstDefined(runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, options.runtime_config_mounts),
+    mounts: firstDefined(runtimeRequirements.runtime_mounts, runtimeRequirements.mounts, runtimeProfile.runtime_mounts, runtimeProfile.mounts, options.mounts),
     callbackData: firstDefined(runtimeRequirements.callback_data, runtimeRequirements.callbackData, runtimeProfile.callback_data, runtimeProfile.callbackData, options.callbackData, options.callback_data),
   };
 }

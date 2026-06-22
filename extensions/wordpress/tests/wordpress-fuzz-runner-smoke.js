@@ -267,6 +267,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'));
 const workloadPath = path.join(tempDir, 'workload.json');
 const runtimeRequirementWorkloadPath = path.join(tempDir, 'runtime-requirement-workload.json');
+const workloadRoot = path.join(tempDir, 'workloads');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 const { discoverWpCodeboxBin, wpCodeboxCommand, wpCodeboxRuntimeEnv } = require(runnerPath);
@@ -295,6 +296,7 @@ fs.writeFileSync(runtimeRequirementWorkloadPath, `${JSON.stringify({
 		},
 	}],
 })}\n`);
+fs.mkdirSync(workloadRoot, { recursive: true });
 
 assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
 assert.equal(
@@ -443,6 +445,14 @@ if (request.task_input?.runtime_requirements?.extra_plugins?.[0]?.source !== '/r
   process.stderr.write('missing delegated runtime extra plugin');
   process.exit(1);
 }
+if (request.task_input?.runtime_requirements?.runtime_mounts?.[0]?.source !== '${workloadRoot}' || request.task_input?.runtime_requirements?.runtime_mounts?.[0]?.target !== '${workloadRoot}') {
+  process.stderr.write('missing delegated fuzz workload root mount');
+  process.exit(1);
+}
+if (request.task_input?.runtime_requirements?.runtime_env?.WP_CODEBOX_FUZZ_WORKLOAD_ROOT !== '${workloadRoot}') {
+  process.stderr.write('missing delegated fuzz workload root env');
+  process.exit(1);
+}
 if (request.task_input?.parent_request?.task_id !== 'task-adapter-dispatch-cli-run') {
   process.stderr.write('missing parent request metadata');
   process.exit(1);
@@ -473,6 +483,7 @@ const taskAdapterDispatchCli = spawnSync(runnerPath, [], {
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_WP_CODEBOX_PLUGIN_PATH: path.join(tempDir, 'packages/wordpress-plugin'),
 		HOMEBOY_FUZZ_WORKLOAD_PATH: runtimeRequirementWorkloadPath,
+		WP_CODEBOX_FUZZ_WORKLOAD_ROOT: workloadRoot,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'task-adapter-dispatch-cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'task-adapter-dispatch-cli-run',
 	},

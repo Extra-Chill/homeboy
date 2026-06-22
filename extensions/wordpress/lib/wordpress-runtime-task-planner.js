@@ -161,6 +161,7 @@ function wordpressRuntimeTaskExecutorConfig(options = {}) {
 		ability_tools: options.abilityTools || options.ability_tools,
 		structured_artifacts: options.structuredArtifacts || options.structured_artifacts,
 		runtime_env: options.runtimeEnv || options.runtime_env,
+		runtime_mounts: options.runtimeMounts || options.runtime_mounts,
 		runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
 		runtime_state_mounts: options.runtimeStateMounts || options.runtime_state_mounts,
 		max_turns: options.maxTurns || options.max_turns,
