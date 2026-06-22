@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::core::cleanup;
 use crate::core::component::Component;
 use crate::core::defaults::deploy_generated_build_dir;
 use crate::core::error::Result;
@@ -13,10 +14,25 @@ pub(super) fn is_generated_build_path(rel_path: &str) -> bool {
 pub(super) fn unexpected_uncommitted_files_excluding_generated_build(
     component: &Component,
 ) -> Result<Vec<String>> {
+    Ok(uncommitted_file_report_excluding_known_generated(component)?.unexpected)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UncommittedFileReport {
+    pub(super) unexpected: Vec<String>,
+    pub(super) known_generated: Vec<String>,
+}
+
+pub(super) fn uncommitted_file_report_excluding_known_generated(
+    component: &Component,
+) -> Result<UncommittedFileReport> {
     let local_path = &component.local_path;
     let uncommitted = git::get_uncommitted_changes(local_path)?;
     if !uncommitted.has_changes {
-        return Ok(Vec::new());
+        return Ok(UncommittedFileReport {
+            unexpected: Vec::new(),
+            known_generated: Vec::new(),
+        });
     }
 
     let mut unexpected: Vec<String> = uncommitted
@@ -27,16 +43,65 @@ pub(super) fn unexpected_uncommitted_files_excluding_generated_build(
         .cloned()
         .collect();
 
+    let mut known_generated: Vec<String> = uncommitted
+        .untracked
+        .iter()
+        .filter(|path| is_known_generated_untracked_path(component, path))
+        .cloned()
+        .collect();
+
     unexpected.extend(
         uncommitted
             .untracked
             .iter()
-            .filter(|path| !is_generated_build_path(path))
-            .filter(|path| !is_deploy_target_debris_path(component, path))
+            .filter(|path| !known_generated.contains(path))
             .cloned(),
     );
 
-    Ok(unexpected)
+    known_generated.sort();
+    known_generated.dedup();
+
+    Ok(UncommittedFileReport {
+        unexpected,
+        known_generated,
+    })
+}
+
+fn is_known_generated_untracked_path(component: &Component, rel_path: &str) -> bool {
+    is_generated_build_path(rel_path)
+        || is_deploy_target_debris_path(component, rel_path)
+        || is_declared_artifact_path(component, rel_path)
+        || is_root_package_archive(rel_path)
+}
+
+fn is_declared_artifact_path(component: &Component, rel_path: &str) -> bool {
+    if component.cleanup_artifacts.iter().any(|artifact| {
+        artifact.path.as_deref().is_some_and(|path| {
+            cleanup::is_safe_artifact_path(path) && path_is_at_or_under(rel_path, path)
+        }) || artifact.glob.as_deref().is_some_and(|pattern| {
+            glob_match::glob_match(pattern, rel_path.trim_end_matches('/'))
+                || glob_match::glob_match(pattern, rel_path)
+        })
+    }) {
+        return true;
+    }
+
+    cleanup::artifact_declarations(Path::new(&component.local_path))
+        .map(|declarations| {
+            declarations.iter().any(|declaration| {
+                cleanup::is_safe_artifact_path(&declaration.relative_path)
+                    && path_is_at_or_under(rel_path, &declaration.relative_path)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn path_is_at_or_under(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
+}
+
+fn is_root_package_archive(rel_path: &str) -> bool {
+    !rel_path.contains('/') && (rel_path.ends_with(".tgz") || rel_path.ends_with(".zip"))
 }
 
 fn is_deploy_target_debris_path(component: &Component, rel_path: &str) -> bool {
@@ -125,9 +190,10 @@ impl Drop for GeneratedBuildArtifactCleanupGuard<'_> {
 mod tests {
     use super::{
         cleanup_generated_build_artifacts, is_deploy_target_debris_path, is_generated_build_path,
+        uncommitted_file_report_excluding_known_generated,
         unexpected_uncommitted_files_excluding_generated_build,
     };
-    use crate::core::component::Component;
+    use crate::core::component::{CleanupArtifactDeclaration, Component};
     use crate::core::defaults::deploy_generated_build_dir;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -185,6 +251,70 @@ mod tests {
             unexpected_uncommitted_files_excluding_generated_build(&component).expect("status");
 
         assert_eq!(unexpected, vec!["src.rs"]);
+    }
+
+    #[test]
+    fn uncommitted_report_classifies_declared_cleanup_paths_and_archives() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::create_dir_all(dir.join("plugins/agentic-ui-block/app/tools/common"))
+            .expect("tracked parent dir");
+        std::fs::write(
+            dir.join("plugins/agentic-ui-block/app/tools/common/.keep"),
+            "tracked\n",
+        )
+        .expect("tracked parent file");
+        std::fs::create_dir_all(dir.join("runtime")).expect("tracked runtime parent dir");
+        std::fs::write(dir.join("runtime/.keep"), "tracked\n")
+            .expect("tracked runtime parent file");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: tracked parent"]);
+        std::fs::write(
+            dir.join("homeboy.json"),
+            r#"{"artifact_cleanup_paths":["plugins/agentic-ui-block/app/tools/common/dist"]}"#,
+        )
+        .expect("homeboy config");
+        std::fs::create_dir_all(dir.join("build")).expect("build dir");
+        std::fs::write(dir.join("build/studio-native.zip"), "artifact").expect("build artifact");
+        std::fs::create_dir_all(dir.join("plugins/agentic-ui-block/app/tools/common/dist"))
+            .expect("dist dir");
+        std::fs::write(
+            dir.join("plugins/agentic-ui-block/app/tools/common/dist/index.js"),
+            "generated",
+        )
+        .expect("dist artifact");
+        std::fs::write(dir.join("wp-codebox-workspace-0.9.0.tgz"), "package")
+            .expect("package artifact");
+        std::fs::create_dir_all(dir.join("runtime/generated-fixture")).expect("runtime artifact");
+        std::fs::write(
+            dir.join("runtime/generated-fixture/output.json"),
+            "generated",
+        )
+        .expect("runtime artifact file");
+        std::fs::write(dir.join("src.rs"), "source\n").expect("source");
+
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            cleanup_artifacts: vec![CleanupArtifactDeclaration {
+                label: "runtime fixture".to_string(),
+                path: Some("runtime/generated-fixture".to_string()),
+                glob: None,
+            }],
+            ..Component::default()
+        };
+        let report = uncommitted_file_report_excluding_known_generated(&component).expect("status");
+
+        assert_eq!(report.unexpected, vec!["homeboy.json", "src.rs"]);
+        assert!(report.known_generated.contains(&"build/".to_string()));
+        assert!(report
+            .known_generated
+            .contains(&"plugins/agentic-ui-block/app/tools/common/dist/".to_string()));
+        assert!(report
+            .known_generated
+            .contains(&"wp-codebox-workspace-0.9.0.tgz".to_string()));
+        assert!(report
+            .known_generated
+            .contains(&"runtime/generated-fixture/".to_string()));
     }
 
     #[test]

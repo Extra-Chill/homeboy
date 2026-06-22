@@ -300,6 +300,11 @@ impl ComponentDeployResult {
         self
     }
 
+    pub(super) fn with_artifact_path(mut self, path: Option<String>) -> Self {
+        self.artifact_path = path;
+        self
+    }
+
     pub(super) fn with_component_status(mut self, status: ComponentStatus) -> Self {
         self.component_status = Some(status);
         self

@@ -74,7 +74,7 @@ pub struct DeployArgs {
     /// Deploy from current branch HEAD instead of the latest tag
     #[arg(long)]
     pub head: bool,
-    /// Force tag-based deploy, ignoring any reusable build artifacts
+    /// Force local tag-based build/deploy, ignoring reusable release assets
     #[arg(long)]
     pub tagged: bool,
 }

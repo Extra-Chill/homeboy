@@ -21,7 +21,7 @@
 //! are intentionally contained in this module rather than leaking into deep
 //! core; the release pipeline simply invokes the guard during preflight.
 
-use std::path::Path;
+use std::path::{Component as PathComponent, Path, PathBuf};
 
 use crate::core::error::{Error, Result};
 use crate::core::git;
@@ -83,6 +83,19 @@ pub(crate) fn guard_committed_lockfiles(component_root: &Path) -> Result<()> {
     Err(missing_lockfile_error(&offenders))
 }
 
+/// Inspect npm-family manifests for `file:` dependencies that cannot be
+/// reproduced from the component checkout used by release packaging.
+pub(crate) fn guard_local_file_dependencies(component_root: &Path) -> Result<()> {
+    let mut offenders = Vec::new();
+    collect_local_file_dependency_offenders(component_root, component_root, &mut offenders);
+
+    if offenders.is_empty() {
+        return Ok(());
+    }
+
+    Err(local_file_dependency_error(&offenders))
+}
+
 fn collect_unlocked_manifests(
     component_root: &Path,
     dir: &Path,
@@ -127,6 +140,146 @@ fn collect_unlocked_manifests(
             offenders.push(offender);
         }
     }
+}
+
+fn collect_local_file_dependency_offenders(
+    component_root: &Path,
+    dir: &Path,
+    offenders: &mut Vec<LocalFileDependency>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if SKIP_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            collect_local_file_dependency_offenders(component_root, &path, offenders);
+            continue;
+        }
+
+        if !file_type.is_file() || entry.file_name() != std::ffi::OsStr::new("package.json") {
+            continue;
+        }
+
+        offenders.extend(local_file_dependency_offenders(component_root, &path));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LocalFileDependency {
+    manifest_rel: String,
+    package: String,
+    spec: String,
+    resolved_path: String,
+    problem: LocalFileDependencyProblem,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LocalFileDependencyProblem {
+    Missing,
+    OutsideCheckout,
+}
+
+fn local_file_dependency_offenders(
+    component_root: &Path,
+    manifest_path: &Path,
+) -> Vec<LocalFileDependency> {
+    let contents = match std::fs::read_to_string(manifest_path) {
+        Ok(contents) => contents,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return Vec::new();
+    };
+
+    let manifest_dir = manifest_path.parent().unwrap_or(component_root);
+    let manifest_rel = manifest_path
+        .strip_prefix(component_root)
+        .map(|rel| rel.to_string_lossy().to_string())
+        .unwrap_or_else(|_| manifest_path.to_string_lossy().to_string());
+    let sections = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ];
+
+    let mut offenders = Vec::new();
+    for section in sections {
+        let Some(map) = value.get(section).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for (package, spec) in map {
+            let Some(spec) = spec.as_str() else { continue };
+            let Some(local_path) = spec.strip_prefix("file:") else {
+                continue;
+            };
+            let resolved = resolve_file_dependency_path(manifest_dir, local_path);
+            let problem = if !resolved.exists() {
+                Some(LocalFileDependencyProblem::Missing)
+            } else if !path_is_inside(component_root, &resolved) {
+                Some(LocalFileDependencyProblem::OutsideCheckout)
+            } else {
+                None
+            };
+
+            if let Some(problem) = problem {
+                offenders.push(LocalFileDependency {
+                    manifest_rel: manifest_rel.clone(),
+                    package: package.clone(),
+                    spec: spec.to_string(),
+                    resolved_path: resolved.display().to_string(),
+                    problem,
+                });
+            }
+        }
+    }
+
+    offenders.sort_by(|a, b| {
+        (&a.manifest_rel, &a.package, &a.spec).cmp(&(&b.manifest_rel, &b.package, &b.spec))
+    });
+    offenders
+}
+
+fn resolve_file_dependency_path(manifest_dir: &Path, local_path: &str) -> PathBuf {
+    let path = Path::new(local_path);
+    if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        normalize_path(&manifest_dir.join(path))
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            PathComponent::CurDir => {}
+            PathComponent::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_is_inside(root: &Path, path: &Path) -> bool {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| normalize_path(root));
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path));
+    path == root || path.starts_with(root)
 }
 
 /// Returns `Some` when `manifest_path` pins git dependencies but has no
@@ -287,6 +440,36 @@ fn missing_lockfile_error(offenders: &[UnlockedManifest]) -> Error {
     )
 }
 
+fn local_file_dependency_error(offenders: &[LocalFileDependency]) -> Error {
+    let mut lines = vec![
+        "Release blocked: package.json file: dependencies must be reproducible from the component checkout.".to_string(),
+        String::new(),
+        "Release packaging runs from an isolated component copy. Local file dependencies that point outside the component checkout are non-reproducible, and missing file dependencies fail later at install/build time.".to_string(),
+        String::new(),
+    ];
+
+    for offender in offenders {
+        let problem = match offender.problem {
+            LocalFileDependencyProblem::Missing => "missing target",
+            LocalFileDependencyProblem::OutsideCheckout => "outside component checkout",
+        };
+        lines.push(format!(
+            "  {}: {}@{} -> {} ({})",
+            offender.manifest_rel, offender.package, offender.spec, offender.resolved_path, problem
+        ));
+    }
+
+    Error::validation_invalid_argument(
+        "release.preflight.local_file_dependencies",
+        lines.join("\n"),
+        None,
+        Some(vec![
+            "Use a published package version for releaseable dependencies.".to_string(),
+            "If this is an intentional workspace release, configure the dependency through the workspace release path instead of a checkout-external file: path.".to_string(),
+        ]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +610,62 @@ mod tests {
         run_git(root, &["commit", "--quiet", "-m", "init"]);
 
         guard_committed_lockfiles(root).expect("registry-only deps need no lockfile guard");
+    }
+
+    #[test]
+    fn local_file_dependency_guard_blocks_missing_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        write(
+            root,
+            "package.json",
+            r#"{ "dependencies": { "@org/ui": "file:../missing-ui" } }"#,
+        );
+
+        let err = guard_local_file_dependencies(root).expect_err("missing file dep blocks release");
+
+        assert!(err.message.contains("file: dependencies"));
+        assert!(err.message.contains("@org/ui@file:../missing-ui"));
+        assert!(err.message.contains("missing target"));
+        assert!(err.message.contains("../missing-ui"));
+    }
+
+    #[test]
+    fn local_file_dependency_guard_blocks_existing_targets_outside_checkout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("component");
+        let sibling = temp.path().join("agenttic/packages/agenttic-ui");
+        std::fs::create_dir_all(&root).expect("component dir");
+        std::fs::create_dir_all(&sibling).expect("sibling dir");
+        write(
+            &root,
+            "package.json",
+            r#"{ "dependencies": { "@automattic/agenttic-ui": "file:../agenttic/packages/agenttic-ui" } }"#,
+        );
+
+        let err = guard_local_file_dependencies(&root)
+            .expect_err("checkout-external file dep blocks release");
+
+        assert!(err
+            .message
+            .contains("@automattic/agenttic-ui@file:../agenttic/packages/agenttic-ui"));
+        assert!(err.message.contains("outside component checkout"));
+        assert!(err.message.contains("published package version"));
+        assert!(err.message.contains("workspace release path"));
+    }
+
+    #[test]
+    fn local_file_dependency_guard_allows_existing_targets_inside_checkout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("packages/ui")).expect("local package dir");
+        write(
+            root,
+            "package.json",
+            r#"{ "dependencies": { "@org/ui": "file:./packages/ui" } }"#,
+        );
+
+        guard_local_file_dependencies(root).expect("in-checkout file dep is reproducible");
     }
 
     #[test]
