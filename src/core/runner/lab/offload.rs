@@ -19,6 +19,12 @@
 use std::path::Path;
 
 use crate::command_contract::lab_runner_support_summary;
+use crate::command_contract::{
+    RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
+    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+};
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
@@ -61,11 +67,12 @@ use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
+#[cfg(test)]
+use super::super::{RunnerActiveJobSource, RunnerActiveJobState};
 
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
@@ -1007,22 +1014,6 @@ fn run_lab_offload_inner(
         ));
     }
 
-    if request.capture_patch && status_tunnel_mode(&runner_status) == RunnerTunnelMode::Reverse {
-        let reason =
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string();
-        plan = with_step(
-            plan,
-            PlanStep::builder(
-                "lab.mutation_return",
-                "lab.mutation_return",
-                PlanStepStatus::Missing,
-            )
-            .skip_reason(reason.clone())
-            .build(),
-        );
-        return mutation_return_unavailable_outcome(plan, &selection, &runner_status, reason);
-    }
-
     let runner_workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -1302,6 +1293,17 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
+    lab_metadata["runner_workload"] = serde_json::to_value(runner_workload_metadata(
+        &plan,
+        &contract,
+        &request,
+        runner_id,
+        status_tunnel_mode(&runner_status).metadata_value(),
+        selection.source.metadata_value(),
+        &remote_cwd,
+        &lab_metadata,
+    ))
+    .unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -1708,6 +1710,116 @@ fn lab_materialization_proof_metadata(
     })
 }
 
+fn runner_workload_metadata(
+    plan: &HomeboyPlan,
+    contract: &LabOffloadCommand,
+    request: &LabOffloadRequest<'_>,
+    runner_id: &str,
+    runner_mode: &str,
+    assignment_source: &str,
+    remote_workspace: &str,
+    lab_metadata: &serde_json::Value,
+) -> RunnerWorkload {
+    RunnerWorkload {
+        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+        workload_id: format!("{}.runner_workload", plan.id),
+        kind: RunnerWorkloadKind {
+            command_label: contract.hot_label.to_string(),
+            command_family: RunnerWorkloadCommandFamily::from_command_label(contract.hot_label),
+        },
+        workspace_mappings: RunnerWorkloadWorkspaceMappings {
+            source_path_mode: contract.source_path_mode.label().to_string(),
+            workspace_mode_policy: contract.workspace_mode_policy.label().to_string(),
+            mapping_ref: Some("workspace_mapping".to_string()),
+        },
+        required_capabilities: runner_workload_required_capabilities(contract),
+        required_secrets: RunnerWorkloadSecrets {
+            categories: runner_workload_required_secret_categories(contract.hot_label),
+        },
+        mutation_policy: RunnerWorkloadMutationPolicy {
+            capture_patch: request.capture_patch,
+            mutation_flag: request.mutation_flag.map(str::to_string),
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        },
+        assignment: RunnerWorkloadAssignment {
+            runner_id: Some(runner_id.to_string()),
+            runner_mode: Some(runner_mode.to_string()),
+            source: Some(assignment_source.to_string()),
+        },
+        state: RunnerWorkloadState {
+            status: "offloaded".to_string(),
+            remote_workspace: Some(remote_workspace.to_string()),
+            fallback_reason: None,
+        },
+        result_refs: RunnerWorkloadResultRefs {
+            plan_id: plan.id.clone(),
+            proof_id: lab_metadata
+                .get("proof")
+                .and_then(|proof| proof.get("id"))
+                .and_then(|id| id.as_str())
+                .map(str::to_string),
+            workspace_mapping_ref: Some("workspace_mapping".to_string()),
+        },
+    }
+}
+
+fn runner_workload_required_capabilities(
+    contract: &LabOffloadCommand,
+) -> Vec<RunnerWorkloadCapability> {
+    let mut capabilities = Vec::new();
+    if contract.routing_policy.requires_extension_parity || !contract.required_extensions.is_empty()
+    {
+        capabilities.push(RunnerWorkloadCapability {
+            name: "extension_parity".to_string(),
+            required: true,
+        });
+    }
+    if contract.requires_playwright {
+        capabilities.push(RunnerWorkloadCapability {
+            name: "playwright".to_string(),
+            required: true,
+        });
+    }
+    capabilities
+}
+
+fn runner_workload_required_secret_categories(hot_label: &str) -> Vec<String> {
+    match hot_label {
+        label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
+        "trace" => vec!["trace".to_string()],
+        label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+impl LabOffloadSourcePathMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CwdOrPathFlag => "cwd_or_path_flag",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+impl LabOffloadWorkspaceModePolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
+            Self::Git => "git",
+            Self::GitCheckoutRequired => "git_checkout_required",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+fn passive_wp_codebox_version() -> Option<String> {
+    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
     let branch = metadata
         .get("git_branch")
@@ -2100,31 +2212,6 @@ fn append_runner_failure_context_summary(
     ));
 }
 
-fn mutation_return_unavailable_outcome(
-    plan: HomeboyPlan,
-    selection: &LabRunnerSelection,
-    runner_status: &RunnerStatusReport,
-    reason: String,
-) -> Result<LabOffloadOutcome> {
-    match selection.source {
-        LabRunnerSelectionSource::Default => Ok(automatic_capability_fallback(
-            plan,
-            &selection.runner_id,
-            runner_status,
-            reason,
-        )),
-        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-            "runner",
-            reason,
-            Some(selection.runner_id.clone()),
-            Some(vec![
-                "Use --force-hot to run the command locally until reverse Lab mutation return is supported."
-                    .to_string(),
-            ]),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::super::lab_capabilities::lab_runner_capability_contract;
@@ -2139,8 +2226,9 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+        RunnerActiveJobSource, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput,
+        RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -3225,61 +3313,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_return_gap_falls_back_for_default_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let outcome = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        )
-        .expect("default runner falls back");
-
-        let LabOffloadOutcome::RunLocal {
-            messages, metadata, ..
-        } = outcome
-        else {
-            panic!("expected local fallback");
-        };
-        assert!(messages[0].contains("running locally"));
-        assert_eq!(metadata.expect("metadata")["status"], "fallback");
-    }
-
-    #[test]
-    fn mutation_return_gap_rejects_explicit_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let result = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        );
-        let Err(err) = result else {
-            panic!("expected explicit runner rejection");
-        };
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("cannot yet return source-tree mutations"));
-        assert_eq!(err.details["id"], "lab");
-    }
-
-    #[test]
     fn apply_patch_step_accepts_noop_mutation_return() {
         let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
 
@@ -3318,6 +3351,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: Some(CommandCaptureMetadata {
@@ -3364,6 +3398,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
@@ -3409,6 +3444,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,

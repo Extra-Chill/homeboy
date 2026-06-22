@@ -3023,6 +3023,7 @@ mod tests {
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,

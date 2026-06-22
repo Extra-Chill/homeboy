@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 /// the deploy when the smoke fails.
 ///
 /// This is deliberately generic: core only knows "fetch a URL, assert a
-/// status/content". The concrete front-end URL (e.g. a WordPress site home
-/// page) belongs in the project config, not in core, so the smoke step stays
+/// status/content". The concrete front-end URL (e.g. a site home page)
+/// belongs in the project config, not in core, so the smoke step stays
 /// stack-agnostic. It exists to catch runtime-fataling releases that pass
-/// syntax-only checks (`php -l`) and never get exercised by a real page load
+/// syntax-only checks and never get exercised by a real page load
 /// — see homeboy#5471.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmokeCheckConfig {

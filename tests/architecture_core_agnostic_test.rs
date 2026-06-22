@@ -450,6 +450,47 @@ fn core_facades_expose_explicit_groups_not_wildcards() {
 }
 
 #[test]
+fn architecture_docs_source_paths_exist() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let docs = [
+        "docs/architecture.md",
+        "docs/developer-guide/architecture-overview.md",
+        "docs/developer-guide/architecture-cleanup-map.md",
+    ];
+    let mut missing = Vec::new();
+
+    for doc in docs {
+        let content = source_file(doc);
+        for source_path in backtick_source_paths(&content) {
+            if !root.join(source_path).exists() {
+                missing.push(format!("{doc} references missing `{source_path}`"));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "architecture docs must not claim missing source paths:\n{}",
+        missing.join("\n")
+    );
+}
+
+fn backtick_source_paths(content: &str) -> Vec<&str> {
+    content
+        .split('`')
+        .enumerate()
+        .filter_map(|(index, segment)| (index % 2 == 1).then_some(segment))
+        .filter(|segment| {
+            segment.starts_with("src/")
+                && !segment.contains("...")
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.'))
+        })
+        .collect()
+}
+
+#[test]
 fn detector_implementations_stay_domain_agnostic() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let findings = homeboy::core::code_audit::source_policy_findings_for_path(
