@@ -745,6 +745,54 @@ has_lint_command() {
   printf '%s\n' "false"
 }
 
+resolve_baseline_commands() {
+  local requested_commands="$1"
+  local baseline_input="${2:-auto}"
+  local source_commands cmd base_cmd requested_cmd requested_base found result=()
+
+  baseline_input="$(printf '%s' "${baseline_input}" | xargs)"
+  case "${baseline_input}" in
+    ""|auto)
+      source_commands="${requested_commands}"
+      ;;
+    none|false|off)
+      printf '\n'
+      return 0
+      ;;
+    *)
+      source_commands="${baseline_input}"
+      ;;
+  esac
+
+  IFS=',' read -ra CMD_ARRAY <<< "$(canonicalize_commands "${source_commands}")"
+  for cmd in "${CMD_ARRAY[@]}"; do
+    cmd="$(echo "${cmd}" | xargs)"
+    base_cmd="$(printf '%s' "${cmd}" | awk '{print $1}')"
+    case "${base_cmd}" in
+      audit|lint|test) ;;
+      *) continue ;;
+    esac
+
+    found=false
+    IFS=',' read -ra REQUESTED_ARRAY <<< "${requested_commands}"
+    for requested_cmd in "${REQUESTED_ARRAY[@]}"; do
+      requested_cmd="$(echo "${requested_cmd}" | xargs)"
+      requested_base="$(printf '%s' "${requested_cmd}" | awk '{print $1}')"
+      if [ "${requested_base}" = "${base_cmd}" ]; then
+        found=true
+        break
+      fi
+    done
+
+    if [ "${found}" = true ]; then
+      result+=("${base_cmd}")
+    fi
+  done
+
+  local IFS=','
+  printf '%s\n' "${result[*]}"
+}
+
 settings_json_flags() {
   local raw="${HOMEBOY_SETTINGS_JSON:-}"
   if [ -z "${raw}" ] || [ "${raw}" = "{}" ]; then

@@ -5,6 +5,7 @@ set -euo pipefail
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 EFFECTIVE_COMMANDS="${COMMANDS:-audit,lint,test}"
+BASELINE_COMMANDS_INPUT="${BASELINE_COMMANDS:-auto}"
 
 if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" != "true" ]; then
   echo "Differential gating disabled; skipping baseline run"
@@ -22,19 +23,19 @@ if [ -n "${TRACKED_DIRTY}" ]; then
   exit 0
 fi
 
-BASELINE_COMMANDS=()
-ORDERED_COMMANDS="$(canonicalize_commands "${EFFECTIVE_COMMANDS}")"
+BASELINE_RUN_COMMANDS=()
+ORDERED_COMMANDS="$(resolve_baseline_commands "${EFFECTIVE_COMMANDS}" "${BASELINE_COMMANDS_INPUT}")"
 IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${CMD}" | xargs)"
   case "${CMD}" in
     audit|lint|test)
-      BASELINE_COMMANDS+=("${CMD}")
+      BASELINE_RUN_COMMANDS+=("${CMD}")
       ;;
   esac
 done
 
-if [ "${#BASELINE_COMMANDS[@]}" -eq 0 ]; then
+if [ "${#BASELINE_RUN_COMMANDS[@]}" -eq 0 ]; then
   echo "No audit/lint/test commands requested; skipping differential baseline run"
   exit 0
 fi
@@ -57,7 +58,7 @@ COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
 GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy baseline}"
 
-for CMD in "${BASELINE_COMMANDS[@]}"; do
+for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
   OUTPUT_STEM="$(command_output_stem "${CMD}")"
   OUTPUT_JSON="${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
