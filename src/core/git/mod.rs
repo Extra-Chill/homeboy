@@ -11,6 +11,7 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod pr_land;
 mod pr_policy;
 mod primitives;
 mod primitives_query;
@@ -58,6 +59,7 @@ pub use operations_tags::{
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote,
 };
+pub use pr_land::{land_prs, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,

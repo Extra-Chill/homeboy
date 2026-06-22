@@ -169,6 +169,7 @@ homeboy git pr create <component_id> --base <base> --head <head> --title <title>
 homeboy git pr edit <component_id> --number <n> [--title <title>] [--body <body> | --body-file <path>]
 homeboy git pr find <component_id> [--base <base>] [--head <head>] [--state open|closed|merged|all] [--limit <n>]
 homeboy git pr comment <component_id> --number <n> [comment mode flags]
+homeboy git pr land <repo> <pr>... [--merge-method squash|merge|rebase]
 ```
 
 Like issue commands, PR commands accept `--path` to discover component metadata from a portable checkout:
@@ -177,6 +178,34 @@ Like issue commands, PR commands accept `--path` to discover component metadata 
 homeboy git pr create homeboy --base main --head docs-refresh-git-command --title "docs: refresh git command workflows" --body-file /tmp/pr.md
 homeboy git pr find homeboy --head docs-refresh-git-command --state open
 ```
+
+### PR Landing Train
+
+`homeboy git pr land` lands a list of PRs one at a time. It inspects the next PR immediately before merging, merges only clean PRs with successful reported checks, then rechecks the next PR after each merge. The command pauses at the first blocker and emits a final fleet status table.
+
+```sh
+homeboy git pr land Extra-Chill/homeboy 123 124 125
+homeboy git pr land Extra-Chill/homeboy https://github.com/Extra-Chill/homeboy/pull/123 --dry-run
+```
+
+Safety behavior:
+
+- PRs merge sequentially by default; there is no parallel landing mode.
+- A PR with failing, pending, or unreported required checks blocks the train.
+- A `CLEAN` merge state without reported successful checks is not considered ready.
+- If GitHub reports a base-branch-modified merge race, Homeboy recomputes readiness and retries within `--max-base-retries`.
+- Dirty dependent PRs are refreshed only when an explicit helper program is supplied with `--refresh-helper`; helper arguments are passed directly, not through a shell.
+
+Refresh helper example:
+
+```sh
+homeboy git pr land Extra-Chill/homeboy 123 124 \
+  --refresh-helper homeboy-pr-refresh \
+  --refresh-helper-arg {repo} \
+  --refresh-helper-arg {number}
+```
+
+Supported helper placeholders are `{repo}`, `{number}`, `{url}`, and `{head_sha}`.
 
 ### PR Comments
 
