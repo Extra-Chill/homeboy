@@ -817,7 +817,7 @@ fn extract_failure_snippets(log: &str, context_lines: usize) -> Vec<CiFailureSni
         let end = (index + (context_lines / 2) + 1).min(lines.len());
         if snippets
             .last()
-            .is_some_and(|snippet| start < snippet.line_end)
+            .is_some_and(|snippet: &CiFailureSnippet| start < snippet.line_end)
         {
             continue;
         }

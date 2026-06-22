@@ -987,6 +987,8 @@ mod pull_requests {
             base_branch: Some(base_branch.to_string()),
             head_branch: Some(head_branch.to_string()),
             head_repo: Some(head_repo.to_string()),
+            mergeability_state: TriageLandingMergeabilityState::Clean,
+            check_state: TriageLandingCheckState::Clean,
             classification: TriageLandingClassification::CleanMergeable,
             suggested_next_command: format!(
                 "homeboy triage --watch {repo}#{number} --until green-mergeable"
