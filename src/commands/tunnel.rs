@@ -379,8 +379,10 @@ impl PreviewIngressInstallArgs {
             bind: self.bind,
             binary_path: self.binary_path,
             service_name: self.service_name,
-            service_user: self.user,
-            service_group: self.group,
+            identity: homeboy::core::daemon::ServiceIdentity {
+                service_user: self.user,
+                service_group: self.group,
+            },
         }
     }
 }

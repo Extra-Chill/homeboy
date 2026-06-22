@@ -14,6 +14,7 @@ use crate::core::preview_client::{
     PreviewIngressRequest, PreviewIngressResponse, PreviewIngressResponseChunk,
 };
 
+use crate::core::daemon::ServiceIdentity;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
 use crate::core::plan::{
@@ -85,8 +86,7 @@ pub struct PreviewIngressInstallOptions {
     pub bind: String,
     pub binary_path: String,
     pub service_name: String,
-    pub service_user: String,
-    pub service_group: String,
+    pub identity: ServiceIdentity,
 }
 
 impl Default for PreviewIngressInstallOptions {
@@ -98,8 +98,7 @@ impl Default for PreviewIngressInstallOptions {
             bind: "127.0.0.1:7350".to_string(),
             binary_path: "/usr/local/bin/homeboy".to_string(),
             service_name: "homeboy-preview-ingress".to_string(),
-            service_user: "homeboy".to_string(),
-            service_group: "homeboy".to_string(),
+            identity: ServiceIdentity::default(),
         }
     }
 }
@@ -114,8 +113,8 @@ pub struct PreviewIngressInstallPlan {
     pub dns_probe_host: String,
     pub bind: String,
     pub service_name: String,
-    pub service_user: String,
-    pub service_group: String,
+    #[serde(flatten)]
+    pub identity: ServiceIdentity,
     pub binary_path: String,
     pub local_status_url: String,
     pub public_status_url: String,
@@ -345,8 +344,7 @@ pub fn render_install_plan(
         dns_probe_host: dns_probe_host.clone(),
         bind: normalized.bind.clone(),
         service_name: normalized.service_name.clone(),
-        service_user: normalized.service_user.clone(),
-        service_group: normalized.service_group.clone(),
+        identity: normalized.identity.clone(),
         binary_path: normalized.binary_path.clone(),
         local_status_url: local_status_url.clone(),
         public_status_url: public_status_url.clone(),
@@ -445,8 +443,8 @@ fn install_homeboy_plan(install: &PreviewIngressInstallPlan) -> HomeboyPlan {
             .string("dns_probe_host", &install.dns_probe_host)
             .string("bind", &install.bind)
             .string("service_name", &install.service_name)
-            .string("service_user", &install.service_user)
-            .string("service_group", &install.service_group)
+            .string("service_user", &install.identity.service_user)
+            .string("service_group", &install.identity.service_group)
             .string("binary_path", &install.binary_path),
     )
     .policy_value("would_mutate", serde_json::json!(false))
@@ -1829,8 +1827,8 @@ ProtectHome=read-only
 [Install]
 WantedBy=multi-user.target
 "#,
-        user = options.service_user,
-        group = options.service_group,
+        user = options.identity.service_user,
+        group = options.identity.service_group,
         binary = options.binary_path,
         bind = options.bind,
         domain = options.domain,
@@ -1933,7 +1931,7 @@ fn required_operator_config(options: &PreviewIngressInstallOptions) -> Vec<Strin
         ),
         format!(
             "System user/group `{}`/`{}` available on the VPS",
-            options.service_user, options.service_group
+            options.identity.service_user, options.identity.service_group
         ),
         "A proxy choice: install the rendered Nginx or Caddy snippet, not both".to_string(),
     ]

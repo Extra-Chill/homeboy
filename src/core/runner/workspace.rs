@@ -92,8 +92,8 @@ pub struct RunnerWorkspaceSyncOutput {
     pub workspace_lease: RunnerWorkspaceLease,
     pub sync_mode: RunnerWorkspaceSyncMode,
     pub snapshot_identity: String,
-    pub files: usize,
-    pub bytes: u64,
+    #[serde(flatten)]
+    pub counts: ByteFileCounts,
     pub excludes: Vec<String>,
     pub includes: Vec<String>,
     pub workspace_cleanliness: String,
@@ -188,8 +188,7 @@ pub fn sync_workspace(
                     workspace_lease,
                     sync_mode: RunnerWorkspaceSyncMode::Snapshot,
                     snapshot_identity: snapshot,
-                    files: stats.files,
-                    bytes: stats.bytes,
+                    counts: stats,
                     excludes,
                     includes,
                     workspace_cleanliness: "snapshot_unique_workspace".to_string(),
@@ -269,8 +268,7 @@ pub fn sync_workspace(
                     workspace_lease,
                     sync_mode: RunnerWorkspaceSyncMode::Git,
                     snapshot_identity: git.head,
-                    files: 0,
-                    bytes: 0,
+                    counts: ByteFileCounts::default(),
                     excludes,
                     includes,
                     workspace_cleanliness: if options.allow_dirty_lab_workspace {
@@ -344,10 +342,18 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
     }
 }
 
-pub(super) struct SnapshotStats {
-    pub(super) files: usize,
-    pub(super) bytes: u64,
+/// File + byte counts for a synced/snapshotted workspace tree.
+///
+/// Shared across the workspace-sync and git-dependency materialization outputs
+/// so the `files` / `bytes` pair is declared once. Serialized flat via
+/// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ByteFileCounts {
+    pub files: usize,
+    pub bytes: u64,
 }
+
+pub(super) type SnapshotStats = ByteFileCounts;
 
 struct GitSnapshot {
     remote_url: String,
@@ -1318,7 +1324,7 @@ mod tests {
             .expect("sync workspace");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(output.files, 1);
+            assert_eq!(output.counts.files, 1);
             assert!(output.excludes.contains(&"generated-state/**".to_string()));
             assert!(Path::new(&output.remote_path)
                 .join("src/source.txt")
@@ -1398,7 +1404,7 @@ mod tests {
             assert_eq!(output.current_workspace.source_commit, None);
             assert_eq!(output.current_workspace.source_ref, None);
             assert_eq!(output.current_workspace.source_dirty, None);
-            assert_eq!(output.files, 4);
+            assert_eq!(output.counts.files, 4);
             assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
             assert!(Path::new(&output.remote_path)
                 .join("vendor/autoload.php")

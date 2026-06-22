@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use homeboy::core::daemon::{
     self, BrokerConfig, BrokerConfigOptions, DaemonStartResult, DaemonStatus, DaemonStopResult,
+    ServiceIdentity,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 
@@ -112,8 +113,10 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::BrokerConfig(daemon::render_broker_config(BrokerConfigOptions {
                 listen_addr,
                 binary_path,
-                service_user: user,
-                service_group: group,
+                identity: ServiceIdentity {
+                    service_user: user,
+                    service_group: group,
+                },
                 domain,
             })?),
             0,

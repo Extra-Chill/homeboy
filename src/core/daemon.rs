@@ -25,7 +25,7 @@ mod broker_config;
 mod patch_capture;
 mod remote_runner;
 pub use artifact_download::ArtifactDownload;
-pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions};
+pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 use patch_capture::{capture_baseline, capture_patch_report};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";

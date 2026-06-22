@@ -1,13 +1,32 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::error::{Error, Result};
+
+/// Unix service identity (system user + group) that a managed daemon runs as.
+///
+/// Shared across the broker and preview-ingress install surfaces so the
+/// `service_user` / `service_group` pair is defined once. Serialized flat via
+/// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceIdentity {
+    pub service_user: String,
+    pub service_group: String,
+}
+
+impl Default for ServiceIdentity {
+    fn default() -> Self {
+        Self {
+            service_user: "homeboy".to_string(),
+            service_group: "homeboy".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerConfigOptions {
     pub listen_addr: String,
     pub binary_path: String,
-    pub service_user: String,
-    pub service_group: String,
+    pub identity: ServiceIdentity,
     pub domain: Option<String>,
 }
 
@@ -16,8 +35,7 @@ impl Default for BrokerConfigOptions {
         Self {
             listen_addr: "127.0.0.1:7421".to_string(),
             binary_path: "/usr/local/bin/homeboy".to_string(),
-            service_user: "homeboy".to_string(),
-            service_group: "homeboy".to_string(),
+            identity: ServiceIdentity::default(),
             domain: None,
         }
     }
@@ -28,8 +46,8 @@ pub struct BrokerConfig {
     pub command: String,
     pub listen_addr: String,
     pub service_name: String,
-    pub service_user: String,
-    pub service_group: String,
+    #[serde(flatten)]
+    pub identity: ServiceIdentity,
     pub binary_path: String,
     pub daemon_state_path: String,
     pub daemon_jobs_path: String,
@@ -69,8 +87,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         command: "daemon.broker_config".to_string(),
         listen_addr: listen.to_string(),
         service_name: "homeboy-broker".to_string(),
-        service_user: options.service_user.clone(),
-        service_group: options.service_group.clone(),
+        identity: options.identity.clone(),
         binary_path: options.binary_path.clone(),
         daemon_state_path: "/var/lib/homeboy/.config/homeboy/daemon/state.json".to_string(),
         daemon_jobs_path: "/var/lib/homeboy/.config/homeboy/daemon/jobs.json".to_string(),
@@ -155,8 +172,8 @@ ProtectHome=read-only
 [Install]
 WantedBy=multi-user.target
 "#,
-        user = options.service_user,
-        group = options.service_group,
+        user = options.identity.service_user,
+        group = options.identity.service_group,
         binary = options.binary_path,
     )
 }

@@ -1149,8 +1149,10 @@ mod tests {
             },
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
             snapshot_identity: "snapshot".to_string(),
-            files: 1,
-            bytes: 42,
+            counts: crate::core::runner::ByteFileCounts {
+                files: 1,
+                bytes: 42,
+            },
             excludes: Vec::new(),
             includes: Vec::new(),
             workspace_cleanliness: "clean".to_string(),
