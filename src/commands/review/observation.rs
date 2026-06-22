@@ -196,6 +196,7 @@ mod tests {
             changed_only: false,
             summary: true,
             ci_profile: None,
+            audit_profile: None,
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),

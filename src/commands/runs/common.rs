@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter, RunRecord};
 use homeboy::core::rig::RigRunArtifactIndex;
-use homeboy::core::runners::is_reportable_artifact_evidence_path;
+use homeboy::core::runners::{
+    is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
+};
 use homeboy::core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -225,6 +227,14 @@ pub fn load_artifact_rows(
                 &run,
                 &artifact,
                 "artifact path is not locally accessible or retrievable",
+            ));
+            continue;
+        }
+        if is_retrievable_runner_artifact(&artifact.path) {
+            skipped.push(skipped_artifact(
+                &run,
+                &artifact,
+                "artifact is a retrievable runner artifact ref; download it before JSON projection",
             ));
             continue;
         }

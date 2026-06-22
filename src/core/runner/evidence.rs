@@ -347,7 +347,7 @@ pub fn mirror_daemon_evidence(
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
     let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
-    mirror_remote_observation_runs(&store, runner, job)?;
+    mirror_remote_observation_runs(&store, runner, job, result)?;
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
     Ok(Some(MirroredDaemonEvidence {
         run: local_job_run,
@@ -421,7 +421,9 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
     mirror_job_run(&store, &runner, cwd, &command, &job, &events, &result)?;
-    Ok(Some(mirror_remote_observation_runs(&store, &runner, &job)?))
+    Ok(Some(mirror_remote_observation_runs(
+        &store, &runner, &job, &result,
+    )?))
 }
 
 pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
@@ -578,7 +580,13 @@ fn mirror_remote_observation_runs(
     store: &ObservationStore,
     runner: &Runner,
     job: &Job,
+    result: &Value,
 ) -> Result<Vec<RunRecord>> {
+    let explicit_run_ids = explicit_observation_run_ids(result, job);
+    if !explicit_run_ids.is_empty() {
+        return mirror_remote_observation_runs_by_id(store, runner, job, &explicit_run_ids);
+    }
+
     let data = daemon_api_get(&runner.id, "/runs?limit=100")?;
     let body = canonical_daemon_body(&data, "runner runs response")?;
     let Some(remote_runs) = body.get("runs").and_then(Value::as_array) else {
@@ -592,6 +600,32 @@ fn mirror_remote_observation_runs(
         if !remote_run_matches_job_window(summary, job) {
             continue;
         }
+        let detail_data = daemon_api_get(
+            &runner.id,
+            &format!("/runs/{}", encode_uri_component(run_id)),
+        )?;
+        let detail_body = canonical_daemon_body(&detail_data, "runner run detail response")?;
+        let Some(detail) = detail_body.get("run") else {
+            continue;
+        };
+        let run = remote_detail_to_run_record(detail, runner, Some(job))?;
+        import_run_if_absent(store, &run)?;
+        for artifact in remote_detail_artifacts(detail, runner, &run.id)? {
+            import_artifact_if_absent(store, &artifact)?;
+        }
+        mirrored.push(run);
+    }
+    Ok(mirrored)
+}
+
+fn mirror_remote_observation_runs_by_id(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    run_ids: &[String],
+) -> Result<Vec<RunRecord>> {
+    let mut mirrored = Vec::new();
+    for run_id in run_ids {
         let detail_data = daemon_api_get(
             &runner.id,
             &format!("/runs/{}", encode_uri_component(run_id)),
@@ -912,6 +946,61 @@ fn remote_run_matches_job_window(summary: &Value, job: &Job) -> bool {
     started_ms >= job_start.saturating_sub(5_000) && started_ms <= job_finish.saturating_add(5_000)
 }
 
+fn explicit_observation_run_ids(result: &Value, job: &Job) -> Vec<String> {
+    let mut ids = Vec::new();
+    for pointer in [
+        "/mirror_run_id",
+        "/durable_run_id",
+        "/runner_result/mirror_run_id",
+        "/data/mirror_run_id",
+        "/data/durable_run_id",
+    ] {
+        push_unique_string(&mut ids, result.pointer(pointer).and_then(Value::as_str));
+    }
+    for pointer in ["/observation_run_ids", "/data/observation_run_ids"] {
+        if let Some(values) = result.pointer(pointer).and_then(Value::as_array) {
+            for value in values {
+                push_unique_string(&mut ids, value.as_str());
+            }
+        }
+    }
+    for artifact in job
+        .artifacts
+        .iter()
+        .filter_map(|artifact| artifact.path.as_deref())
+    {
+        if let Ok(token) = RemoteArtifactToken::parse(artifact) {
+            push_unique_string(&mut ids, Some(&token.run_id));
+        }
+    }
+    for pointer in [
+        "/artifact_refs",
+        "/runner_result/artifact_refs",
+        "/data/artifact_refs",
+    ] {
+        if let Some(artifacts) = result.pointer(pointer).and_then(Value::as_array) {
+            for artifact in artifacts {
+                let path = artifact.get("path").and_then(Value::as_str);
+                if let Some(path) = path {
+                    if let Ok(token) = RemoteArtifactToken::parse(path) {
+                        push_unique_string(&mut ids, Some(&token.run_id));
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
 fn job_status_as_run_status(status: JobStatus) -> &'static str {
     match status {
         JobStatus::Queued | JobStatus::Running => "running",
@@ -1215,5 +1304,58 @@ mod tests {
         assert_eq!(artifacts[0].id, "artifact-1");
         assert_eq!(artifacts[0].artifact_type, "remote_file");
         assert_eq!(artifacts[0].path, "runner-artifact://lab/run-1/artifact-1");
+    }
+
+    #[test]
+    fn test_explicit_observation_run_ids_prefers_result_lineage() {
+        let job_id = Uuid::new_v4();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Succeeded,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: Some(1_700_000_001_000),
+            event_count: 0,
+            source_snapshot: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: vec![JobArtifactMetadata {
+                id: "artifact-1".to_string(),
+                name: None,
+                path: Some("runner-artifact://lab/run-from-job/artifact-1".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                metadata: None,
+            }],
+        };
+        let result = json!({
+            "mirror_run_id": "run-a",
+            "observation_run_ids": ["run-b", "run-a"],
+            "runner_result": {
+                "artifact_refs": [{
+                    "artifact_id": "artifact-2",
+                    "path": "runner-artifact://lab/run-from-ref/artifact-2"
+                }]
+            }
+        });
+
+        assert_eq!(
+            explicit_observation_run_ids(&result, &job),
+            vec![
+                "run-a".to_string(),
+                "run-b".to_string(),
+                "run-from-job".to_string(),
+                "run-from-ref".to_string(),
+            ]
+        );
     }
 }

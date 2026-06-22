@@ -9,7 +9,7 @@
 //! `lab_runner_unsupported_reason`, `lab_offload_mutation_flag`).
 
 use crate::cli_surface::Commands;
-use crate::command_contract::CommandDescriptor;
+use crate::command_contract::{CommandDescriptor, CommandOutputFileMode};
 use crate::commands::agent_task;
 use crate::core::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::core::engine::execution_context::{self, ResolveOptions};
@@ -344,7 +344,9 @@ impl Commands {
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple("extension update")
             }
-            Commands::Fleet(args) => args.lab_contract()?,
+            Commands::Fleet(args) => {
+                crate::commands::fleet::adapter(CommandOutputFileMode::None).lab_contract(args)?
+            }
             Commands::Lint(args) => args.lab_contract()?,
             Commands::Review(args) => args.lab_contract(),
             Commands::Refactor(args) if args.is_hot_resource_command() => {

@@ -73,7 +73,11 @@ pub struct RemoteRunnerJobResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observation_run_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
