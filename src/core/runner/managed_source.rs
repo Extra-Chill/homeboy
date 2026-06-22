@@ -151,7 +151,7 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
             script.push_str("  echo \"managed runner source ref not found: $ref\" >&2\n");
             script.push_str("  exit 1\n");
             script.push_str("fi\n");
-            script.push_str("git -C \"$dir\" checkout --quiet --force \"$ref\" 2>/dev/null || git -C \"$dir\" checkout --quiet --force --detach \"$target\"\n");
+            script.push_str("git -C \"$dir\" checkout --quiet --force -B \"$ref\" \"$target\" 2>/dev/null || git -C \"$dir\" checkout --quiet --force --detach \"$target\"\n");
             script.push_str("git -C \"$dir\" reset --hard \"$target\"\n");
         }
         None => {
@@ -263,6 +263,21 @@ mod tests {
         assert!(plan
             .script
             .contains("rev-parse --verify --quiet \"origin/$ref\""));
+        assert!(plan
+            .script
+            .contains("git -C \"$dir\" reset --hard \"$target\""));
+    }
+
+    #[test]
+    fn script_restores_declared_branch_from_detached_dirty_checkout() {
+        let mut decl = source("src", "/home/r/.cache/src");
+        decl.remote_url = Some("https://example.test/repo.git".to_string());
+        decl.git_ref = Some("main".to_string());
+        let plan = plan_managed_runner_source_sync(&decl).expect("plan");
+
+        assert!(plan
+            .script
+            .contains("git -C \"$dir\" checkout --quiet --force -B \"$ref\" \"$target\""));
         assert!(plan
             .script
             .contains("git -C \"$dir\" reset --hard \"$target\""));

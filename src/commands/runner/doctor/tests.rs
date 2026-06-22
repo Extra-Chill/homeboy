@@ -1,6 +1,7 @@
 use super::*;
 use homeboy::core::agent_tasks::provider::{
     AgentTaskProviderEnvPathReadiness, AgentTaskProviderRunnerReadiness,
+    AgentTaskProviderRunnerSource,
 };
 use std::collections::BTreeMap;
 use types::{HomeboyProbe, RunnerDoctorStatus};
@@ -306,6 +307,72 @@ fn path_within_canonical_root_is_segment_aware() {
     ));
     // Empty root is treated as "no canonical constraint".
     assert!(probes::path_within_canonical_root("/anywhere", ""));
+}
+
+#[test]
+fn managed_runner_source_warns_on_dirty_generated_cache_state() {
+    let contract = AgentTaskProviderRunnerSource {
+        id: "wp-codebox".to_string(),
+        label: "WP Codebox".to_string(),
+        path: "/home/chubes/.cache/homeboy/wp-codebox/source".to_string(),
+        remote_url: Some("https://github.com/Automattic/wp-codebox.git".to_string()),
+        git_ref: Some("main".to_string()),
+        remediation: Some("Run runner doctor with --repair".to_string()),
+        extra: BTreeMap::new(),
+    };
+    let mut details = BTreeMap::new();
+    details.insert("dirty_files".to_string(), "1".to_string());
+
+    let check = probes::managed_runner_source_state_check(
+        &contract,
+        "lab.managed_source.wp-codebox".to_string(),
+        Some("main"),
+        1,
+        details,
+    )
+    .expect("dirty source warning");
+
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check
+        .message
+        .contains("reconstructable local modifications"));
+    assert_eq!(
+        check.details.get("dirty_files").map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        check.remediation.as_deref(),
+        contract.remediation.as_deref()
+    );
+}
+
+#[test]
+fn managed_runner_source_warns_on_detached_declared_ref() {
+    let contract = AgentTaskProviderRunnerSource {
+        id: "wp-codebox".to_string(),
+        label: "WP Codebox".to_string(),
+        path: "/home/chubes/.cache/homeboy/wp-codebox/source".to_string(),
+        remote_url: Some("https://github.com/Automattic/wp-codebox.git".to_string()),
+        git_ref: Some("main".to_string()),
+        remediation: Some("Run runner doctor with --repair".to_string()),
+        extra: BTreeMap::new(),
+    };
+
+    let check = probes::managed_runner_source_state_check(
+        &contract,
+        "lab.managed_source.wp-codebox".to_string(),
+        None,
+        0,
+        BTreeMap::new(),
+    )
+    .expect("detached source warning");
+
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("declared ref `main`"));
+    assert_eq!(
+        check.remediation.as_deref(),
+        contract.remediation.as_deref()
+    );
 }
 
 #[test]
