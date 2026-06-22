@@ -8,6 +8,8 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
+homeboy fuzz validate <results-file>
+homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--output-envelope <path>]
 homeboy fuzz replay [<case>] [--run-id <id>] [-- <runner-args>]
 ```
 
@@ -58,6 +60,26 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
 
+Campaigns can include a product-neutral coverage summary:
+
+```json
+{
+  "schema": "homeboy/fuzz-campaign/v1",
+  "id": "campaign-1",
+  "safety_class": "read_only",
+  "coverage_summary": {
+    "schema": "homeboy/fuzz-coverage-summary/v1",
+    "declared_targets": 2,
+    "executable_targets": 2,
+    "proven_targets": 2,
+    "declared_operations": 4,
+    "executable_operations": 4,
+    "proven_operations": 4,
+    "artifact_ids": ["coverage-report"]
+  }
+}
+```
+
 `homeboy fuzz replay` is reserved for a future generic replay contract. Today it
 returns a product-agnostic `not_implemented` JSON response and does not execute
 local fuzz code. Use the originating fuzz runner's replay command until Homeboy
@@ -67,6 +89,11 @@ Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
 reason codes; and case/manifest artifacts. Treat missing `proven` counts or
 missing coverage/case artifacts as incomplete evidence, not as full coverage.
+`homeboy fuzz validate` and `homeboy fuzz report` evaluate coverage completeness
+gates from `coverage_summary`: `target-coverage-complete` and
+`operation-coverage-complete` pass only when every declared target/operation is
+proven, or when the summary explicitly declares zero targets/operations. Missing
+`coverage_summary` fails those completeness gates.
 
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab
@@ -122,8 +149,8 @@ Rigs can add private fuzz workloads keyed by extension id:
 
 ## Output
 
-`list`, `run`, and `replay` return JSON envelopes with stable `variant` values:
-`list`, `run`, and `replay`.
+`contract`, `list`, `plan`, `run`, `validate`, `report`, and `replay` return
+JSON envelopes with stable `variant` values.
 
 `run.execution.results_file` is the path advertised to the runner through
 `HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote

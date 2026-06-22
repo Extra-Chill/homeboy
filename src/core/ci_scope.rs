@@ -98,12 +98,12 @@ impl ScopeRequest {
         }
     }
 
-    pub fn with_base_ref(mut self, base_ref: Option<String>) -> Self {
+    fn with_base_ref(mut self, base_ref: Option<String>) -> Self {
         self.base_ref = base_ref.filter(|r| !r.is_empty());
         self
     }
 
-    pub fn with_fork(mut self, is_fork: bool) -> Self {
+    fn with_fork(mut self, is_fork: bool) -> Self {
         self.is_fork = is_fork;
         self
     }

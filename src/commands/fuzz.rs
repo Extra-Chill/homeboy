@@ -242,6 +242,7 @@ pub struct FuzzValidateOutput {
     pub campaign_id: String,
     pub open_findings: usize,
     pub artifacts: usize,
+    pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -252,6 +253,7 @@ pub struct FuzzReportOutput {
     pub results_file: String,
     pub envelope_file: Option<String>,
     pub envelope: FuzzResultEnvelope,
+    pub coverage_completeness: FuzzCoverageCompletenessOutput,
     pub gates: Vec<FuzzGateEvaluation>,
 }
 
@@ -301,6 +303,22 @@ pub struct FuzzGateEvaluation {
     pub metric: String,
     pub observed: f64,
     pub expected: f64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FuzzCoverageCompletenessOutput {
+    pub has_summary: bool,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub target_coverage_ratio: f64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    pub operation_coverage_ratio: f64,
+    pub skipped_targets: usize,
+    pub skipped_operations: usize,
+    pub artifact_ids: Vec<String>,
 }
 
 pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
@@ -458,6 +476,7 @@ fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
 fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOutput> {
     let campaign = parse_fuzz_results_file(&args.results_file)?;
     let gates = evaluate_fuzz_gates(&campaign);
+    let coverage_completeness = fuzz_coverage_completeness(&campaign);
 
     Ok(FuzzValidateOutput {
         command: "fuzz.validate".to_string(),
@@ -466,6 +485,7 @@ fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOut
         campaign_id: campaign.id.clone(),
         open_findings: open_finding_count(&campaign),
         artifacts: campaign.artifacts.len(),
+        coverage_completeness,
         gates,
     })
 }
@@ -473,6 +493,7 @@ fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOut
 fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
     let campaign = parse_fuzz_results_file(&args.results_file)?;
     let gates = evaluate_fuzz_gates(&campaign);
+    let coverage_completeness = fuzz_coverage_completeness(&campaign);
     let status = gate_status(&gates);
     let run_id = args.run.run_id.clone();
     let component = args.run.comp.id().unwrap_or("unknown").to_string();
@@ -536,6 +557,7 @@ fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
             .output_envelope
             .map(|path| path.to_string_lossy().to_string()),
         envelope,
+        coverage_completeness,
         gates,
     })
 }
@@ -659,6 +681,16 @@ fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvaluation> {
                     .iter()
                     .filter(|artifact| artifact.kind == "case_log")
                     .count() as f64,
+                "target_coverage_ratio" => coverage_ratio(
+                    campaign.coverage_summary.as_ref(),
+                    |summary| summary.proven_targets,
+                    |summary| summary.declared_targets,
+                ),
+                "operation_coverage_ratio" => coverage_ratio(
+                    campaign.coverage_summary.as_ref(),
+                    |summary| summary.proven_operations,
+                    |summary| summary.declared_operations,
+                ),
                 _ => 0.0,
             };
             let passed = threshold_passes(observed, gate.operator, gate.value);
@@ -671,6 +703,63 @@ fn evaluate_fuzz_gates(campaign: &FuzzCampaign) -> Vec<FuzzGateEvaluation> {
             }
         })
         .collect()
+}
+
+fn coverage_ratio(
+    summary: Option<&homeboy::core::fuzz::FuzzCoverageSummary>,
+    covered: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
+    total: impl Fn(&homeboy::core::fuzz::FuzzCoverageSummary) -> u64,
+) -> f64 {
+    let Some(summary) = summary else {
+        return 0.0;
+    };
+    let total = total(summary);
+    if total == 0 {
+        1.0
+    } else {
+        covered(summary) as f64 / total as f64
+    }
+}
+
+fn fuzz_coverage_completeness(campaign: &FuzzCampaign) -> FuzzCoverageCompletenessOutput {
+    match campaign.coverage_summary.as_ref() {
+        Some(summary) => FuzzCoverageCompletenessOutput {
+            has_summary: true,
+            declared_targets: summary.declared_targets,
+            executable_targets: summary.executable_targets,
+            proven_targets: summary.proven_targets,
+            target_coverage_ratio: coverage_ratio(
+                Some(summary),
+                |summary| summary.proven_targets,
+                |summary| summary.declared_targets,
+            ),
+            declared_operations: summary.declared_operations,
+            executable_operations: summary.executable_operations,
+            proven_operations: summary.proven_operations,
+            operation_coverage_ratio: coverage_ratio(
+                Some(summary),
+                |summary| summary.proven_operations,
+                |summary| summary.declared_operations,
+            ),
+            skipped_targets: summary.skipped_targets.len(),
+            skipped_operations: summary.skipped_operations.len(),
+            artifact_ids: summary.artifact_ids.clone(),
+        },
+        None => FuzzCoverageCompletenessOutput {
+            has_summary: false,
+            declared_targets: 0,
+            executable_targets: 0,
+            proven_targets: 0,
+            target_coverage_ratio: 0.0,
+            declared_operations: 0,
+            executable_operations: 0,
+            proven_operations: 0,
+            operation_coverage_ratio: 0.0,
+            skipped_targets: 0,
+            skipped_operations: 0,
+            artifact_ids: Vec::new(),
+        },
+    }
 }
 
 fn open_finding_count(campaign: &FuzzCampaign) -> usize {
@@ -1128,6 +1217,7 @@ mod tests {
             cases: Vec::new(),
             seeds: Vec::new(),
             coverage: Vec::new(),
+            coverage_summary: None,
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),
@@ -1143,6 +1233,123 @@ mod tests {
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "has-case-evidence" && gate.status == "failed" && gate.observed == 0.0
         }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "target-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.0
+        }));
+    }
+
+    #[test]
+    fn fuzz_gate_evaluation_requires_complete_target_and_operation_coverage() {
+        let mut campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
+                schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                declared_targets: 2,
+                executable_targets: 2,
+                proven_targets: 1,
+                declared_operations: 4,
+                executable_operations: 4,
+                proven_operations: 4,
+                skipped_targets: Vec::new(),
+                skipped_operations: Vec::new(),
+                artifact_ids: vec!["coverage-report".to_string()],
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }),
+            findings: Vec::new(),
+            artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
+                schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+                id: "case-log".to_string(),
+                kind: "case_log".to_string(),
+                artifact: None,
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }],
+            thresholds: Vec::new(),
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let gates = evaluate_fuzz_gates(&campaign);
+
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "target-coverage-complete"
+                && gate.status == "failed"
+                && gate.observed == 0.5
+        }));
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "operation-coverage-complete"
+                && gate.status == "passed"
+                && gate.observed == 1.0
+        }));
+
+        campaign.coverage_summary.as_mut().unwrap().proven_targets = 2;
+        assert_eq!(gate_status(&evaluate_fuzz_gates(&campaign)), "passed");
+    }
+
+    #[test]
+    fn fuzz_coverage_completeness_reports_summary_counts() {
+        let campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: Some(homeboy::core::fuzz::FuzzCoverageSummary {
+                schema: homeboy::core::fuzz::FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                declared_targets: 2,
+                executable_targets: 1,
+                proven_targets: 1,
+                declared_operations: 0,
+                executable_operations: 0,
+                proven_operations: 0,
+                skipped_targets: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                    id: "target-2".to_string(),
+                    reason: "not_executable".to_string(),
+                    label: None,
+                }],
+                skipped_operations: Vec::new(),
+                artifact_ids: vec!["coverage-report".to_string()],
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }),
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+            thresholds: Vec::new(),
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let summary = fuzz_coverage_completeness(&campaign);
+
+        assert!(summary.has_summary);
+        assert_eq!(summary.declared_targets, 2);
+        assert_eq!(summary.target_coverage_ratio, 0.5);
+        assert_eq!(summary.operation_coverage_ratio, 1.0);
+        assert_eq!(summary.skipped_targets, 1);
+        assert_eq!(summary.artifact_ids, vec!["coverage-report"]);
     }
 
     #[test]
@@ -1265,6 +1472,7 @@ mod tests {
             cases: Vec::new(),
             seeds: Vec::new(),
             coverage: Vec::new(),
+            coverage_summary: None,
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),

@@ -52,6 +52,7 @@ pub mod artifact_ref;
 pub mod browser_evidence;
 pub mod build_identity;
 pub mod change_artifact;
+pub mod ci_gate;
 pub mod ci_plan;
 pub mod ci_profile;
 pub mod ci_scope;

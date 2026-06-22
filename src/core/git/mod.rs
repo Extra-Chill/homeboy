@@ -11,6 +11,7 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod pr_land;
 mod pr_policy;
 mod primitives;
 mod primitives_query;
@@ -58,6 +59,7 @@ pub use operations_tags::{
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote,
 };
+pub use pr_land::{land_prs, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
@@ -165,6 +167,28 @@ pub(crate) fn resolve_target(
     Ok((
         target.component_id,
         target.source_path.to_string_lossy().to_string(),
+    ))
+}
+
+/// Resolve a target, run a single `git` invocation against it, and wrap the
+/// result in a [`GitOutput`].
+///
+/// This is the shared spine for the simple "resolve → run one git command →
+/// report" operations (`status`, `pull`, `tag`, …). Each caller only differs
+/// by the argument vector and the `operation` label, so they delegate here
+/// instead of repeating the resolve / `execute_git` / `map_err` / `from_output`
+/// dance.
+pub(crate) fn run_resolved_git(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    operation: &str,
+    args: &[&str],
+) -> crate::core::error::Result<operation_output::GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
+    let output = execute_git(&path, args)
+        .map_err(|e| crate::core::error::Error::git_command_failed(e.to_string()))?;
+    Ok(operation_output::GitOutput::from_output(
+        id, path, operation, output,
     ))
 }
 

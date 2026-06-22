@@ -31,13 +31,11 @@ pub fn tag_at(
     let name = tag_name.ok_or_else(|| {
         Error::validation_invalid_argument("tagName", "Missing tag name", None, None)
     })?;
-    let (id, path) = resolve_target(component_id, path_override)?;
     let args: Vec<&str> = match message {
         Some(msg) => vec!["tag", "-a", name, "-m", msg],
         None => vec!["tag", name],
     };
-    let output = execute_git(&path, &args).map_err(|e| Error::git_command_failed(e.to_string()))?;
-    Ok(GitOutput::from_output(id, path, "tag", output))
+    super::run_resolved_git(component_id, path_override, "tag", &args)
 }
 
 /// Check if a tag exists on the remote.
