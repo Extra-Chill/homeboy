@@ -270,7 +270,7 @@ pub(super) fn is_repo_loop_spec_action(action: &AgentTaskLoopPolicyActionRecord)
     action.reason == REPO_LOOP_SPEC_WORKFLOW_REASON || action.reason == REPO_LOOP_SPEC_ACTION_REASON
 }
 
-pub(super) fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
+pub(crate) fn validate_loop_spec(spec: &AgentTaskRepoLoopSpec) -> Result<()> {
     if spec.loop_id.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "loop_id",

@@ -245,6 +245,9 @@ PR review agents should:
 - Use `success`, `data.summary.passed`, and per-stage `passed` fields for status.
 - Use `finding_count` for quick triage and the nested stage `output` for details.
 - Use `changed-since` scoped payloads to avoid repeating unrelated baseline findings.
+- Treat `baseline-red` / `baseline_red` and `inconclusive` failure-origin statuses as
+  baseline or evidence problems, not proven candidate regressions. These statuses
+  should include the baseline command and artifact/evidence refs when available.
 - Keep a link to the GitHub check or run URL from action-owned metadata.
 - Ignore unknown additive fields.
 - Avoid scraping human logs unless the JSON envelope is absent or malformed.

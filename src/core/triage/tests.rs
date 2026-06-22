@@ -595,6 +595,30 @@ mod pull_requests {
             classify_landing_pr("OPEN", None, None, Some("UNKNOWN")),
             TriageLandingClassification::BaselineRedInconclusive
         );
+        assert_eq!(
+            landing_mergeability_state(Some("CLEAN")),
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("DIRTY")),
+            TriageLandingMergeabilityState::Conflicting
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNKNOWN")),
+            TriageLandingMergeabilityState::Unknown
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNSTABLE")),
+            TriageLandingMergeabilityState::Unstable
+        );
+        assert_eq!(
+            landing_check_state(Some("PENDING")),
+            TriageLandingCheckState::Pending
+        );
+        assert_eq!(
+            landing_check_state(Some("FAILURE")),
+            TriageLandingCheckState::Failed
+        );
     }
 
     #[test]
@@ -613,7 +637,10 @@ mod pull_requests {
           "reviewDecision": "APPROVED",
           "mergeStateStatus": "CLEAN",
           "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+          "baseRefName": "main",
           "headRefName": "cook/ready",
+          "headRepository": {"name":"homeboy"},
+          "headRepositoryOwner": {"login":"Extra-Chill"},
           "mergedAt": null,
           "comments": [],
           "reviews": [],
@@ -626,11 +653,102 @@ mod pull_requests {
             item.classification,
             TriageLandingClassification::CleanMergeable
         );
+        assert_eq!(
+            item.mergeability_state,
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(item.check_state, TriageLandingCheckState::Clean);
         assert_eq!(item.head_branch.as_deref(), Some("cook/ready"));
+        assert_eq!(item.base_branch.as_deref(), Some("main"));
+        assert_eq!(item.head_repo.as_deref(), Some("Extra-Chill/homeboy"));
         assert_eq!(
             item.suggested_next_command,
             "homeboy triage --watch Extra-Chill/homeboy#42 --until green-mergeable"
         );
+        assert!(item.dependent_rebase.is_none());
+    }
+
+    #[test]
+    fn ordered_landing_preserves_input_order_and_dedupes() {
+        let mut items = vec![
+            landing_pr(
+                2,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/two",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                1,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/one",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                2,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/two",
+                "Extra-Chill/homeboy",
+            ),
+        ];
+
+        dedupe_landing_prs_preserving_order(&mut items);
+
+        assert_eq!(
+            items.iter().map(|item| item.number).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn ordered_landing_generates_same_repo_dependent_rebase_command() {
+        let mut items = vec![
+            landing_pr(
+                10,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/base",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                11,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/dependent",
+                "Extra-Chill/homeboy",
+            ),
+        ];
+
+        annotate_ordered_dependent_rebases(&mut items);
+
+        assert!(items[0].dependent_rebase.is_none());
+        let plan = items[1].dependent_rebase.as_ref().unwrap();
+        assert_eq!(plan.after_pr, 10);
+        assert!(plan.safe_to_update);
+        assert_eq!(plan.reason, "same_repo_head_branch");
+        assert_eq!(
+            plan.command.as_deref(),
+            Some("gh pr checkout 11 -R Extra-Chill/homeboy && git fetch origin main && git rebase origin/main && git push --force-with-lease origin HEAD:feature/dependent")
+        );
+    }
+
+    #[test]
+    fn ordered_landing_marks_forked_heads_manual() {
+        let item = landing_pr(
+            11,
+            "Extra-Chill/homeboy",
+            "main",
+            "feature/dependent",
+            "someone/homeboy",
+        );
+
+        let plan = dependent_rebase_plan(&item, 10);
+
+        assert!(!plan.safe_to_update);
+        assert_eq!(plan.reason, "head_branch_not_in_base_repo");
+        assert!(plan.command.is_none());
     }
 
     #[test]
@@ -809,6 +927,32 @@ mod pull_requests {
         assert_eq!(actions[0].label, "2 PRs have failed checks");
         assert_eq!(actions[1].kind, "review_required");
         assert_eq!(actions[2].kind, "clean_and_ready");
+    }
+
+    fn landing_pr(
+        number: u64,
+        repo: &str,
+        base_branch: &str,
+        head_branch: &str,
+        head_repo: &str,
+    ) -> TriageLandingPr {
+        TriageLandingPr {
+            repo: repo.to_string(),
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            state: "OPEN".to_string(),
+            base_branch: Some(base_branch.to_string()),
+            head_branch: Some(head_branch.to_string()),
+            head_repo: Some(head_repo.to_string()),
+            classification: TriageLandingClassification::CleanMergeable,
+            suggested_next_command: format!(
+                "homeboy triage --watch {repo}#{number} --until green-mergeable"
+            ),
+            dependent_rebase: None,
+            signals: TriagePullRequestSignals::default(),
+            check_failures: Vec::new(),
+        }
     }
 }
 
