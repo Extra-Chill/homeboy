@@ -188,6 +188,7 @@ const legacyIndexPath = path.join(installRoot, 'source', 'node_modules', '@autom
 fs.mkdirSync(path.dirname(focusedContractsPath), { recursive: true });
 fs.writeFileSync(focusedContractsPath, 'export function runtimeContractManifest() { return {}; }\n');
 fs.writeFileSync(legacyIndexPath, 'export function runtimeContractManifest() { return {}; }\n');
+delete process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE;
 const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: installRoot });
 assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
 assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
