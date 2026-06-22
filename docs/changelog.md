@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.250.2] - 2026-06-22
+
+### Fixed
+- remove dead code mark_failed in phase_timing (#5863)
+- unify parallel implementations (#5849)
+- resolve correctness findings in deploy/release (#5852)
+
 ## [0.250.1] - 2026-06-22
 
 ### Changed
