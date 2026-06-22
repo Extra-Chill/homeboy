@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.12] - 2026-06-22
+
+### Changed
+- Add WordPress workload setup declarations
+
 ## [3.12.11] - 2026-06-22
 
 ### Fixed
