@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.47] - 2026-06-22
+
+### Changed
+- Remove legacy Data Machine Codebox compat lane
+
 ## [3.12.46] - 2026-06-22
 
 ### Changed
