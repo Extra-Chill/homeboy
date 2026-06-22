@@ -309,6 +309,20 @@ pub struct FuzzConfig {
     pub extension_script: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<FuzzWorkloadConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corpus_artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimize_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_retention: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
