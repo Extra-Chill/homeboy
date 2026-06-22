@@ -181,7 +181,7 @@ the upstream primitive requirement in the runtime profile for WP Codebox to
 fulfill through the public parent-tool-bridge contract.
 
 For WordPress fuzzing, Homeboy Extensions builds and forwards the
-Codebox-owned `wp-codebox/fuzz-run/v1` request through the WP Codebox runtime
+Codebox-owned `wp-codebox/fuzz-suite/v1` request through the WP Codebox runtime
 task boundary. HBX may describe WordPress targets, seeds, limits, coverage
 requests, and artifact expectations, but WP Codebox owns the fuzz execution
 loop and result envelope.

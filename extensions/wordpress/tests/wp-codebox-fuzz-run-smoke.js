@@ -33,6 +33,8 @@ const input = wpCodeboxFuzzRunInput({
 
 assert.equal(input.schema, WP_CODEBOX_FUZZ_RUN_SCHEMA);
 assert.equal(input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(WP_CODEBOX_FUZZ_RUN_SCHEMA, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(DEFAULT_FUZZ_RUN_ABILITY, DEFAULT_FUZZ_SUITE_ABILITY);
 assert.equal(input.target.slug, 'sample-plugin');
 assert.deepEqual(input.metadata.limits, { max_cases: 1 });
 assert.equal(wpCodeboxFuzzSuiteInput({ id: 'suite-alias' }).schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);

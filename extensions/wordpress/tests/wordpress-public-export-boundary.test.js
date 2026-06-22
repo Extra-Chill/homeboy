@@ -48,6 +48,8 @@ assert.equal(typeof wordpress.buildWpCodeboxFuzzPlanRecipe, 'function');
 assert.equal(typeof wordpress.wpCodeboxFuzzRunTaskRequest, 'function');
 assert.equal(typeof wordpress.wpCodeboxFuzzSuiteTaskRequest, 'function');
 assert.equal(wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA, 'wp-codebox/fuzz-suite/v1');
+assert.equal(wordpress.WP_CODEBOX_FUZZ_RUN_SCHEMA, wordpress.WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(wordpress.wpCodebox.WP_CODEBOX_FUZZ_RUN_SCHEMA, wordpress.wpCodebox.WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(typeof wordpress.applyApprovedWpCodeboxArtifact, 'function');
 assert.equal(wordpress.compareCodeboxMemoryResults, undefined);
 assert.equal(wordpress.createStaticSiteFanoutPlan, undefined);

@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const {
 	WP_CODEBOX_FUZZ_RUN_SCHEMA,
+	WP_CODEBOX_FUZZ_SUITE_SCHEMA,
 	WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA,
 	buildWpCodeboxFuzzPlanRecipe,
 } = require('../lib/wp-codebox-fuzz-plan');
@@ -34,6 +35,8 @@ const recipe = buildWpCodeboxFuzzPlanRecipe(plan);
 
 assert.equal(recipe.schema, WP_CODEBOX_WORKSPACE_RECIPE_SCHEMA);
 assert.equal(recipe.fuzzRun.schema, WP_CODEBOX_FUZZ_RUN_SCHEMA);
+assert.equal(recipe.fuzzRun.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(WP_CODEBOX_FUZZ_RUN_SCHEMA, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(recipe.fuzzRun.cases[0].case_id, 'case-001');
 assert.deepEqual(recipe.fuzzRun.cases[0].phases.action, [{
 	command: 'wordpress.wp-cli',
@@ -51,7 +54,9 @@ const result = spawnSync(process.execPath, [script], {
 });
 
 assert.equal(result.status, 0, result.stderr);
-assert.equal(JSON.parse(result.stdout).fuzzRun.cases[0].case_id, 'case-001');
+const cliRecipe = JSON.parse(result.stdout);
+assert.equal(cliRecipe.fuzzRun.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
+assert.equal(cliRecipe.fuzzRun.cases[0].case_id, 'case-001');
 
 assert.throws(
 	() => buildWpCodeboxFuzzPlanRecipe({ cases: [{ case_id: 'missing-action', phases: { setup: [{ command: 'wordpress.wp-cli' }] } }] }),
