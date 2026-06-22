@@ -28,20 +28,22 @@ IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${CMD}" | xargs)"
   case "${CMD}" in
-    audit|test)
+    audit|lint|test)
       BASELINE_COMMANDS+=("${CMD}")
       ;;
   esac
 done
 
 if [ "${#BASELINE_COMMANDS[@]}" -eq 0 ]; then
-  echo "No audit/test commands requested; skipping differential baseline run"
+  echo "No audit/lint/test commands requested; skipping differential baseline run"
   exit 0
 fi
 
 ORIGINAL_REF="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse HEAD)"
 BASE_OUTPUT_DIR="$(mktemp -d)"
 echo "HOMEBOY_BASE_OUTPUT_DIR=${BASE_OUTPUT_DIR}" >> "${GITHUB_ENV}"
+BASELINE_STATUS_JSON="${BASE_OUTPUT_DIR}/baseline-status.json"
+printf '{}\n' > "${BASELINE_STATUS_JSON}"
 
 restore_original_ref() {
   git checkout -q "${ORIGINAL_REF}" || true
@@ -76,6 +78,29 @@ for CMD in "${BASELINE_COMMANDS[@]}"; do
   if [ ! -s "${OUTPUT_JSON}" ]; then
     echo "::warning::baseline homeboy ${CMD} did not write structured output to ${OUTPUT_JSON}"
   fi
+
+  STRUCTURED_OUTPUT=false
+  if [ -s "${OUTPUT_JSON}" ]; then
+    STRUCTURED_OUTPUT=true
+  fi
+
+  STATUS="pass"
+  if [ "${CMD_EXIT}" -ne 0 ]; then
+    STATUS="fail"
+  fi
+
+  tmp_status="$(mktemp)"
+  jq -c \
+    --arg cmd "${CMD}" \
+    --arg status "${STATUS}" \
+    --arg command "${FULL_CMD}" \
+    --arg output_json "${OUTPUT_JSON}" \
+    --arg log_path "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
+    --argjson exit_code "${CMD_EXIT}" \
+    --argjson structured_output "${STRUCTURED_OUTPUT}" \
+    '. + {($cmd): {status: $status, exit_code: $exit_code, command: $command, output_json: $output_json, log_path: $log_path, structured_output: $structured_output}}' \
+    "${BASELINE_STATUS_JSON}" > "${tmp_status}"
+  mv "${tmp_status}" "${BASELINE_STATUS_JSON}"
 
   echo "Baseline homeboy ${CMD} exited ${CMD_EXIT}"
 done

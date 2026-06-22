@@ -84,6 +84,7 @@ status_icon() {
   case "$1" in
     pass|passed) printf '%s\n' ':white_check_mark:' ;;
     fail|failed) printf '%s\n' ':x:' ;;
+    baseline_red|inconclusive) printf '%s\n' ':warning:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;
   esac
@@ -93,6 +94,8 @@ status_label() {
   case "$1" in
     pass|passed) printf '%s\n' 'passed' ;;
     fail|failed) printf '%s\n' 'failed' ;;
+    baseline_red) printf '%s\n' 'baseline red' ;;
+    inconclusive) printf '%s\n' 'inconclusive' ;;
     skipped) printf '%s\n' 'skipped' ;;
     *) printf '%s\n' 'unknown' ;;
   esac

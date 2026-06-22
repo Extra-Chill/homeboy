@@ -78,6 +78,26 @@ def test_count(payload: dict[str, Any] | None) -> int | None:
     return None
 
 
+def lint_count(payload: dict[str, Any] | None) -> int | None:
+    data = unwrap(payload)
+    if not isinstance(data, dict):
+        return None
+
+    for key in ("lint_findings", "findings", "violations", "top_violations"):
+        items = data.get(key)
+        if isinstance(items, list):
+            return len(items)
+
+    summary = data.get("summary")
+    if isinstance(summary, dict):
+        for key in ("findings", "failures", "errors"):
+            value = summary.get(key)
+            if isinstance(value, int):
+                return int(value)
+
+    return None
+
+
 def changed_scope_introduced_count(command: str, payload: dict[str, Any] | None) -> int | None:
     data = unwrap(payload)
     changed_since = data.get("changed_since", {}) if isinstance(data, dict) else {}
@@ -100,9 +120,35 @@ def metric_for(command: str, directory: str) -> int | None:
         return scoped_count
     if command == "audit":
         return audit_count(payload)
+    if command == "lint":
+        return lint_count(payload)
     if command == "test":
         return test_count(payload)
     return None
+
+
+def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
+    status = read_json(os.path.join(base_dir, "baseline-status.json"))
+    if not isinstance(status, dict):
+        return {}
+    value = status.get(command)
+    return value if isinstance(value, dict) else {}
+
+
+def command_label(command: str, metadata: dict[str, Any]) -> str:
+    full = metadata.get("command")
+    if isinstance(full, str) and full:
+        return full
+    return f"homeboy {command}"
+
+
+def command_failed(metadata: dict[str, Any]) -> bool:
+    if metadata.get("status") == "fail":
+        return True
+    try:
+        return int(metadata.get("exit_code") or 0) != 0
+    except (TypeError, ValueError):
+        return False
 
 
 def main() -> int:
@@ -119,15 +165,28 @@ def main() -> int:
         return 0
 
     adjusted = dict(results)
-    for command in ("audit", "test"):
+    for command in ("audit", "lint", "test"):
         if adjusted.get(command) != "fail":
             continue
 
         current = metric_for(command, current_dir)
         base = metric_for(command, base_dir)
-        if current is None or base is None:
+        base_metadata = base_command_status(command, base_dir)
+        base_failed = command_failed(base_metadata)
+        base_structured = base_metadata.get("structured_output") is True
+
+        if base_failed and (base is None or not base_structured):
+            adjusted[command] = "baseline_red"
             print(
-                f"::warning::Differential gate could not parse {command} counts; preserving failure",
+                f"::warning::Differential gate marked {command} baseline_red: baseline command `{command_label(command, base_metadata)}` exited {base_metadata.get('exit_code', 'unknown')} before comparable counts were available",
+                file=sys.stderr,
+            )
+            continue
+
+        if current is None or base is None:
+            adjusted[command] = "inconclusive"
+            print(
+                f"::warning::Differential gate marked {command} inconclusive: current={current if current is not None else 'unavailable'} base={base if base is not None else 'unavailable'}",
                 file=sys.stderr,
             )
             continue

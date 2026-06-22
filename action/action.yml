@@ -77,7 +77,7 @@ inputs:
     required: false
     default: ''
   differential-gating:
-    description: 'On PRs, compare audit/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; lint remains normal exit-code gating. PR autofix is skipped while enabled.'
+    description: 'On PRs, compare audit/lint/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; PR autofix is skipped while enabled.'
     required: false
     default: 'false'
   observation-window:
@@ -643,7 +643,14 @@ runs:
       run: bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
-      if: always() && steps.select-results.outputs.results != '' && contains(steps.select-results.outputs.results, '"fail"')
+      if: |
+        always()
+        && steps.select-results.outputs.results != ''
+        && (
+          contains(steps.select-results.outputs.results, '"fail"')
+          || contains(steps.select-results.outputs.results, '"baseline_red"')
+          || contains(steps.select-results.outputs.results, '"inconclusive"')
+        )
       shell: bash
       env:
         RESULTS: ${{ steps.select-results.outputs.results }}

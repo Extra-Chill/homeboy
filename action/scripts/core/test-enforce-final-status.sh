@@ -39,4 +39,10 @@ assert_exit 0 "closed PR ignores malformed stale results" \
 assert_exit 0 "passing quality results pass" \
   env RESULTS='{"test":"pass"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
+assert_exit 0 "baseline red quality results do not fail PR" \
+  env RESULTS='{"test":"baseline_red"}' COMMANDS='test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+
+assert_exit 0 "inconclusive quality results do not fail PR" \
+  env RESULTS='{"lint":"inconclusive"}' COMMANDS='lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+
 printf 'All final status enforcement checks passed.\n'

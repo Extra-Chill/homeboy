@@ -98,7 +98,7 @@ on:
         type: string
         default: ''
       differential-gating:
-        description: 'Enable PR differential gating for audit/test.'
+        description: 'Enable PR differential gating for audit/lint/test.'
         type: string
         default: 'false'
       observation-window:

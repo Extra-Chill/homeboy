@@ -53,6 +53,47 @@ append_local_reproduction_commands() {
   } >> "${digest_file}"
 }
 
+append_differential_evidence() {
+  local digest_file="$1"
+  local baseline_status_file="${OUTPUT_DIR}/baseline-status.json"
+  local rows
+
+  rows="$(jq -r '
+    to_entries[]
+    | select(.value == "baseline_red" or .value == "inconclusive")
+    | [.key, .value] | @tsv
+  ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
+
+  [ -n "${rows}" ] || return 0
+
+  {
+    printf '\n### Differential baseline evidence\n'
+    printf -- '- Classification: baseline failures or missing comparable counts prevented candidate regression enforcement.\n'
+    if [ -f "${baseline_status_file}" ]; then
+      printf -- '- Baseline status artifact: `baseline-status.json`\n'
+    fi
+  } >> "${digest_file}"
+
+  while IFS=$'\t' read -r command status; do
+    [ -n "${command}" ] || continue
+    local baseline_command baseline_exit baseline_result candidate_result baseline_json baseline_log
+    baseline_command="$(jq -r --arg cmd "${command}" '.[$cmd].command // ("homeboy " + $cmd)' "${baseline_status_file}" 2>/dev/null || printf 'homeboy %s' "${command}")"
+    baseline_exit="$(jq -r --arg cmd "${command}" '.[$cmd].exit_code // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
+    baseline_result="$(jq -r --arg cmd "${command}" '.[$cmd].status // "unknown"' "${baseline_status_file}" 2>/dev/null || printf 'unknown')"
+    candidate_result="$(jq -r --arg cmd "${command}" '.[$cmd] // "unknown"' <<< "${RESULTS_JSON}" 2>/dev/null || printf 'unknown')"
+    baseline_json="baseline-${command}.json"
+    baseline_log="baseline-${command}.log"
+
+    {
+      printf -- '- `%s`: **%s**\n' "${command}" "${status}"
+      printf '  - Baseline command: `%s`\n' "${baseline_command}"
+      printf '  - Baseline result: `%s` (exit `%s`)\n' "${baseline_result}" "${baseline_exit}"
+      printf '  - Candidate result: `%s`\n' "${candidate_result}"
+      printf '  - Artifact refs: `%s`, `%s`, `%s`\n' "${command}.json" "${baseline_json}" "${baseline_log}"
+    } >> "${digest_file}"
+  done <<< "${rows}"
+}
+
 if [ -z "${OUTPUT_DIR}" ] || [ ! -d "${OUTPUT_DIR}" ]; then
   echo "No output directory available; skipping failure digest"
   exit 0
@@ -111,6 +152,7 @@ if [ ! -s "${DIGEST_FILE}" ]; then
 fi
 
 append_local_reproduction_commands "${DIGEST_FILE}"
+append_differential_evidence "${DIGEST_FILE}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HOMEBOY_FAILURE_DIGEST_FILE=${DIGEST_FILE}" >> "${GITHUB_ENV}"

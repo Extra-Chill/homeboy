@@ -94,4 +94,25 @@ jq -e \
    .action_ref == "v2"' \
   "${TOOLING_JSON}" >/dev/null
 
+export RESULTS='{"test":"baseline_red"}'
+cat > "${OUTPUT_DIR}/baseline-status.json" <<'JSON'
+{
+  "test": {
+    "status": "fail",
+    "exit_code": 1,
+    "command": "homeboy test wordpress --path /work --changed-since abc123base",
+    "structured_output": false
+  }
+}
+JSON
+
+bash "${ROOT}/scripts/digest/generate-failure-digest.sh"
+
+grep -F "### Differential baseline evidence" "${DIGEST_FILE}" >/dev/null
+grep -F -- '- `test`: **baseline_red**' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Baseline command: `homeboy test wordpress --path /work --changed-since abc123base`' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Baseline result: `fail` (exit `1`)' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Candidate result: `baseline_red`' "${DIGEST_FILE}" >/dev/null
+grep -F -- '- Artifact refs: `test.json`, `baseline-test.json`, `baseline-test.log`' "${DIGEST_FILE}" >/dev/null
+
 echo "generate failure digest wrapper checks passed"

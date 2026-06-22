@@ -55,6 +55,12 @@ if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
     echo "::error::One or more quality commands failed"
     FAILED=true
   fi
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "baseline_red")' > /dev/null; then
+    echo "::warning::One or more quality commands were inconclusive because the baseline is already red"
+  fi
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "inconclusive")' > /dev/null; then
+    echo "::warning::One or more quality commands were inconclusive; preserving evidence without failing the PR"
+  fi
 fi
 
 # Check operations command results
