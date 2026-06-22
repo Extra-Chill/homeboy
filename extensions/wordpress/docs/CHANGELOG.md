@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.17] - 2026-06-22
+
+### Changed
+- Wrap fuzz dispatch as Codebox run-agent-task input
+
 ## [3.12.16] - 2026-06-22
 
 ### Changed
