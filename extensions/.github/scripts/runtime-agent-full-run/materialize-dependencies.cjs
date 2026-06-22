@@ -27,13 +27,10 @@ function dependencyEntries(env) {
   const runtimeId = env.RUNTIME || env.RUNTIME_PROVIDER || env.BACKEND || DEFAULT_RUNTIME_ID;
   const runtime = resolveRuntimeProvider(runtimeId, { env });
   const entries = runtime.checkout.repo ? [{ repo: runtime.checkout.repo, ref: runtime.checkout.ref, target: runtime.checkout.target }] : [];
-  const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || 'openai', true);
+  const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
   const runtimeDependencies = runtimeDependencyEntries(env.RUNTIME_DEPENDENCIES || '');
   if (runtimeDependencies.length > 0) {
     entries.push(...runtimeDependencies);
-  }
-  if ((env.PROVIDER || 'openai') === 'openai' && !providerPlugin.repo) {
-    entries.push(`WordPress/ai-provider-for-openai@${env.OPENAI_PROVIDER_REF || 'trunk'}`);
   }
   if (providerPlugin.repo) {
     entries.push(providerPlugin.ref ? `${providerPlugin.repo}@${providerPlugin.ref}` : providerPlugin.repo);

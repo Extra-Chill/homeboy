@@ -80,10 +80,6 @@ name: Runtime Agent Full Run (reusable)
         description: JSON object describing an optional provider plugin checkout and credential env mapping.
         type: string
         default: '{}'
-      openai_provider_ref:
-        description: Ref for WordPress/ai-provider-for-openai when using the built-in OpenAI provider checkout.
-        type: string
-        default: trunk
       model:
         type: string
         default: ''
@@ -301,8 +297,6 @@ name: Runtime Agent Full Run (reusable)
         required: false
       HOMEBOY_APP_PRIVATE_KEY:
         required: false
-      OPENAI_API_KEY:
-        required: false
       PROVIDER_SECRET_1:
         required: false
       PROVIDER_SECRET_2:
@@ -440,7 +434,6 @@ jobs:
           AGENT_RUNTIME_REF: ${{ inputs.runtime_ref }}
           PROVIDER: ${{ inputs.provider }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-          OPENAI_PROVIDER_REF: ${{ inputs.openai_provider_ref }}
         run: node .ci/homeboy-extensions/.github/scripts/runtime-agent-full-run/materialize-dependencies.cjs
 
       - name: Download workflow input artifacts
@@ -559,7 +552,6 @@ jobs:
           GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
           PROVIDER_PLUGIN: ${{ inputs.provider_plugin }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
           PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
           PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}
@@ -572,7 +564,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HOMEBOY_GITHUB_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PROVIDER_SECRET_1: ${{ secrets.PROVIDER_SECRET_1 }}
           PROVIDER_SECRET_2: ${{ secrets.PROVIDER_SECRET_2 }}
           PROVIDER_SECRET_3: ${{ secrets.PROVIDER_SECRET_3 }}

@@ -38,7 +38,7 @@ function installCheckedOutPhpDependencies(workspace) {
     }
   }
 
-  const providerPlugin = normalizeProviderPlugin(process.env.PROVIDER_PLUGIN || '{}', process.env.PROVIDER || 'openai', false);
+  const providerPlugin = normalizeProviderPlugin(process.env.PROVIDER_PLUGIN || '{}', process.env.PROVIDER || '', false);
   if (!providerPlugin.repo) {
     return;
   }

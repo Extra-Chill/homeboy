@@ -46,10 +46,10 @@ function buildConfig(env) {
     throw new Error(`Runtime CLI build missing at ${runtimeBin || 'runtime.paths.runtime_bin'}`);
   }
 
-  const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', false);
+  const providerPlugin = normalizeProviderPlugin(env.PROVIDER_PLUGIN || '{}', env.PROVIDER || '', true);
   const validationDependencies = validationPaths(workspace, providerPlugin, env.PROVIDER || '');
   const providerSecretEnvMapping = providerPlugin.provider_secret_env || {};
-  const providerBenchEnv = {};
+  const providerBenchEnv = providerBenchEnvFromManifest(runtime, env.PROVIDER || '', env);
   for (const providerEnvName of Object.values(providerSecretEnvMapping)) {
     if (typeof providerEnvName !== 'string' || providerEnvName.length === 0) {
       continue;
@@ -210,10 +210,50 @@ function buildConfig(env) {
       HOMEBOY_GITHUB_APP_TOKEN: env.GITHUB_APP_TOKEN_VALUE || '',
       GITHUB_RUN_ID: env.GITHUB_RUN_ID_VALUE || '',
       GITHUB_RUN_ATTEMPT: env.GITHUB_RUN_ATTEMPT_VALUE || '',
-      OPENAI_API_KEY: env.OPENAI_API_KEY || '',
       ...providerBenchEnv,
     },
   };
+}
+
+function providerBenchEnvFromManifest(runtime, provider, env) {
+  const envNames = new Set();
+  const defaults = runtime?.executor?.provider_defaults?.[provider];
+  if (defaults && typeof defaults === 'object' && !Array.isArray(defaults)) {
+    for (const name of normalizeStringArray(defaults.secret_env)) {
+      envNames.add(name);
+    }
+    for (const name of normalizeStringArray(defaults.required_secret_env)) {
+      envNames.add(name);
+    }
+    for (const name of normalizeStringArray(defaults.optional_secret_env)) {
+      envNames.add(name);
+    }
+  }
+  for (const requirement of runtime?.executor?.secret_env_requirements || []) {
+    if (secretRequirementMatchesProvider(requirement, provider)) {
+      for (const name of normalizeStringArray(requirement.env)) {
+        envNames.add(name);
+      }
+    }
+  }
+  return Object.fromEntries(Array.from(envNames)
+    .filter((name) => env[name])
+    .map((name) => [name, env[name]]));
+}
+
+function secretRequirementMatchesProvider(requirement, provider) {
+  if (!provider || !requirement || typeof requirement !== 'object' || Array.isArray(requirement)) {
+    return false;
+  }
+  const clauses = requirement.when?.any || [];
+  return Array.isArray(clauses) && clauses.some((clause) => clause?.equals === provider);
+}
+
+function normalizeStringArray(value) {
+  if (typeof value === 'string' && value.length > 0) {
+    return [value];
+  }
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
 }
 
 function runtimeWorkloadFromEnv(env, fallbackId) {
@@ -231,9 +271,6 @@ function validationPaths(workspace, providerPlugin, provider) {
       .sort();
   }
   let providerPluginHostPath = '';
-  if (!providerPlugin.repo && provider === 'openai' && fs.existsSync(path.join(ciDir, 'ai-provider-for-openai'))) {
-    providerPluginHostPath = path.join(ciDir, 'ai-provider-for-openai');
-  }
   if (providerPlugin.repo) {
     const providerPluginRepoName = providerPlugin.repo.split('/')[1];
     const providerPluginRoot = path.join(ciDir, providerPluginRepoName);
@@ -398,4 +435,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, projectRuntimeConfig, runtimePathRequired };
+module.exports = { buildConfig, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };

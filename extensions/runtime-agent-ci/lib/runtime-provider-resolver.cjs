@@ -198,6 +198,9 @@ function resolveExecutor(manifest, repoRoot, options = {}) {
 		invocation,
 		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities.filter(Boolean) : [],
 		runtime_execution_contracts: provider?.runtime_execution_contracts || provider?.execution_contracts || {},
+		provider_metadata: provider?.provider_metadata || {},
+		provider_defaults: provider?.provider_defaults || {},
+		secret_env_requirements: Array.isArray(provider?.secret_env_requirements) ? provider.secret_env_requirements : [],
 	};
 }
 

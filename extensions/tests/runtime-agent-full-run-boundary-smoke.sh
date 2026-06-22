@@ -25,6 +25,8 @@ const files = [
   '.github/scripts/runtime-agent-full-run/lib/common.cjs',
 ];
 
+const failures = [];
+const compatibilityReferences = [];
 const workflow = fs.readFileSync(path.join(root, '.github/workflows/runtime-agent-full-run.yml'), 'utf8');
 if (/wordpress\/scripts\/agent\/(run-runtime-agent-task|run-host-runner-lifecycle|extract-engine-data|update-runner-workspace-pr)/.test(workflow)) {
   failures.push('runtime-agent-full-run.yml: generic workflow must invoke runtime-agent-full-run scripts, not wordpress/scripts/agent');
@@ -32,9 +34,9 @@ if (/wordpress\/scripts\/agent\/(run-runtime-agent-task|run-host-runner-lifecycl
 if (/default:\s*wp-codebox/.test(workflow)) {
   failures.push('runtime-agent-full-run.yml: generic workflow must not default to wp-codebox');
 }
-
-const failures = [];
-const compatibilityReferences = [];
+if (/OPENAI_API_KEY|openai_provider_ref|OPENAI_PROVIDER_REF/.test(workflow)) {
+  failures.push('runtime-agent-full-run.yml: generic workflow must not declare OpenAI provider secrets or checkout refs');
+}
 for (const file of files) {
   const body = fs.readFileSync(path.join(root, file), 'utf8');
   const match = body.match(forbidden);

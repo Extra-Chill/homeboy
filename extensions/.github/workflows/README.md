@@ -201,7 +201,7 @@ jobs:
 - WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
 - `tool_profile` is the runtime-neutral tool policy input. The selected runtime adapter maps it into runtime-owned workflow fields; for WP Codebox that becomes the sandbox tool policy. `tool_policy` remains accepted as a compatibility alias.
-- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. When `provider: openai`, an empty object preserves the existing OpenAI provider defaults. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
+- `provider_plugin` is a JSON object with `repo`, `ref`, `path`, `register_function`, and `provider_secret_env` keys. The generic workflow does not choose a provider plugin or secret for callers; provider dependencies and credential mappings are explicit caller inputs, and runtime manifests advertise provider-specific defaults/capabilities. The legacy `credentials` key is still accepted by the normalizer as an input alias, but generated config uses `provider_secret_env_mapping`.
 - `validation_dependencies` accepts additional `OWNER/REPO@REF` entries and checks each out under `.ci/<repo>`. Entries without `@REF` use the repository default branch.
 - Bundle sources in `runtime_execution` are resolved relative to the consumer checkout unless the caller materializes external bundle sources through dependencies or validation checkouts.
 - `app_token_repos` scopes the Homeboy GitHub App token and defaults to `target_repo`. Use it when the workflow needs app-token access to more than the target repository.
@@ -269,28 +269,9 @@ results copied into stable runner outputs.
 
 ## Provider plugin examples
 
-OpenAI is the default provider. Callers can omit `provider_plugin` and pass
-`OPENAI_API_KEY` through inherited secrets:
-
-```yaml
-jobs:
-  run-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
-    with:
-      runtime_provider: wp-codebox
-      runtime_profile: example-agent
-      runtime_profiles: >-
-        {"example-agent":{"id":"example-agent","runtime_task_ability":"example/run-task","ability_requirements":["example/run-task"]}}
-      workload_id: example-flow
-      target_repo: Extra-Chill/example
-      provider: openai
-      model: gpt-5.5
-    secrets: inherit
-```
-
-Non-OpenAI providers supply the plugin checkout and credential mapping
-explicitly. Map each provider option to one of the generic provider
-secret env names, then pass that secret in the reusable workflow call:
+Provider plugins and credentials are explicit. Map each provider option to one
+of the generic provider secret env names, then pass that secret in the reusable
+workflow call:
 
 ```yaml
 jobs:
@@ -304,7 +285,7 @@ jobs:
       workload_id: example-flow
       target_repo: Extra-Chill/example
       provider: example-provider
-      model: example-model
+      model: gpt-5.5
       provider_plugin: |
         {
           "repo": "Example/example-ai-provider",

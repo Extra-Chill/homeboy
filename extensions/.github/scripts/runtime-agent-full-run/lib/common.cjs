@@ -58,7 +58,7 @@ function normalizeProviderPlugin(rawInput, provider, includeCredentials) {
   if (includeCredentials) {
     const providerSecretEnv = jqAlternative(
       providerPlugin.provider_secret_env || providerPlugin.providerSecretEnv || providerPlugin.provider_secret_env_mapping || providerPlugin.providerSecretEnvMapping || providerPlugin.credentials,
-      provider === 'openai' ? { connectors_ai_openai_api_key: 'OPENAI_API_KEY' } : {}
+      {}
     );
     if (!providerSecretEnv || Array.isArray(providerSecretEnv) || typeof providerSecretEnv !== 'object') {
       throw new Error('provider_plugin.provider_secret_env must be a JSON object');
