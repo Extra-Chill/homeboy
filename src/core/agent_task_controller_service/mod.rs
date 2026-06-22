@@ -60,6 +60,7 @@ mod reports;
 mod request;
 mod spec;
 mod spec_compile;
+mod spec_source;
 
 use action_state::*;
 use actions::*;
@@ -76,6 +77,7 @@ use spec_compile::{
     repo_loop_spec_fingerprint_from_metadata, set_repo_loop_spec_metadata,
     RepoLoopSpecReconciliation, REPO_LOOP_SPEC_ACTION_REASON, REPO_LOOP_SPEC_WORKFLOW_REASON,
 };
+pub use spec_source::{load_materialize_spec_source, MaterializeSpecSource};
 
 /// Create a new durable controller record.
 pub fn init(request: ControllerInitRequest) -> Result<AgentTaskLoopControllerRecord> {
