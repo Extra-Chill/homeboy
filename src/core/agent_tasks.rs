@@ -139,20 +139,21 @@ pub use super::agent_task_provider::{
 /// Durable controller execution service entry points and report contracts.
 pub mod controller_service {
     pub use super::super::agent_task_controller_service::{
-        apply_event, apply_spec_dispatch_defaults, apply_spec_dispatch_defaults_with_cwd, init,
-        init_from_spec, list, mark_human_ready, optional_bool, optional_string,
+        apply_event, apply_spec_dispatch_defaults, apply_spec_dispatch_defaults_with_cwd,
+        controller_request_dispatch_command, init, init_from_spec, list,
+        load_materialize_spec_source, mark_human_ready, optional_bool, optional_string,
         optional_string_array, optional_u32, optional_usize, plan_from_controller_request,
         plan_from_spec, resume, run_action, run_next, status, AgentTaskRepoLoopSpec,
         AgentTaskRepoLoopSpecAbility, AgentTaskRepoLoopSpecAgent, AgentTaskRepoLoopSpecArtifact,
         AgentTaskRepoLoopSpecDependency, AgentTaskRepoLoopSpecEntity, AgentTaskRepoLoopSpecEvent,
         AgentTaskRepoLoopSpecGate, AgentTaskRepoLoopSpecMetric, AgentTaskRepoLoopSpecPhase,
         AgentTaskRepoLoopSpecTool, AgentTaskRepoLoopSpecWorkflow, ControllerActionReport,
-        ControllerApplyEventRequest, ControllerDispatchHook, ControllerEventReport,
-        ControllerFromSpecReport, ControllerFromSpecRequest, ControllerInitRequest,
-        ControllerListReport, ControllerMarkHumanReadyRequest, ControllerPlanReport,
-        ControllerPlanRequest, ControllerResumeReport, NoopDispatchHook, ACTION_RESULT_SCHEMA,
-        APPLY_EVENT_RESULT_SCHEMA, FROM_SPEC_RESULT_SCHEMA, LIST_RESULT_SCHEMA, PLAN_RESULT_SCHEMA,
-        RESUME_RESULT_SCHEMA,
+        ControllerApplyEventRequest, ControllerDispatchHook, ControllerDispatchOverrides,
+        ControllerEventReport, ControllerFromSpecReport, ControllerFromSpecRequest,
+        ControllerInitRequest, ControllerListReport, ControllerMarkHumanReadyRequest,
+        ControllerPlanReport, ControllerPlanRequest, ControllerResumeReport, MaterializeSpecSource,
+        NoopDispatchHook, ACTION_RESULT_SCHEMA, APPLY_EVENT_RESULT_SCHEMA, FROM_SPEC_RESULT_SCHEMA,
+        LIST_RESULT_SCHEMA, PLAN_RESULT_SCHEMA, RESUME_RESULT_SCHEMA,
     };
 }
 

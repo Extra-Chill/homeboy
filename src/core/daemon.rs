@@ -22,10 +22,14 @@ use crate::core::upgrade::VERSION;
 
 mod artifact_download;
 mod broker_config;
+mod control;
 mod patch_capture;
 mod remote_runner;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
+pub use control::{
+    artifact_content_url, fetch_artifact_to_path, start_background, ArtifactFetchOutcome,
+};
 use patch_capture::{capture_baseline, capture_patch_report};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";

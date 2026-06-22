@@ -262,24 +262,15 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
         }
     });
 
-    let args = dispatch_args_from_controller_request(&request).expect("dispatch args");
-    let dispatch_request = homeboy::core::agent_tasks::dispatch_service::AgentTaskDispatchRequest {
-        prompt: args.prompt,
-        tasks: args.tasks,
-        cwd: args.cwd,
-        workspace: args.workspace,
-        repo: args.repo,
-        task_url: args.task_url,
-        backend: args.backend.expect("backend"),
-        selector: args.selector,
-        model: args.model,
-        required_capabilities: args.required_capabilities,
-        secret_env: args.secret_env,
-        concurrency: args.concurrency,
-        run_id: args.run_id,
-        core: args.core.into(),
-        backend_selection: None,
-    };
+    let command =
+        homeboy::core::agent_tasks::controller_service::controller_request_dispatch_command(
+            &request,
+            &homeboy::core::agent_tasks::controller_service::ControllerDispatchOverrides::default(),
+        )
+        .expect("dispatch command");
+    let dispatch_request =
+        homeboy::core::agent_tasks::dispatch_service::resolve_dispatch_request(command)
+            .expect("dispatch request");
     let plan = homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan_with_provider_requirements(
             &dispatch_request,
             |_backend, _selector| false,

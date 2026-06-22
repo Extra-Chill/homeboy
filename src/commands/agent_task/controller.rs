@@ -1,12 +1,7 @@
 //! `agent-task controller` handlers: durable multi-agent loop controller
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy::core::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
@@ -26,9 +21,6 @@ use homeboy::core::proof::validate_proof_value;
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
-const CONTROLLER_SPEC_GENERATOR_SCHEMA: &str = "homeboy/agent-task-loop-spec-generator/v1";
-
-use super::super::agent_task_dispatch::{DispatchArgs, DispatchCoreArgs};
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
@@ -99,7 +91,7 @@ fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdR
 }
 
 pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
-    let source = load_materialize_spec_source(&args.spec)?;
+    let source = agent_task_controller_service::load_materialize_spec_source(&args.spec)?;
     let mut spec = source.spec;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let run_inputs = match args.inputs {
@@ -132,198 +124,6 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
         }
     }
     Ok((value, 0))
-}
-
-struct ControllerMaterializeSpecSource {
-    spec: AgentTaskRepoLoopSpec,
-    generator_evidence: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ControllerSpecGeneratorManifest {
-    schema: String,
-    command: Vec<String>,
-    output_path: String,
-    #[serde(default)]
-    inputs: Value,
-}
-
-fn load_materialize_spec_source(
-    source: &str,
-) -> homeboy::core::Result<ControllerMaterializeSpecSource> {
-    let raw = config::read_json_spec_to_string(source)?;
-    match serde_json::from_str::<AgentTaskRepoLoopSpec>(&raw) {
-        Ok(spec) => {
-            return Ok(ControllerMaterializeSpecSource {
-                spec,
-                generator_evidence: None,
-            })
-        }
-        Err(spec_error) => {
-            let manifest: ControllerSpecGeneratorManifest =
-                serde_json::from_str(&raw).map_err(|_| {
-                    homeboy::core::Error::validation_invalid_argument(
-                        "spec",
-                        spec_error.to_string(),
-                        Some(source.to_string()),
-                        None,
-                    )
-                })?;
-            load_generated_materialize_spec(source, manifest)
-        }
-    }
-}
-
-fn load_generated_materialize_spec(
-    source: &str,
-    manifest: ControllerSpecGeneratorManifest,
-) -> homeboy::core::Result<ControllerMaterializeSpecSource> {
-    validate_generator_manifest(source, &manifest)?;
-    let manifest_dir = manifest_base_dir(source);
-    let output_path = resolve_manifest_path(manifest_dir.as_deref(), &manifest.output_path);
-    let command_status = run_spec_generator_command(&manifest, manifest_dir.as_deref())?;
-    let generated_raw = std::fs::read_to_string(&output_path).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "spec.output_path",
-            format!(
-                "generator command completed but generated spec was not found at {}; rerun the manifest command or update output_path: {error}",
-                output_path.display()
-            ),
-            Some(source.to_string()),
-            Some(vec![format!(
-                "{} must write {}",
-                manifest.command.join(" "),
-                manifest.output_path
-            )]),
-        )
-    })?;
-    let spec: AgentTaskRepoLoopSpec = serde_json::from_str(&generated_raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "spec.output_path",
-            format!("generated spec JSON is invalid: {error}"),
-            Some(output_path.display().to_string()),
-            None,
-        )
-    })?;
-    let materialized = materialize_repo_loop_spec(AgentTaskLoopSpecMaterializationRequest {
-        spec: &spec,
-        run_inputs: &Value::Null,
-        policy_results: &[],
-    })?;
-    let validation_result = validate_proof_value(command_json_value(materialized)?);
-    let spec_hash = format!("{:x}", Sha256::digest(generated_raw.as_bytes()));
-
-    Ok(ControllerMaterializeSpecSource {
-        spec,
-        generator_evidence: Some(serde_json::json!({
-            "schema": "homeboy/agent-task-loop-spec-generator-evidence/v1",
-            "manifest": source,
-            "command": manifest.command,
-            "inputs": manifest.inputs,
-            "output_path": output_path.display().to_string(),
-            "spec_hash": spec_hash,
-            "validation_result": validation_result,
-            "status": command_status,
-        })),
-    })
-}
-
-fn validate_generator_manifest(
-    source: &str,
-    manifest: &ControllerSpecGeneratorManifest,
-) -> homeboy::core::Result<()> {
-    if manifest.schema != CONTROLLER_SPEC_GENERATOR_SCHEMA {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "spec.schema",
-            format!(
-                "controller materialize generator manifests must use schema {CONTROLLER_SPEC_GENERATOR_SCHEMA}"
-            ),
-            Some(source.to_string()),
-            None,
-        ));
-    }
-    if manifest.command.is_empty() || manifest.command.iter().any(|part| part.trim().is_empty()) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "spec.command",
-            "generator command must be a non-empty array of program and arguments",
-            Some(source.to_string()),
-            None,
-        ));
-    }
-    if manifest.output_path.trim().is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "spec.output_path",
-            "generator manifest must declare the spec file path written by the command",
-            Some(source.to_string()),
-            None,
-        ));
-    }
-    if !manifest.inputs.is_null() && !manifest.inputs.is_object() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "spec.inputs",
-            "generator manifest inputs must be a JSON object when present",
-            Some(source.to_string()),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn manifest_base_dir(source: &str) -> Option<PathBuf> {
-    let file = source.strip_prefix('@')?;
-    if file == "-" {
-        return None;
-    }
-    Path::new(file).parent().map(Path::to_path_buf)
-}
-
-fn resolve_manifest_path(base_dir: Option<&Path>, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else if let Some(base_dir) = base_dir {
-        base_dir.join(path)
-    } else {
-        path
-    }
-}
-
-fn run_spec_generator_command(
-    manifest: &ControllerSpecGeneratorManifest,
-    manifest_dir: Option<&Path>,
-) -> homeboy::core::Result<Value> {
-    let mut command = Command::new(&manifest.command[0]);
-    command.args(&manifest.command[1..]);
-    if let Some(manifest_dir) = manifest_dir {
-        command.current_dir(manifest_dir);
-    }
-    let output = command.output().map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "spec.command",
-            format!("failed to execute generator command: {error}"),
-            Some(manifest.command.join(" ")),
-            None,
-        )
-    })?;
-    let code = output.status.code();
-    if !output.status.success() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "spec.command",
-            format!(
-                "generator command exited with status {}; stderr: {}",
-                code.map(|value| value.to_string())
-                    .unwrap_or_else(|| "terminated by signal".to_string()),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Some(manifest.command.join(" ")),
-            None,
-        ));
-    }
-    Ok(serde_json::json!({
-        "exit_code": code,
-        "stdout": String::from_utf8_lossy(&output.stdout).trim(),
-        "stderr": String::from_utf8_lossy(&output.stderr).trim(),
-    }))
 }
 
 fn parse_policy_result(
@@ -466,8 +266,11 @@ fn doctor_dispatch_request_checks(
         return checks;
     }
 
-    let mut dispatch_args = match dispatch_args_from_controller_request(request) {
-        Ok(args) => args,
+    let command = match agent_task_controller_service::controller_request_dispatch_command(
+        request,
+        &defaults.to_overrides(),
+    ) {
+        Ok(command) => command,
         Err(error) => {
             checks.push(doctor_check(
                 format!("controller.action.{action_id}.dispatch.parse"),
@@ -479,9 +282,7 @@ fn doctor_dispatch_request_checks(
             return checks;
         }
     };
-    defaults.apply(&mut dispatch_args);
 
-    let command: dispatch_service::AgentTaskDispatchCommand = dispatch_args.into();
     let dispatch_request = match dispatch_service::resolve_dispatch_request(command) {
         Ok(request) => request,
         Err(error) => {
@@ -673,18 +474,12 @@ impl ControllerDispatchDefaults {
         }
     }
 
-    fn apply(&self, args: &mut DispatchArgs) {
-        if args.backend.is_none() {
-            args.backend = self.backend.clone();
-        }
-        if args.selector.is_none() {
-            args.selector = self.selector.clone();
-        }
-        if args.model.is_none() {
-            args.model = self.model.clone();
-        }
-        if args.core.provider_config.is_none() {
-            args.core.provider_config = self.provider_config.clone();
+    fn to_overrides(&self) -> agent_task_controller_service::ControllerDispatchOverrides {
+        agent_task_controller_service::ControllerDispatchOverrides {
+            backend: self.backend.clone(),
+            selector: self.selector.clone(),
+            model: self.model.clone(),
+            provider_config: self.provider_config.clone(),
         }
     }
 }
@@ -694,44 +489,12 @@ where
     E: AgentTaskExecutorAdapter + Clone,
 {
     fn dispatch(&self, request: &Value) -> homeboy::core::Result<(Value, i32)> {
-        let mut dispatch_args = dispatch_args_from_controller_request(request)?;
-        self.defaults.apply(&mut dispatch_args);
-        dispatch_service::run_dispatch_command(dispatch_args.into(), self.executor.clone())
+        let command = agent_task_controller_service::controller_request_dispatch_command(
+            request,
+            &self.defaults.to_overrides(),
+        )?;
+        dispatch_service::run_dispatch_command(command, self.executor.clone())
     }
-}
-
-pub(super) fn dispatch_args_from_controller_request(
-    request: &Value,
-) -> homeboy::core::Result<DispatchArgs> {
-    use agent_task_controller_service::{
-        optional_bool, optional_string, optional_string_array, optional_u32, optional_usize,
-    };
-    let dispatch = request.get("dispatch").unwrap_or(request);
-    Ok(DispatchArgs {
-        prompt: optional_string(dispatch, "prompt"),
-        tasks: optional_string_array(dispatch, "tasks")?,
-        cwd: optional_string(dispatch, "cwd")
-            .or_else(|| optional_string(request, "cwd"))
-            .or_else(|| optional_string(request, "workspace_root")),
-        workspace: optional_string(dispatch, "workspace")
-            .or_else(|| optional_string(request, "workspace")),
-        repo: optional_string(dispatch, "repo").or_else(|| optional_string(request, "repo")),
-        task_url: optional_string(dispatch, "task_url"),
-        backend: optional_string(dispatch, "backend"),
-        selector: optional_string(dispatch, "selector"),
-        model: optional_string(dispatch, "model"),
-        required_capabilities: optional_string_array(dispatch, "required_capabilities")?,
-        secret_env: optional_string_array(dispatch, "secret_env")?,
-        concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
-        run_id: optional_string(dispatch, "run_id"),
-        core: DispatchCoreArgs {
-            tasks_json: optional_string(dispatch, "tasks_json"),
-            provider_config: optional_string(dispatch, "provider_config"),
-            client_context: optional_string(dispatch, "client_context"),
-            attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
-            queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
-        },
-    })
 }
 
 pub(super) fn apply_controller_event(args: AgentTaskControllerApplyEventArgs) -> CmdResult<Value> {
@@ -883,52 +646,56 @@ mod tests {
 
     #[test]
     fn controller_dispatch_defaults_apply_provider_config_when_missing() {
-        let mut args = dispatch_args_from_controller_request(&serde_json::json!({
-            "dispatch": {
-                "prompt": "Cook",
-                "tasks": ["Do the work"],
-                "backend": "synthetic-runtime"
-            }
-        }))
-        .expect("dispatch args");
-
-        ControllerDispatchDefaults {
+        let command = ControllerDispatchDefaults {
             backend: Some("ignored-backend".to_string()),
             selector: None,
             model: Some("gpt-5.5".to_string()),
             provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
         }
-        .apply(&mut args);
+        .to_overrides();
+        let command = agent_task_controller_service::controller_request_dispatch_command(
+            &serde_json::json!({
+                "dispatch": {
+                    "prompt": "Cook",
+                    "tasks": ["Do the work"],
+                    "backend": "synthetic-runtime"
+                }
+            }),
+            &command,
+        )
+        .expect("dispatch command");
 
-        assert_eq!(args.backend.as_deref(), Some("synthetic-runtime"));
-        assert_eq!(args.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(command.backend.as_deref(), Some("synthetic-runtime"));
+        assert_eq!(command.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
-            args.core.provider_config.as_deref(),
+            command.core.provider_config.as_deref(),
             Some(r#"{"runtime_wordpress_version":"7.0"}"#)
         );
     }
 
     #[test]
     fn controller_dispatch_defaults_preserve_existing_provider_config() {
-        let mut args = dispatch_args_from_controller_request(&serde_json::json!({
-            "dispatch": {
-                "prompt": "Cook",
-                "tasks": ["Do the work"],
-                "provider_config": "{\"runtime_wordpress_version\":\"nightly\"}"
-            }
-        }))
-        .expect("dispatch args");
-
-        ControllerDispatchDefaults {
+        let overrides = ControllerDispatchDefaults {
             backend: None,
             selector: None,
             model: None,
             provider_config: Some(r#"{"runtime_wordpress_version":"7.0"}"#.to_string()),
         }
-        .apply(&mut args);
+        .to_overrides();
+        let command = agent_task_controller_service::controller_request_dispatch_command(
+            &serde_json::json!({
+                "dispatch": {
+                    "prompt": "Cook",
+                    "tasks": ["Do the work"],
+                    "provider_config": "{\"runtime_wordpress_version\":\"nightly\"}"
+                }
+            }),
+            &overrides,
+        )
+        .expect("dispatch command");
 
         assert_eq!(
-            args.core.provider_config.as_deref(),
+            command.core.provider_config.as_deref(),
             Some(r#"{"runtime_wordpress_version":"nightly"}"#)
         );
     }

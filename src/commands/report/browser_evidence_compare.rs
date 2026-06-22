@@ -4,7 +4,6 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::commands::escape_markdown_table_cell;
 use homeboy::core::extension::trace::{
@@ -1475,73 +1474,18 @@ mod implementation {
         baseline_label: &str,
         candidate_label: &str,
     ) -> homeboy::core::Result<VisualCompareResult> {
-        std::fs::create_dir_all(artifacts_dir).map_err(|err| {
-            homeboy::core::Error::internal_io(
-                format!(
-                    "Failed to create visual compare artifact directory {}: {}",
-                    artifacts_dir.display(),
-                    err
-                ),
-                Some("report.browser_evidence_compare.visual_artifacts".to_string()),
-            )
-        })?;
-        let input_path = artifacts_dir.join("homeboy-visual-compare-input.json");
-        let mut input = serde_json::json!({
-            "schema": "homeboy/visual-compare-request/v1",
-            "source_screenshot": source_screenshot,
-            "candidate_screenshot": candidate_screenshot,
-            "source_label": baseline_label,
-            "candidate_label": candidate_label,
-            "artifacts_directory": artifacts_dir,
-        });
-        if let Some(threshold) = options.threshold {
-            input["threshold"] = serde_json::json!(threshold);
-        }
-        std::fs::write(
-            &input_path,
-            serde_json::to_string_pretty(&input).map_err(|err| {
-                homeboy::core::Error::internal_json(
-                    err.to_string(),
-                    Some("report.browser_evidence_compare.visual_input".to_string()),
-                )
-            })?,
-        )
-        .map_err(|err| {
-            homeboy::core::Error::internal_io(
-                format!(
-                    "Failed to write visual compare input {}: {}",
-                    input_path.display(),
-                    err
-                ),
-                Some("report.browser_evidence_compare.visual_input".to_string()),
-            )
-        })?;
-
-        let output = Command::new(&options.provider_command)
-            .args(&options.provider_args)
-            .arg(&input_path)
-            .output()
-            .map_err(|err| {
-                homeboy::core::Error::internal_unexpected(format!(
-                    "Failed to invoke visual compare provider `{}`: {}",
-                    options.provider_command, err
-                ))
-            })?;
-        if !output.status.success() {
-            return Err(homeboy::core::Error::internal_unexpected(format!(
-                "Visual compare provider `{}` failed with status {:?}: {}{}",
-                options.provider_command,
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr),
-                String::from_utf8_lossy(&output.stdout)
-            )));
-        }
-        let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|err| {
-            homeboy::core::Error::internal_json(
-                format!("Failed to parse visual compare provider output: {}", err),
-                Some("report.browser_evidence_compare.visual_output".to_string()),
-            )
-        })?;
+        let value = homeboy::core::browser_visual_compare::run_visual_compare_provider(
+            &homeboy::core::browser_visual_compare::VisualCompareProviderRequest {
+                artifacts_dir,
+                source_screenshot,
+                candidate_screenshot,
+                baseline_label,
+                candidate_label,
+                threshold: options.threshold,
+                provider_command: &options.provider_command,
+                provider_args: &options.provider_args,
+            },
+        )?;
         Ok(visual_compare_result_from_value(&value, artifacts_dir))
     }
 

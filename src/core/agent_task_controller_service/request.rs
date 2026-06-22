@@ -2,6 +2,73 @@
 #![allow(unused_imports)]
 use super::*;
 
+use crate::core::agent_task_dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
+
+/// Optional dispatch overrides applied to a controller request when the request
+/// itself does not declare a backend/selector/model/provider config. The CLI
+/// supplies these from `--dispatch-*` flags; core owns how they merge so the
+/// command module stays a thin adapter.
+#[derive(Debug, Clone, Default)]
+pub struct ControllerDispatchOverrides {
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    pub provider_config: Option<String>,
+}
+
+/// Build a typed dispatch command from a controller action request, applying the
+/// supplied overrides when the corresponding request fields are absent.
+///
+/// The request may nest dispatch inputs under a `"dispatch"` key or supply them
+/// at the top level. Owns the JSON-to-command adaptation so the CLI controller
+/// adapter only constructs overrides and renders the result.
+pub fn controller_request_dispatch_command(
+    request: &Value,
+    overrides: &ControllerDispatchOverrides,
+) -> Result<AgentTaskDispatchCommand> {
+    let dispatch = request.get("dispatch").unwrap_or(request);
+    let mut command = AgentTaskDispatchCommand {
+        prompt: optional_string(dispatch, "prompt"),
+        tasks: optional_string_array(dispatch, "tasks")?,
+        cwd: optional_string(dispatch, "cwd")
+            .or_else(|| optional_string(request, "cwd"))
+            .or_else(|| optional_string(request, "workspace_root")),
+        workspace: optional_string(dispatch, "workspace")
+            .or_else(|| optional_string(request, "workspace")),
+        repo: optional_string(dispatch, "repo").or_else(|| optional_string(request, "repo")),
+        task_url: optional_string(dispatch, "task_url"),
+        backend: optional_string(dispatch, "backend"),
+        selector: optional_string(dispatch, "selector"),
+        model: optional_string(dispatch, "model"),
+        required_capabilities: optional_string_array(dispatch, "required_capabilities")?,
+        secret_env: optional_string_array(dispatch, "secret_env")?,
+        concurrency: optional_usize(dispatch, "concurrency")?.unwrap_or(1),
+        run_id: optional_string(dispatch, "run_id"),
+        core: DispatchCoreInputs {
+            tasks_json: optional_string(dispatch, "tasks_json"),
+            provider_config: optional_string(dispatch, "provider_config"),
+            client_context: optional_string(dispatch, "client_context"),
+            attempts: optional_u32(dispatch, "attempts")?.unwrap_or(1),
+            queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
+        },
+    };
+
+    if command.backend.is_none() {
+        command.backend = overrides.backend.clone();
+    }
+    if command.selector.is_none() {
+        command.selector = overrides.selector.clone();
+    }
+    if command.model.is_none() {
+        command.model = overrides.model.clone();
+    }
+    if command.core.provider_config.is_none() {
+        command.core.provider_config = overrides.provider_config.clone();
+    }
+
+    Ok(command)
+}
+
 /// Parse an `AgentTaskPlan` out of a controller spawn-task request.
 ///
 /// The request may either wrap the plan under a `"plan"` field or be the plan
