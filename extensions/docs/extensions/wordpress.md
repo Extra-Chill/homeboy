@@ -251,6 +251,85 @@ and verification are ordinary WordPress recipe steps, while visual comparison is
 carried as a verifier step that a runtime can implement with its own browser
 capture and artifact policy.
 
+### Portable fuzz manifest helper
+
+Fuzz callers that need one manifest across local scripts, CI, and agent runners
+can use schema `homeboy/wordpress-fuzz-manifest/v1` and normalize it through
+`wordpress/lib/wordpress-fuzz-manifest.js`. The manifest reuses the portable
+workload profile fields for setup/execution and embeds the generic WordPress
+fuzz discovery/plan contracts described below.
+
+The helper returns a stable manifest object with:
+
+- `workload_profile` normalized by `homeboy/wordpress-workload-profile/v1`.
+- `discovery` normalized by `wordpress-surface-discovery/v1`, when provided.
+- `plan` normalized by `wordpress-fuzz-plan/v1`, when provided.
+- `artifacts`, `budget`, and `metadata` copied as product-agnostic execution
+  hints.
+
+`workflowInputsFromWordPressFuzzManifest()` projects the same runtime inputs as
+the workload profile helper and adds JSON inputs for `wordpress_fuzz_manifest`,
+`wordpress_fuzz_discovery`, `wordpress_fuzz_plan`, and
+`wordpress_fuzz_artifacts`.
+
+Example manifest:
+
+```json
+{
+  "schema": "homeboy/wordpress-fuzz-manifest/v1",
+  "id": "generic-rest-fuzz",
+  "label": "Generic REST fuzz",
+  "dependencies": ["example/plugin-under-test@main"],
+  "run_before": [
+    { "type": "wp-cli", "command": "rewrite flush" }
+  ],
+  "workloads": [
+    {
+      "id": "execute-fuzz-plan",
+      "run": [
+        {
+          "type": "ability",
+          "ability": "wordpress/fuzz-run",
+          "input": { "plan_id": "generic-rest-plan" }
+        }
+      ]
+    }
+  ],
+  "discovery": {
+    "id": "generic-surfaces",
+    "surfaces": [
+      {
+        "type": "rest-route",
+        "id": "wp-v2-posts",
+        "method": "GET",
+        "route": "/wp/v2/posts"
+      }
+    ]
+  },
+  "plan": {
+    "id": "generic-rest-plan",
+    "discovery_id": "generic-surfaces",
+    "targets": [
+      {
+        "id": "posts-list",
+        "surface_id": "wp-v2-posts",
+        "cases": [
+          { "id": "per-page-boundary", "query": { "per_page": 100 } }
+        ]
+      }
+    ]
+  },
+  "artifacts": [
+    { "path": "artifacts/fuzz/result.json", "kind": "json" }
+  ],
+  "budget": { "max_cases": 25 }
+}
+```
+
+The manifest is intentionally product-agnostic. Product-specific target
+selection, fixture content, and assertions belong in caller-owned manifests or
+runtime inputs, not in the shared contract.
+
 ### Surface discovery and fuzz schemas
 
 The WordPress extension exposes product-agnostic data shapes for discovering
