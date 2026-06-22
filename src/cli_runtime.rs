@@ -223,7 +223,6 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info)
     }
-
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {

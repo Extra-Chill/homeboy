@@ -172,7 +172,6 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("refs", CommandJsonFamily::Workspace),
     command_registry_entry("rig", CommandJsonFamily::Workspace),
     command_registry_entry("runner", CommandJsonFamily::Workspace),
-    command_registry_entry("lab", CommandJsonFamily::Workspace),
     command_registry_entry("runtime", CommandJsonFamily::Workspace),
     command_registry_entry("worktree", CommandJsonFamily::Workspace),
     command_registry_entry("tunnel", CommandJsonFamily::Workspace),
@@ -349,7 +348,6 @@ impl Commands {
             | Commands::Changes(_)
             | Commands::Release(_)
             | Commands::Report(_)
-            | Commands::Lab(_)
             | Commands::Runner(_)
             | Commands::Runtime(_)
             | Commands::Worktree(_)

@@ -198,8 +198,8 @@ refs surfaced by `homeboy runs show` and `homeboy runs artifact get`, not a
 controller-local hot run or a benchmark surrogate.
 
 If `homeboy fuzz` is present in source but unavailable on a Lab runner, compare
-the controller and runner Homeboy versions with `homeboy lab status --runner
-<id>`. The status output includes command availability checks such as
+the controller and runner Homeboy versions with `homeboy runner status <id>`.
+The status output includes command availability checks such as
 `homeboy fuzz --help`; refresh or upgrade the runner binary before rerunning the
 campaign.
 

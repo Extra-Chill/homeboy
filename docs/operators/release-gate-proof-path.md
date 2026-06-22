@@ -77,7 +77,7 @@ non-interactive shell and points you at Lab offload. Honor that routing:
     -- homeboy review my-component --changed-since=origin/main
   ```
 
-See [lab](../commands/lab.md) for runner selection, readiness, and managed
+See [runner](../commands/runner.md) for runner selection, readiness, and managed
 follow-up commands, and [the reverse-runner operator guide](controller-runner-reverse-runner.md)
 for setup and smoke evidence.
 
@@ -108,7 +108,7 @@ Re-run through normal routing before claiming the gate is green.
 Early gate failures usually mean the routing needs repair, not that you should run
 locally. Fix the routing, then re-run the canonical `homeboy review` command:
 
-- **Stale runner binary or daemon.** Check `runner_homeboy` in `homeboy lab status`
+- **Stale runner binary or daemon.** Check `runner_homeboy` in `homeboy runner status <runner>`
   / offload metadata. If the daemon identity is stale, restart it; if the
   configured executable is behind merged fixes, upgrade it first:
 
@@ -143,7 +143,7 @@ use that routed result as the proof.
 ## Related
 
 - [review](../commands/review.md) — the audit + lint + test umbrella (canonical proof command)
-- [lab](../commands/lab.md) — Lab runner selection, offload routing, and managed follow-ups
+- [runner](../commands/runner.md) — Lab runner selection, offload routing, and managed follow-ups
 - [Controller to runner reverse-runner setup](controller-runner-reverse-runner.md) — gated reverse-runner path
 - [agent-task](../commands/agent-task.md) — durable lifecycle and runner-side gate dispatch
 - [Code Factory](../code-factory.md) — the lint → test → audit → release pipeline this proof feeds

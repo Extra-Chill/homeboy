@@ -62,7 +62,7 @@ docs cleanup PR.
 
 | Compatibility surface | Current owner | Current shape | Retirement criteria |
 | --- | --- | --- | --- |
-| Hidden `homeboy lab` command | `src/cli_surface.rs`, `src/commands/lab.rs` | Hidden top-level compatibility shortcut; runner discovery lives under `homeboy runner`. | Remove after public docs, scripts, and command-surface consumers use `runner` or global `--runner` flows, and telemetry/issues show no active `lab` invocation dependency. |
+| Hidden `homeboy list` command | `src/cli_surface.rs`, `src/command_contract/output.rs` | Hidden raw Markdown/help alias with optional JSON safety manifest. | Remove after command-surface manifest consumers use `homeboy --help`, `homeboy docs list`, or the explicit safety manifest surface. |
 | Global `--no-local-execution` alias | `src/cli_surface.rs` | Visible alias for `--lab-only`. | Remove after operator docs and automation uniformly use `--lab-only` and no active scripts reference the alias. |
 | Legacy component fields such as `build_command` | `src/commands/component.rs`, `src/core/extension/build/mod.rs`, `src/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Deprecated `homeboy component add-version-target` | `src/commands/component.rs` | Deprecated command path that points callers to `component set --version-target`. | Remove after docs and automation stop invoking it and a release window has carried the deprecation notice. |

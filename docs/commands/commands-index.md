@@ -57,8 +57,7 @@
 - [wp](wp.md) — extension-provided WP-CLI routing when installed
 
 This list covers the top-level core CLI commands currently surfaced by `homeboy
---help` in this checkout. Hidden compatibility aliases such as `lab` are
-documented but omitted from this index.
+--help` in this checkout. Hidden internal commands are omitted from this index.
 
 Note: some extensions also expose additional top-level CLI commands at runtime
 when installed. Extension command docs, including `cargo` and `wp`, describe

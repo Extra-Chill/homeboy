@@ -31,6 +31,12 @@ mod workspace;
 pub struct RunnerExtra {
     pub variant: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_lab_runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_lab_runner: Option<LabSelectedRunnerOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub managed_followups: Vec<LabFollowup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub connection: Option<RunnerConnectionOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
@@ -44,12 +50,52 @@ impl Default for RunnerExtra {
     fn default() -> Self {
         Self {
             variant: "registry",
+            preferred_lab_runner: None,
+            selected_lab_runner: None,
+            managed_followups: Vec::new(),
             connection: None,
             sessions: Vec::new(),
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LabFollowup {
+    pub label: &'static str,
+    pub command: String,
+    pub purpose: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LabSelectedRunnerOutput {
+    pub runner_id: String,
+    pub kind: String,
+    pub configured_executable: String,
+    pub runner_homeboy: LabRunnerHomeboyOutput,
+    pub daemon_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    pub readiness_state: String,
+    pub connected: bool,
+    pub status: RunnerStatusReport,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LabRunnerHomeboyOutput {
+    pub controller_version: String,
+    pub configured_executable: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_daemon_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_daemon_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_daemon: Option<Value>,
+    pub version_drift: bool,
+    pub command_availability_checks: Vec<String>,
+    pub refresh_commands: Vec<String>,
+    pub upgrade_command: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1221,16 +1267,21 @@ fn connect(
 }
 
 fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
+    let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
         let report = runner::status(id)?;
         let operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
+        let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
                 id: Some(id.to_string()),
                 extra: RunnerExtra {
                     connection: Some(RunnerConnectionOutput::Status(report)),
+                    preferred_lab_runner,
+                    selected_lab_runner,
+                    managed_followups: runner_followups(Some(id)),
                     operator_hints,
                     operator_commands,
                     ..Default::default()
@@ -1250,11 +1301,16 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         .iter()
         .flat_map(runner_status_operator_commands)
         .collect();
+    let selected_lab_runner = selected_lab_runner_status(preferred_lab_runner.as_deref(), None)?;
+    let managed_followups = runner_followups(preferred_lab_runner.as_deref());
     Ok((
         RunnerOutput {
             command: "runner.status".to_string(),
             extra: RunnerExtra {
                 sessions,
+                preferred_lab_runner,
+                selected_lab_runner,
+                managed_followups,
                 operator_hints,
                 operator_commands,
                 ..Default::default()
@@ -1263,6 +1319,173 @@ fn status(id: Option<&str>) -> CmdResult<RunnerOutput> {
         },
         0,
     ))
+}
+
+fn selected_lab_runner_status(
+    runner_id: Option<&str>,
+    status: Option<RunnerStatusReport>,
+) -> homeboy::core::Result<Option<LabSelectedRunnerOutput>> {
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let runner_config = runner::load(runner_id)?;
+    let status = match status {
+        Some(status) => status,
+        None => runner::status(runner_id)?,
+    };
+    let configured_executable = runner_config
+        .settings
+        .homeboy_path
+        .clone()
+        .unwrap_or_else(|| "homeboy".to_string());
+    Ok(Some(LabSelectedRunnerOutput {
+        runner_id: runner_id.to_string(),
+        kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
+        configured_executable: configured_executable.clone(),
+        runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
+        daemon_enabled: runner_config.settings.daemon,
+        workspace_root: runner_config.workspace_root.clone(),
+        readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
+        connected: status.connected,
+        status,
+    }))
+}
+
+fn lab_runner_homeboy_output(
+    runner_id: &str,
+    configured_executable: &str,
+    status: &RunnerStatusReport,
+) -> LabRunnerHomeboyOutput {
+    let controller_version = env!("CARGO_PKG_VERSION").to_string();
+    let active_daemon_version = status
+        .session
+        .as_ref()
+        .map(|session| session.homeboy_version.clone());
+    let version_drift = active_daemon_version
+        .as_ref()
+        .is_some_and(|version| version != &controller_version);
+    LabRunnerHomeboyOutput {
+        controller_version,
+        configured_executable: configured_executable.to_string(),
+        active_daemon_version,
+        active_daemon_build_identity: status
+            .session
+            .as_ref()
+            .and_then(|session| session.homeboy_build_identity.clone()),
+        stale_daemon: status
+            .stale_daemon
+            .as_ref()
+            .and_then(|warning| serde_json::to_value(warning).ok()),
+        version_drift,
+        command_availability_checks: lab_command_availability_checks(configured_executable),
+        refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
+        upgrade_command: format!(
+            "homeboy upgrade --force --upgrade-runner {}",
+            shell_arg(runner_id)
+        ),
+    }
+}
+
+fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
+    let binary = shell_arg(homeboy_path);
+    vec![
+        format!("{binary} --version"),
+        format!("{binary} fuzz --help"),
+        format!("{binary} runs evidence --help"),
+        format!("{binary} extension list"),
+    ]
+}
+
+fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
+    let runner_arg = shell_arg(runner_id);
+    vec![
+        format!("homeboy runner disconnect {runner_arg}"),
+        format!("homeboy runner connect {runner_arg}"),
+    ]
+}
+
+fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
+    let mut followups = vec![
+        LabFollowup {
+            label: "recent_runs",
+            command: "homeboy runs list --limit 5".to_string(),
+            purpose: "Find recent persisted run records before digging into runner state.",
+        },
+        LabFollowup {
+            label: "latest_bench_run",
+            command: "homeboy runs latest-run --kind bench".to_string(),
+            purpose: "Resolve the latest benchmark run id for evidence inspection.",
+        },
+        LabFollowup {
+            label: "run_artifacts",
+            command: "homeboy runs artifacts <run-id>".to_string(),
+            purpose: "List recorded run artifacts through Homeboy.",
+        },
+        LabFollowup {
+            label: "run_evidence",
+            command: "homeboy runs evidence <run-id>".to_string(),
+            purpose: "Show stable evidence summary and reviewer-facing commands for one run.",
+        },
+        LabFollowup {
+            label: "run_refs",
+            command: "homeboy runs refs --kind bench --limit 10".to_string(),
+            purpose: "List recent benchmark run and artifact refs.",
+        },
+    ];
+    let Some(runner_id) = runner_id else {
+        return followups;
+    };
+    let runner_arg = shell_arg(runner_id);
+    followups.extend([
+        LabFollowup {
+            label: "doctor",
+            command: format!("homeboy runner doctor {runner_arg} --scope lab-offload"),
+            purpose: "Probe runner tools, workspace writability, artifact storage, and Lab offload readiness.",
+        },
+        LabFollowup {
+            label: "env",
+            command: format!("homeboy runner env {runner_arg}"),
+            purpose: "Show the redacted environment Homeboy injects into runner jobs.",
+        },
+        LabFollowup {
+            label: "homeboy_binary_refresh",
+            command: format!(
+                "homeboy runner disconnect {runner_arg} && homeboy runner connect {runner_arg}"
+            ),
+            purpose: "Restart the runner daemon so offload uses the currently configured Homeboy binary.",
+        },
+        LabFollowup {
+            label: "homeboy_binary_upgrade",
+            command: format!("homeboy upgrade --force --upgrade-runner {runner_arg}"),
+            purpose: "Upgrade the Homeboy binary configured for this runner before reconnecting stale runs.",
+        },
+        LabFollowup {
+            label: "exec",
+            command: format!("homeboy runner exec {runner_arg} -- <command>"),
+            purpose: "Run a managed follow-up command through Homeboy instead of opening an ad-hoc shell.",
+        },
+    ]);
+    if let Ok(path) = std::env::current_dir() {
+        followups.push(LabFollowup {
+            label: "workspace_sync",
+            command: format!(
+                "homeboy runner workspace sync {runner_arg} --path {} --mode snapshot",
+                shell_arg(&path.display().to_string())
+            ),
+            purpose: "Materialize the current checkout into the runner workspace before a replay or follow-up run.",
+        });
+    }
+    followups
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {

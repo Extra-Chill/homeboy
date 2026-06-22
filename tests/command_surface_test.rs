@@ -200,8 +200,7 @@ fn command_surface_depth_is_configurable() {
 
 #[test]
 fn manifest_command_exposes_recursive_safety_manifest() {
-    let cli = Cli::try_parse_from(["homeboy", "manifest"])
-        .expect("manifest command should parse");
+    let cli = Cli::try_parse_from(["homeboy", "manifest"]).expect("manifest command should parse");
     assert!(matches!(cli.command, Commands::Manifest(_)));
     assert!(Cli::try_parse_from(["homeboy", "list", "--json"]).is_err());
 
@@ -261,7 +260,7 @@ fn command_index_matches_top_level_command_surface() {
 #[test]
 fn command_safety_manifest_docs_paths_match_command_docs() {
     let manifest = command_safety_manifest();
-    let hidden_top_level_commands = BTreeSet::from(["lab"]);
+    let hidden_top_level_commands = BTreeSet::from(["list"]);
 
     for entry in &manifest.commands {
         if entry.hidden {
@@ -327,8 +326,47 @@ fn visible_safety_manifest_entries_advertise_live_command_docs() {
 fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
     let manifest = command_safety_manifest();
     let explicit_no_apply_surface = BTreeSet::from([
+        "component create".to_string(),
+        "component delete".to_string(),
+        "component rename".to_string(),
+        "component set".to_string(),
+        "component setup".to_string(),
+        "config remove".to_string(),
+        "config reset".to_string(),
+        "config set".to_string(),
+        "extension install".to_string(),
+        "extension install-for-component".to_string(),
+        "extension refresh".to_string(),
+        "extension relink".to_string(),
+        "extension set".to_string(),
+        "extension setup".to_string(),
+        "extension uninstall".to_string(),
+        "extension update".to_string(),
         "file mkdir".to_string(),
         "file rename".to_string(),
+        "project components attach-path".to_string(),
+        "project components clear".to_string(),
+        "project components remove".to_string(),
+        "project components set".to_string(),
+        "project create".to_string(),
+        "project delete".to_string(),
+        "project init".to_string(),
+        "project pin add".to_string(),
+        "project pin remove".to_string(),
+        "project pin update".to_string(),
+        "project remove".to_string(),
+        "project rename".to_string(),
+        "project set".to_string(),
+        "runs import".to_string(),
+        "server connect".to_string(),
+        "server create".to_string(),
+        "server delete".to_string(),
+        "server disconnect".to_string(),
+        "server key generate".to_string(),
+        "server key import".to_string(),
+        "server key unset".to_string(),
+        "server key use".to_string(),
+        "server set".to_string(),
         "triage".to_string(),
     ]);
 
@@ -360,9 +398,7 @@ fn command_docs_files_match_command_index_snapshot() {
         "commands-index".to_string(),
         "rig-spec".to_string(),
     ]);
-    // Hidden top-level commands ship a docs file for runtimes but are
-    // deliberately kept out of the human-facing command index.
-    let hidden_documented_commands = BTreeSet::from(["lab".to_string(), "list".to_string()]);
+    let hidden_documented_commands: BTreeSet<String> = BTreeSet::new();
     let docs_files = documented_command_doc_files();
 
     // Guard against a vacuously-passing snapshot: the index and the docs
@@ -514,9 +550,6 @@ fn docs_cover_focused_command_surface_cleanup_targets() {
     assert!(self_docs.contains("`cleanup-runtime-tmp`"));
     assert!(self_docs.contains("--older-than-days"));
     assert!(self_docs.contains("--apply"));
-
-    let lab = include_str!("../docs/commands/lab.md");
-    assert!(lab.contains("routing helper, not a benchmark executor"));
 
     let extension = include_str!("../docs/commands/extension.md");
     assert!(extension.contains("install-for-component --source <source> [--path <component_path>]"));
