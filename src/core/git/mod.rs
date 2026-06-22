@@ -34,6 +34,7 @@ pub use commits::{
     CommitInfo, MonorepoContext, SemverBump,
 };
 pub use gh_client::{github_cli_env, GhClient};
+pub(in crate::core) use github::push_markdown_body_file_arg;
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
     issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_fleet,

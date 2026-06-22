@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
+use serde_json::Value;
 
 const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
     "dependencies",
@@ -52,6 +53,20 @@ impl GitHubRepo {
             "https://{}/{}/{}/releases/download/{}/{}",
             self.host, self.owner, self.repo, tag, artifact_name
         )
+    }
+
+    fn release_by_tag_api_url(&self, tag: &str) -> String {
+        if self.host == "github.com" {
+            format!(
+                "https://api.github.com/repos/{}/{}/releases/tags/{}",
+                self.owner, self.repo, tag
+            )
+        } else {
+            format!(
+                "https://{}/api/v3/repos/{}/{}/releases/tags/{}",
+                self.host, self.owner, self.repo, tag
+            )
+        }
     }
 }
 
@@ -139,7 +154,12 @@ pub fn download_release_artifact(
     tag: &str,
     artifact_name: &str,
 ) -> Result<PathBuf> {
-    let url = github.release_artifact_url(tag, artifact_name);
+    let auth_token = github_auth_token(&github.host);
+    let url = match auth_token.as_deref() {
+        Some(token) => resolve_release_asset_api_url(github, tag, artifact_name, token)?
+            .unwrap_or_else(|| github.release_artifact_url(tag, artifact_name)),
+        None => github.release_artifact_url(tag, artifact_name),
+    };
 
     // Create temp directory for the download
     let tmp_dir = crate::core::engine::temp::runtime_temp_dir("deploy-download")?;
@@ -147,7 +167,6 @@ pub fn download_release_artifact(
 
     log_status!("deploy", "Downloading release artifact: {}", url);
 
-    let auth_token = github_auth_token(&github.host);
     let curl_command = curl_release_artifact_command(
         &url,
         dest_path.to_str().unwrap_or("artifact"),
@@ -236,6 +255,81 @@ pub fn download_release_artifact(
     Ok(dest_path)
 }
 
+fn resolve_release_asset_api_url(
+    github: &GitHubRepo,
+    tag: &str,
+    artifact_name: &str,
+    auth_token: &str,
+) -> Result<Option<String>> {
+    let url = github.release_by_tag_api_url(tag);
+    let config_stdin = github_api_config(auth_token);
+
+    let mut command = std::process::Command::new("curl");
+    command.args(["-fsSL", "--retry", "3", "--config", "-", &url]);
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("resolve release asset".to_string()),
+        )
+    })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        Error::internal_io(
+            "Failed to open curl stdin".to_string(),
+            Some("resolve release asset".to_string()),
+        )
+    })?;
+    stdin.write_all(config_stdin.as_bytes()).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to write curl config: {}", e),
+            Some("resolve release asset".to_string()),
+        )
+    })?;
+    drop(stdin);
+
+    let output = child.wait_with_output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("resolve release asset".to_string()),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::internal_io(
+            format!(
+                "Failed to resolve release asset '{}' from {}: {}",
+                artifact_name,
+                url,
+                stderr.trim()
+            ),
+            Some("resolve release asset".to_string()),
+        ));
+    }
+
+    let release: Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        Error::internal_json(
+            format!("Failed to parse release metadata from {}: {}", url, e),
+            Some("resolve release asset".to_string()),
+        )
+    })?;
+
+    let Some(assets) = release.get("assets").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+
+    Ok(assets.iter().find_map(|asset| {
+        let name = asset.get("name")?.as_str()?;
+        if name != artifact_name {
+            return None;
+        }
+        asset.get("url")?.as_str().map(ToString::to_string)
+    }))
+}
+
 fn github_auth_token(host: &str) -> Option<String> {
     let output = std::process::Command::new("gh")
         .args(["auth", "token", "--hostname", host])
@@ -264,16 +358,14 @@ fn curl_release_artifact_command(
     dest_path: &str,
     auth_token: Option<&str>,
 ) -> CurlReleaseArtifactCommand {
-    let mut args = vec![
-        "-fsSL".to_string(),
-        "--retry".to_string(),
-        "3".to_string(),
-        "-H".to_string(),
-        "Accept: application/octet-stream".to_string(),
-    ];
+    let mut args = vec!["-fsSL".to_string(), "--retry".to_string(), "3".to_string()];
 
-    let config_stdin =
-        auth_token.map(|token| format!("header = \"Authorization: Bearer {}\"\n", token));
+    let config_stdin = auth_token.map(|token| {
+        format!(
+            "{}header = \"Accept: application/octet-stream\"\n",
+            github_api_config(token)
+        )
+    });
 
     if config_stdin.is_some() {
         args.extend(["--config".to_string(), "-".to_string()]);
@@ -282,6 +374,13 @@ fn curl_release_artifact_command(
     args.extend(["-o".to_string(), dest_path.to_string(), url.to_string()]);
 
     CurlReleaseArtifactCommand { args, config_stdin }
+}
+
+fn github_api_config(token: &str) -> String {
+    format!(
+        "header = \"Authorization: Bearer {}\"\nheader = \"X-GitHub-Api-Version: 2022-11-28\"\nheader = \"User-Agent: homeboy\"\n",
+        token
+    )
 }
 
 fn validate_downloaded_artifact(path: &Path, artifact_name: &str, url: &str) -> Result<()> {
@@ -589,16 +688,13 @@ mod tests {
             Some("secret-token"),
         );
 
-        assert!(command
-            .args
-            .contains(&"Accept: application/octet-stream".to_string()));
         assert!(command.args.contains(&"--config".to_string()));
         assert!(command.args.contains(&"-".to_string()));
         assert!(!command.args.iter().any(|arg| arg.contains("secret-token")));
-        assert_eq!(
-            command.config_stdin.as_deref(),
-            Some("header = \"Authorization: Bearer secret-token\"\n")
-        );
+        let config = command.config_stdin.as_deref().expect("curl config");
+        assert!(config.contains("Authorization: Bearer secret-token"));
+        assert!(config.contains("Accept: application/octet-stream"));
+        assert!(config.contains("User-Agent: homeboy"));
         assert_eq!(
             command.args.last().map(String::as_str),
             Some("https://github.example.com/example-org/theme/releases/download/v1/theme.zip")
@@ -613,11 +709,36 @@ mod tests {
             None,
         );
 
-        assert!(command
-            .args
-            .contains(&"Accept: application/octet-stream".to_string()));
         assert!(!command.args.contains(&"--config".to_string()));
         assert_eq!(command.config_stdin, None);
+    }
+
+    #[test]
+    fn github_release_api_url_uses_enterprise_api_path() {
+        let repo = GitHubRepo {
+            host: "github.a8c.com".to_string(),
+            owner: "chubes4".to_string(),
+            repo: "studio-native".to_string(),
+        };
+
+        assert_eq!(
+            repo.release_by_tag_api_url("v0.12.3"),
+            "https://github.a8c.com/api/v3/repos/chubes4/studio-native/releases/tags/v0.12.3"
+        );
+    }
+
+    #[test]
+    fn github_release_api_url_uses_public_api_host() {
+        let repo = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "homeboy".to_string(),
+        };
+
+        assert_eq!(
+            repo.release_by_tag_api_url("v1.2.3"),
+            "https://api.github.com/repos/Extra-Chill/homeboy/releases/tags/v1.2.3"
+        );
     }
 
     #[test]

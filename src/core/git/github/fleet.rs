@@ -3,6 +3,7 @@
 
 use crate::core::error::Result;
 
+use super::super::gh_client::pr_merge_api_args;
 use super::super::github_types::{
     GithubPrCheckRollup, GithubPrFleetItem, GithubPrFleetOutput, GithubPrFleetSummary,
     GithubPrView, PrFleetOptions,
@@ -67,14 +68,7 @@ pub fn pr_fleet(
         item.updated = updated;
 
         if options.apply && item.mergeable {
-            let args: Vec<String> = vec![
-                "pr".into(),
-                "merge".into(),
-                parsed.to_string(),
-                "-R".into(),
-                repo_flag.clone(),
-                format!("--{}", merge_method),
-            ];
+            let args = pr_merge_api_args(&repo_flag, parsed, &merge_method);
             match run_gh(&args) {
                 Ok(_) => {
                     item.merged = true;

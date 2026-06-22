@@ -109,7 +109,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
 }
 
 #[test]
-fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
+fn lab_runner_preparation_refreshes_stale_default_daemon_version() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
         source: LabRunnerSelectionSource::Default,
@@ -139,20 +139,15 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
-        |_| panic!("stale connected daemon should not dispatch or reconnect automatically"),
+        |runner_id| Ok((successful_connect_report(runner_id), 0)),
     )
     .expect("prepared");
 
-    assert_eq!(
-        prepared,
-        LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon is stale: connected daemon reports homeboy 0.218.0, but the configured runner executable reports homeboy 0.219.0; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `homeboy runner disconnect lab && homeboy runner connect lab`".to_string()
-        }
-    );
+    assert_eq!(prepared, LabRunnerPreparation::Ready);
 }
 
 #[test]
-fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
+fn lab_runner_preparation_errors_when_explicit_stale_daemon_refresh_fails() {
     let selection = LabRunnerSelection {
         runner_id: "lab".to_string(),
         source: LabRunnerSelectionSource::Explicit,
@@ -182,11 +177,16 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
-        |_| panic!("explicit stale connected daemon should fail before reconnect"),
+        |runner_id| Ok((failed_connect_report(runner_id, "daemon restart failed"), 1)),
     )
-    .expect_err("explicit stale daemon should error");
+    .expect_err("explicit stale daemon refresh failure should error");
 
-    assert!(err.message.contains("connected but is not ready"));
+    assert!(err
+        .message
+        .contains("stale daemon and automatic refresh failed"));
+    assert!(err
+        .message
+        .contains("automatic refresh failed: daemon restart failed"));
     assert!(err.message.contains("daemon is stale"));
     assert!(err.message.contains("homeboy 0.218.0"));
     assert!(err.message.contains("homeboy 0.219.0"));
@@ -204,7 +204,46 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
         .flatten()
         .any(|suggestion| suggestion
             .as_str()
-            .is_some_and(|value| value.contains("homeboy runner connect lab"))));
+            .is_some_and(|value| value
+                .contains("homeboy runner disconnect lab && homeboy runner connect lab"))));
+}
+
+#[test]
+fn lab_runner_preparation_refreshes_stale_explicit_daemon_version() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Explicit,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: Some(connected_direct_session(
+                    runner_id,
+                    Some("http://127.0.0.1:1234"),
+                )),
+                stale_daemon: Some(stale_daemon_warning(runner_id)),
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_jobs: Vec::new(),
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |runner_id| Ok((successful_connect_report(runner_id), 0)),
+    )
+    .expect("prepared");
+
+    assert_eq!(prepared, LabRunnerPreparation::Ready);
 }
 
 #[test]
@@ -428,6 +467,48 @@ fn connected_direct_session(
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
+    }
+}
+
+fn successful_connect_report(runner_id: &str) -> RunnerConnectReport {
+    RunnerConnectReport {
+        runner_id: runner_id.to_string(),
+        mode: Some(RunnerTunnelMode::DirectSsh),
+        role: Some(super::super::RunnerSessionRole::Controller),
+        connected: true,
+        recorded: None,
+        local_url: Some("http://127.0.0.1:1234".to_string()),
+        broker_url: None,
+        controller_id: None,
+        remote_daemon_address: Some("127.0.0.1:5678".to_string()),
+        tunnel_pid: None,
+        remote_daemon_pid: Some(42),
+        homeboy_version: Some("homeboy 0.219.0".to_string()),
+        homeboy_build_identity: Some("homeboy 0.219.0+new".to_string()),
+        session_path: Some("/tmp/lab.json".to_string()),
+        failure_kind: None,
+        failure_message: None,
+    }
+}
+
+fn failed_connect_report(runner_id: &str, failure_message: &str) -> RunnerConnectReport {
+    RunnerConnectReport {
+        runner_id: runner_id.to_string(),
+        mode: None,
+        role: None,
+        connected: false,
+        recorded: None,
+        local_url: None,
+        broker_url: None,
+        controller_id: None,
+        remote_daemon_address: None,
+        tunnel_pid: None,
+        remote_daemon_pid: None,
+        homeboy_version: None,
+        homeboy_build_identity: None,
+        session_path: Some("/tmp/lab.json".to_string()),
+        failure_kind: Some(super::super::RunnerFailureKind::DaemonStartupFailure),
+        failure_message: Some(failure_message.to_string()),
     }
 }
 

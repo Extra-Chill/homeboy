@@ -193,6 +193,34 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     let status = status_fn(&selection.runner_id)?;
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
+            if status.stale_daemon.is_some()
+                && status_tunnel_mode(&status) == RunnerTunnelMode::DirectSsh
+            {
+                eprintln!(
+                    "Lab offload: connected runner `{}` daemon is stale; attempting automatic refresh.",
+                    selection.runner_id
+                );
+                let (report, _) = connect_fn(&selection.runner_id)?;
+                if report.connected {
+                    eprintln!(
+                        "Lab offload: refreshed runner `{}` daemon session before dispatch.",
+                        selection.runner_id
+                    );
+                    return Ok(LabRunnerPreparation::Ready);
+                }
+                let refresh_reason = report.failure_message.unwrap_or_else(|| {
+                    "runner connect did not establish a fresh daemon session".to_string()
+                });
+                return automatic_fallback_or_explicit_error(
+                    selection,
+                    format!("{reason}; automatic refresh failed: {refresh_reason}"),
+                    format!(
+                        "Lab offload runner `{}` has a stale daemon and automatic refresh failed",
+                        selection.runner_id
+                    ),
+                    stale_daemon_repair_command(&selection.runner_id, &status),
+                );
+            }
             return automatic_fallback_or_explicit_error(
                 selection,
                 reason,
@@ -283,12 +311,7 @@ fn connected_runner_not_ready_reason(
     status: &RunnerStatusReport,
 ) -> Option<String> {
     if let Some(warning) = status.stale_daemon.as_ref() {
-        let restart = warning.recovery_commands.join(" && ");
-        let restart = if restart.is_empty() {
-            format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}")
-        } else {
-            restart
-        };
+        let restart = stale_daemon_repair_command(runner_id, status);
         return Some(format!(
             "connected runner `{runner_id}` daemon is stale: connected daemon reports {}, but the configured runner executable reports {}; stale runner runtimes can return malformed or misleading provider output; restart the active daemon with `{restart}`",
             warning.session_homeboy_version, warning.current_homeboy_version
@@ -308,6 +331,19 @@ fn connected_runner_not_ready_reason(
             ))
         }
         _ => None,
+    }
+}
+
+fn stale_daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
+    let restart = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.recovery_commands.join(" && "))
+        .unwrap_or_default();
+    if restart.is_empty() {
+        format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}")
+    } else {
+        restart
     }
 }
 

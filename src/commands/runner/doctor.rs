@@ -1091,6 +1091,28 @@ mod probes {
             details.insert("head".to_string(), head);
         }
 
+        let branch = common::remote_line(
+            client,
+            &format!(
+                "git -C {} symbolic-ref --quiet --short HEAD 2>/dev/null",
+                common::shell_word(&resolved_path)
+            ),
+        );
+        if let Some(branch) = branch.as_deref() {
+            details.insert("branch".to_string(), branch.to_string());
+        }
+
+        let dirty_files = common::remote_line(
+            client,
+            &format!(
+                "git -C {} status --porcelain 2>/dev/null | wc -l | tr -d ' '",
+                common::shell_word(&resolved_path)
+            ),
+        )
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+        details.insert("dirty_files".to_string(), dirty_files.to_string());
+
         if let (Some(declared_remote), Some(actual_remote)) =
             (contract.remote_url.as_deref(), actual_remote.as_deref())
         {
@@ -1107,6 +1129,16 @@ mod probes {
             }
         }
 
+        if let Some(check) = managed_runner_source_state_check(
+            contract,
+            id.clone(),
+            branch.as_deref(),
+            dirty_files,
+            details.clone(),
+        ) {
+            return check;
+        }
+
         checks::ok_with_details(
             id,
             format!(
@@ -1115,6 +1147,48 @@ mod probes {
             ),
             details,
         )
+    }
+
+    pub(super) fn managed_runner_source_state_check(
+        contract: &AgentTaskProviderRunnerSource,
+        id: String,
+        branch: Option<&str>,
+        dirty_files: u64,
+        details: BTreeMap<String, String>,
+    ) -> Option<RunnerCheck> {
+        if dirty_files > 0 {
+            return Some(checks::warning_with_details(
+                id,
+                format!(
+                    "Managed runner source `{}` has reconstructable local modifications on the Lab runner",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            ));
+        }
+
+        let Some(git_ref) = contract
+            .git_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return None;
+        };
+        let branch = branch.unwrap_or("").trim();
+        if branch != git_ref {
+            return Some(checks::warning_with_details(
+                id,
+                format!(
+                    "Managed runner source `{}` is not on declared ref `{git_ref}` on the Lab runner",
+                    contract.label
+                ),
+                contract.remediation.clone(),
+                details,
+            ));
+        }
+
+        None
     }
 
     fn provider_readiness_check(
@@ -1924,6 +1998,7 @@ mod repair {
         let target::RunnerTarget::Ssh {
             id,
             runner: runner_config,
+            client,
             ..
         } = target
         else {
@@ -1935,6 +2010,8 @@ mod repair {
             });
             return;
         };
+
+        repair_managed_sources(client, report);
 
         let daemon_failed = report
             .checks
@@ -1989,6 +2066,51 @@ mod repair {
                 });
             }
         }
+    }
+
+    fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
+        let contracts = homeboy::core::agent_tasks::provider::provider_runner_source_contracts();
+        let plans = runner::plan_managed_runner_source_syncs(&contracts);
+        if plans.is_empty() {
+            return;
+        }
+
+        let mut failed = false;
+        for plan in plans {
+            let output = client.execute(&plan.script);
+            if !output.success {
+                failed = true;
+                report.repairs.push(RunnerRepair {
+                    id: format!("repair.managed_source.{}", plan.id),
+                    status: RunnerDoctorStatus::Error,
+                    message: format!(
+                        "Could not refresh managed runner source `{}`: {}",
+                        plan.label,
+                        output.stderr.trim()
+                    ),
+                    commands: Vec::new(),
+                });
+                continue;
+            }
+
+            report.repairs.push(RunnerRepair {
+                id: format!("repair.managed_source.{}", plan.id),
+                status: RunnerDoctorStatus::Ok,
+                message: format!("Refreshed managed runner source `{}`", plan.label),
+                commands: Vec::new(),
+            });
+        }
+
+        if failed {
+            return;
+        }
+
+        report
+            .checks
+            .retain(|check| !check.id.starts_with("lab.managed_source."));
+        report
+            .checks
+            .extend(probes::managed_runner_source_checks(client, &contracts));
     }
 }
 

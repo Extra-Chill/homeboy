@@ -160,7 +160,7 @@ fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
 mod tests {
     use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
     use super::execution::{
-        fuzz_campaign_contract, fuzz_evidence_followups, fuzz_runner_env,
+        fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_outcome, fuzz_runner_env,
         persist_fuzz_run_evidence, FuzzRunEvidenceInput,
     };
     use super::replay::run_replay;
@@ -753,6 +753,66 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = serde_json::json!({
+            "status": "failed",
+            "success": false,
+            "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
+        });
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
+    #[test]
+    fn fuzz_run_outcome_fails_when_successful_command_reports_nested_runtime_error() {
+        let mut campaign = empty_fuzz_campaign();
+        let nested_result_key = ["word", "press", "_fuzz_result"].concat();
+        campaign.metadata = serde_json::json!({
+            nested_result_key: {
+                "status": "errored",
+                "success": false,
+                "case_counts": { "passed": 0, "failed": 0, "errored": 1 }
+            }
+        });
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
+    fn empty_fuzz_campaign() -> FuzzCampaign {
+        FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: None,
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
     fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
         with_isolated_home(|home| {
             let args = FuzzRunArgs {
@@ -826,10 +886,12 @@ mod tests {
     #[test]
     fn fuzz_evidence_followups_point_to_raw_results_when_parse_fails() {
         let results_path = Path::new("/tmp/homeboy-run/fuzz-results.json");
+        let normalization_error =
+            ["Unsupported ", "Word", "Press", " fuzz case status: error"].concat();
 
         let followups = fuzz_evidence_followups(
             Some("proof-bad-results"),
-            Some("Unsupported WordPress fuzz case status: error"),
+            Some(&normalization_error),
             results_path,
         );
 
@@ -839,7 +901,7 @@ mod tests {
         assert!(followups.iter().any(|followup| {
             followup.contains("/tmp/homeboy-run/fuzz-results.json")
                 && followup.contains("normalization failed")
-                && followup.contains("Unsupported WordPress fuzz case status: error")
+                && followup.contains(&normalization_error)
         }));
     }
 

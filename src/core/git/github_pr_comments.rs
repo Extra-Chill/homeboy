@@ -3,7 +3,9 @@
 use crate::core::deploy::release_download::GitHubRepo;
 use crate::core::error::{Error, Result};
 
-use super::github::{ensure_gh_ready, resolve_component_github, run_gh, GithubPrOutput};
+use super::github::{
+    ensure_gh_ready, push_markdown_body_file_arg, resolve_component_github, run_gh, GithubPrOutput,
+};
 use super::github_comment_sections::{
     comment_matches_key, extract_footer, extract_header, merge_section, parse_comment_sections,
     render_comment,
@@ -120,15 +122,15 @@ fn pr_comment_fresh(
     options: PrCommentOptions,
 ) -> Result<GithubPrOutput> {
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "pr".into(),
         "comment".into(),
         options.number.to_string(),
         "-R".into(),
         repo_flag,
-        "--body".into(),
-        options.body,
     ];
+    let mut body_files = Vec::new();
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
     let output = run_gh(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
@@ -178,15 +180,15 @@ fn pr_comment_sticky_whole(
     }
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "pr".into(),
         "comment".into(),
         pr_number.to_string(),
         "-R".into(),
         repo_flag,
-        "--body".into(),
-        full_body,
     ];
+    let mut body_files = Vec::new();
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &full_body)?;
     let output = run_gh(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
@@ -237,15 +239,15 @@ fn pr_comment_sectioned(
             footer.as_deref(),
         );
         let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "pr".into(),
             "comment".into(),
             pr_number.to_string(),
             "-R".into(),
             repo_flag,
-            "--body".into(),
-            rendered,
         ];
+        let mut body_files = Vec::new();
+        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &rendered)?;
         let output = run_gh(&args)?;
         return Ok(GithubPrOutput {
             component_id: id,

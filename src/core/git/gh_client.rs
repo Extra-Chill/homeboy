@@ -161,6 +161,26 @@ impl GhClient {
     }
 }
 
+pub(crate) fn pr_merge_api_args(repo: &str, number: u64, method: &str) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "PUT".to_string(),
+        format!("repos/{repo}/pulls/{number}/merge"),
+        "-f".to_string(),
+        format!("merge_method={method}"),
+    ]
+}
+
+pub(crate) fn delete_branch_ref_api_args(repo: &str, branch: &str) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "DELETE".to_string(),
+        format!("repos/{repo}/git/refs/heads/{branch}"),
+    ]
+}
+
 /// Run a prepared `gh`/CLI command swallowing stdout/stderr, returning whether
 /// it exited successfully.
 ///
@@ -224,7 +244,7 @@ mod tests {
 
     use crate::core::component::{GithubConfig, GithubHostConfig};
 
-    use super::{github_cli_env, GhClient};
+    use super::{delete_branch_ref_api_args, github_cli_env, pr_merge_api_args, GhClient};
 
     #[test]
     fn repo_arg_accepts_host_qualified_repo() {
@@ -283,5 +303,39 @@ mod tests {
             "HTTPS_PROXY".to_string(),
             "https://proxy.example.test:9443".to_string()
         )));
+    }
+
+    #[test]
+    fn pr_merge_api_args_do_not_use_checkout_merger() {
+        let args = pr_merge_api_args("Extra-Chill/homeboy", 6006, "merge");
+
+        assert_eq!(
+            args,
+            vec![
+                "api",
+                "-X",
+                "PUT",
+                "repos/Extra-Chill/homeboy/pulls/6006/merge",
+                "-f",
+                "merge_method=merge"
+            ]
+        );
+        assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
+    }
+
+    #[test]
+    fn delete_branch_ref_api_args_do_not_checkout_default_branch() {
+        let args = delete_branch_ref_api_args("Extra-Chill/homeboy", "fix/example");
+
+        assert_eq!(
+            args,
+            vec![
+                "api",
+                "-X",
+                "DELETE",
+                "repos/Extra-Chill/homeboy/git/refs/heads/fix/example"
+            ]
+        );
+        assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
     }
 }

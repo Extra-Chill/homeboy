@@ -20,6 +20,7 @@ use std::path::Path;
 
 use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
+use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::redaction::{redact_argv, redact_argv_display};
@@ -63,11 +64,12 @@ use super::super::lab_workspaces::{
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
+    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
+    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
+    LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
@@ -596,6 +598,36 @@ fn run_runner_resident_lab_offload(
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
+    let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
+    if source_syncs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::builder(
+                "lab.managed_sources",
+                "lab.managed_sources",
+                PlanStepStatus::Skipped,
+            )
+            .skip_reason("no extension-declared managed runner sources")
+            .build(),
+        );
+    } else {
+        let syncs_json = serde_json::to_value(&source_syncs).map_err(|err| {
+            Error::internal_json(
+                format!("failed to serialize managed source syncs: {err}"),
+                None,
+            )
+        })?;
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.managed_sources", "lab.managed_sources")
+                .inputs(PlanValues::new().json("sources", &syncs_json))
+                .build(),
+        );
+        messages.push(format!(
+            "Lab offload: refreshed {} managed runner source checkout(s) before dispatch.",
+            source_syncs.len()
+        ));
+    }
     plan = with_step(
         plan,
         PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
@@ -717,6 +749,73 @@ fn run_runner_resident_lab_offload(
         stderr,
         exit_code,
     })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManagedRunnerSourceRefreshOutput {
+    id: String,
+    label: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_ref: Option<String>,
+    stdout: String,
+    stderr: String,
+}
+
+fn refresh_managed_runner_sources(
+    runner_id: &str,
+    cwd: &str,
+) -> Result<Vec<ManagedRunnerSourceRefreshOutput>> {
+    let plans = plan_managed_runner_source_syncs(&provider_runner_source_contracts());
+    let mut refreshed = Vec::new();
+
+    for source in plans {
+        let (output, exit_code) = exec(
+            runner_id,
+            RunnerExecOptions {
+                cwd: Some(cwd.to_string()),
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec!["sh".to_string(), "-lc".to_string(), source.script.clone()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )?;
+        if exit_code != 0 {
+            return Err(Error::validation_invalid_argument(
+                "managed_runner_source",
+                format!(
+                    "Managed runner source `{}` could not be refreshed before Lab dispatch",
+                    source.label
+                ),
+                Some(source.id),
+                Some(vec![format!(
+                    "Run `homeboy runner doctor {runner_id} --scope lab-offload --repair` for the first-class repair report before retrying."
+                )]),
+            ));
+        }
+        refreshed.push(ManagedRunnerSourceRefreshOutput {
+            id: source.id,
+            label: source.label,
+            path: source.path,
+            remote_url: source.remote_url,
+            git_ref: source.git_ref,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        });
+    }
+
+    Ok(refreshed)
 }
 
 struct LabOffloadWorkspaceStage {
@@ -1994,18 +2093,35 @@ fn in_flight_daemon_disconnect_error(
     reason: &str,
     err: &Error,
 ) -> Error {
+    let runner_exec_prefix = "homeboy runner exec ".to_string() + runner_id + " --";
+    let runner_runs_list =
+        format!("{runner_exec_prefix} homeboy runs list --status running --limit 20");
+    let runner_job_logs = format!("homeboy runner job logs {runner_id} {job_id} --follow");
+    let runner_job_cancel = format!("homeboy runner job cancel {runner_id} {job_id}");
+    let runner_run_show = format!("{runner_exec_prefix} homeboy runs show <run-id>");
+    let runner_run_evidence = format!("{runner_exec_prefix} homeboy runs evidence <run-id>");
+    let runner_run_artifacts = format!("{runner_exec_prefix} homeboy runs artifacts <run-id>");
     let mut disconnected = Error::new(
-        ErrorCode::InternalUnexpected,
+        ErrorCode::RunnerControllerDisconnected,
         format!(
-            "Lab offload controller disconnected while runner `{runner_id}` daemon job `{job_id}` was still in flight: {}",
+            "Lab offload controller disconnected while runner `{runner_id}` daemon job `{job_id}` was still in flight; recover from the durable runner job id: {}",
             err.message
         ),
         serde_json::json!({
-            "status": "followup_required",
+            "status": "recoverable_followup_required",
             "runner_id": runner_id,
             "job_id": job_id,
             "durable_run_id": run_id,
             "reason": reason,
+            "recovery": {
+                "mode": "durable_runner_job",
+                "job_logs": runner_job_logs,
+                "job_cancel": runner_job_cancel,
+                "runner_runs_list": runner_runs_list,
+                "runner_run_show": runner_run_show,
+                "runner_run_evidence": runner_run_evidence,
+                "runner_run_artifacts": runner_run_artifacts,
+            },
             "source": err.details,
         }),
     );
@@ -2019,7 +2135,7 @@ fn in_flight_daemon_disconnect_error(
     ) {
         disconnected = disconnected.with_hint(hint);
     }
-    disconnected.retryable = Some(false);
+    disconnected.retryable = Some(true);
     disconnected
 }
 
@@ -2615,11 +2731,24 @@ mod tests {
             &source,
         );
 
-        assert_eq!(err.code, ErrorCode::InternalUnexpected);
-        assert_eq!(err.retryable, Some(false));
+        assert_eq!(err.code, ErrorCode::RunnerControllerDisconnected);
+        assert_eq!(err.retryable, Some(true));
         assert_eq!(err.details["runner_id"], "homeboy-lab");
         assert_eq!(err.details["job_id"], "job-123");
-        assert_eq!(err.details["status"], "followup_required");
+        assert_eq!(err.details["status"], "recoverable_followup_required");
+        assert_eq!(err.details["recovery"]["mode"], "durable_runner_job");
+        assert_eq!(
+            err.details["recovery"]["job_logs"],
+            "homeboy runner job logs homeboy-lab job-123 --follow"
+        );
+        assert_eq!(
+            err.details["recovery"]["runner_runs_list"],
+            "homeboy runner exec homeboy-lab -- homeboy runs list --status running --limit 20"
+        );
+        assert_eq!(
+            err.details["recovery"]["runner_run_artifacts"],
+            "homeboy runner exec homeboy-lab -- homeboy runs artifacts <run-id>"
+        );
         assert!(err.message.contains("still in flight"));
         assert!(err.hints.iter().any(|hint| hint
             .message
