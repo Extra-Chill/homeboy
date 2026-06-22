@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.44] - 2026-06-22
+
+### Changed
+- Dedupe WordPress generic agent contracts
+
 ## [3.12.43] - 2026-06-22
 
 ### Changed
