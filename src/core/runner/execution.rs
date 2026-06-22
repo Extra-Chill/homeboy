@@ -6,6 +6,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::command_contract::RunnerWorkload;
 use crate::core::agent_tasks::{
     provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
 };
@@ -15,7 +16,7 @@ use crate::core::api_jobs::{
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
-use crate::core::redaction::RedactionPolicy;
+use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -61,6 +62,7 @@ pub struct RunnerExecOptions {
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
     pub require_paths: Vec<String>,
+    pub runner_workload: Option<RunnerWorkload>,
     pub detach_after_handoff: bool,
 }
 
@@ -223,8 +225,21 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     let runner = plan.runner.clone();
     let cwd = plan.cwd.clone();
     let request_env = plan.env.clone();
-    let required_extensions =
-        required_extensions_for_command(&options.command, &options.required_extensions);
+    super::workload::validate_runner_workload_dispatch(
+        options.runner_workload.as_ref(),
+        runner_id,
+        Some(&cwd),
+        &options.command,
+        &secret_env_names,
+        options.capture_patch,
+    )?;
+    let required_extensions = required_extensions_for_command(
+        &options.command,
+        &super::workload::merge_runner_workload_required_extensions(
+            options.required_extensions.clone(),
+            options.runner_workload.as_ref(),
+        ),
+    );
 
     validate_runner_extension_parity(runner_id, &runner, &cwd, &required_extensions)?;
 
@@ -232,8 +247,10 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
     // top-level executable when the caller did not supply an explicit one, so
     // remote dispatch always validates that the runner can satisfy the command
     // before starting execution instead of failing mid-run (#5093, #5422).
-    let capability_preflight =
-        remote_execution_preflight(&options.command, options.capability_preflight.as_ref());
+    let capability_preflight = super::workload::merge_runner_workload_capability_preflight(
+        remote_execution_preflight(&options.command, options.capability_preflight.as_ref()),
+        options.runner_workload.as_ref(),
+    )?;
     let run_capability_preflight = |runner: &Runner| -> Result<()> {
         preflight_runner_capability_plan(runner, capability_preflight.as_ref(), &request_env)
     };
@@ -282,6 +299,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.require_paths,
+                options.runner_workload,
                 options.detach_after_handoff,
             )
         }
@@ -298,6 +316,7 @@ pub fn exec(runner_id: &str, options: RunnerExecOptions) -> Result<(RunnerExecOu
                 options.capture_patch,
                 Some(plan.source_snapshot),
                 options.require_paths,
+                options.runner_workload,
                 options.detach_after_handoff,
             )
         }
@@ -359,6 +378,22 @@ fn exec_worker_local_with_process_output(
         require_paths: options.require_paths.clone(),
         validate_require_paths_on_host: true,
     })?;
+    super::workload::validate_runner_workload_dispatch(
+        options.runner_workload.as_ref(),
+        runner_id,
+        Some(&plan.cwd),
+        &options.command,
+        &options.secret_env_names,
+        options.capture_patch,
+    )?;
+    let required_extensions = required_extensions_for_command(
+        &options.command,
+        &super::workload::merge_runner_workload_required_extensions(
+            options.required_extensions.clone(),
+            options.runner_workload.as_ref(),
+        ),
+    );
+    validate_runner_extension_parity(runner_id, &plan.runner, &plan.cwd, &required_extensions)?;
     validate_runner_policy(
         &plan.runner,
         &plan.cwd,
@@ -369,11 +404,11 @@ fn exec_worker_local_with_process_output(
             raw_exec: options.raw_exec,
         },
     )?;
-    preflight_worker_local_capability_plan(
-        &plan.runner,
-        options.capability_preflight.as_ref(),
-        &plan.env,
+    let capability_preflight = super::workload::merge_runner_workload_capability_preflight(
+        options.capability_preflight.clone(),
+        options.runner_workload.as_ref(),
     )?;
+    preflight_worker_local_capability_plan(&plan.runner, capability_preflight.as_ref(), &plan.env)?;
     let output = execute(&plan)?;
     Ok(exec_output(
         &plan.runner,
@@ -430,12 +465,13 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         .unwrap_or("runner command exited non-zero")
         .to_string();
     let execution = serde_json::to_value(output).unwrap_or(Value::Null);
-    let command = output.argv.join(" ");
+    let command = redact_argv_display(&output.argv);
+    let redacted_argv = redact_argv(&output.argv);
     let mut details = json!({
         "runner_id": output.runner_id,
         "job_id": output.job_id,
         "remote_cwd": output.remote_cwd,
-        "command": output.argv,
+        "command": redacted_argv,
         "exit_code": output.exit_code,
         "execution": execution,
     });
@@ -572,6 +608,7 @@ fn exec_via_reverse_broker(
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
+    runner_workload: Option<RunnerWorkload>,
     detach_after_handoff: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
@@ -593,6 +630,7 @@ fn exec_via_reverse_broker(
         secret_env_names,
         capture_patch,
         source_snapshot: Some(source_snapshot.clone()),
+        runner_workload: runner_workload.clone(),
         metadata: Some(json!({
             "transport": "reverse_broker",
         })),
@@ -718,7 +756,7 @@ fn exec_via_reverse_broker(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode: RunnerExecMode::ReverseBroker,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -754,6 +792,7 @@ fn exec_via_daemon(
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     require_paths: Vec<String>,
+    runner_workload: Option<RunnerWorkload>,
     detach_after_handoff: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
     let client = Client::builder()
@@ -776,6 +815,7 @@ fn exec_via_daemon(
             "capture_patch": capture_patch,
             "source_snapshot": source_snapshot.clone(),
             "require_paths": require_paths.clone(),
+            "runner_workload": runner_workload,
         }))
         .send()
         .map_err(|err| daemon_exec_transport_error(&runner.id, err))?;
@@ -894,7 +934,7 @@ fn exec_via_daemon(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode: RunnerExecMode::Daemon,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -981,7 +1021,7 @@ fn detached_handoff_output(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code: 0,
             stdout,
@@ -1086,7 +1126,7 @@ fn daemon_job_wait_timeout(
     error.details["runner_id"] = Value::String(runner.id.clone());
     error.details["job_id"] = Value::String(job_id.clone());
     error.details["remote_cwd"] = Value::String(cwd.to_string());
-    error.details["command"] = json!(command);
+    error.details["command"] = json!(redact_argv(command));
     match mirrored {
         Ok(run) => {
             error.details["active_run_id"] = Value::String(run.id.clone());
@@ -2219,7 +2259,7 @@ fn exec_output(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -2511,7 +2551,7 @@ fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> String {
         .unwrap_or("unknown persisted run");
     format!(
         "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`; contract field: `{field}`; reason: {}.",
-        context.command.join(" "),
+        redact_argv_display(&context.command),
         context.reason
     )
 }
@@ -3556,6 +3596,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3611,6 +3652,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3649,6 +3691,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3692,6 +3735,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: vec![missing.display().to_string()],
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3734,6 +3778,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: vec![required_path.display().to_string()],
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3787,6 +3832,7 @@ mod tests {
                     capability_preflight: None,
                     required_extensions: Vec::new(),
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     detach_after_handoff: false,
                 },
             )
@@ -3824,6 +3870,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         };
 
@@ -3868,6 +3915,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         };
 
@@ -3903,6 +3951,7 @@ mod tests {
             capability_preflight: None,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         };
         validate_runner_policy(

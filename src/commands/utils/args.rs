@@ -7,7 +7,6 @@
 //! See: https://github.com/Extra-Chill/homeboy/issues/436
 
 use clap::{Arg, ArgAction, Args, Command, CommandFactory};
-use std::path::PathBuf;
 
 use crate::cli_surface::Cli;
 use homeboy::core::component::{self, Component};
@@ -168,43 +167,6 @@ fn arg_takes_value(arg: &Arg) -> bool {
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
     mark_explicit_passthrough(args)
-}
-
-// ============================================================================
-// ComponentArgs: --component + --path + resolve()
-// ============================================================================
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct ComponentArgs {
-    #[arg(short, long)]
-    pub component: Option<String>,
-
-    /// Override the component checkout path for this invocation
-    #[arg(long)]
-    pub path: Option<String>,
-}
-
-#[allow(dead_code)]
-impl ComponentArgs {
-    pub fn resolve(&self) -> homeboy::core::Result<Component> {
-        component::resolve_effective(self.component.as_deref(), self.path.as_deref(), None)
-    }
-
-    pub fn resolve_root(&self) -> homeboy::core::Result<PathBuf> {
-        if let Some(ref p) = self.path {
-            Ok(PathBuf::from(p))
-        } else {
-            let comp = component::resolve(self.component.as_deref())?;
-            component::validate_local_path(&comp)
-        }
-    }
-
-    pub fn load(&self) -> homeboy::core::Result<Component> {
-        let id = self.component.as_deref().ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec!["component".to_string()])
-        })?;
-        component::resolve_effective(Some(id), self.path.as_deref(), None)
-    }
 }
 
 // ============================================================================

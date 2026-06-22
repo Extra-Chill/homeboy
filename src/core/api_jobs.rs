@@ -14,6 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::core::error::{Error, Result};
+use crate::core::redaction::redact_argv_display;
 use crate::core::source_snapshot::SourceSnapshot;
 
 mod remote_runner;
@@ -610,7 +611,7 @@ fn active_runner_job_summary(
             .unwrap_or_else(|| "runner-daemon".to_string()),
         kind: request_metadata_string(request, "kind").unwrap_or_else(|| job.operation.clone()),
         status: job.status,
-        command: request.command.join(" "),
+        command: redact_argv_display(&request.command),
         cwd: request.cwd.clone(),
         started_at_ms,
         updated_at_ms: job.updated_at_ms,
@@ -795,10 +796,12 @@ fn reconcile_stale_jobs(durable: &mut DurableJobStore, event_retention_limit: us
             continue;
         }
         // Remote-runner jobs that are still Queued are waiting for a runner to
-        // claim them; a daemon restart does not invalidate that work, so leave
-        // them enqueued for re-claim.
+        // claim them; a daemon restart does not invalidate that work unless the
+        // non-serialized execution request carried secret env values.
         if stored.remote_runner.is_some() && stored.job.status == JobStatus::Queued {
-            continue;
+            if !remote_runner_job_has_unrecoverable_execution_env(stored) {
+                continue;
+            }
         }
 
         // Recover the real terminal status when the underlying command already
@@ -834,7 +837,11 @@ fn reconcile_stale_jobs(durable: &mut DurableJobStore, event_retention_limit: us
             continue;
         }
 
-        let reason = "daemon restarted before the job reached a terminal status".to_string();
+        let reason = if remote_runner_job_has_unrecoverable_execution_env(stored) {
+            "daemon restarted before the remote runner claimed secret execution env".to_string()
+        } else {
+            "daemon restarted before the job reached a terminal status".to_string()
+        };
         stored.job.status = JobStatus::Failed;
         stored.job.updated_at_ms = now;
         stored.job.finished_at_ms = Some(now);
@@ -866,6 +873,22 @@ fn reconcile_stale_jobs(durable: &mut DurableJobStore, event_retention_limit: us
     }
 
     next_sequence
+}
+
+fn remote_runner_job_has_unrecoverable_execution_env(stored: &StoredJob) -> bool {
+    let Some(remote_runner) = stored.remote_runner.as_ref() else {
+        return false;
+    };
+    if remote_runner.execution_request.is_some() {
+        return false;
+    }
+    remote_runner.request.secret_env_names.iter().any(|name| {
+        remote_runner
+            .request
+            .env
+            .get(name)
+            .is_some_and(|value| value == "<redacted>")
+    })
 }
 
 /// Recover a terminal job status from a recorded `Result` event when a job was
@@ -1574,6 +1597,71 @@ mod tests {
     }
 
     #[test]
+    fn remote_runner_job_secret_env_is_execution_only_not_public_or_persisted() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let sentinel = "homeboy-secret-sentinel-do-not-persist";
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request
+            .env
+            .insert("RUNNER_SECRET_TOKEN".to_string(), sentinel.to_string());
+        request
+            .env
+            .insert("PUBLIC_FLAG".to_string(), "1".to_string());
+        request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
+
+        let job = store
+            .submit_remote_runner_job(request)
+            .expect("remote runner job queues");
+
+        {
+            let inner = store.inner.lock().expect("job store mutex poisoned");
+            let stored = inner.jobs.get(&job.id).expect("job stored");
+            let remote_runner = stored.remote_runner.as_ref().expect("remote runner job");
+            assert_eq!(
+                remote_runner.request.env.get("RUNNER_SECRET_TOKEN"),
+                Some(&"<redacted>".to_string())
+            );
+            assert_eq!(
+                remote_runner
+                    .execution_request
+                    .as_ref()
+                    .expect("execution request")
+                    .env
+                    .get("RUNNER_SECRET_TOKEN"),
+                Some(&sentinel.to_string())
+            );
+        }
+
+        let persisted = fs::read_to_string(&path).expect("read durable store");
+        assert!(
+            !persisted.contains(sentinel),
+            "persisted store leaked secret"
+        );
+        assert!(persisted.contains("<redacted>"));
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        assert_eq!(
+            reopened.get(job.id).expect("reopened job").status,
+            JobStatus::Failed
+        );
+        assert!(reopened
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("claim request succeeds")
+            .is_none());
+
+        let claim = store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        assert_eq!(
+            claim.request.env.get("RUNNER_SECRET_TOKEN"),
+            Some(&sentinel.to_string())
+        );
+    }
+
+    #[test]
     fn remote_runner_job_claim_returns_oldest_matching_job() {
         let store = JobStore::default();
         let other = store
@@ -1775,6 +1863,7 @@ mod tests {
                         mime: Some("application/json".to_string()),
                         size_bytes: Some(42),
                         sha256: Some("abc123".to_string()),
+                        content_base64: None,
                         metadata: Some(json!({ "kind": "test_report" })),
                     }],
                     artifact_refs: Vec::new(),
@@ -2072,6 +2161,7 @@ mod tests {
                 Some("/srv"),
             )),
             require_paths: Vec::new(),
+            runner_workload: None,
             metadata: Some(json!({ "submitted_by": "controller" })),
         }
     }

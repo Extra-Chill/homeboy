@@ -119,6 +119,37 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             parsed_command(&[
                 "homeboy",
                 "agent-task",
+                "fanout",
+                "submit-batch",
+                "--input",
+                "fanout.json",
+            ]),
+            "agent-task fanout submit-batch/status/artifacts",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "fanout",
+                "status",
+                "fanout-batch-123",
+            ]),
+            "agent-task fanout submit-batch/status/artifacts",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "fanout",
+                "artifacts",
+                "fanout-batch-123",
+            ]),
+            "agent-task fanout submit-batch/status/artifacts",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
                 "controller",
                 "from-spec",
                 "loop.json",
@@ -241,6 +272,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
             "agent-task retry --run",
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+            "agent-task fanout submit-batch/status/artifacts",
             "agent-task auth status",
             "lint",
             "test",
@@ -466,6 +498,22 @@ fn test_lab_command_contracts_cover_hot_commands() {
         ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "status",
+            "fanout-batch-123",
+        ]
+        .as_slice(),
+        [
+            "homeboy",
+            "agent-task",
+            "fanout",
+            "artifacts",
+            "fanout-batch-123",
+        ]
+        .as_slice(),
         ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
     ] {
         let contract = parsed_command(args)
@@ -478,6 +526,32 @@ fn test_lab_command_contracts_cover_hot_commands() {
         );
         assert!(!contract.routing_policy.default_lab_offload);
     }
+
+    let fanout_submit_batch = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "submit-batch",
+        "--input",
+        "fanout.json",
+    ])
+    .lab_contract()
+    .expect("fanout submit-batch contract");
+    assert_eq!(
+        fanout_submit_batch.hot_label,
+        "agent-task fanout submit-batch"
+    );
+    assert_eq!(
+        fanout_submit_batch.source_path_mode,
+        LabSourcePathMode::CwdOrPathFlag
+    );
+    assert_eq!(
+        fanout_submit_batch.workspace_mode_policy,
+        LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+    );
+    assert!(!fanout_submit_batch.routing_policy.default_lab_offload);
+    assert!(!fanout_submit_batch.routing_policy.requires_extension_parity);
+    assert!(!fanout_submit_batch.routing_policy.infer_source_path_tools);
 
     assert!(
         parsed_command(&[
@@ -655,6 +729,39 @@ fn test_lab_command_contracts_cover_hot_commands() {
             .lab_contract()
             .is_none()
     );
+}
+
+#[test]
+fn command_portability_contract_exposes_delegated_lab_descriptors() {
+    for args in [
+        ["homeboy", "bench"].as_slice(),
+        ["homeboy", "lint"].as_slice(),
+        ["homeboy", "trace"].as_slice(),
+        ["homeboy", "rig", "check", "studio"].as_slice(),
+        [
+            "homeboy",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "preview-consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/",
+        ]
+        .as_slice(),
+    ] {
+        let command = parsed_command(args);
+        assert_eq!(
+            command.portability_contract().lab_command(),
+            command.lab_contract(),
+            "portability descriptor diverged for {args:?}"
+        );
+    }
+
+    assert!(parsed_command(&["homeboy", "bench", "list"])
+        .portability_contract()
+        .lab_command()
+        .is_none());
 }
 
 #[test]

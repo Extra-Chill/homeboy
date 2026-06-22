@@ -237,6 +237,8 @@ pub struct CommandSafetyEntry {
     pub output: CommandOutputMetadata,
     pub lab: CommandLabMetadata,
     pub docs: CommandDocsMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<ExtensionCommandManifest>,
     pub dangerous_flags: Vec<String>,
     pub subcommands: Vec<CommandSafetyEntry>,
 }
@@ -275,6 +277,46 @@ pub struct CommandLabMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandDocsMetadata {
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandManifest {
+    pub extension_id: String,
+    pub extension_name: String,
+    pub extension_version: String,
+    pub tool_name: String,
+    pub display_name: String,
+    pub args_contract: ExtensionCommandArgsContract,
+    pub health: ExtensionCommandHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandArgsContract {
+    pub project_id: ExtensionCommandArgContract,
+    pub args: ExtensionCommandArgContract,
+    pub trailing_var_arg: bool,
+    pub allow_hyphen_values: bool,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandArgContract {
+    pub name: String,
+    pub help: String,
+    pub required: bool,
+    pub multiple: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandHealth {
+    pub status: String,
+    pub ready: bool,
+    pub compatible: bool,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl CommandSurfaceEntry {
@@ -359,6 +401,8 @@ pub struct DynamicCommandDescriptor {
     pub name: String,
     pub about: String,
     pub docs_path: Option<String>,
+    pub extension: Option<ExtensionCommandManifest>,
+    pub safety: Option<DynamicCommandSafety>,
 }
 
 impl DynamicCommandDescriptor {
@@ -367,6 +411,44 @@ impl DynamicCommandDescriptor {
             docs_path: Some(format!("docs/commands/{name}.md")),
             name,
             about,
+            extension: None,
+            safety: None,
+        }
+    }
+
+    pub fn installed_extension_command(
+        name: String,
+        about: String,
+        docs_path: Option<String>,
+        extension: ExtensionCommandManifest,
+    ) -> Self {
+        Self {
+            name,
+            about,
+            docs_path,
+            extension: Some(extension),
+            safety: Some(DynamicCommandSafety::extension_cli_passthrough()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCommandSafety {
+    pub mutates: bool,
+    pub operator: bool,
+    pub output_notes: &'static str,
+    pub lab_notes: &'static str,
+    pub dangerous_flags: Vec<&'static str>,
+}
+
+impl DynamicCommandSafety {
+    fn extension_cli_passthrough() -> Self {
+        Self {
+            mutates: true,
+            operator: true,
+            output_notes: "extension-provided CLI passthrough; forwarded arguments may mutate the target system",
+            lab_notes: "not declared as Lab-routable in the safety manifest",
+            dangerous_flags: vec!["passthrough args"],
         }
     }
 }
@@ -413,7 +495,16 @@ fn command_safety_entry(
 ) -> CommandSafetyEntry {
     let mut path = parent_path.to_vec();
     path.push(entry.name.clone());
-    let safety = command_safety_metadata(&path);
+    let mut safety = command_safety_metadata(&path);
+    let dynamic_command = dynamic_command_for_path(&path, dynamic_commands);
+
+    if let Some(dynamic_safety) = dynamic_command.and_then(|command| command.safety.as_ref()) {
+        safety.mutates = dynamic_safety.mutates;
+        safety.operator = dynamic_safety.operator;
+        safety.output_notes = dynamic_safety.output_notes;
+        safety.lab_notes = dynamic_safety.lab_notes;
+        safety.dangerous_flags = dynamic_safety.dangerous_flags.clone();
+    }
 
     CommandSafetyEntry {
         name: entry.name.clone(),
@@ -437,6 +528,7 @@ fn command_safety_entry(
         docs: CommandDocsMetadata {
             path: docs_path(&path, dynamic_commands),
         },
+        extension: dynamic_command.and_then(|command| command.extension.clone()),
         dangerous_flags: safety
             .dangerous_flags
             .into_iter()
@@ -676,19 +768,26 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 }
 
 fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> Option<String> {
+    if let Some(dynamic) = dynamic_command_for_path(path, dynamic_commands) {
+        return dynamic.docs_path.clone();
+    }
+
+    let command = path.first()?;
+
+    registered_command(command).and_then(|entry| entry.docs_path())
+}
+
+fn dynamic_command_for_path<'a>(
+    path: &[String],
+    dynamic_commands: &'a [DynamicCommandDescriptor],
+) -> Option<&'a DynamicCommandDescriptor> {
     let command = path.first()?;
 
     if path.len() == 1 {
-        if let Some(dynamic) = dynamic_commands.iter().find(|entry| entry.name == *command) {
-            return dynamic.docs_path.clone();
-        }
+        dynamic_commands.iter().find(|entry| entry.name == *command)
+    } else {
+        None
     }
-
-    registered_command(command).and_then(|entry| {
-        entry
-            .docs_slug
-            .map(|slug| format!("docs/commands/{slug}.md"))
-    })
 }
 
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
@@ -713,11 +812,18 @@ fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<Command
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn command_doc(command: &str) -> String {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(root.join("docs/commands").join(format!("{command}.md")))
             .unwrap_or_else(|error| panic!("failed to read docs for {command}: {error}"))
+    }
+
+    fn commands_index() -> String {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(root.join("docs/commands/commands-index.md"))
+            .unwrap_or_else(|error| panic!("failed to read docs command index: {error}"))
     }
 
     fn root_command(command: &str) -> clap::Command {
@@ -929,6 +1035,107 @@ mod tests {
         assert!(bench.lab.supported);
         assert!(bench.lab.notes.contains("portable Lab offload"));
         assert_eq!(bench.docs.path.as_deref(), Some("docs/commands/bench.md"));
+    }
+
+    #[test]
+    fn command_registry_docs_paths_exist_and_are_indexed() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let index = commands_index();
+
+        for entry in crate::command_contract::COMMAND_REGISTRY {
+            let Some(path) = entry.docs_path() else {
+                continue;
+            };
+            let Some(slug) = entry.docs_slug else {
+                continue;
+            };
+
+            assert!(
+                root.join(&path).is_file(),
+                "registered command `{}` points at missing docs path {path}",
+                entry.name
+            );
+            assert!(
+                index.contains(&format!("[{slug}]({slug}.md)")),
+                "docs/commands/commands-index.md is missing registered command `{}`",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn command_registry_manifest_and_docs_metadata_align() {
+        let parser_names = Cli::command()
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+            .map(|subcommand| subcommand.get_name().to_string())
+            .collect::<BTreeSet<_>>();
+        let registry_names = crate::command_contract::COMMAND_REGISTRY
+            .iter()
+            .map(|entry| entry.name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registry_names, parser_names);
+
+        let manifest = current_command_safety_manifest();
+        for entry in crate::command_contract::COMMAND_REGISTRY {
+            let manifest_entry = manifest
+                .find_path(&[entry.name])
+                .unwrap_or_else(|| panic!("manifest missing registered command `{}`", entry.name));
+            let output_notes_overridden_for_safety = matches!(entry.name, "release" | "upgrade");
+
+            assert_eq!(
+                manifest_entry.docs.path,
+                entry.docs_path(),
+                "manifest docs path drifted from registry for `{}`",
+                entry.name
+            );
+            if !output_notes_overridden_for_safety {
+                assert_eq!(
+                    manifest_entry.output.notes, entry.output_notes,
+                    "manifest output notes drifted from registry for `{}`",
+                    entry.name
+                );
+            }
+            assert_eq!(
+                manifest_entry.lab.supported, entry.lab_supported,
+                "manifest Lab support drifted from registry for `{}`",
+                entry.name
+            );
+            assert_eq!(
+                manifest_entry.lab.notes, entry.lab_notes,
+                "manifest Lab notes drifted from registry for `{}`",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn core_command_docs_do_not_drift_from_registry() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let registered_docs = crate::command_contract::COMMAND_REGISTRY
+            .iter()
+            .filter_map(|entry| entry.docs_slug)
+            .collect::<BTreeSet<_>>();
+        let extension_or_support_docs =
+            BTreeSet::from(["audit-rules", "cargo", "commands-index", "rig-spec", "wp"]);
+
+        for doc in
+            std::fs::read_dir(root.join("docs/commands")).expect("failed to read docs/commands")
+        {
+            let doc = doc.expect("failed to read docs/commands entry");
+            let path = doc.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            let slug = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .expect("command docs filename should be valid UTF-8");
+            assert!(
+                registered_docs.contains(slug) || extension_or_support_docs.contains(slug),
+                "docs/commands/{slug}.md is not registered as a core command doc or known extension/support doc"
+            );
+        }
     }
 
     #[test]

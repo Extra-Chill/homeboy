@@ -14,6 +14,7 @@ use crate::core::engine::{command, shell};
 use crate::core::error::{Error, Result};
 use crate::core::paths::resolve_path_string;
 use crate::core::project;
+use crate::core::server::CommandOutput;
 
 use std::path::Path;
 use std::process::Command;
@@ -71,6 +72,37 @@ fn file_size(project: &project::Project, full_path: &str) -> Option<i64> {
     }
 
     parse_file_size(&output.stdout)
+}
+
+fn require_file_command_success(
+    output: &CommandOutput,
+    operation: &str,
+    resolved_path: &str,
+) -> Result<()> {
+    if output.success {
+        return Ok(());
+    }
+
+    let low_level_error = if output.stderr.trim().is_empty() {
+        format!(
+            "command exited without stderr (exit_code={})",
+            output.exit_code
+        )
+    } else {
+        format!(
+            "exit_code={}; stderr={}",
+            output.exit_code,
+            output.stderr.trim()
+        )
+    };
+
+    Err(Error::internal_io(
+        format!(
+            "{}_FAILED: path={}; {}",
+            operation, resolved_path, low_level_error
+        ),
+        Some(operation.to_string()),
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,7 +220,7 @@ pub fn list(project_id: &str, path: &str) -> Result<ListResult> {
     let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let command = format!("ls -la {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
-    command::require_success(output.success, &output.stderr, "LIST")?;
+    require_file_command_success(&output, "LIST", &full_path)?;
 
     let entries = parse_ls_output(&output.stdout, &full_path);
 
@@ -206,7 +238,7 @@ pub fn read(project_id: &str, path: &str) -> Result<ReadResult> {
     let full_path = resolve_remote_path(&project, &project_base_path, path)?;
     let command = format!("cat {}", shell::quote_path(&full_path));
     let output = execute_for_project(&project, &command)?;
-    command::require_success(output.success, &output.stderr, "READ")?;
+    require_file_command_success(&output, "READ", &full_path)?;
     let size = file_size(&project, &full_path);
 
     Ok(ReadResult {
@@ -671,5 +703,49 @@ mod tests {
     fn parse_file_size_rejects_unavailable_output() {
         assert_eq!(parse_file_size(""), None);
         assert_eq!(parse_file_size("not a size"), None);
+    }
+
+    #[test]
+    fn read_failure_message_includes_path_and_exit_code_when_stderr_is_blank() {
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            exit_code: 126,
+            child_resource: None,
+        };
+
+        let error = require_file_command_success(&output, "READ", "/srv/site/blocked.txt")
+            .expect_err("blank stderr read failure should return diagnostics");
+        let details = error.details;
+        let message = details
+            .get("error")
+            .and_then(|value| value.as_str())
+            .expect("internal IO details include error message");
+
+        assert!(message.contains("READ_FAILED: path=/srv/site/blocked.txt"));
+        assert!(message.contains("command exited without stderr (exit_code=126)"));
+    }
+
+    #[test]
+    fn list_failure_message_includes_path_exit_code_and_stderr() {
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: "permission denied\n".to_string(),
+            success: false,
+            exit_code: 2,
+            child_resource: None,
+        };
+
+        let error = require_file_command_success(&output, "LIST", "/srv/site/private")
+            .expect_err("list failure should return diagnostics");
+        let details = error.details;
+        let message = details
+            .get("error")
+            .and_then(|value| value.as_str())
+            .expect("internal IO details include error message");
+
+        assert!(message.contains("LIST_FAILED: path=/srv/site/private"));
+        assert!(message.contains("exit_code=2; stderr=permission denied"));
     }
 }

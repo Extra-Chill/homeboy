@@ -2,13 +2,20 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-use crate::cli_surface::{Cli, Commands, DynamicCommandDescriptor};
+use crate::cli_surface::{
+    command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
+    Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
+    ExtensionCommandHealth, ExtensionCommandManifest,
+};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
 use crate::commands::GlobalArgs;
-use crate::core::extension::{list_summaries, load_all_extensions};
+use crate::core::extension::{
+    list_summaries, load_all_extensions, CliConfig,
+    ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
+};
 use crate::core::upgrade;
 
 pub struct CliRuntime {
@@ -57,6 +64,20 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
     }
 
     Some(std::process::ExitCode::SUCCESS)
+}
+
+pub fn current_augmented_command_safety_manifest() -> CommandSafetyManifest {
+    let discovery = collect_extension_cli_info();
+    let dynamic_descriptors = discovery
+        .info
+        .iter()
+        .map(|info| info.descriptor.clone())
+        .collect::<Vec<_>>();
+
+    command_safety_manifest_from_dynamic(
+        command_surface_from(build_augmented_command(&discovery.info, &discovery.health)),
+        &dynamic_descriptors,
+    )
 }
 
 impl CliRuntime {
@@ -189,18 +210,6 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        // Show help for changelog when neither subcommand nor --self is provided.
-        if let Commands::Changelog(ref args) = cli.command {
-            if args.command.is_none() && !args.show_self {
-                let cmd = self.build_augmented_command();
-                if let Some(mut changelog_cmd) = cmd.find_subcommand("changelog").cloned() {
-                    changelog_cmd.print_help().expect("Failed to print help");
-                    println!();
-                    return std::process::ExitCode::SUCCESS;
-                }
-            }
-        }
-
         let exit_code = commands::response::run(cli.command, &global, output_file.as_deref());
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
     }
@@ -276,18 +285,32 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
     let info = extensions
         .into_iter()
         .filter_map(|m| {
-            m.cli.map(|cli| {
-                let help = cli.help.unwrap_or_default();
+            let cli = m.cli.clone()?;
+            Some({
+                let help = cli.help.clone().unwrap_or_default();
+                let project_id_help = help.project_id_help.clone();
+                let args_help = help.args_help.clone();
+                let examples = help.examples.clone();
                 let about = format!("Run {} commands via {}", cli.display_name, m.name);
+                let extension_manifest = extension_command_manifest(
+                    &m,
+                    &cli,
+                    project_id_help.clone(),
+                    args_help.clone(),
+                    examples.clone(),
+                    &summaries,
+                );
                 ExtensionCliInfo {
-                    descriptor: DynamicCommandDescriptor::extension_command(
+                    descriptor: DynamicCommandDescriptor::installed_extension_command(
                         cli.tool.clone(),
                         about,
+                        extension_command_docs_path(&m, &cli.tool),
+                        extension_manifest,
                     ),
                     tool: cli.tool,
-                    project_id_help: help.project_id_help,
-                    args_help: help.args_help,
-                    examples: help.examples,
+                    project_id_help,
+                    args_help,
+                    examples,
                 }
             })
         })
@@ -300,6 +323,92 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
             broken_link_ids,
         },
     }
+}
+
+fn extension_command_manifest(
+    extension: &InstalledExtensionManifest,
+    cli: &CliConfig,
+    project_id_help: Option<String>,
+    args_help: Option<String>,
+    examples: Vec<String>,
+    summaries: &[ExtensionSummary],
+) -> ExtensionCommandManifest {
+    let project_id_help = project_id_help.unwrap_or_else(|| "Project ID".to_string());
+    let args_help = args_help.unwrap_or_else(|| "Command arguments".to_string());
+    let summary = summaries.iter().find(|summary| summary.id == extension.id);
+    let health = summary
+        .map(extension_command_health_from_summary)
+        .unwrap_or_else(|| ExtensionCommandHealth {
+            status: "unknown".to_string(),
+            ready: false,
+            compatible: false,
+            linked: false,
+            reason: Some("summary_missing".to_string()),
+            detail: Some("Extension loaded, but no extension summary was available".to_string()),
+        });
+
+    ExtensionCommandManifest {
+        extension_id: extension.id.clone(),
+        extension_name: extension.name.clone(),
+        extension_version: extension.version.clone(),
+        tool_name: cli.tool.clone(),
+        display_name: cli.display_name.clone(),
+        args_contract: ExtensionCommandArgsContract {
+            project_id: ExtensionCommandArgContract {
+                name: "project_id".to_string(),
+                help: project_id_help,
+                required: true,
+                multiple: false,
+            },
+            args: ExtensionCommandArgContract {
+                name: "args".to_string(),
+                help: args_help,
+                required: false,
+                multiple: true,
+            },
+            trailing_var_arg: true,
+            allow_hyphen_values: true,
+            examples,
+        },
+        health,
+    }
+}
+
+fn extension_command_health_from_summary(summary: &ExtensionSummary) -> ExtensionCommandHealth {
+    let status = if summary.error.is_some() {
+        "error"
+    } else if summary.ready && summary.compatible {
+        "ready"
+    } else if !summary.compatible {
+        "incompatible"
+    } else {
+        "not_ready"
+    };
+
+    ExtensionCommandHealth {
+        status: status.to_string(),
+        ready: summary.ready,
+        compatible: summary.compatible,
+        linked: summary.linked,
+        reason: summary
+            .error
+            .clone()
+            .or_else(|| summary.ready_reason.clone()),
+        detail: summary.ready_detail.clone(),
+    }
+}
+
+fn extension_command_docs_path(
+    extension: &InstalledExtensionManifest,
+    tool: &str,
+) -> Option<String> {
+    let docs_path = format!("docs/commands/{tool}.md");
+    let extension_path = extension.extension_path.as_ref()?;
+
+    std::path::Path::new(extension_path)
+        .join(&docs_path)
+        .exists()
+        .then_some(docs_path)
 }
 
 fn build_augmented_command(
@@ -715,6 +824,16 @@ mod tests {
         .expect("extension manifest");
     }
 
+    fn write_extension_command_docs(home: &std::path::Path, id: &str, tool: &str) {
+        let docs_dir = home
+            .join(".config/homeboy/extensions")
+            .join(id)
+            .join("docs/commands");
+        std::fs::create_dir_all(&docs_dir).expect("extension docs dir");
+        std::fs::write(docs_dir.join(format!("{tool}.md")), "# Extension command")
+            .expect("extension command docs");
+    }
+
     #[test]
     fn output_format_names_are_rejected_as_global_output_paths() {
         let err = output_runtime::validate_output_file_path("json")
@@ -824,6 +943,39 @@ mod tests {
             assert_eq!(discovery.info.len(), 1);
             assert_eq!(discovery.info[0].tool, "wp");
             assert_eq!(discovery.health.broken_link_ids, vec!["nodejs"]);
+        });
+    }
+
+    #[test]
+    fn augmented_manifest_includes_extension_command_contract_and_health() {
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "wordpress", "wp");
+            write_extension_command_docs(home.path(), "wordpress", "wp");
+
+            let manifest = current_augmented_command_safety_manifest();
+            let wp = manifest.find_path(&["wp"]).expect("wp command manifest");
+
+            assert!(wp.mutates);
+            assert!(wp.operator);
+            assert_eq!(wp.docs.path.as_deref(), Some("docs/commands/wp.md"));
+            assert!(wp.dangerous_flags.contains(&"passthrough args".to_string()));
+            assert!(wp
+                .output
+                .notes
+                .contains("extension-provided CLI passthrough"));
+
+            let extension = wp.extension.as_ref().expect("extension metadata");
+            assert_eq!(extension.extension_id, "wordpress");
+            assert_eq!(extension.tool_name, "wp");
+            assert_eq!(extension.args_contract.project_id.name, "project_id");
+            assert!(extension.args_contract.project_id.required);
+            assert_eq!(extension.args_contract.args.name, "args");
+            assert!(extension.args_contract.args.multiple);
+            assert!(extension.args_contract.trailing_var_arg);
+            assert!(extension.args_contract.allow_hyphen_values);
+            assert_eq!(extension.health.status, "ready");
+            assert!(extension.health.ready);
+            assert!(extension.health.compatible);
         });
     }
 

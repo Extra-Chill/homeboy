@@ -27,6 +27,7 @@ use crate::core::agent_tasks::provider::{
     default_backend_for_component, AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use crate::core::engine::shell;
+use crate::core::redaction::redact_argv_display;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
 
@@ -270,6 +271,7 @@ fn probe_agent_task_providers_on_runner(
             capability_preflight,
             required_extensions,
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         },
     )?;
@@ -425,7 +427,7 @@ fn agent_task_provider_selection_preflight_error(
                 .as_str()
                 .unwrap_or("homeboy upgrade --force --upgrade-runner <runner>")
         ),
-        format!("Preflight command: `{}`.", command.join(" ")),
+        format!("Preflight command: `{}`.", redact_argv_display(command)),
     ];
     hints.retain(|hint| !hint.is_empty());
 

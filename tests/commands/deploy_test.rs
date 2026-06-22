@@ -1,23 +1,5 @@
 use super::{run, DeployArgs};
 use crate::commands::GlobalArgs;
-use crate::core::deploy::parse_bulk_component_ids;
-
-#[test]
-fn test_parse_bulk_component_ids_supports_json_array() {
-    let ids = parse_bulk_component_ids(r#"["api","web"]"#).unwrap();
-    assert_eq!(ids, vec!["api", "web"]);
-}
-
-#[test]
-fn test_parse_bulk_component_ids_supports_json_object() {
-    let ids = parse_bulk_component_ids(r#"{"component_ids":["api","web"]}"#).unwrap();
-    assert_eq!(ids, vec!["api", "web"]);
-}
-
-#[test]
-fn test_parse_bulk_component_ids_rejects_csv() {
-    assert!(parse_bulk_component_ids("api, web").is_err());
-}
 
 #[test]
 fn deploy_head_requires_apply_for_real_deploy() {

@@ -23,6 +23,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::{CmdResult, DynamicSetArgs};
+use crate::command_contract::{
+    CommandPortabilityContract, LabCommandContract, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
+    TUNNEL_SERVICE_EXPOSE_LAB_LABEL, TUNNEL_SERVICE_START_LAB_LABEL,
+};
 
 mod service;
 use service::TunnelServiceCommand;
@@ -114,6 +118,25 @@ impl TunnelArgs {
                 command: TunnelServiceCommand::Expose { .. }
             }
         )
+    }
+
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        if self.is_preview_consumer_run() {
+            return CommandPortabilityContract::lab(LabCommandContract::explicit_runner_simple(
+                TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
+            ));
+        }
+        if self.is_service_start() {
+            return CommandPortabilityContract::lab(LabCommandContract::runner_resident(
+                TUNNEL_SERVICE_START_LAB_LABEL,
+            ));
+        }
+        if self.is_service_expose() {
+            return CommandPortabilityContract::lab(LabCommandContract::runner_resident(
+                TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
+            ));
+        }
+        CommandPortabilityContract::none()
     }
 }
 

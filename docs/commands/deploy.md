@@ -47,6 +47,8 @@ Options:
 
 Real deploys with `--head` or `--force` require `--apply`. Preview and status commands (`--dry-run` or `--check`) do not require `--apply`.
 
+Components can declare `deploy_together` in their component config. When any selected component belongs to a deploy-together group, Homeboy requires the full group in the same deploy plan and fails before build/upload if only part of the group was selected. Use explicit component IDs for the whole group or `--all` for the project.
+
 Bulk JSON input uses `component_ids` (snake_case):
 
 ```json

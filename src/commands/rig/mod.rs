@@ -15,6 +15,10 @@ use self::output::{
     RigStatusOutput, RigSummary, RigSyncOutput, RigUpOutput, RigUpdateOutput,
 };
 use super::CmdResult;
+use crate::command_contract::{
+    CommandPortabilityContract, LabCommandContract, LAB_NO_EXTRA_TOOLS, RIG_CHECK_LAB_LABEL,
+    RIG_UP_LAB_UNSUPPORTED_REASON,
+};
 
 #[derive(Args)]
 pub struct RigArgs {
@@ -39,6 +43,24 @@ impl RigArgs {
             self.command,
             RigCommand::Install { .. } | RigCommand::Sources { .. }
         )
+    }
+
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        if self.is_check_command() {
+            return CommandPortabilityContract::lab(LabCommandContract::portable_workload(
+                RIG_CHECK_LAB_LABEL,
+                None,
+                false,
+                LAB_NO_EXTRA_TOOLS,
+            ));
+        }
+        if self.is_hot_resource_command() {
+            return CommandPortabilityContract::lab(LabCommandContract::local_only(
+                "rig up",
+                RIG_UP_LAB_UNSUPPORTED_REASON,
+            ));
+        }
+        CommandPortabilityContract::none()
     }
 }
 

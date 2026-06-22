@@ -4,9 +4,13 @@ use crate::command_contract::{
     RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
     RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
 };
+use crate::core::error::{Error, Result};
 use crate::core::plan::HomeboyPlan;
 
-use super::{LabOffloadCommand, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy};
+use super::{
+    LabOffloadCommand, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
+    RunnerCapabilityPreflight, RunnerRequiredTool,
+};
 
 pub(crate) struct RunnerWorkloadBuildInput<'a> {
     pub plan: &'a HomeboyPlan,
@@ -65,8 +69,143 @@ pub(crate) fn build_runner_workload(input: RunnerWorkloadBuildInput<'_>) -> Runn
             plan_id: input.plan.id.clone(),
             proof_id: input.proof_id.map(str::to_string),
             workspace_mapping_ref,
+            job_id: None,
+            mirror_run_id: None,
+            artifacts: Vec::new(),
         },
     }
+}
+
+pub(crate) fn validate_runner_workload_dispatch(
+    workload: Option<&RunnerWorkload>,
+    runner_id: &str,
+    cwd: Option<&str>,
+    command: &[String],
+    _secret_env_names: &[String],
+    capture_patch: bool,
+) -> Result<()> {
+    let Some(workload) = workload else {
+        return Ok(());
+    };
+    if workload.schema != RUNNER_WORKLOAD_SCHEMA {
+        return Err(workload_error(
+            "runner_workload.schema",
+            format!("runner workload schema must be `{RUNNER_WORKLOAD_SCHEMA}`"),
+        ));
+    }
+    if workload.assignment.runner_id.as_deref() != Some(runner_id) {
+        return Err(workload_error(
+            "runner_workload.assignment.runner_id",
+            "runner workload assignment does not match dispatch runner_id".to_string(),
+        ));
+    }
+    if let (Some(expected), Some(actual)) = (workload.state.remote_workspace.as_deref(), cwd) {
+        if expected != actual {
+            return Err(workload_error(
+                "runner_workload.state.remote_workspace",
+                "runner workload remote workspace does not match dispatch cwd".to_string(),
+            ));
+        }
+    }
+    if workload.mutation_policy.capture_patch != capture_patch {
+        return Err(workload_error(
+            "runner_workload.mutation_policy.capture_patch",
+            "runner workload mutation policy does not match dispatch capture_patch".to_string(),
+        ));
+    }
+    for category in &workload.required_secrets.categories {
+        if !matches!(category.as_str(), "agent_task" | "trace" | "tunnel") {
+            return Err(workload_error(
+                "runner_workload.required_secrets",
+                format!("runner workload declares unsupported secret category `{category}`"),
+            ));
+        }
+    }
+    for capability in &workload.required_capabilities {
+        match capability.name.as_str() {
+            "extension_parity" | "playwright" => {}
+            name if !capability.required => {}
+            name => {
+                return Err(workload_error(
+                    "runner_workload.required_capabilities",
+                    format!("runner workload requires unsupported capability `{name}`"),
+                ));
+            }
+        }
+    }
+    if command.is_empty() {
+        return Err(workload_error(
+            "runner_workload.command",
+            "runner workload dispatch requires a command".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn merge_runner_workload_capability_preflight(
+    mut preflight: Option<RunnerCapabilityPreflight>,
+    workload: Option<&RunnerWorkload>,
+) -> Result<Option<RunnerCapabilityPreflight>> {
+    let Some(workload) = workload else {
+        return Ok(preflight);
+    };
+    for capability in &workload.required_capabilities {
+        if capability.name == "playwright" && capability.required {
+            let preflight = preflight.get_or_insert_with(|| RunnerCapabilityPreflight {
+                command: workload.kind.command_label.clone(),
+                ..Default::default()
+            });
+            if !preflight
+                .required_tools
+                .contains(&RunnerRequiredTool::Playwright)
+            {
+                preflight
+                    .required_tools
+                    .push(RunnerRequiredTool::Playwright);
+            }
+        }
+    }
+    Ok(preflight)
+}
+
+pub(crate) fn merge_runner_workload_required_extensions(
+    mut required_extensions: Vec<String>,
+    workload: Option<&RunnerWorkload>,
+) -> Vec<String> {
+    if let Some(workload) = workload {
+        for extension in &workload.required_extensions {
+            if !required_extensions.contains(extension) {
+                required_extensions.push(extension.clone());
+            }
+        }
+    }
+    required_extensions
+}
+
+fn workload_error(field: &str, message: String) -> Error {
+    Error::validation_invalid_argument(field, message, None, None)
+}
+
+pub(crate) fn runner_workload_with_result_refs(
+    mut workload: RunnerWorkload,
+    job_id: Option<&str>,
+    mirror_run_id: Option<&str>,
+    artifacts: &[crate::core::api_jobs::JobArtifactMetadata],
+) -> RunnerWorkload {
+    workload.result_refs.job_id = job_id.map(str::to_string);
+    workload.result_refs.mirror_run_id = mirror_run_id.map(str::to_string);
+    workload.result_refs.artifacts = artifacts
+        .iter()
+        .map(
+            |artifact| crate::command_contract::RunnerWorkloadArtifactRef {
+                id: artifact.id.clone(),
+                name: artifact.name.clone(),
+                path: artifact.path.clone(),
+                url: artifact.url.clone(),
+            },
+        )
+        .collect();
+    workload
 }
 
 fn required_capabilities(command: &LabOffloadCommand) -> Vec<RunnerWorkloadCapability> {
@@ -117,6 +256,7 @@ fn workspace_mode_policy_label(policy: LabOffloadWorkspaceModePolicy) -> &'stati
 mod tests {
     use super::*;
     use crate::command_contract::LabRoutingPolicy;
+    use crate::core::api_jobs::JobArtifactMetadata;
     use crate::core::plan::{HomeboyPlan, PlanKind};
 
     fn plan() -> HomeboyPlan {
@@ -186,5 +326,122 @@ mod tests {
         );
         assert_eq!(workload.result_refs.plan_id, "lab_offload.test");
         assert_eq!(workload.result_refs.proof_id.as_deref(), Some("proof-1"));
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_dispatch_drift() {
+        let plan = plan();
+        let command = command();
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: Some("workspace_mapping"),
+            proof_id: None,
+        });
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &[],
+            true,
+        )
+        .expect("matching dispatch is valid");
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "other-runner",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &[],
+            true,
+        )
+        .expect_err("drifted runner id must fail");
+        assert_eq!(err.details["field"], "runner_workload.assignment.runner_id");
+    }
+
+    #[test]
+    fn runner_workload_capabilities_merge_into_preflight() {
+        let plan = plan();
+        let command = command();
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        let preflight = merge_runner_workload_capability_preflight(None, Some(&workload))
+            .expect("merge workload capabilities")
+            .expect("playwright preflight");
+        assert!(preflight
+            .required_tools
+            .contains(&RunnerRequiredTool::Playwright));
+    }
+
+    #[test]
+    fn runner_workload_result_refs_use_actual_artifacts() {
+        let plan = plan();
+        let command = command();
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: false,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+        let workload = runner_workload_with_result_refs(
+            workload,
+            Some("job-1"),
+            Some("mirror-1"),
+            &[JobArtifactMetadata {
+                id: "artifact-1".to_string(),
+                name: Some("trace.zip".to_string()),
+                path: Some("/tmp/trace.zip".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: Some(42),
+                sha256: None,
+                metadata: None,
+            }],
+        );
+
+        assert_eq!(workload.result_refs.job_id.as_deref(), Some("job-1"));
+        assert_eq!(
+            workload.result_refs.mirror_run_id.as_deref(),
+            Some("mirror-1")
+        );
+        assert_eq!(workload.result_refs.artifacts[0].id, "artifact-1");
+        assert_eq!(
+            workload.result_refs.artifacts[0].name.as_deref(),
+            Some("trace.zip")
+        );
     }
 }

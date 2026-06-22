@@ -62,6 +62,33 @@ pub struct LabCommandContract {
     pub routing_policy: LabRoutingPolicy,
 }
 
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
+pub struct CommandPortabilityContract {
+    lab_command: Option<LabCommandContract>,
+}
+
+impl CommandPortabilityContract {
+    pub const fn none() -> Self {
+        Self { lab_command: None }
+    }
+
+    pub const fn lab(command: LabCommandContract) -> Self {
+        Self {
+            lab_command: Some(command),
+        }
+    }
+
+    pub const fn lab_optional(command: Option<LabCommandContract>) -> Self {
+        Self {
+            lab_command: command,
+        }
+    }
+
+    pub const fn lab_command(self) -> Option<LabCommandContract> {
+        self.lab_command
+    }
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 pub enum LabCommandPortability {
     Portable,
@@ -162,6 +189,23 @@ pub struct RunnerWorkloadResultRefs {
     pub plan_id: String,
     pub proof_id: Option<String>,
     pub workspace_mapping_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<RunnerWorkloadArtifactRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadArtifactRef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -246,8 +290,8 @@ impl LabLocalExecutionPolicy {
 }
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
-const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
-const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
+pub(crate) const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
+pub(crate) const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
 const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
@@ -257,6 +301,8 @@ const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resu
 const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
+const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
 pub(crate) const LINT_LAB_LABEL: &str = "lint";
 pub(crate) const TEST_LAB_LABEL: &str = "test";
@@ -264,12 +310,12 @@ pub(crate) const AUDIT_LAB_LABEL: &str = "audit";
 pub(crate) const REVIEW_LAB_LABEL: &str = "review";
 pub(crate) const BENCH_LAB_LABEL: &str = "bench";
 pub(crate) const FUZZ_LAB_LABEL: &str = "fuzz";
-const TRACE_LAB_LABEL: &str = "trace";
+pub(crate) const TRACE_LAB_LABEL: &str = "trace";
 const REFACTOR_LAB_LABEL: &str = "refactor";
-const RIG_CHECK_LAB_LABEL: &str = "rig check";
-const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
-const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
-const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
+pub(crate) const RIG_CHECK_LAB_LABEL: &str = "rig check";
+pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
+pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
+pub(crate) const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
 
 struct LabSupportedCommandSummary {
     contract_labels: &'static [&'static str],
@@ -309,6 +355,14 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
         hint_label:
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[
+            AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+            AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+        ],
+        message_label: "agent-task fanout submit-batch/status/artifacts",
+        hint_label: "agent-task fanout submit-batch/status/artifacts",
     },
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
@@ -444,7 +498,25 @@ fn human_join(labels: &[&str]) -> String {
 
 impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
-        let mut contract = match self {
+        let mut contract = self.portability_contract().lab_command()?;
+
+        // Agent-task commands whose provider needs a real git checkout of the
+        // cwd workspace upgrade to the GitCheckoutRequired policy. This applies
+        // uniformly to every resolved agent-task contract; the predicate only
+        // returns true for the run/from-spec commands that own a portable or
+        // explicit-runner base, so the other arms (which set their own
+        // runner-resident policy) are left untouched.
+        if let Commands::AgentTask(args) = self {
+            if agent_task_provider_requires_cwd_git_checkout(&args.command) {
+                contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
+            }
+        }
+
+        Some(contract)
+    }
+
+    pub fn portability_contract(&self) -> CommandPortabilityContract {
+        let contract = match self {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Cook(args),
             }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
@@ -465,6 +537,22 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::SubmitBatch(_),
+                    }),
+            }) => LabCommandContract::explicit_runner_simple(
+                AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command:
+                            agent_task::AgentTaskFanoutCommand::Status(_)
+                            | agent_task::AgentTaskFanoutCommand::Artifacts(_),
+                    }),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_FANOUT_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
@@ -509,17 +597,19 @@ impl Commands {
                         command: agent_task::AgentTaskAuthCommand::Status(_),
                     }),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_AUTH_STATUS_LAB_LABEL),
-            Commands::Audit(args) => args.lab_contract()?,
-            Commands::Bench(args) => args.lab_contract()?,
-            Commands::Fuzz(args) => args.lab_contract()?,
+            Commands::Audit(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
+            Commands::Bench(args) => return args.portability_contract(),
+            Commands::Fuzz(args) => return CommandPortabilityContract::lab_optional(args.lab_contract()),
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple("extension update")
             }
             Commands::Fleet(args) => {
-                crate::commands::fleet::adapter(CommandOutputFileMode::None).lab_contract(args)?
+                let contract = crate::commands::fleet::adapter(CommandOutputFileMode::None)
+                    .lab_contract(args);
+                return CommandPortabilityContract::lab_optional(contract);
             }
-            Commands::Lint(args) => args.lab_contract()?,
-            Commands::Review(args) => args.lab_contract(),
+            Commands::Lint(args) => return args.portability_contract(),
+            Commands::Review(args) => return CommandPortabilityContract::lab(args.lab_contract()),
             Commands::Refactor(args) if args.is_hot_resource_command() => {
                 LabCommandContract::portable(
                     "refactor",
@@ -529,55 +619,13 @@ impl Commands {
                     LAB_NO_EXTRA_TOOLS,
                 )
             }
-            Commands::Rig(args) if args.is_check_command() => {
-                LabCommandContract::portable_workload(
-                    RIG_CHECK_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_TOOLS,
-                )
-            }
-            Commands::Rig(args) if args.is_hot_resource_command() => {
-                LabCommandContract::local_only("rig up", RIG_UP_LAB_UNSUPPORTED_REASON)
-            }
-            Commands::Test(args) => args.lab_contract(),
-            Commands::Trace(args) => {
-                let mut contract = LabCommandContract::portable_workload(
-                    "trace",
-                    args.keep_overlay.then_some("--keep-overlay"),
-                    false,
-                    LAB_TRACE_EXTRA_TOOLS,
-                );
-                if args.is_compare_target_run() {
-                    contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;
-                }
-                contract
-            }
-            Commands::Tunnel(args) if args.is_preview_consumer_run() => {
-                LabCommandContract::explicit_runner_simple(TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL)
-            }
-            Commands::Tunnel(args) if args.is_service_start() => {
-                LabCommandContract::runner_resident(TUNNEL_SERVICE_START_LAB_LABEL)
-            }
-            Commands::Tunnel(args) if args.is_service_expose() => {
-                LabCommandContract::runner_resident(TUNNEL_SERVICE_EXPOSE_LAB_LABEL)
-            }
-            _ => return None,
+            Commands::Rig(args) => return args.portability_contract(),
+            Commands::Test(args) => return CommandPortabilityContract::lab(args.lab_contract()),
+            Commands::Trace(args) => return args.portability_contract(),
+            Commands::Tunnel(args) => return args.portability_contract(),
+            _ => return CommandPortabilityContract::none(),
         };
-
-        // Agent-task commands whose provider needs a real git checkout of the
-        // cwd workspace upgrade to the GitCheckoutRequired policy. This applies
-        // uniformly to every resolved agent-task contract; the predicate only
-        // returns true for the run/from-spec commands that own a portable or
-        // explicit-runner base, so the other arms (which set their own
-        // runner-resident policy) are left untouched.
-        if let Commands::AgentTask(args) = self {
-            if agent_task_provider_requires_cwd_git_checkout(&args.command) {
-                contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
-            }
-        }
-
-        Some(contract)
+        CommandPortabilityContract::lab(contract)
     }
 }
 

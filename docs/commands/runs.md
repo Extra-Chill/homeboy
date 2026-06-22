@@ -5,10 +5,11 @@ Inspect and maintain persisted observation-store runs and artifacts.
 ## Synopsis
 
 ```bash
-homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
+homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
 homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
+homeboy runs bench-compare --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs show <run-id> [--json]
 homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id>
@@ -34,7 +35,7 @@ homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <
 
 `homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, and run explicit cleanup or reconciliation tasks.
 
-`homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine.
+`homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
 
@@ -99,6 +100,8 @@ homeboy runs compare --kind bench --component studio --metric total_elapsed_ms -
 
 Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`, direct dotted paths, and benchmark scenario metrics recorded under `scenario_metrics[].metrics` or `metric_groups`.
 
+`homeboy runs bench-compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares numeric metrics recorded in two exact benchmark runs. It captures both run IDs, component state, shared benchmark context, selected metric deltas, and a Markdown table under `reports.markdown` in the JSON payload.
+
 ## Related Readers
 
 ```bash
@@ -108,7 +111,7 @@ homeboy bench compare --from-run <run-id> --to-run <run-id>
 homeboy rig runs <id> [--limit 20]
 ```
 
-These commands are thin read-only wrappers over the same observation-store records.
+These commands are thin read-only compatibility wrappers over the same observation-store records. Prefer `runs` readers for new automation: `bench history` returns the `runs.list` payload, `bench distribution` returns `runs.distribution`, and `bench compare` returns `runs.bench-compare`.
 
 ## Portable Bundles
 
