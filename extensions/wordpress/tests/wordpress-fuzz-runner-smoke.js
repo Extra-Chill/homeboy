@@ -197,8 +197,8 @@ assert.equal(
 		HOMEBOY_WP_CODEBOX_BIN: '/explicit/wp-codebox',
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot,
 	}),
-	'/explicit/wp-codebox',
-	'Explicit WP Codebox binary env should override cache discovery'
+	cachedCodeboxBin,
+	'Homeboy-managed WP Codebox cache should beat stale ambient runner env'
 );
 
 const cli = spawnSync(runnerPath, [], {
@@ -227,6 +227,8 @@ assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 
 const fakeCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-wp-codebox.js');
+const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
+fs.mkdirSync(emptyCodeboxInstallRoot, { recursive: true });
 fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
@@ -257,6 +259,7 @@ const dispatchCli = spawnSync(runnerPath, [], {
 	env: {
 		...process.env,
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'dispatch-cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'dispatch-cli-run',
@@ -329,6 +332,7 @@ const legacyDispatchCli = spawnSync(runnerPath, [], {
 	env: {
 		...process.env,
 		HOMEBOY_WP_CODEBOX_BIN: legacyCodeboxBin,
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_WP_CODEBOX_PLUGIN_PATH: path.join(tempDir, 'packages/wordpress-plugin'),
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'legacy-dispatch-cli-workload',
