@@ -27,6 +27,15 @@ assert.equal(readySurface.status, 'ready');
 assert.deepEqual(readySurface.skipReasons, []);
 assert.deepEqual(readySurface.unsafeReasons, []);
 
+const interactionSurface = normalizeWordPressAdminPageFuzzSurface({
+	id: 'bulk-posts',
+	path: '/wp-admin/edit.php',
+	forms: [{ id: 'bulk-action', method: 'POST', nonce_action: 'bulk-posts', capability: 'edit_posts' }],
+	actions: [{ id: 'view-filter', method: 'GET', selector: '#filter-by-date' }],
+}, { includeUnsafe: true });
+assert.equal(interactionSurface.forms.length, 1);
+assert.equal(interactionSurface.actions.length, 1);
+
 const unsafeSurface = normalizeWordPressAdminPageFuzzSurface({
 	id: 'delete-item',
 	path: '/wp-admin/edit.php?action=delete&post=1',

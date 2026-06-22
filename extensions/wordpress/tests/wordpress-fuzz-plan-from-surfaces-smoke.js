@@ -165,4 +165,34 @@ assert.deepEqual(resourcePlan.targets[0].cases[2].skip_reasons, []);
 assert.equal(resourcePlan.targets[1].cases.length, 1);
 assert.equal(resourcePlan.targets[1].cases[0].intent, 'exercise-wordpress-surface');
 
+const adminInteractionPlan = buildWordPressFuzzPlanFromSurfaces({
+	admin: [{
+		id: 'admin:bulk-posts',
+		path: '/wp-admin/edit.php',
+		forms: [{
+			id: 'bulk-action',
+			method: 'POST',
+			selector: '#posts-filter',
+			capability: 'edit_posts',
+			nonce_action: 'bulk-posts',
+		}],
+		actions: [{ id: 'date-filter', method: 'GET', selector: '#filter-by-date' }],
+	}],
+});
+const adminCases = adminInteractionPlan.targets[0].cases;
+assert.equal(adminCases.length, 3);
+assert.equal(adminCases[0].intent, 'request-admin-page');
+assert.equal(adminCases[0].metadata.executable, true);
+assert.equal(adminCases[1].intent, 'plan-admin-page-mutation');
+assert.deepEqual(adminCases[1].skip_reasons, ['requires_explicit_mutation_opt_in']);
+assert.deepEqual(adminCases[1].destructive_reasons, ['form_mutation']);
+assert.equal(adminCases[1].metadata.executable, false);
+assert.equal(adminCases[1].metadata.gated, true);
+assert.deepEqual(adminCases[1].metadata.capability_context, { required: ['edit_posts'] });
+assert.deepEqual(adminCases[1].metadata.nonce_context, { required: true, action: 'bulk-posts', field: '_wpnonce' });
+assert.equal(adminCases[2].intent, 'exercise-admin-page-read-only-interaction');
+assert.deepEqual(adminCases[2].skip_reasons, []);
+assert.deepEqual(adminCases[2].destructive_reasons, []);
+assert.equal(adminCases[2].metadata.executable, true);
+
 console.log('WordPress fuzz plan from surfaces smoke passed.');
