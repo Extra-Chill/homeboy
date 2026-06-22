@@ -19,6 +19,7 @@ module.exports = {
 	...require('./lib/page-profiler'),
 	...require('./lib/ajax-action-surface'),
 	...require('./lib/rest-route-matrix'),
+	...require('./lib/wordpress-rest-route-discovery'),
 	...require('./lib/wordpress-rest-fuzz-surface-discovery'),
 	...require('./lib/wordpress-route-latency'),
 	...require('./lib/block-quality'),

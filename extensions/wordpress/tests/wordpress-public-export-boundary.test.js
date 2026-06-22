@@ -14,6 +14,8 @@ assert.equal(typeof wordpress.profileWordPressAdminPageScenario, 'function');
 assert.equal(typeof wordpress.normalizeWordPressAjaxActionSurface, 'function');
 assert.equal(typeof wordpress.buildAjaxActionPlanArtifact, 'function');
 assert.equal(typeof wordpress.normalizeWordPressRestRouteMatrix, 'function');
+assert.equal(typeof wordpress.normalizeWordPressRestRouteDiscovery, 'function');
+assert.equal(typeof wordpress.discoverWordPressRestRoutes, 'function');
 assert.equal(typeof wordpress.generateWordPressRestRequestCases, 'function');
 assert.equal(typeof wordpress.buildFullSurfaceCoverageArtifact, 'function');
 assert.equal(typeof wordpress.formatFullSurfaceCoverageMarkdownReport, 'function');

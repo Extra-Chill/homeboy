@@ -88,6 +88,16 @@ DB queries, configured delay, elapsed milliseconds, and a deterministic digest.
 Store API and classic checkout request probes are intentionally left to follow-up
 issue #1091: https://github.com/Extra-Chill/homeboy-extensions/issues/1091
 
+### REST Route Discovery
+
+`lib/wordpress-rest-route-discovery.js` provides generic WordPress REST route
+discovery helpers for fuzz orchestration. Callers can pass a captured REST index
+plus optional per-route `OPTIONS` and schema snapshots, or provide a `fetch`
+implementation and `baseUrl` to collect the same metadata through the REST API.
+The normalized artifact uses `homeboy/wordpress-rest-route-discovery/v1` and
+records route, method, namespace, argument summary, response schema summary, and
+best-effort auth metadata without embedding product-specific endpoints.
+
 `<component-id>` matches the id Homeboy core uses for the component. Most
 verbs also accept a project id to fan out across all of its components.
 
