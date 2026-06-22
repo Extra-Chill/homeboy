@@ -762,8 +762,8 @@ fn agent_task_git_checkout_policy_covers_cook_dispatch_workspace() {
             "cook",
         ])
         .lab_contract()
-            .expect("agent-task cook contract")
-            .workspace_mode_policy,
+        .expect("agent-task cook contract")
+        .workspace_mode_policy,
         LabWorkspaceModePolicy::GitCheckoutRequired
     );
 }
