@@ -86,10 +86,50 @@ Campaigns can include a product-neutral coverage summary:
     "declared_operations": 4,
     "executable_operations": 4,
     "proven_operations": 4,
+    "skipped_targets": [
+      { "id": "target-3", "reason": "auth_required" }
+    ],
+    "surface_summaries": [
+      {
+        "id": "surface-a",
+        "kind": "api",
+        "declared_targets": 2,
+        "executable_targets": 2,
+        "proven_targets": 2,
+        "declared_operations": 3,
+        "executable_operations": 3,
+        "proven_operations": 3
+      }
+    ],
+    "kind_summaries": [
+      {
+        "id": "read",
+        "kind": "operation_kind",
+        "declared_targets": 1,
+        "executable_targets": 1,
+        "proven_targets": 1,
+        "declared_operations": 2,
+        "executable_operations": 2,
+        "proven_operations": 2
+      }
+    ],
     "artifact_ids": ["coverage-report"]
   }
 }
 ```
+
+Coverage summaries can include selector breakdowns in `surface_summaries` and
+`kind_summaries`. Each selector row uses the same declared, executable, proven,
+and skipped-count shape as the aggregate summary, allowing gates and reports to
+show which surface or operation kind is incomplete without embedding any
+product-specific taxonomy.
+
+Use standardized skip reason codes when a declared target or operation is not
+executable in the current campaign: `unsafe`, `destructive`, `auth_required`,
+`unavailable`, `legacy`, `unsupported`, and `config_required`. The codes are
+reported in `coverage_completeness.skipped_reason_counts` for `fuzz validate`
+and `fuzz report`, including per-selector counts for `surface_summaries` and
+`kind_summaries`.
 
 `homeboy fuzz replay` resolves replay metadata from a product-neutral campaign
 or result envelope artifact. Pass a `homeboy/fuzz-campaign/v1` or

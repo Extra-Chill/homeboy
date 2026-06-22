@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use homeboy::core::component::{Component, ScopedExtensionConfig};
@@ -347,7 +347,28 @@ pub struct FuzzCoverageCompletenessOutput {
     pub operation_coverage_ratio: f64,
     pub skipped_targets: usize,
     pub skipped_operations: usize,
+    pub skipped_reason_counts: BTreeMap<String, usize>,
+    pub surface_summaries: Vec<FuzzCoverageSelectorSummaryOutput>,
+    pub kind_summaries: Vec<FuzzCoverageSelectorSummaryOutput>,
     pub artifact_ids: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FuzzCoverageSelectorSummaryOutput {
+    pub id: String,
+    pub kind: String,
+    pub label: Option<String>,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub target_coverage_ratio: f64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    pub operation_coverage_ratio: f64,
+    pub skipped_targets: usize,
+    pub skipped_operations: usize,
+    pub skipped_reason_counts: BTreeMap<String, usize>,
 }
 
 pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
@@ -1145,28 +1166,45 @@ fn coverage_ratio(
 
 fn fuzz_coverage_completeness(campaign: &FuzzCampaign) -> FuzzCoverageCompletenessOutput {
     match campaign.coverage_summary.as_ref() {
-        Some(summary) => FuzzCoverageCompletenessOutput {
-            has_summary: true,
-            declared_targets: summary.declared_targets,
-            executable_targets: summary.executable_targets,
-            proven_targets: summary.proven_targets,
-            target_coverage_ratio: coverage_ratio(
-                Some(summary),
-                |summary| summary.proven_targets,
-                |summary| summary.declared_targets,
-            ),
-            declared_operations: summary.declared_operations,
-            executable_operations: summary.executable_operations,
-            proven_operations: summary.proven_operations,
-            operation_coverage_ratio: coverage_ratio(
-                Some(summary),
-                |summary| summary.proven_operations,
-                |summary| summary.declared_operations,
-            ),
-            skipped_targets: summary.skipped_targets.len(),
-            skipped_operations: summary.skipped_operations.len(),
-            artifact_ids: summary.artifact_ids.clone(),
-        },
+        Some(summary) => {
+            let mut skipped_reason_counts = BTreeMap::new();
+            accumulate_skip_reason_counts(&mut skipped_reason_counts, &summary.skipped_targets);
+            accumulate_skip_reason_counts(&mut skipped_reason_counts, &summary.skipped_operations);
+
+            FuzzCoverageCompletenessOutput {
+                has_summary: true,
+                declared_targets: summary.declared_targets,
+                executable_targets: summary.executable_targets,
+                proven_targets: summary.proven_targets,
+                target_coverage_ratio: coverage_ratio(
+                    Some(summary),
+                    |summary| summary.proven_targets,
+                    |summary| summary.declared_targets,
+                ),
+                declared_operations: summary.declared_operations,
+                executable_operations: summary.executable_operations,
+                proven_operations: summary.proven_operations,
+                operation_coverage_ratio: coverage_ratio(
+                    Some(summary),
+                    |summary| summary.proven_operations,
+                    |summary| summary.declared_operations,
+                ),
+                skipped_targets: summary.skipped_targets.len(),
+                skipped_operations: summary.skipped_operations.len(),
+                skipped_reason_counts,
+                surface_summaries: summary
+                    .surface_summaries
+                    .iter()
+                    .map(fuzz_coverage_selector_summary)
+                    .collect(),
+                kind_summaries: summary
+                    .kind_summaries
+                    .iter()
+                    .map(fuzz_coverage_selector_summary)
+                    .collect(),
+                artifact_ids: summary.artifact_ids.clone(),
+            }
+        }
         None => FuzzCoverageCompletenessOutput {
             has_summary: false,
             declared_targets: 0,
@@ -1179,8 +1217,59 @@ fn fuzz_coverage_completeness(campaign: &FuzzCampaign) -> FuzzCoverageCompletene
             operation_coverage_ratio: 0.0,
             skipped_targets: 0,
             skipped_operations: 0,
+            skipped_reason_counts: BTreeMap::new(),
+            surface_summaries: Vec::new(),
+            kind_summaries: Vec::new(),
             artifact_ids: Vec::new(),
         },
+    }
+}
+
+fn fuzz_coverage_selector_summary(
+    summary: &homeboy::core::fuzz::FuzzCoverageGroupSummary,
+) -> FuzzCoverageSelectorSummaryOutput {
+    let mut skipped_reason_counts = BTreeMap::new();
+    accumulate_skip_reason_counts(&mut skipped_reason_counts, &summary.skipped_targets);
+    accumulate_skip_reason_counts(&mut skipped_reason_counts, &summary.skipped_operations);
+
+    FuzzCoverageSelectorSummaryOutput {
+        id: summary.id.clone(),
+        kind: summary.kind.clone(),
+        label: summary.label.clone(),
+        declared_targets: summary.declared_targets,
+        executable_targets: summary.executable_targets,
+        proven_targets: summary.proven_targets,
+        target_coverage_ratio: count_ratio(summary.proven_targets, summary.declared_targets),
+        declared_operations: summary.declared_operations,
+        executable_operations: summary.executable_operations,
+        proven_operations: summary.proven_operations,
+        operation_coverage_ratio: count_ratio(
+            summary.proven_operations,
+            summary.declared_operations,
+        ),
+        skipped_targets: summary.skipped_targets.len(),
+        skipped_operations: summary.skipped_operations.len(),
+        skipped_reason_counts,
+    }
+}
+
+fn count_ratio(covered: u64, total: u64) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        covered as f64 / total as f64
+    }
+}
+
+fn accumulate_skip_reason_counts(
+    counts: &mut BTreeMap<String, usize>,
+    skips: &[homeboy::core::fuzz::FuzzCoverageSkip],
+) {
+    for skip in skips {
+        let reason = skip.reason.trim();
+        if !reason.is_empty() {
+            *counts.entry(reason.to_string()).or_default() += 1;
+        }
     }
 }
 
@@ -1725,6 +1814,8 @@ mod tests {
                 proven_operations: 4,
                 skipped_targets: Vec::new(),
                 skipped_operations: Vec::new(),
+                surface_summaries: Vec::new(),
+                kind_summaries: Vec::new(),
                 artifact_ids: vec!["coverage-report".to_string()],
                 metadata: serde_json::Value::Null,
                 extra: std::collections::BTreeMap::new(),
@@ -1786,10 +1877,52 @@ mod tests {
                 proven_operations: 0,
                 skipped_targets: vec![homeboy::core::fuzz::FuzzCoverageSkip {
                     id: "target-2".to_string(),
-                    reason: "not_executable".to_string(),
+                    reason: "auth_required".to_string(),
                     label: None,
                 }],
-                skipped_operations: Vec::new(),
+                skipped_operations: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                    id: "operation-2".to_string(),
+                    reason: "config_required".to_string(),
+                    label: None,
+                }],
+                surface_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+                    id: "surface-a".to_string(),
+                    kind: "api".to_string(),
+                    label: Some("Surface A".to_string()),
+                    declared_targets: 2,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 2,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                        id: "target-2".to_string(),
+                        reason: "auth_required".to_string(),
+                        label: None,
+                    }],
+                    skipped_operations: vec![homeboy::core::fuzz::FuzzCoverageSkip {
+                        id: "operation-2".to_string(),
+                        reason: "config_required".to_string(),
+                        label: None,
+                    }],
+                    metadata: serde_json::Value::Null,
+                    extra: std::collections::BTreeMap::new(),
+                }],
+                kind_summaries: vec![homeboy::core::fuzz::FuzzCoverageGroupSummary {
+                    id: "read".to_string(),
+                    kind: "operation_kind".to_string(),
+                    label: None,
+                    declared_targets: 1,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 1,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: Vec::new(),
+                    skipped_operations: Vec::new(),
+                    metadata: serde_json::Value::Null,
+                    extra: std::collections::BTreeMap::new(),
+                }],
                 artifact_ids: vec!["coverage-report".to_string()],
                 metadata: serde_json::Value::Null,
                 extra: std::collections::BTreeMap::new(),
@@ -1810,6 +1943,18 @@ mod tests {
         assert_eq!(summary.target_coverage_ratio, 0.5);
         assert_eq!(summary.operation_coverage_ratio, 1.0);
         assert_eq!(summary.skipped_targets, 1);
+        assert_eq!(summary.skipped_operations, 1);
+        assert_eq!(summary.skipped_reason_counts["auth_required"], 1);
+        assert_eq!(summary.skipped_reason_counts["config_required"], 1);
+        assert_eq!(summary.surface_summaries.len(), 1);
+        assert_eq!(summary.surface_summaries[0].id, "surface-a");
+        assert_eq!(summary.surface_summaries[0].target_coverage_ratio, 0.5);
+        assert_eq!(summary.surface_summaries[0].operation_coverage_ratio, 0.5);
+        assert_eq!(
+            summary.surface_summaries[0].skipped_reason_counts["auth_required"],
+            1
+        );
+        assert_eq!(summary.kind_summaries[0].id, "read");
         assert_eq!(summary.artifact_ids, vec!["coverage-report"]);
     }
 
