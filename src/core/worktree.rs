@@ -446,7 +446,7 @@ fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
         .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
 }
 
-fn branch_slug(branch: &str) -> String {
+pub fn branch_slug(branch: &str) -> String {
     branch
         .chars()
         .map(|ch| {

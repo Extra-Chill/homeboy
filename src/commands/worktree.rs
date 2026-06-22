@@ -8,8 +8,9 @@ use homeboy::core::cleanup::{
     self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput,
 };
 use homeboy::core::worktree::{
-    self, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeListOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    self, branch_slug, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions,
+    WorktreeCreateOutput, WorktreeListOutput, WorktreeRemoveOptions, WorktreeRemoveOutput,
+    WorktreeStatusOutput,
 };
 
 use super::CmdResult;
@@ -388,19 +389,6 @@ fn dmc_add_args(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<Strin
 
 fn dmc_worktree_handle(repo: &str, branch: &str) -> String {
     format!("{}@{}", repo, branch_slug(branch))
-}
-
-fn branch_slug(branch: &str) -> String {
-    branch
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 fn active_lock_holder(
