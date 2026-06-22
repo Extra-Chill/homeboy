@@ -4,53 +4,16 @@ const WORDPRESS_SURFACE_DISCOVERY_SCHEMA = 'wordpress-surface-discovery/v1';
 const WORDPRESS_FUZZ_PLAN_SCHEMA = 'wordpress-fuzz-plan/v1';
 const WORDPRESS_FUZZ_RESULT_SCHEMA = 'wordpress-fuzz-result/v1';
 
-const SURFACE_TYPES = new Set([
-	'admin-page',
-	'block',
-	'capability',
-	'cron-event',
-	'database-table',
-	'db-query',
-	'external-http',
-	'frontend-url',
-	'hook',
-	'media',
-	'option',
-	'post-type',
-	'rest-route',
-	'role',
-	'taxonomy',
-	'user',
-	'wp-cli-command',
-]);
+/**
+ * Internal dependencies
+ */
+const {
+	isWordPressSurfaceType,
+	normalizeWordPressSurfaceType,
+} = require('./wordpress-surface-types');
 
 const CASE_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 const RESULT_STATUSES = new Set(['passed', 'failed', 'errored', 'partial', 'skipped']);
-const SURFACE_TYPE_ALIASES = new Map([
-	['action', 'hook'],
-	['admin', 'admin-page'],
-	['admin_page', 'admin-page'],
-	['capabilities', 'capability'],
-	['cron', 'cron-event'],
-	['database', 'database-table'],
-	['db', 'database-table'],
-	['db_table', 'database-table'],
-	['db-query', 'db-query'],
-	['database-query', 'db-query'],
-	['external_http', 'external-http'],
-	['http', 'external-http'],
-	['http-request', 'external-http'],
-	['filter', 'hook'],
-	['frontend', 'frontend-url'],
-	['frontend_url', 'frontend-url'],
-	['post_type', 'post-type'],
-	['rest', 'rest-route'],
-	['rest_route', 'rest-route'],
-	['taxonomy_term', 'taxonomy'],
-	['users', 'user'],
-	['roles', 'role'],
-	['wp-cli', 'wp-cli-command'],
-]);
 
 function assertPlainObject(value, field) {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -84,11 +47,11 @@ function normalizeId(value, fallback, field) {
 
 function normalizeSurface(surface, index) {
 	assertPlainObject(surface, `surfaces[${index}]`);
-	const type = SURFACE_TYPE_ALIASES.get(surface.type || surface.kind) || surface.type || surface.kind;
+	const type = normalizeWordPressSurfaceType(surface.type || surface.kind, { allowUnknown: true });
 	if (!type || typeof type !== 'string') {
 		throw new Error(`surfaces[${index}].type must be a string.`);
 	}
-	if (!SURFACE_TYPES.has(type)) {
+	if (!isWordPressSurfaceType(type)) {
 		throw new Error(`Unsupported WordPress surface type: ${type}`);
 	}
 

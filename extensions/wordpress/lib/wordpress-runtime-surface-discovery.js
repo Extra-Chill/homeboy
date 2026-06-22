@@ -4,42 +4,13 @@
  * Internal dependencies
  */
 const { isPlainObject } = require('./shared');
+const {
+	WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES,
+	normalizeWordPressRuntimeSurfaceType,
+} = require('./wordpress-surface-types');
 
 const WORDPRESS_RUNTIME_SURFACE_DISCOVERY_SCHEMA = 'homeboy/wordpress-surface-discovery/v1';
 const WORDPRESS_RUNTIME_SURFACE_COVERAGE_MANIFEST_SCHEMA = 'homeboy/wordpress-fuzz-coverage-manifest/v1';
-
-const SURFACE_TYPE_ALIASES = new Map([
-	['admin', 'admin_page'],
-	['admin-page', 'admin_page'],
-	['admin_page', 'admin_page'],
-	['ajax', 'ajax_action'],
-	['ajax-action', 'ajax_action'],
-	['ajax_action', 'ajax_action'],
-	['block', 'block'],
-	['block-type', 'block'],
-	['block_type', 'block'],
-	['database', 'db_table'],
-	['database-table', 'db_table'],
-	['database_table', 'db_table'],
-	['db', 'db_table'],
-	['db-table', 'db_table'],
-	['db_table', 'db_table'],
-	['frontend', 'frontend_url'],
-	['frontend-url', 'frontend_url'],
-	['frontend_url', 'frontend_url'],
-	['rest', 'rest_route'],
-	['rest-route', 'rest_route'],
-	['rest_route', 'rest_route'],
-]);
-
-const COVERAGE_ID_PREFIXES = Object.freeze({
-	admin_page: 'admin',
-	ajax_action: 'ajax',
-	block: 'block',
-	db_table: 'db',
-	frontend_url: 'frontend',
-	rest_route: 'rest',
-});
 
 function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
 	const surfaces = collectRuntimeSurfaceInputs(input, options)
@@ -199,8 +170,7 @@ function normalizeRuntimeSurface(surface, index) {
 }
 
 function normalizeRuntimeSurfaceType(value) {
-	const key = String(value || '').trim().toLowerCase().replace(/\s+/g, '-');
-	return SURFACE_TYPE_ALIASES.get(key) || '';
+	return normalizeWordPressRuntimeSurfaceType(value);
 }
 
 function runtimeSurfaceValue(surface, type, index) {
@@ -223,7 +193,7 @@ function runtimeSurfaceValue(surface, type, index) {
 }
 
 function runtimeSurfaceId(surface, type, value) {
-	const prefix = COVERAGE_ID_PREFIXES[type];
+	const prefix = WORDPRESS_RUNTIME_SURFACE_ID_PREFIXES[type];
 	const explicitCoverageId = stringValue(surface.coverage_id || surface.coverageId);
 	if (explicitCoverageId) {
 		return explicitCoverageId.includes(':') ? explicitCoverageId : `${prefix}:${explicitCoverageId}`;
