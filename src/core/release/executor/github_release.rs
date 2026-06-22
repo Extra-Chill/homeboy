@@ -592,6 +592,7 @@ pub(super) fn not_created_result(
 /// `gh release create` failed, so no GitHub Release object exists. `Failed`,
 /// carrying the recovery commands so the operator can finish the release from
 /// the already-pushed tag + built artifacts without making a second tag.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_failed_result(
     tag: &str,
     github: &GitHubRepo,
