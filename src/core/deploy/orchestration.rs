@@ -518,11 +518,8 @@ fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Op
     }
 
     let tag = latest_deploy_tag(component, config.expected_version.as_deref())?;
-    let tag_sha = crate::core::engine::command::run_in_optional(
-        path,
-        "git",
-        &["rev-parse", "--short", &tag],
-    );
+    let tag_sha =
+        crate::core::engine::command::run_in_optional(path, "git", &["rev-parse", "--short", &tag]);
     let head_ahead = crate::core::engine::command::run_in_optional(
         path,
         "git",

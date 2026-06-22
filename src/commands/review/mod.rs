@@ -67,6 +67,11 @@ pub struct ReviewArgs {
     #[arg(long, value_name = "ID")]
     pub ci_profile: Option<String>,
 
+    /// Audit detector profile for the audit stage. Defaults to `pr` for
+    /// changed-file review and `full` for full review.
+    #[arg(long, value_name = "PROFILE", value_parser = ["full", "pr", "architecture"])]
+    pub audit_profile: Option<String>,
+
     /// Output format. Default JSON envelope; `--report=pr-comment` emits a
     /// markdown PR-comment section instead, suitable for piping to
     /// `homeboy git pr comment --body-file`.
@@ -148,11 +153,9 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
             component_label,
             scope_flag_suffix(review_args, self.include_changed_only_scope),
         );
-        if self.name == "audit"
-            && (review_args.changed_since.is_some()
-                || review_context.precomputed_changed_files().is_some())
-        {
-            hint.push_str(" --profile=pr");
+        if self.name == "audit" {
+            hint.push_str(" --profile=");
+            hint.push_str(&selected_audit_profile(review_args, review_context));
         }
 
         Ok((
@@ -509,13 +512,7 @@ fn build_audit_args(
         conventions: false,
         only: Vec::new(),
         exclude: Vec::new(),
-        profile: if args.changed_since.is_some()
-            || review_context.precomputed_changed_files().is_some()
-        {
-            "pr".to_string()
-        } else {
-            "full".to_string()
-        },
+        profile: selected_audit_profile(args, review_context),
         baseline_args: args.baseline_args.clone(),
         changed_since: args.changed_since.clone(),
         precomputed_changed_files: review_context
@@ -524,6 +521,16 @@ fn build_audit_args(
         json_summary: args.summary,
         fixability: false,
     }
+}
+
+fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> String {
+    args.audit_profile.clone().unwrap_or_else(|| {
+        if args.changed_since.is_some() || review_context.precomputed_changed_files().is_some() {
+            "pr".to_string()
+        } else {
+            "full".to_string()
+        }
+    })
 }
 
 fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
@@ -914,6 +921,7 @@ mod tests {
             changed_only: false,
             summary: false,
             ci_profile: None,
+            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -935,6 +943,7 @@ mod tests {
             changed_only: true,
             summary: false,
             ci_profile: None,
+            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -958,6 +967,7 @@ mod tests {
             changed_only: false,
             summary: false,
             ci_profile: None,
+            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -1033,6 +1043,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn review_audit_profile_override_takes_precedence() {
+        let mut args = review_args_fixture();
+        args.changed_since = Some("origin/main".to_string());
+        args.audit_profile = Some("architecture".to_string());
+        let review_context = ReviewExecutionContext {
+            scope: "changed since origin/main".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: None,
+        };
+
+        assert_eq!(
+            build_audit_args(&args, &review_context).profile,
+            "architecture"
+        );
+    }
+
     fn review_args_fixture() -> ReviewArgs {
         ReviewArgs {
             comp: PositionalComponentArgs {
@@ -1044,6 +1071,7 @@ mod tests {
             changed_only: false,
             summary: false,
             ci_profile: None,
+            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),

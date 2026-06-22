@@ -61,10 +61,9 @@ use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 
 use super::agent_task_bridge::{
@@ -2139,8 +2138,9 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+        RunnerActiveJobSource, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput,
+        RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
