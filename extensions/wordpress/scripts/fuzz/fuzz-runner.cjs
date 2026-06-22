@@ -93,7 +93,8 @@ function spawnJson(command, args, options) {
 		child.on('close', (code) => {
 			const parsed = parseJsonOutput(stdout);
 			if (code !== 0) {
-				const message = parsed?.error?.message || stderr.trim() || `${command} exited with ${code}`;
+				const details = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
+				const message = parsed?.error?.message || details || `${command} exited with ${code}`;
 				reject(new Error(message));
 				return;
 			}
