@@ -34,10 +34,11 @@ pub use gh_client::{github_cli_env, GhClient};
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
     issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_fleet,
-    pr_merge, pr_view, GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
-    GithubPrView, IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions,
-    IssueEditOptions, IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions,
-    PrMergeOptions, PrState,
+    pr_merge, pr_reconcile_mergeability, pr_view, GithubFindItem, GithubFindOutput,
+    GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason,
+    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrMergeabilityReconcileOptions,
+    PrMergeabilityReconcileOutput, PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
 pub use github_types::{

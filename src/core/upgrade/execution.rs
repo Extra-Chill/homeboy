@@ -147,7 +147,57 @@ pub(crate) fn execute_upgrade(
     let new_version = active_binary.as_ref().and_then(|info| info.version.clone());
     let new_build_identity = active_binary.and_then(|info| info.build_identity);
 
+    // A source upgrade's command is responsible for swapping the freshly built
+    // artifact into the active binary on disk. When that command exits 0 but the
+    // read-back proves the active binary is unchanged, the swap silently
+    // no-op'd (e.g. the artifact was built but never installed over the active
+    // path, or `command -v` resolved a different binary than the one running).
+    // Reporting a soft `upgraded: false` "completed" here lets operators
+    // believe the roll-forward succeeded. Fail loudly with an actionable reason
+    // so urgent source fixes are not silently dropped (#5772).
+    if let Some(error) = source_swap_failure(
+        method,
+        success,
+        new_version.as_deref(),
+        new_build_identity.as_deref(),
+    ) {
+        return Err(error);
+    }
+
     Ok((success, new_version, new_build_identity))
+}
+
+/// Detect a source upgrade whose command exited successfully but left the
+/// active binary unchanged (the swap silently no-op'd), and surface it as a
+/// loud, actionable failure instead of a soft `upgraded: false` "completed".
+///
+/// Returns `None` for every other case (verified swap, or a non-source method
+/// where a soft unverified result is reported by the caller).
+fn source_swap_failure(
+    method: InstallMethod,
+    success: bool,
+    new_version: Option<&str>,
+    new_build_identity: Option<&str>,
+) -> Option<Error> {
+    if method != InstallMethod::Source || success {
+        return None;
+    }
+
+    let observed = new_build_identity
+        .or(new_version)
+        .unwrap_or("an unverifiable version");
+
+    Some(
+        Error::internal_unexpected(format!(
+            "source upgrade command exited successfully but the active binary was not replaced (still {observed})"
+        ))
+        .with_hint(
+            "The build succeeded but the swap into the active binary path did not take effect.",
+        )
+        .with_hint(
+            "Verify the active binary is writable and on PATH, then re-run: homeboy upgrade --method source --force",
+        ),
+    )
 }
 
 /// Read back the active binary version after a successful swap, retrying while
@@ -838,6 +888,61 @@ mod tests {
         assert_eq!(
             active.and_then(|info| info.version).as_deref(),
             Some("0.158.0")
+        );
+    }
+
+    #[test]
+    fn source_swap_failure_errors_when_active_binary_unchanged() {
+        // Issue #5772: the source upgrade command exited 0 but the read-back
+        // proves the active binary was not replaced — fail loudly instead of a
+        // soft `upgraded: false` "completed".
+        let err = source_swap_failure(
+            InstallMethod::Source,
+            false,
+            Some("0.247.5"),
+            Some("homeboy 0.247.5+old"),
+        )
+        .expect("unverified source swap must surface an error");
+
+        assert!(err.message.contains("active binary was not replaced"));
+        assert!(err.message.contains("homeboy 0.247.5+old"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("--method source")));
+    }
+
+    #[test]
+    fn source_swap_failure_reports_version_when_no_build_identity() {
+        let err = source_swap_failure(InstallMethod::Source, false, Some("0.247.5"), None)
+            .expect("unverified source swap must surface an error");
+
+        assert!(err.message.contains("0.247.5"));
+    }
+
+    #[test]
+    fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
+        let err = source_swap_failure(InstallMethod::Source, false, None, None)
+            .expect("unverified source swap must surface an error");
+
+        assert!(err.message.contains("an unverifiable version"));
+    }
+
+    #[test]
+    fn source_swap_failure_silent_on_verified_swap() {
+        assert!(
+            source_swap_failure(InstallMethod::Source, true, Some("0.249.0"), None).is_none(),
+            "a verified source swap is not a failure"
+        );
+    }
+
+    #[test]
+    fn source_swap_failure_ignores_non_source_methods() {
+        // Non-source methods keep their soft unverified reporting; only source
+        // (where the swap is part of the command's contract) fails loudly here.
+        assert!(source_swap_failure(InstallMethod::Binary, false, Some("0.247.5"), None).is_none());
+        assert!(
+            source_swap_failure(InstallMethod::Secondary, false, Some("0.247.5"), None).is_none()
         );
     }
 

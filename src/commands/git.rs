@@ -6,8 +6,8 @@ use homeboy::core::git::{
     GithubPrOutput, IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions,
     IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions,
     PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions, PrLandOptions, PrLandOutput,
-    PrLandRefreshHelper, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrState,
-    PushOptions, RebaseOptions,
+    PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrPolicyDecision,
+    PrPolicyMergeOptions, PrPolicyOpenOptions, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -589,6 +589,19 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Compare GitHub mergeability with local git merge-tree evidence.
+    ReconcileMergeability {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Evaluate PR open/merge policy.
     Policy(PrPolicyArgs),
     /// Land a train of ready PRs sequentially, pausing on the first blocker.
@@ -737,6 +750,7 @@ pub enum GitCommandOutput {
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
     Find(GithubFindOutput),
+    ReconcileMergeability(PrMergeabilityReconcileOutput),
     Policy(PrPolicyDecision),
     Fleet(GithubPrFleetOutput),
     Land(PrLandOutput),
@@ -753,6 +767,9 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Issue(output) => ("issue", serde_json::to_value(output)),
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
+            GitCommandOutput::ReconcileMergeability(output) => {
+                ("reconcile_mergeability", serde_json::to_value(output))
+            }
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
             GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
             GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
@@ -1273,6 +1290,17 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             let exit = if output.success { 0 } else { 1 };
             Ok((GitCommandOutput::Fleet(output), exit))
+        }
+        PrCommand::ReconcileMergeability {
+            component_id,
+            number,
+            path,
+        } => {
+            let output = git::pr_reconcile_mergeability(
+                Some(&component_id),
+                PrMergeabilityReconcileOptions { number, path },
+            )?;
+            Ok((GitCommandOutput::ReconcileMergeability(output), 0))
         }
         PrCommand::Policy(args) => run_pr_policy(args),
         PrCommand::Land {
