@@ -99,8 +99,8 @@ pub use controller::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
     AgentTaskControllerMaterializeArgs, AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunNextArgs, AgentTaskControllerStatusArgs,
-    AgentTaskControllerValidateProofArgs,
+    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs,
 };
 
 #[derive(Args, Debug)]
