@@ -1833,7 +1833,10 @@ mod tests {
             owner: "Extra-Chill".into(),
             repo: "homeboy".into(),
             number: 42,
+            url: "https://github.com/Extra-Chill/homeboy/pull/42".into(),
+            title: None,
             state: "OPEN".into(),
+            draft: false,
             author: None,
             base: "main".into(),
             head: "feature".into(),
@@ -1844,6 +1847,7 @@ mod tests {
             merge_state: Some("CLEAN".into()),
             ci_state: "terminal_green".into(),
             ci_summary: "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending".into(),
+            ci_next_action: "merge_ready".into(),
         };
 
         let item = pr_fleet_item("42", &view, GithubPrCheckRollup::default());
@@ -1859,7 +1863,10 @@ mod tests {
             owner: "Extra-Chill".into(),
             repo: "homeboy".into(),
             number: 42,
+            url: "https://github.com/Extra-Chill/homeboy/pull/42".into(),
+            title: None,
             state: "OPEN".into(),
+            draft: false,
             author: None,
             base: "main".into(),
             head: "feature".into(),
@@ -1870,6 +1877,7 @@ mod tests {
             merge_state: Some("BEHIND".into()),
             ci_state: "terminal_green".into(),
             ci_summary: "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending".into(),
+            ci_next_action: "merge_ready".into(),
         };
 
         let item = pr_fleet_item("42", &view, GithubPrCheckRollup::default());

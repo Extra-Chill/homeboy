@@ -944,6 +944,8 @@ mod pull_requests {
             state: "OPEN".to_string(),
             base_branch: Some(base_branch.to_string()),
             head_branch: Some(head_branch.to_string()),
+            mergeability_state: TriageLandingMergeabilityState::Clean,
+            check_state: TriageLandingCheckState::Clean,
             head_repo: Some(head_repo.to_string()),
             classification: TriageLandingClassification::CleanMergeable,
             suggested_next_command: format!(
