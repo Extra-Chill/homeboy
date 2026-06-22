@@ -85,10 +85,10 @@ homeboy file grep mysite /var/www "error" -i
 homeboy file grep mysite /var/www "add_action" --name "*.php" --max-depth 3
 ```
 
-### `upload`, `copy`, and `sync`
+### `copy` and `sync`
 
 ```sh
-homeboy file upload prod ./report.json /tmp/report.json --dry-run
+homeboy file copy ./report.json prod:/tmp/report.json --dry-run
 homeboy file copy ./dump.sql prod:/tmp/dump.sql --compress --dry-run
 homeboy file copy prod:/tmp/dump.sql ./dump.sql --dry-run
 homeboy file copy old:/var/www/uploads new:/var/www/uploads --recursive --exclude cache --dry-run
@@ -97,8 +97,8 @@ homeboy file sync ./uploads prod:/var/www/uploads --exclude cache --dry-run
 
 Notes:
 
-- `upload` is the ergonomic mirror of `download` for local-to-server uploads.
 - `copy` preserves the old local↔remote and remote↔remote transfer target syntax.
+- `file upload` is deprecated; use `file copy <local> <server>:<path>` for local-to-server uploads.
 - `sync` is directory-oriented and recursive, but does not delete files from the destination.
 
 ### `edit`

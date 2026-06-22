@@ -182,7 +182,7 @@ mod tests {
             "cook".to_string(),
             "--provider-config".to_string(),
             "@config.json".to_string(),
-            "--provider-config={\"provider\":\"codex\"}".to_string(),
+            "--provider-config={\"provider\":\"example-oauth\"}".to_string(),
             "--provider-config=-".to_string(),
             "--".to_string(),
             "--provider-config".to_string(),
@@ -202,7 +202,7 @@ mod tests {
         );
         assert_eq!(
             envelope.inputs.provider_configs[1].value,
-            ArgValue::InlineText("{\"provider\":\"codex\"}".to_string())
+            ArgValue::InlineText("{\"provider\":\"example-oauth\"}".to_string())
         );
         assert_eq!(envelope.inputs.provider_configs[2].value, ArgValue::Stdin);
     }

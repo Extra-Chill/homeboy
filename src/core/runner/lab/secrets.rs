@@ -862,7 +862,7 @@ mod tests {
 
     #[test]
     fn declared_agent_task_cook_provider_defaults_include_controller_sources() {
-        let provider = fixture_provider_with_codex_defaults();
+        let provider = fixture_provider_with_example_defaults();
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -870,7 +870,7 @@ mod tests {
             "--backend".to_string(),
             "sample-runtime".to_string(),
             "--provider-config".to_string(),
-            serde_json::json!({ "provider": "codex" }).to_string(),
+            serde_json::json!({ "provider": "example-oauth" }).to_string(),
         ];
 
         let names = declared_agent_task_controller_secret_env_with_providers(
@@ -883,24 +883,24 @@ mod tests {
             std::slice::from_ref(&provider),
         );
 
-        assert!(names.contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
+        assert!(names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()));
         let source = sources
-            .get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
-            .expect("codex provider default source discovered for cook");
+            .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
+            .expect("example provider default source discovered for cook");
         assert_eq!(source.source, "json-file");
-        assert_eq!(source.path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(source.path.as_deref(), Some("~/.example-provider/auth.json"));
         assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 
     #[test]
     fn declared_agent_task_providers_still_include_provider_default_sources() {
-        let provider = fixture_provider_with_codex_defaults();
+        let provider = fixture_provider_with_example_defaults();
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "providers".to_string(),
             "--secret-env".to_string(),
-            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
         ];
 
         let sources = declared_agent_task_controller_secret_sources_with_providers(
@@ -909,7 +909,7 @@ mod tests {
             std::slice::from_ref(&provider),
         );
 
-        assert!(sources.contains_key("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
+        assert!(sources.contains_key("EXAMPLE_PROVIDER_ACCESS_TOKEN"));
     }
 
     #[test]
@@ -1058,10 +1058,10 @@ mod tests {
 
     #[test]
     fn hydrate_agent_task_secret_env_resolves_provider_default_run_plan_secrets_on_controller() {
-        let _access_token_env = RemovedEnvVar::new("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN");
+        let _access_token_env = RemovedEnvVar::new("EXAMPLE_PROVIDER_ACCESS_TOKEN");
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
-            let auth_path = temp.path().join("codex-auth.json");
+            let auth_path = temp.path().join("provider-auth.json");
             std::fs::write(
                 &auth_path,
                 serde_json::json!({
@@ -1081,14 +1081,14 @@ mod tests {
                     "tasks": [
                         {
                             "schema": "homeboy/agent-task-request/v1",
-                            "task_id": "codex-task",
+                            "task_id": "provider-task",
                             "executor": {
                                 "backend": "sample-runtime",
                                 "config": {
-                                    "provider": "codex"
+                                    "provider": "example-oauth"
                                 }
                             },
-                            "instructions": "Use Codex credentials."
+                            "instructions": "Use provider credentials."
                         }
                     ]
                 })
@@ -1096,7 +1096,7 @@ mod tests {
             )
             .expect("write plan");
             let provider =
-                fixture_provider_with_codex_defaults_at(&auth_path.display().to_string());
+                fixture_provider_with_example_defaults_at(&auth_path.display().to_string());
             let mut env = HashMap::new();
 
             let diagnostics = hydrate_agent_task_secret_env_with_providers(
@@ -1107,7 +1107,7 @@ mod tests {
             .expect("provider default source should resolve on controller");
 
             assert!(matches!(
-                env.get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+                env.get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
                     .map(String::as_str),
                 Some("controller-access-token")
             ));
@@ -1119,7 +1119,7 @@ mod tests {
                 diagnostics["secret_env"],
                 serde_json::json!([
                     {
-                        "name": "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+                        "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
                         "configured": true,
                         "source": "json-file"
                     }
@@ -1399,18 +1399,18 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
         }
     }
 
-    fn fixture_provider_with_codex_defaults() -> AgentTaskExecutorProvider {
-        fixture_provider_with_codex_defaults_at("~/.codex/auth.json")
+    fn fixture_provider_with_example_defaults() -> AgentTaskExecutorProvider {
+        fixture_provider_with_example_defaults_at("~/.example-provider/auth.json")
     }
 
-    fn fixture_provider_with_codex_defaults_at(path: &str) -> AgentTaskExecutorProvider {
+    fn fixture_provider_with_example_defaults_at(path: &str) -> AgentTaskExecutorProvider {
         let mut provider_defaults = std::collections::BTreeMap::new();
         provider_defaults.insert(
-            "codex".to_string(),
+            "example-oauth".to_string(),
             serde_json::json!({
-                "secret_env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "secret_env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
                 "secret_env_sources": {
-                    "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                    "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
                         "source": "json-file",
                         "path": path,
                         "field": "tokens.access_token"
@@ -1421,7 +1421,7 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
 
         AgentTaskExecutorProvider {
             schema: "homeboy/agent-task-executor-provider/v1".to_string(),
-            id: "sample-runtime.codex".to_string(),
+            id: "sample-runtime.example-oauth".to_string(),
             label: None,
             backend: "sample-runtime".to_string(),
             default_backend: true,

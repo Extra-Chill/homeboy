@@ -51,8 +51,8 @@ impl TagCheckout {
 /// branch/ref, and checks out the tag. Returns a list of checkouts
 /// so branches can be restored after deployment.
 ///
-/// Components without tags are skipped with a warning — they deploy
-/// from HEAD as before (the pre-tag-checkout behavior).
+/// Components without tags fail closed. Deploying the current checkout must be
+/// requested explicitly with `--head`.
 pub(super) fn checkout_deploy_tags(
     components: &[Component],
     expected_version: Option<&str>,
@@ -72,20 +72,31 @@ pub(super) fn checkout_deploy_tags(
             None => match git::get_latest_tag(path) {
                 Ok(Some(t)) => t,
                 Ok(None) => {
-                    log_status!(
+                    if !checkouts.is_empty() {
+                        restore_branches(&checkouts);
+                    }
+                    return Err(Error::validation_invalid_argument(
                         "deploy",
-                        "Warning: '{}' has no version tags — deploying from HEAD (use --head to suppress this warning)",
-                        component.id
-                    );
-                    continue;
+                        format!(
+                            "Refusing to deploy '{}': no version tags found for default tagged deploy",
+                            component.id
+                        ),
+                        None,
+                        Some(vec![
+                            "Run `homeboy release` to create a tagged release first".to_string(),
+                            "Use `homeboy deploy --head` to deploy the current branch HEAD explicitly"
+                                .to_string(),
+                        ]),
+                    ));
                 }
-                Err(_) => {
-                    log_status!(
-                        "deploy",
-                        "Warning: could not read tags for '{}' — deploying from HEAD",
-                        component.id
-                    );
-                    continue;
+                Err(err) => {
+                    if !checkouts.is_empty() {
+                        restore_branches(&checkouts);
+                    }
+                    return Err(Error::git_command_failed(format!(
+                        "Could not read version tags for '{}': {}",
+                        component.id, err
+                    )));
                 }
             },
         };

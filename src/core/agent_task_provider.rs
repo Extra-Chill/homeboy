@@ -4539,7 +4539,7 @@ process.stdout.write(JSON.stringify({
     fn provider_default_secret_sources_resolve_required_env_without_duplicate_mapping() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
-            let auth_path = temp.path().join("codex-auth.json");
+            let auth_path = temp.path().join("provider-auth.json");
             fs::write(
                 &auth_path,
                 json!({
@@ -4552,22 +4552,22 @@ process.stdout.write(JSON.stringify({
             )
             .expect("write auth");
             let (mut request, mut provider) = request("task-a", "node provider-a.js".to_string());
-            request.executor.config = json!({ "provider": "codex" });
+            request.executor.config = json!({ "provider": "example-oauth" });
             request.executor.secret_env = vec![
-                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
-                "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
             ];
             provider.provider_defaults.insert(
-                "codex".to_string(),
+                "example-oauth".to_string(),
                 json!({
                     "secret_env": request.executor.secret_env,
                     "secret_env_sources": {
-                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                        "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
                             "source": "json-file",
                             "path": auth_path,
                             "field": "tokens.access_token"
                         },
-                        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN": {
+                        "EXAMPLE_PROVIDER_REFRESH_TOKEN": {
                             "source": "json-file",
                             "path": auth_path,
                             "field": "tokens.refresh_token"
@@ -4579,7 +4579,7 @@ process.stdout.write(JSON.stringify({
             let env = provider_command_env(&request, &provider).expect("provider env resolves");
 
             assert!(env.contains(&(
-                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
                 "provider-owned-access-token".to_string()
             )));
             let rendered =
@@ -4593,13 +4593,13 @@ process.stdout.write(JSON.stringify({
     fn provider_secret_sources_for_providers_include_default_json_sources() {
         let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
         provider.provider_defaults.insert(
-            "codex".to_string(),
+            "example-oauth".to_string(),
             json!({
-                "secret_env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
+                "secret_env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
                 "secret_env_sources": {
-                    "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                    "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
                         "source": "json-file",
-                        "path": "~/.codex/auth.json",
+                        "path": "~/.example-provider/auth.json",
                         "field": "tokens.access_token"
                     }
                 }
@@ -4609,10 +4609,10 @@ process.stdout.write(JSON.stringify({
         let sources = provider_secret_sources_for_providers(&[provider]);
 
         let source = sources
-            .get("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN")
+            .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
             .expect("provider default source discovered");
         assert_eq!(source.source, "json-file");
-        assert_eq!(source.path.as_deref(), Some("~/.codex/auth.json"));
+        assert_eq!(source.path.as_deref(), Some("~/.example-provider/auth.json"));
         assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 
@@ -4686,7 +4686,7 @@ process.stdout.write(JSON.stringify({
     fn provider_default_secret_sources_feed_secret_readiness_status() {
         crate::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("tempdir");
-            let auth_path = temp.path().join("codex-auth.json");
+            let auth_path = temp.path().join("provider-auth.json");
             fs::write(
                 &auth_path,
                 json!({
@@ -4699,10 +4699,10 @@ process.stdout.write(JSON.stringify({
             .expect("write auth");
             let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
             provider.provider_defaults.insert(
-                "codex".to_string(),
+                "example-oauth".to_string(),
                 json!({
                     "secret_env_sources": {
-                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN": {
+                        "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
                             "source": "json-file",
                             "path": auth_path,
                             "field": "tokens.access_token"
@@ -4713,7 +4713,7 @@ process.stdout.write(JSON.stringify({
             let fallback_sources = provider_secret_sources_for_providers(&[provider]);
 
             let status = crate::core::agent_task_secrets::secret_env_status_with_fallbacks(
-                &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+                &["EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()],
                 &fallback_sources,
             );
 

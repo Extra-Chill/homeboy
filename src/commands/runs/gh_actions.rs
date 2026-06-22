@@ -24,13 +24,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::process::Command;
 
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use homeboy::core::git::GhClient;
 use homeboy::core::observation::{ObservationStore, RunRecord};
 use homeboy::core::Error;
 
@@ -115,25 +115,20 @@ pub enum GhActionsImportedArtifactStatus {
 }
 
 pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput> {
-    if !args.repo.contains('/') {
-        return Err(Error::validation_invalid_argument(
-            "repo",
-            "expected owner/repo form (e.g. Extra-Chill/homeboy)",
-            Some(args.repo.clone()),
-            None,
-        ));
-    }
+    let gh = GhClient::from_repo_arg(&args.repo)?;
+    gh.ensure_ready()?;
+    let repo = gh.repo_path()?.to_string();
 
     let store = ObservationStore::open_initialized()?;
     let pattern = compile_glob(&args.artifact_glob)?;
 
     let (runs, etag_cache_hit) = if let Some(run_id) = args.run_id {
-        (vec![get_workflow_run(&args.repo, run_id)?], false)
+        (vec![get_workflow_run(&gh, run_id)?], false)
     } else {
         let workflow = args.workflow.as_deref().ok_or_else(|| {
             Error::validation_missing_argument(vec!["--workflow or --run-id".to_string()])
         })?;
-        list_workflow_runs(&args.repo, workflow, &args.since)?
+        list_workflow_runs(&gh, workflow, &args.since)?
     };
     let runs_inspected = runs.len().min(args.limit);
     let runs_to_process: Vec<&GhWorkflowRun> = runs.iter().take(args.limit).collect();
@@ -146,11 +141,10 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
     let mut artifact_rows = Vec::new();
 
     for gh_run in runs_to_process {
-        let homeboy_run_id = deterministic_run_id(&args.repo, gh_run.id);
+        let homeboy_run_id = deterministic_run_id(&repo, gh_run.id);
         let existed = store.get_run(&homeboy_run_id)?.is_some();
         if !existed {
-            let run_record =
-                build_run_record(&homeboy_run_id, &args.component_id, &args.repo, gh_run);
+            let run_record = build_run_record(&homeboy_run_id, &args.component_id, &repo, gh_run);
             store.import_run(&run_record)?;
             runs_imported += 1;
         } else {
@@ -161,7 +155,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
         // artifacts can land late (e.g. retried jobs) and we still want them
         // ingested. Existing artifact rows are detected via deterministic
         // (run_id, gh_artifact_id, file_name) IDs.
-        let artifacts = list_run_artifacts(&args.repo, gh_run.id)?;
+        let artifacts = list_run_artifacts(&gh, gh_run.id)?;
         let existing_artifacts: HashMap<String, homeboy::core::observation::ArtifactRecord> = store
             .list_artifacts(&homeboy_run_id)?
             .into_iter()
@@ -177,7 +171,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                 // bytes — skip silently. Future re-imports won't recover.
                 continue;
             }
-            let zip_bytes = match download_artifact_zip(&args.repo, artifact.id) {
+            let zip_bytes = match download_artifact_zip(&gh, artifact.id) {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
             };
@@ -250,7 +244,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
         RunsOutput::ImportFromGhActions(GhActionsImportOutput {
             command: "runs.import.gh-actions",
             component_id: args.component_id,
-            repo: args.repo,
+            repo,
             workflow: args.workflow,
             run_id: args.run_id,
             artifact_glob: args.artifact_glob,
@@ -338,23 +332,10 @@ fn map_gh_conclusion_to_status(gh_run: &GhWorkflowRun) -> String {
 
 // ── GitHub API listing (via `gh` CLI) ───────────────────────────────────────
 
-fn get_workflow_run(repo: &str, run_id: u64) -> homeboy::core::Result<GhWorkflowRun> {
-    let api_path = format!("repos/{repo}/actions/runs/{run_id}");
-    let output = Command::new("gh")
-        .args(["api", &api_path])
-        .output()
-        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))?;
-    if !output.status.success() {
-        return Err(Error::internal_io(
-            format!(
-                "gh api workflow run failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Some(format!("gh api {api_path}")),
-        ));
-    }
-
-    parse_run_payload(&output.stdout)
+fn get_workflow_run(gh: &GhClient, run_id: u64) -> homeboy::core::Result<GhWorkflowRun> {
+    let api_path = format!("repos/{}/actions/runs/{run_id}", gh.repo_path()?);
+    gh.api_json::<GhWorkflowRunRaw>(&api_path)
+        .map(GhWorkflowRun::from)
 }
 
 /// One GitHub Actions workflow run, projected to the fields we persist.
@@ -427,10 +408,11 @@ impl From<GhWorkflowRunRaw> for GhWorkflowRun {
 /// List workflow runs via `gh api`, with ETag caching to keep us off
 /// GitHub's primary rate limit on re-runs of the ingestor.
 fn list_workflow_runs(
-    repo: &str,
+    gh: &GhClient,
     workflow: &str,
     since: &str,
 ) -> homeboy::core::Result<(Vec<GhWorkflowRun>, bool)> {
+    let repo = gh.repo_path()?;
     let cache_key = list_runs_cache_key(repo, workflow);
     let etag_path = list_runs_cache_path(&cache_key, "etag")?;
     let body_path = list_runs_cache_path(&cache_key, "json")?;
@@ -458,10 +440,8 @@ fn list_workflow_runs(
         args.push(format!("If-None-Match: {etag}"));
     }
 
-    let output = Command::new("gh")
-        .args(&args)
-        .output()
-        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))?;
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = gh.output(&arg_refs)?;
 
     if !output.status.success() {
         // 304 from gh api -i comes back with a non-zero status because
@@ -651,13 +631,13 @@ struct GhArtifact {
     archive_download_url: Option<String>,
 }
 
-fn list_run_artifacts(repo: &str, gh_run_id: u64) -> homeboy::core::Result<Vec<GhArtifact>> {
-    let api_path = format!("repos/{repo}/actions/runs/{gh_run_id}/artifacts?per_page=100");
+fn list_run_artifacts(gh: &GhClient, gh_run_id: u64) -> homeboy::core::Result<Vec<GhArtifact>> {
+    let api_path = format!(
+        "repos/{}/actions/runs/{gh_run_id}/artifacts?per_page=100",
+        gh.repo_path()?
+    );
     let args = vec!["api".to_string(), "--paginate".into(), api_path.clone()];
-    let output = Command::new("gh")
-        .args(&args)
-        .output()
-        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))?;
+    let output = gh.output(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
     if !output.status.success() {
         return Err(Error::internal_io(
             format!(
@@ -697,24 +677,14 @@ fn list_run_artifacts(repo: &str, gh_run_id: u64) -> homeboy::core::Result<Vec<G
     Ok(out)
 }
 
-fn download_artifact_zip(repo: &str, artifact_id: u64) -> homeboy::core::Result<Vec<u8>> {
+fn download_artifact_zip(gh: &GhClient, artifact_id: u64) -> homeboy::core::Result<Vec<u8>> {
     // `gh api repos/.../actions/artifacts/{id}/zip` follows the redirect to
     // the artifact storage URL automatically.
-    let api_path = format!("repos/{repo}/actions/artifacts/{artifact_id}/zip");
-    let output = Command::new("gh")
-        .args(["api", &api_path])
-        .output()
-        .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))?;
-    if !output.status.success() {
-        return Err(Error::internal_io(
-            format!(
-                "gh api artifact download failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Some(format!("gh api {api_path}")),
-        ));
-    }
-    Ok(output.stdout)
+    let api_path = format!(
+        "repos/{}/actions/artifacts/{artifact_id}/zip",
+        gh.repo_path()?
+    );
+    gh.api_bytes(&api_path)
 }
 
 /// Walk a downloaded artifact zip in memory and yield `(file_name, bytes)`

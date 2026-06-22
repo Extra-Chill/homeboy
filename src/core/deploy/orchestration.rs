@@ -11,7 +11,9 @@ use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
 use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
-use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
+use super::orchestration_tag_checkout::{
+    checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
+};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     calculate_component_status_with_git_cache, calculate_release_state, load_project_components,
@@ -21,9 +23,6 @@ use super::types::{
     ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
-
-#[cfg(test)]
-use super::orchestration_tag_checkout::{deploy_tag_for_version, TagCheckout};
 
 /// Main deploy orchestration entry point.
 /// Handles component selection, building, and deployment.
@@ -135,7 +134,7 @@ pub(super) fn deploy_components(
             &project,
             base_path,
             config,
-        ));
+        )?);
     }
 
     // Sync: pull latest changes before deploying (unless --no-pull or --skip-build)
@@ -464,7 +463,7 @@ fn run_dry_run_mode(
     project: &Project,
     base_path: &str,
     config: &DeployConfig,
-) -> DeployOrchestrationResult {
+) -> Result<DeployOrchestrationResult> {
     let mut git_probe_cache = GitProbeCache::default();
     let results: Vec<ComponentDeployResult> = components
         .iter()
@@ -481,15 +480,18 @@ fn run_dry_run_mode(
                     remote_versions.get(&c.id).cloned(),
                 )
                 .with_source_identity(c, config.head);
+            if let Some(deploy_ref) = planned_deploy_ref(c, config)? {
+                result = result.with_deployed_ref(deploy_ref);
+            }
             if config.check {
                 result = result.with_component_status(status);
             }
-            result
+            Ok(result)
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let total = results.len() as u32;
-    DeployOrchestrationResult {
+    Ok(DeployOrchestrationResult {
         results,
         summary: DeploySummary {
             total,
@@ -497,6 +499,75 @@ fn run_dry_run_mode(
             failed: 0,
             skipped: 0,
         },
+    })
+}
+
+fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Option<String>> {
+    if component.is_file_component() {
+        return Ok(None);
+    }
+
+    let path = &component.local_path;
+    if config.head {
+        return Ok(crate::core::engine::command::run_in_optional(
+            path,
+            "git",
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        )
+        .map(|branch| format!("{} (HEAD)", branch)));
+    }
+
+    let tag = latest_deploy_tag(component, config.expected_version.as_deref())?;
+    let tag_sha = crate::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["rev-parse", "--short", &tag],
+    );
+    let head_ahead = crate::core::engine::command::run_in_optional(
+        path,
+        "git",
+        &["rev-list", "--count", &format!("{}..HEAD", tag)],
+    )
+    .and_then(|out| out.trim().parse::<u32>().ok())
+    .unwrap_or(0);
+
+    Ok(Some(
+        TagCheckout {
+            component_id: component.id.clone(),
+            tag,
+            original_ref: String::new(),
+            local_path: path.clone(),
+            tag_sha,
+            head_ahead,
+        }
+        .provenance_ref(),
+    ))
+}
+
+fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> Result<String> {
+    if let Some(version) = expected_version {
+        return Ok(deploy_tag_for_version(component, version));
+    }
+
+    match git::get_latest_tag(&component.local_path) {
+        Ok(Some(tag)) => Ok(tag),
+        Ok(None) => Err(Error::validation_invalid_argument(
+            "deploy",
+            format!(
+                "Refusing to deploy '{}': no version tags found for default tagged deploy",
+                component.id
+            ),
+            None,
+            Some(vec![
+                "Run `homeboy release` to create a tagged release first".to_string(),
+                "Use `homeboy deploy --head` to deploy the current branch HEAD explicitly"
+                    .to_string(),
+            ]),
+        )),
+        Err(err) => Err(Error::git_command_failed(format!(
+            "Could not read version tags for '{}': {}",
+            component.id, err
+        ))),
     }
 }
 
@@ -1288,6 +1359,77 @@ mod tests {
             err.message.contains("HEAD has unreleased commits"),
             "unexpected error: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn default_dry_run_plans_latest_tag_not_feature_branch_head() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+        assert!(std::process::Command::new("git")
+            .args(["checkout", "-q", "-b", "feature/deploy"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git checkout")
+            .success());
+
+        let component = make_component("demo", &dir.path().to_string_lossy());
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+
+        let result = run_dry_run_mode(
+            &[component],
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "",
+            &config,
+        )
+        .expect("default dry-run should plan the latest deploy tag");
+
+        let planned_ref = result.results[0]
+            .deployed_ref
+            .as_deref()
+            .expect("planned deploy ref");
+        assert!(
+            planned_ref.starts_with("v1.0.0"),
+            "default dry-run should plan the latest tag, got {planned_ref}"
+        );
+        assert!(
+            !planned_ref.contains("feature/deploy"),
+            "default dry-run must not plan the current feature branch HEAD: {planned_ref}"
+        );
+    }
+
+    #[test]
+    fn head_dry_run_explicitly_plans_current_branch_head() {
+        let dir = TempDir::new().expect("temp dir");
+        init_repo_with_tag_gap(dir.path());
+        assert!(std::process::Command::new("git")
+            .args(["checkout", "-q", "-b", "feature/deploy"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git checkout")
+            .success());
+
+        let component = make_component("demo", &dir.path().to_string_lossy());
+        let mut config = base_deploy_config();
+        config.dry_run = true;
+        config.head = true;
+
+        let result = run_dry_run_mode(
+            &[component],
+            &HashMap::new(),
+            &HashMap::new(),
+            &Project::default(),
+            "",
+            &config,
+        )
+        .expect("--head dry-run should plan the current branch");
+
+        assert_eq!(
+            result.results[0].deployed_ref.as_deref(),
+            Some("feature/deploy (HEAD)")
         );
     }
 

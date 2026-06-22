@@ -105,10 +105,11 @@ pub use offload_metadata::{
 };
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
-    ReverseRunnerConnectOptions, RunnerArtifactRef, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerResult, RunnerSession,
-    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-    RunnerTunnelMode, RunnerWorkspaceLease,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerArtifactRef, RunnerConnectReport, RunnerDisconnectReport,
+    RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerResult,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerTransport};
@@ -326,6 +327,7 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
                 connected: status.connected,
                 stale_daemon: status.stale_daemon.is_some(),
                 active_jobs: status.active_jobs.len(),
+                active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
                 capabilities_ready: true,
             })
         }),
@@ -339,6 +341,7 @@ struct DefaultLabRunnerCandidate {
     connected: bool,
     stale_daemon: bool,
     active_jobs: usize,
+    active_jobs_available: bool,
     capabilities_ready: bool,
 }
 
@@ -370,6 +373,9 @@ impl DefaultLabRunnerCandidate {
         }
         if self.mode == RunnerTunnelMode::DirectSsh {
             score += 5;
+        }
+        if !self.active_jobs_available {
+            score -= 25;
         }
         score -= self.active_jobs.min(50) as i32;
 
@@ -742,6 +748,7 @@ mod tests {
             connected,
             stale_daemon: false,
             active_jobs: 0,
+            active_jobs_available: true,
             capabilities_ready: true,
         }
     }
@@ -1232,6 +1239,21 @@ mod tests {
             None,
             vec![
                 busy,
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_prefers_known_active_job_state() {
+        let mut unknown = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        unknown.active_jobs_available = false;
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                unknown,
                 default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
             ],
         );

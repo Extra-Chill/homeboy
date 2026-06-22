@@ -69,7 +69,7 @@ fn extension_capability_owns_labels_and_scripts() {
         (ExtensionCapability::Test, "test", "test.sh", true),
         (ExtensionCapability::Build, "build", "build.sh", false),
         (ExtensionCapability::Bench, "bench", "bench.sh", true),
-        (ExtensionCapability::Fuzz, "fuzz", "fuzz.sh", true),
+        (ExtensionCapability::Fuzz, "fuzz", "fuzz.sh", false),
         (ExtensionCapability::Trace, "trace", "trace.sh", true),
         (ExtensionCapability::Deps, "deps", "deps.sh", true),
     ] {
@@ -79,6 +79,23 @@ fn extension_capability_owns_labels_and_scripts() {
         assert_eq!(capability.requires_script(), requires_script);
     }
 
+    assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
+}
+
+#[test]
+fn fuzz_manifest_support_does_not_require_execution_script() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "name": "Example",
+        "version": "0.0.0",
+        "fuzz": {
+            "workloads": [{ "id": "parser", "label": "Parser fuzz" }]
+        }
+    }))
+    .unwrap();
+
+    assert!(ExtensionCapability::Fuzz.has_manifest_support(&manifest));
+    assert_eq!(ExtensionCapability::Fuzz.script_path(&manifest), None);
+    assert!(!ExtensionCapability::Fuzz.requires_script());
     assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
 }
 

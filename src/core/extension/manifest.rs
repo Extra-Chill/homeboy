@@ -685,10 +685,7 @@ impl ExtensionManifest {
     }
 
     pub fn has_fuzz(&self) -> bool {
-        self.fuzz
-            .as_ref()
-            .and_then(|c| c.extension_script.as_ref())
-            .is_some()
+        self.fuzz.is_some()
     }
 
     pub fn has_trace(&self) -> bool {

@@ -52,11 +52,14 @@ pub(super) fn execute_release_plan_step(
                 .inputs
                 .get("name")
                 .and_then(|value| value.as_str())
-                .unwrap_or_default();
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .map(Ok)
+                .unwrap_or_else(|| planned_release_tag_name(context))?;
             executor::run_tag_availability_preflight(
                 context.component,
                 context.component_id,
-                tag_name,
+                &tag_name,
             )
             .map(Some)
         }
@@ -222,6 +225,33 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && !step.kind.starts_with("preflight.extension."))
         || step.kind == "changelog.policy"
         || step.kind == "changelog.generate"
+}
+
+fn planned_release_tag_name(context: &ReleaseExecutionContext) -> Result<String> {
+    let version_info = super::version::read_component_version(context.component)?;
+    let new_version =
+        super::version::increment_version(&version_info.version, &context.options.bump_type)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "bump_type",
+                    format!(
+                        "Invalid bump type '{}' for current version {}",
+                        context.options.bump_type, version_info.version
+                    ),
+                    Some(context.options.bump_type.clone()),
+                    Some(vec![
+                        "Use one of: patch, minor, major, or an explicit version like 2.0.0"
+                            .to_string(),
+                    ]),
+                )
+            })?;
+    let monorepo =
+        git::MonorepoContext::detect(&context.component.local_path, context.component_id);
+
+    Ok(monorepo
+        .as_ref()
+        .map(|ctx| ctx.format_tag(&new_version))
+        .unwrap_or_else(|| format!("v{}", new_version)))
 }
 
 fn run_default_branch_preflight(

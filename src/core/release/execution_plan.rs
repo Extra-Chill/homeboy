@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::core::component::Component;
 use crate::core::error::{Error, Result};
 use crate::core::git;
-use crate::core::plan::PlanStep;
+use crate::core::plan::{PlanStep, PlanValues};
 
 use super::context::{load_component, resolve_extensions};
 use super::execution_dispatch::{
@@ -17,10 +17,18 @@ pub(super) fn build_initial_preflight_plan(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> ReleasePlan {
-    let steps = build_preflight_steps(options, None, &[])
+    let mut steps: Vec<PlanStep> = build_preflight_steps(options, None, &[])
         .into_iter()
         .filter(|step| initial_executable_preflight_ids().contains(&step.id.as_str()))
         .collect();
+
+    if let Some(tag_step) = early_tag_availability_step(options, false) {
+        let insert_at = steps
+            .iter()
+            .position(|step| step.id == "preflight.lint")
+            .unwrap_or(steps.len());
+        steps.insert(insert_at, tag_step);
+    }
 
     ReleasePlan::new(component_id, true, steps, None, Vec::new(), Vec::new())
 }
@@ -29,10 +37,14 @@ pub(super) fn build_dry_run_preflight_plan(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> ReleasePlan {
-    let steps = build_preflight_steps(options, None, &[])
+    let mut steps: Vec<PlanStep> = build_preflight_steps(options, None, &[])
         .into_iter()
         .filter(|step| dry_run_executable_preflight_ids().contains(&step.id.as_str()))
         .collect();
+
+    if let Some(tag_step) = early_tag_availability_step(options, true) {
+        steps.push(tag_step);
+    }
 
     ReleasePlan::new(component_id, true, steps, None, Vec::new(), Vec::new())
 }
@@ -43,6 +55,7 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
         "preflight.git_identity",
         "preflight.working_tree",
         "preflight.remote_sync",
+        "preflight.tag_availability",
         "preflight.lint",
         "preflight.test",
         "preflight.changelog_bootstrap",
@@ -51,6 +64,26 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
 
 fn dry_run_executable_preflight_ids() -> &'static [&'static str] {
     &["preflight.default_branch", "preflight.working_tree"]
+}
+
+fn early_tag_availability_step(options: &ReleaseOptions, dry_run: bool) -> Option<PlanStep> {
+    if options.pipeline.head || options.bump_type == "none" {
+        return None;
+    }
+
+    let needs = if dry_run {
+        vec!["preflight.working_tree".to_string()]
+    } else {
+        vec!["preflight.remote_sync".to_string()]
+    };
+
+    Some(PlanStep::ready_labeled(
+        "preflight.tag_availability",
+        "preflight.tag_availability",
+        "Check release tag is available",
+        needs,
+        PlanValues::new(),
+    ))
 }
 
 pub(super) fn execute_plan_steps(
@@ -175,37 +208,13 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
-        initial_executable_preflight_ids,
+        build_dry_run_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
     };
     use crate::core::plan::PlanStepStatus;
-    use crate::core::release::types::ReleaseOptions;
+    use crate::core::release::types::{ReleaseOptions, ReleaseStepStatus};
     use std::collections::HashSet;
-
-    #[test]
-    fn test_build_initial_preflight_plan() {
-        let options = ReleaseOptions {
-            bump_type: "patch".to_string(),
-            ..Default::default()
-        };
-
-        let plan = build_initial_preflight_plan("fixture", &options);
-        let ids: Vec<&str> = plan
-            .plan
-            .steps
-            .iter()
-            .map(|step| step.id.as_str())
-            .collect();
-
-        assert_eq!(ids, initial_executable_preflight_ids().to_vec());
-        assert!(plan.semver_recommendation().is_none());
-        assert!(plan
-            .plan
-            .steps
-            .iter()
-            .any(|step| step.id == "preflight.git_identity"
-                && step.status == PlanStepStatus::Disabled));
-    }
+    use std::path::Path;
+    use std::process::Command;
 
     #[test]
     fn test_initial_executable_preflight_ids() {
@@ -216,6 +225,7 @@ mod tests {
                 "preflight.git_identity",
                 "preflight.working_tree",
                 "preflight.remote_sync",
+                "preflight.tag_availability",
                 "preflight.lint",
                 "preflight.test",
                 "preflight.changelog_bootstrap",
@@ -224,13 +234,81 @@ mod tests {
     }
 
     #[test]
-    fn test_build_dry_run_preflight_plan_only_includes_non_mutating_guards() {
+    fn initial_preflight_plan_checks_tag_availability_before_quality_gates() {
         let options = ReleaseOptions {
             bump_type: "patch".to_string(),
             ..Default::default()
         };
+        let plan = super::build_initial_preflight_plan("fixture", &options);
+        let steps = plan.plan.steps;
+        let tag = steps
+            .iter()
+            .position(|step| step.id == "preflight.tag_availability")
+            .expect("tag preflight");
+        let lint = steps
+            .iter()
+            .position(|step| step.id == "preflight.lint")
+            .expect("lint preflight");
+        let test = steps
+            .iter()
+            .position(|step| step.id == "preflight.test")
+            .expect("test preflight");
 
-        let plan = build_dry_run_preflight_plan("fixture", &options);
+        assert!(tag < lint, "tag availability must fail before lint runs");
+        assert!(tag < test, "tag availability must fail before tests run");
+        assert_eq!(steps[tag].needs, vec!["preflight.remote_sync"]);
+    }
+
+    #[test]
+    fn test_build_initial_preflight_plan() {
+        let options = ReleaseOptions {
+            bump_type: "none".to_string(),
+            ..Default::default()
+        };
+
+        let plan = super::build_initial_preflight_plan(
+            "missing-component-is-not-loaded-without-tag-check",
+            &options,
+        );
+        let ids: Vec<&str> = plan
+            .plan
+            .steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec![
+                "preflight.default_branch",
+                "preflight.git_identity",
+                "preflight.working_tree",
+                "preflight.remote_sync",
+                "preflight.lint",
+                "preflight.test",
+                "preflight.changelog_bootstrap",
+            ]
+        );
+        assert!(plan.semver_recommendation().is_none());
+        assert!(plan
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.id == "preflight.git_identity"
+                && step.status == PlanStepStatus::Disabled));
+    }
+
+    #[test]
+    fn test_build_dry_run_preflight_plan_only_includes_non_mutating_guards() {
+        let options = ReleaseOptions {
+            bump_type: "none".to_string(),
+            ..Default::default()
+        };
+
+        let plan = build_dry_run_preflight_plan(
+            "missing-component-is-not-loaded-without-tag-check",
+            &options,
+        );
         let ids: Vec<&str> = plan
             .plan
             .steps
@@ -241,6 +319,53 @@ mod tests {
         assert_eq!(
             ids,
             vec!["preflight.default_branch", "preflight.working_tree"]
+        );
+    }
+
+    #[test]
+    fn dry_run_preflight_refuses_remote_existing_release_tag() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            path_override: Some(checkout.path().to_string_lossy().to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let plan = build_dry_run_preflight_plan("fixture", &options);
+        let mut results = Vec::new();
+        let stopped = execute_plan_steps(
+            &plan.plan.steps,
+            "fixture",
+            &options,
+            &mut results,
+            &HashSet::new(),
+        )
+        .expect("dry-run preflights should execute");
+
+        assert!(stopped, "existing remote tag must stop dry-run preflights");
+        let tag_result = results
+            .iter()
+            .find(|result| result.id == "preflight.tag_availability")
+            .expect("tag availability preflight should run");
+        assert_eq!(tag_result.status, ReleaseStepStatus::Failed);
+        assert!(
+            tag_result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("remote_tag"))
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "remote tag commit should be reported in structured data"
+        );
+        assert!(
+            tag_result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Release tag v0.11.11 already exists"),
+            "expected existing tag failure, got: {:?}",
+            tag_result.error
         );
     }
 
@@ -259,5 +384,83 @@ mod tests {
 
         assert!(!stopped);
         assert!(results.is_empty());
+    }
+
+    fn release_repo_with_remote_tag(
+        version: &str,
+        tag: &str,
+    ) -> (tempfile::TempDir, tempfile::TempDir) {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        let checkout = tempfile::tempdir().expect("checkout tempdir");
+        run_in(
+            remote.path(),
+            &["git", "init", "--bare", "-b", "main", "-q"],
+        );
+        run_in(
+            checkout.path(),
+            &[
+                "git",
+                "clone",
+                "-q",
+                remote.path().to_str().expect("remote path"),
+                ".",
+            ],
+        );
+        run_in(
+            checkout.path(),
+            &["git", "config", "user.email", "t@example.com"],
+        );
+        run_in(checkout.path(), &["git", "config", "user.name", "T"]);
+        run_in(
+            checkout.path(),
+            &["git", "config", "commit.gpgsign", "false"],
+        );
+
+        std::fs::write(
+            checkout.path().join("plugin.php"),
+            format!("<?php\n/*\nVersion: {}\n*/\n", version),
+        )
+        .expect("write plugin file");
+        std::fs::write(
+            checkout.path().join("homeboy.json"),
+            r#"{
+                "id": "fixture-project",
+                "components": {
+                    "fixture": {
+                        "type": "wordpress-plugin",
+                        "path": ".",
+                        "version_targets": [
+                            {"file": "plugin.php", "pattern": "(?m)^Version:\\s*([0-9.]+)"}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .expect("write homeboy config");
+        run_in(checkout.path(), &["git", "add", "."]);
+        run_in(
+            checkout.path(),
+            &["git", "commit", "-q", "-m", "feat: fixture"],
+        );
+        run_in(checkout.path(), &["git", "push", "-q", "origin", "main"]);
+        run_in(checkout.path(), &["git", "tag", tag]);
+        run_in(checkout.path(), &["git", "push", "-q", "origin", tag]);
+        run_in(checkout.path(), &["git", "tag", "-d", tag]);
+
+        (remote, checkout)
+    }
+
+    fn run_in(dir: &Path, args: &[&str]) {
+        let output = Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(dir)
+            .output()
+            .expect("spawn command");
+        assert!(
+            output.status.success(),
+            "command {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

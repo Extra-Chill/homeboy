@@ -92,7 +92,9 @@ impl ExtensionCapability {
     }
 
     pub(crate) fn requires_script(self) -> bool {
-        self != ExtensionCapability::Build
+        // Fuzz supports manifest-only workload discovery; `fuzz run` validates
+        // its runner script before execution.
+        !matches!(self, ExtensionCapability::Build | ExtensionCapability::Fuzz)
     }
 }
 

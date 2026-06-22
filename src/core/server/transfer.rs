@@ -166,7 +166,7 @@ pub fn transfer(config: &TransferConfig) -> crate::core::Result<(TransferOutput,
                 "Both source and destination are local paths. At least one must be a remote server",
                 None,
                 Some(vec![
-                    "Upload to server: homeboy file upload server ./file /path/to/file".to_string(),
+                    "Upload to server: homeboy file copy ./file server:/path/to/file".to_string(),
                     "Copy from server: homeboy file copy server:/path/to/file ./local-copy"
                         .to_string(),
                 ]),

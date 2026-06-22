@@ -152,8 +152,8 @@ fn spec_has_provider_plugin_paths(spec: &str) -> bool {
 ///
 /// Lab offload only syncs (and records local->remote mappings for) the
 /// directories a cook actually references, so an absolute provider-plugin path
-/// inherited from stale/global controller or runner settings (e.g. a Codex
-/// provider plugin path that is not part of this run's workspace) survives
+/// inherited from stale/global controller or runner settings (e.g. a provider
+/// plugin path that is not part of this run's workspace) survives
 /// remapping unchanged. Forwarding it would make the provider runtime declare
 /// an extra plugin/workspace entry pointing at a directory that does not exist
 /// on the runner, failing runtime validation with a `missing-path` error before the

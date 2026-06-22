@@ -1,4 +1,5 @@
 pub mod changelog;
+mod checkout_guard;
 mod context;
 mod deployment;
 mod execution_dispatch;

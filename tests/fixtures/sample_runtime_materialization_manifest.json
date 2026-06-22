@@ -34,7 +34,7 @@
       {
         "id": "sample-runtime.ready",
         "label": "Sample Runtime available",
-        "secret_env": ["AI_PROVIDER_OPENAI_CODEX_API_KEY"],
+        "secret_env": ["EXAMPLE_PROVIDER_API_KEY"],
         "env_path": {
           "env": ["SAMPLE_RUNTIME_HOME"],
           "revision": true,
@@ -50,7 +50,7 @@
     "env_passthrough": [
       "SAMPLE_RUNTIME_HOME",
       "SAMPLE_RUNTIME_BIN",
-      "AI_PROVIDER_OPENAI_CODEX_API_KEY"
+      "EXAMPLE_PROVIDER_API_KEY"
     ],
     "workspace": {
       "cwd": "git_checkout",

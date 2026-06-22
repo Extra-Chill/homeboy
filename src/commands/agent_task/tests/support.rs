@@ -161,7 +161,7 @@ impl AgentTaskExecutorAdapter for DiagnosticFailureExecutor {
                 evidence_refs: Vec::new(),
                 diagnostics: vec![AgentTaskDiagnostic {
                     class: "provider_discovery".to_string(),
-                    message: "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                    message: "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
                         .to_string(),
                     data: json!({ "registered_provider_plugins": [] }),
                 }],

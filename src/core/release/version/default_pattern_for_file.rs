@@ -231,7 +231,7 @@ pub(crate) fn build_init_warnings(component: &Component) -> Vec<String> {
     let unconfigured = detect_unconfigured_patterns(component);
     for pattern in &unconfigured {
         warnings.push(format!(
-            "Unconfigured version pattern in '{}': {} found in {} (v{}). Add with: homeboy component add-version-target {} '{}' '{}'",
+            "Unconfigured version pattern in '{}': {} found in {} (v{}). Add with: homeboy component set {} --version-target '{}::{}'",
             component.id,
             pattern.description,
             pattern.file,

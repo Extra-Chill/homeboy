@@ -61,16 +61,17 @@ use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
     lab_pre_dispatch_failure_message, materialize_inline_agent_task_plan_arg,
     materialize_inline_agent_task_tasks_arg, mirror_agent_task_run_plan_lifecycle,
-    parse_offloaded_dispatch_envelope_from_outputs,
+    parse_offloaded_agent_task_handoff_from_outputs,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
@@ -1514,7 +1515,7 @@ fn run_lab_offload_inner(
         ));
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = agent_task_run_id.as_deref() {
-            if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
+            if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
                 &exec_output.stdout,
                 &exec_output.stderr,
             )? {
@@ -1528,7 +1529,7 @@ fn run_lab_offload_inner(
                         stderr: &exec_output.stderr,
                         exit_code,
                     },
-                    &envelope,
+                    &handoff.envelope,
                 )? {
                     stderr.push_str(&format!(
                         "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
@@ -1702,18 +1703,9 @@ fn lab_materialization_proof_metadata(
         "source_snapshot": source_snapshot,
         "source_checkout": source_checkout,
         "runner_homeboy": runner_homeboy,
-        "wp_codebox_version": passive_wp_codebox_version(),
         "workspace_mapping": workspace_mapping,
         "rigs": synced_rigs,
     })
-}
-
-fn passive_wp_codebox_version() -> Option<String> {
-    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
@@ -2531,6 +2523,9 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+            active_job_error: None,
             session_path: "/tmp/lab.json".to_string(),
         }
     }
@@ -2779,7 +2774,6 @@ mod tests {
             proof["runner_homeboy"]["active_daemon_version"],
             "homeboy 0.1.0"
         );
-        assert!(proof["wp_codebox_version"].is_null());
     }
 
     #[test]
@@ -3365,6 +3359,7 @@ mod tests {
             stderr: r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Missing required field: cwd","details":{"field":"cwd"}}}"#.to_string(),
             source_snapshot: None,
             job: None,
+            runner_job: None,
             job_id: Some("job-123".to_string()),
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
@@ -3372,7 +3367,6 @@ mod tests {
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
-            runner_job: None,
             runner_result: None,
             handoff: None,
             diagnostics: None,

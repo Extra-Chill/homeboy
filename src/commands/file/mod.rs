@@ -163,16 +163,16 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             server,
             local_path,
             remote_path,
-            compress,
-            dry_run,
-        } => transfer_command(TransferConfig {
-            source: local_path,
-            destination: format!("{}:{}", server, remote_path),
-            recursive: false,
-            compress,
-            dry_run,
-            exclude: Vec::new(),
-        }),
+            ..
+        } => Err(homeboy::core::Error::validation_invalid_argument(
+            "file.upload",
+            "`homeboy file upload` is deprecated; use `homeboy file copy` for local-to-remote transfers",
+            None,
+            Some(vec![format!(
+                "Use: homeboy file copy {} {}:{}",
+                local_path, server, remote_path
+            )]),
+        )),
         FileCommand::Copy(args) => transfer_command(args.into_config()),
         FileCommand::Sync(args) => transfer_command(args.into_config()),
         FileCommand::Edit(args) => {
@@ -445,12 +445,13 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
     let EditArgs {
         project_id,
         file_path,
-        dry_run: _,
-        force: _,
+        dry_run,
+        force,
         line_ops,
         pattern_ops,
         file_mods,
     } = args;
+    let edit_options = files::EditOptions { dry_run, force };
 
     let result = if let Some(line_num) = line_ops.replace_line {
         let content = line_ops.replace_line_content.ok_or_else(|| {
@@ -461,7 +462,13 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             )
         })?;
-        files::edit_replace_line(&project_id, &file_path, line_num, &content)?
+        files::edit_replace_line_with_options(
+            &project_id,
+            &file_path,
+            line_num,
+            &content,
+            edit_options,
+        )?
     } else if let Some(line_num) = line_ops.insert_after {
         let content = line_ops.insert_after_content.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -471,7 +478,13 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             )
         })?;
-        files::edit_insert_after_line(&project_id, &file_path, line_num, &content)?
+        files::edit_insert_after_line_with_options(
+            &project_id,
+            &file_path,
+            line_num,
+            &content,
+            edit_options,
+        )?
     } else if let Some(line_num) = line_ops.insert_before {
         let content = line_ops.insert_before_content.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -481,9 +494,15 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             )
         })?;
-        files::edit_insert_before_line(&project_id, &file_path, line_num, &content)?
+        files::edit_insert_before_line_with_options(
+            &project_id,
+            &file_path,
+            line_num,
+            &content,
+            edit_options,
+        )?
     } else if let Some(line_num) = line_ops.delete_line {
-        files::edit_delete_line(&project_id, &file_path, line_num)?
+        files::edit_delete_line_with_options(&project_id, &file_path, line_num, edit_options)?
     } else if let Some(lines) = line_ops.delete_lines {
         if lines.len() != 2 {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -493,7 +512,13 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             ));
         }
-        files::edit_delete_lines(&project_id, &file_path, lines[0], lines[1])?
+        files::edit_delete_lines_with_options(
+            &project_id,
+            &file_path,
+            lines[0],
+            lines[1],
+            edit_options,
+        )?
     } else if let Some(pattern) = pattern_ops.replace_pattern {
         let replacement = pattern_ops.replace_pattern_content.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -503,7 +528,14 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             )
         })?;
-        files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, false)?
+        files::edit_replace_pattern_with_options(
+            &project_id,
+            &file_path,
+            &pattern,
+            &replacement,
+            false,
+            edit_options,
+        )?
     } else if let Some(pattern) = pattern_ops.replace_all_pattern {
         let replacement = pattern_ops.replace_all_content.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -513,13 +545,20 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
                 None,
             )
         })?;
-        files::edit_replace_pattern(&project_id, &file_path, &pattern, &replacement, true)?
+        files::edit_replace_pattern_with_options(
+            &project_id,
+            &file_path,
+            &pattern,
+            &replacement,
+            true,
+            edit_options,
+        )?
     } else if let Some(pattern) = pattern_ops.delete_pattern {
-        files::edit_delete_pattern(&project_id, &file_path, &pattern)?
+        files::edit_delete_pattern_with_options(&project_id, &file_path, &pattern, edit_options)?
     } else if let Some(content) = file_mods.append {
-        files::edit_append(&project_id, &file_path, &content)?
+        files::edit_append_with_options(&project_id, &file_path, &content, edit_options)?
     } else if let Some(content) = file_mods.prepend {
-        files::edit_prepend(&project_id, &file_path, &content)?
+        files::edit_prepend_with_options(&project_id, &file_path, &content, edit_options)?
     } else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "operation",
@@ -537,6 +576,7 @@ fn edit(args: EditArgs) -> CmdResult<FileEditOutput> {
             project_id: project_id.to_string(),
             base_path: result.base_path,
             path: result.path,
+            dry_run,
             changes_made: result.changes_made,
             change_count,
             success: result.success,

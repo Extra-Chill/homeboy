@@ -208,7 +208,7 @@ This is useful for:
 
 ```json
 {
-  "command": "component.create|component.show|component.set|component.delete|component.rename|component.list|component.projects|component.shared|component.env|component.add-version-target|component.reconcile|component.artifacts",
+  "command": "component.create|component.show|component.set|component.delete|component.rename|component.list|component.projects|component.shared|component.env|component.reconcile|component.artifacts",
   "component_id": "<id>|null",
   "success": true,
   "updated_fields": ["local_path", "remote_path"],

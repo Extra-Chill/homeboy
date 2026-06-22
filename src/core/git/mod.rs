@@ -1,5 +1,6 @@
 mod changes;
 mod commits;
+mod gh_client;
 mod github;
 mod github_comment_sections;
 mod github_pr_comments;
@@ -28,6 +29,7 @@ pub use commits::{
     get_previous_tag_before_with_prefix, recommended_bump_from_commits, strip_conventional_prefix,
     CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
 };
+pub use gh_client::{github_cli_env, GhClient};
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
     issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge,

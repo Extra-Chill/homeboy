@@ -343,3 +343,36 @@ pub fn build_init_output(project_id: &str, dir: &std::path::Path) -> ProjectRepo
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::project::ProjectComponentAttachment;
+    use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn show_report_marks_project_not_deploy_ready_when_component_local_path_is_missing() {
+        with_isolated_home(|_| {
+            crate::core::project::save(&Project {
+                id: "site".to_string(),
+                base_path: Some("/srv/site".to_string()),
+                components: vec![ProjectComponentAttachment {
+                    id: "plugin".to_string(),
+                    local_path: "/tmp/homeboy-missing-component-path".to_string(),
+                    remote_path: Some("wp-content/plugins/plugin".to_string()),
+                }],
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let report = show_report("site").expect("show report");
+
+            assert!(!report.deploy_ready);
+            assert!(report.deploy_blockers.iter().any(|blocker| {
+                blocker.contains(
+                    "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
+                )
+            }));
+        });
+    }
+}

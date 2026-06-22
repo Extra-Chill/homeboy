@@ -11,13 +11,20 @@
 
 use std::fs;
 
+use crate::core::agent_task::AgentTaskEvidenceRef;
+use crate::core::agent_task_lifecycle::{
+    AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
+};
 use crate::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::core::agent_tasks::provider::{
     dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
 };
-use crate::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use crate::core::agent_tasks::scheduler::{
+    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan,
+};
 use crate::core::{config, Error, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
@@ -261,15 +268,41 @@ fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
 }
 
 pub(super) fn parse_offloaded_dispatch_envelope(stdout: &str) -> Result<Option<serde_json::Value>> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
-        return Ok(agent_task_dispatch_envelope_value(&value).cloned());
+    Ok(parse_offloaded_agent_task_handoff(stdout)?.map(|handoff| handoff.envelope))
+}
+
+pub(super) fn parse_offloaded_dispatch_envelope_from_outputs(
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<serde_json::Value>> {
+    Ok(
+        parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)?
+            .map(|handoff| handoff.envelope),
+    )
+}
+
+pub(super) fn parse_offloaded_agent_task_handoff_from_outputs(
+    stdout: &str,
+    stderr: &str,
+) -> Result<Option<AgentTaskLabHandoff>> {
+    parse_offloaded_agent_task_handoff(stdout).and_then(|parsed| match parsed {
+        Some(handoff) => Ok(Some(handoff)),
+        None => parse_offloaded_agent_task_handoff(stderr),
+    })
+}
+
+pub(super) fn parse_offloaded_agent_task_handoff(
+    output: &str,
+) -> Result<Option<AgentTaskLabHandoff>> {
+    if let Ok(value) = serde_json::from_str::<Value>(output) {
+        return Ok(agent_task_handoff_value(&value));
     }
 
-    for (index, _) in stdout.match_indices('{') {
-        let mut stream = serde_json::Deserializer::from_str(&stdout[index..]).into_iter();
+    for (index, _) in output.match_indices('{') {
+        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter();
         if let Some(Ok(value)) = stream.next() {
-            if let Some(envelope) = agent_task_dispatch_envelope_value(&value) {
-                return Ok(Some(envelope.clone()));
+            if let Some(handoff) = agent_task_handoff_value(&value) {
+                return Ok(Some(handoff));
             }
         }
     }
@@ -277,14 +310,187 @@ pub(super) fn parse_offloaded_dispatch_envelope(stdout: &str) -> Result<Option<s
     Ok(None)
 }
 
-pub(super) fn parse_offloaded_dispatch_envelope_from_outputs(
-    stdout: &str,
-    stderr: &str,
-) -> Result<Option<serde_json::Value>> {
-    parse_offloaded_dispatch_envelope(stdout).and_then(|parsed| match parsed {
-        Some(envelope) => Ok(Some(envelope)),
-        None => parse_offloaded_dispatch_envelope(stderr),
-    })
+const AGENT_TASK_LAB_HANDOFF_SCHEMA: &str = "homeboy/agent-task-lab-handoff/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(super) struct AgentTaskLabHandoff {
+    #[serde(default = "agent_task_lab_handoff_schema")]
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_summary: Option<AgentTaskRunRecordSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_summary: Option<AgentTaskAggregateHandoffSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentTaskArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<AgentTaskEvidenceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<AgentTaskRunRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<AgentTaskAggregate>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub envelope: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct AgentTaskRunRecordSummary {
+    pub run_id: String,
+    pub plan_id: String,
+    pub state: AgentTaskRunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_path: Option<String>,
+    #[serde(default)]
+    pub task_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct AgentTaskAggregateHandoffSummary {
+    pub plan_id: String,
+    pub status: String,
+    pub totals: AgentTaskAggregateTotals,
+    #[serde(default)]
+    pub outcome_count: usize,
+}
+
+fn agent_task_lab_handoff_schema() -> String {
+    AGENT_TASK_LAB_HANDOFF_SCHEMA.to_string()
+}
+
+fn agent_task_handoff_value(value: &Value) -> Option<AgentTaskLabHandoff> {
+    if let Some(handoff_value) = typed_agent_task_handoff_value(value) {
+        let mut handoff =
+            serde_json::from_value::<AgentTaskLabHandoff>(handoff_value.clone()).ok()?;
+        if handoff.envelope.is_null() {
+            handoff.envelope = handoff_envelope_from_typed_handoff(&handoff);
+        }
+        return Some(handoff);
+    }
+    agent_task_dispatch_envelope_value(value).map(AgentTaskLabHandoff::from_dispatch_envelope)
+}
+
+fn typed_agent_task_handoff_value(value: &Value) -> Option<&Value> {
+    if value.get("schema").and_then(Value::as_str) == Some(AGENT_TASK_LAB_HANDOFF_SCHEMA) {
+        return Some(value);
+    }
+    let data = value.get("data")?;
+    (data.get("schema").and_then(Value::as_str) == Some(AGENT_TASK_LAB_HANDOFF_SCHEMA))
+        .then_some(data)
+}
+
+fn handoff_envelope_from_typed_handoff(handoff: &AgentTaskLabHandoff) -> Value {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(
+        "schema".to_string(),
+        Value::String("homeboy/agent-task-dispatch/v1".to_string()),
+    );
+    if let Some(run_id) = handoff.run_id.as_ref() {
+        envelope.insert("run_id".to_string(), Value::String(run_id.clone()));
+    }
+    if let Some(record) = handoff.record.as_ref() {
+        if let Ok(value) = serde_json::to_value(record) {
+            envelope.insert("record".to_string(), value);
+        }
+    }
+    if let Some(aggregate) = handoff.aggregate.as_ref() {
+        if let Ok(value) = serde_json::to_value(aggregate) {
+            envelope.insert("aggregate".to_string(), value);
+        }
+    }
+    Value::Object(envelope)
+}
+
+impl AgentTaskLabHandoff {
+    fn from_dispatch_envelope(envelope: &Value) -> Self {
+        let record = envelope
+            .get("record")
+            .and_then(|value| serde_json::from_value::<AgentTaskRunRecord>(value.clone()).ok());
+        let aggregate = envelope
+            .get("aggregate")
+            .and_then(|value| serde_json::from_value::<AgentTaskAggregate>(value.clone()).ok());
+        let run_id = envelope
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| record.as_ref().map(|record| record.run_id.clone()));
+        Self {
+            schema: agent_task_lab_handoff_schema(),
+            run_id,
+            record_summary: record.as_ref().map(AgentTaskRunRecordSummary::from_record),
+            aggregate_summary: aggregate
+                .as_ref()
+                .map(AgentTaskAggregateHandoffSummary::from_aggregate),
+            artifact_refs: collect_handoff_artifact_refs(record.as_ref(), aggregate.as_ref()),
+            evidence_refs: collect_handoff_evidence_refs(aggregate.as_ref()),
+            record,
+            aggregate,
+            envelope: envelope.clone(),
+        }
+    }
+}
+
+impl AgentTaskRunRecordSummary {
+    fn from_record(record: &AgentTaskRunRecord) -> Self {
+        Self {
+            run_id: record.run_id.clone(),
+            plan_id: record.plan_id.clone(),
+            state: record.state,
+            aggregate_path: record.aggregate_path.clone(),
+            task_count: record.tasks.len(),
+        }
+    }
+}
+
+impl AgentTaskAggregateHandoffSummary {
+    fn from_aggregate(aggregate: &AgentTaskAggregate) -> Self {
+        Self {
+            plan_id: aggregate.plan_id.clone(),
+            status: format!("{:?}", aggregate.status).to_lowercase(),
+            totals: aggregate.totals.clone(),
+            outcome_count: aggregate.outcomes.len(),
+        }
+    }
+}
+
+fn collect_handoff_artifact_refs(
+    record: Option<&AgentTaskRunRecord>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Vec<AgentTaskArtifactRef> {
+    let mut refs = record
+        .map(|record| record.artifact_refs.clone())
+        .unwrap_or_default();
+    if let Some(aggregate) = aggregate {
+        for outcome in &aggregate.outcomes {
+            for artifact in &outcome.artifacts {
+                let uri = artifact
+                    .url
+                    .as_deref()
+                    .or(artifact.path.as_deref())
+                    .unwrap_or(&artifact.id);
+                refs.push(AgentTaskArtifactRef {
+                    task_id: outcome.task_id.clone(),
+                    kind: artifact.kind.clone(),
+                    uri: uri.to_string(),
+                    role: artifact.role.clone(),
+                    label: artifact.label.clone().or_else(|| artifact.name.clone()),
+                    semantic_key: artifact.semantic_key.clone(),
+                    size_bytes: artifact.size_bytes,
+                });
+            }
+        }
+    }
+    refs
+}
+
+fn collect_handoff_evidence_refs(
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Vec<AgentTaskEvidenceRef> {
+    aggregate
+        .into_iter()
+        .flat_map(|aggregate| aggregate.outcomes.iter())
+        .flat_map(|outcome| outcome.evidence_refs.iter().cloned())
+        .collect()
 }
 
 fn agent_task_dispatch_envelope_value(value: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -591,6 +797,76 @@ mod tests {
                 ["failure_classification"],
             "runtime"
         );
+    }
+
+    #[test]
+    fn offloaded_agent_task_handoff_wraps_legacy_dispatch_envelope() {
+        let stdout = concat!(
+            "remote setup complete\n",
+            "{\"success\":false,\"data\":{",
+            "\"schema\":\"homeboy/agent-task-dispatch/v1\",",
+            "\"run_id\":\"run-1\",",
+            "\"aggregate\":{",
+            "\"plan_id\":\"plan-1\",",
+            "\"status\":\"failed\",",
+            "\"totals\":{\"skipped\":0,\"failed\":1},",
+            "\"outcomes\":[{",
+            "\"task_id\":\"task-1\",",
+            "\"status\":\"failed\",",
+            "\"artifacts\":[{\"id\":\"artifact-1\",\"kind\":\"log\",\"path\":\"/tmp/log.txt\"}],",
+            "\"evidence_refs\":[{\"kind\":\"logs\",\"uri\":\"homeboy://agent-task/run/run-1/logs\"}]",
+            "}]}}}\n"
+        );
+
+        let handoff = parse_offloaded_agent_task_handoff(stdout)
+            .expect("parse handoff")
+            .expect("handoff found");
+
+        assert_eq!(handoff.schema, AGENT_TASK_LAB_HANDOFF_SCHEMA);
+        assert_eq!(handoff.run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            handoff.aggregate_summary.expect("aggregate summary").status,
+            "failed"
+        );
+        assert_eq!(handoff.artifact_refs[0].uri, "/tmp/log.txt");
+        assert_eq!(handoff.evidence_refs[0].kind, "logs");
+        assert_eq!(handoff.envelope["schema"], "homeboy/agent-task-dispatch/v1");
+    }
+
+    #[test]
+    fn offloaded_agent_task_handoff_accepts_typed_data_envelope() {
+        let stdout = concat!(
+            "runner chatter\n",
+            "{\"success\":false,\"data\":{",
+            "\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
+            "\"run_id\":\"run-typed\",",
+            "\"aggregate_summary\":{",
+            "\"plan_id\":\"plan-typed\",",
+            "\"status\":\"failed\",",
+            "\"totals\":{\"skipped\":0,\"failed\":1},",
+            "\"outcome_count\":1},",
+            "\"artifact_refs\":[{",
+            "\"task_id\":\"task-typed\",",
+            "\"kind\":\"review\",",
+            "\"uri\":\"homeboy://artifact/review\"}],",
+            "\"evidence_refs\":[{",
+            "\"kind\":\"review\",",
+            "\"uri\":\"homeboy://agent-task/run/run-typed/review\"}]",
+            "}}\n"
+        );
+
+        let handoff = parse_offloaded_agent_task_handoff(stdout)
+            .expect("parse handoff")
+            .expect("handoff found");
+
+        assert_eq!(handoff.run_id.as_deref(), Some("run-typed"));
+        assert_eq!(handoff.artifact_refs[0].kind, "review");
+        assert_eq!(
+            handoff.evidence_refs[0].uri,
+            "homeboy://agent-task/run/run-typed/review"
+        );
+        assert_eq!(handoff.envelope["run_id"], "run-typed");
+        assert!(handoff.envelope.get("aggregate").is_none());
     }
 
     #[test]
