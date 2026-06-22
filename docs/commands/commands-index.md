@@ -6,8 +6,8 @@
 - [audit-baseline](audit-baseline.md) — deterministic audit baseline refresh workflow
 - [auth](auth.md)
 - [bench](bench.md) — performance benchmarks + p95 regression ratchet
-- [build](build.md)
-- [cargo](cargo.md) — run Cargo commands via Rust extension routing
+- [build](build.md) — local build quality gate
+- [cargo](cargo.md) — extension-provided Cargo routing when installed
 - [changelog](changelog.md)
 - [changes](changes.md)
 - [ci](ci.md) — CI reproduction profiles and shallow CI surface discovery
@@ -38,7 +38,7 @@
 - [review](review.md) — scoped audit + lint + test umbrella for PR-style changes
 - [rig](rig.md) — reproducible local dev environments ([spec](rig-spec.md))
 - [runner](runner.md) — local and SSH execution runner registry
-- [runtime](runtime.md) — core-owned runner runtime helper lookup
+- [runtime](runtime.md) — narrow lookup for bundled core runtime helpers
 - [runs](runs.md) — persisted observation runs and artifacts
 - [server](server.md)
 - [self](self.md) — active binary and install-signal inspection
@@ -53,11 +53,15 @@
 - [upgrade](upgrade.md)
 - [version](version.md)
 - [worktree](worktree.md) — component-backed task worktree lifecycle
-- [wp](wp.md) — run WP-CLI commands via WordPress extension routing
+- [wp](wp.md) — extension-provided WP-CLI routing when installed
 
-This list covers the top-level CLI commands currently surfaced by `homeboy --help` in this checkout.
+This list covers the top-level core CLI commands currently surfaced by `homeboy
+--help` in this checkout. Hidden compatibility aliases such as `lab` are
+documented but omitted from this index.
 
-Note: some extensions also expose additional top-level CLI commands at runtime (loaded from installed extensions).
+Note: some extensions also expose additional top-level CLI commands at runtime
+when installed. Extension command docs, including `cargo` and `wp`, describe
+possible runtime-provided commands rather than guaranteed core subcommands.
 
 Related:
 

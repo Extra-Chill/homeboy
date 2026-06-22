@@ -12,14 +12,18 @@ Provider commands can use `{{runtime_path}}`, and Homeboy injects `HOMEBOY_RUNTI
 
 ## Helper Paths
 
-Resolve the materialized path for a core runtime helper:
+Resolve the materialized path for a bundled core runtime helper:
 
 ```bash
 homeboy runtime helper path runner-prelude.sh
 homeboy runtime helper path HOMEBOY_RUNTIME_COMMAND_CAPTURE
 ```
 
-The command accepts either the helper filename or the injected `HOMEBOY_RUNTIME_*` environment variable name. Normal extension execution receives these paths automatically in the runner environment.
+The command accepts only known helper filenames or the corresponding injected
+`HOMEBOY_RUNTIME_*` environment variable names. It is not a general runtime
+package browser, extension asset resolver, or arbitrary config-path lookup.
+Normal extension execution receives these paths automatically in the runner
+environment.
 
 Use `--plain` when a shell wrapper needs a sourceable path without parsing JSON:
 

@@ -12,8 +12,9 @@ For multisite projects, use `project:subtarget` as the project ID.
 
 `wp` is not a core subcommand compiled into Homeboy. It is registered at runtime
 by an installed extension with CLI tool metadata, typically the WordPress
-extension. Use `homeboy docs list` to confirm the command is available in the
-current installation.
+extension. Static core docs describe the extension contract; availability in a
+specific installation depends on installed extension metadata and can be
+confirmed with `homeboy --help` or `homeboy docs list`.
 
 ## Examples
 

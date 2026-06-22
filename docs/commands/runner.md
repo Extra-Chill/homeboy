@@ -51,7 +51,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (`audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--force-hot` only suppresses the resource-policy warning. If a default Lab runner is available for a portable hot command, Homeboy refuses to use `--force-hot` as an implicit local bypass.
@@ -71,14 +71,26 @@ Lab offload support is intentionally command-specific:
 
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
+| `agent-task dispatch` / `agent-task cook` / `agent-task loop` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
+| `agent-task controller from-spec --resume` / `agent-task controller materialize` / `agent-task controller resume` | No | Yes | Runner-hosted controller lifecycle work. |
+| `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
+| `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
+| `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |
 | `audit` full workspace | Yes | Yes | Safe single-workspace replay after snapshot sync. |
 | `audit --changed-since` | No | No | Runs locally for now because changed-since audit depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
+| `build` | No | No | Local quality gate; extension-owned build commands are not represented in the portable Lab contract yet. |
+| `fuzz run` / default fuzz run | Yes | Yes | Safe single-workspace replay with fuzz-specific case/result artifacts. |
 | `lint` full workspace | Yes | Yes | Safe single-workspace replay; `--fix` is treated as a mutation flag. |
 | `lint --changed-since` / `lint --changed-only` | No | No | Runs locally for now because changed-file scopes are not represented in the Lab portability contract yet. The Lab plan records the skipped local-only decision. |
+| `refactor --from audit` / `refactor --all` | No | Yes | Source refactor runs with command-owned mutation flags and runner-side workspace controls. |
+| `review` | Yes | Yes | Scoped audit/lint/test umbrella using the same portable quality gates. |
+| `rig check` | No | Yes | Runner-side rig validation without starting local services. |
 | `test` full workspace | Yes | Yes | Safe single-workspace replay with runner extension parity preflight. |
 | `test --changed-since` | No | No | Runs locally for now because changed-since test selection depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `trace` | Yes | Yes | Safe single-workspace replay with Playwright/browser capability gate. |
+| `tunnel preview-consumer run` | No | Yes | Runner-hosted preview consumer execution. |
+| `tunnel service expose` / `tunnel service start` | No | Yes | Runner-hosted private service tunnel lifecycle. |
 | `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
 | `fleet exec` | No | No | Stays local because fleet execution depends on local fleet/project/server config before opening SSH sessions to each project; runner-side config parity is not guaranteed. |
 

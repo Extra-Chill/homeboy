@@ -10,14 +10,18 @@ homeboy docs map [OPTIONS] <component-id>
 
 ## Description
 
-This command renders embedded documentation topics and provides a codebase-map helper for AI-assisted documentation work.
+This command has two modes: topic rendering and codebase-map generation for
+AI-assisted documentation work.
 
-**Topic display** renders documentation from:
+**Topic display** is the default mode. `homeboy docs <topic>` renders
+documentation from:
 
 1. Embedded core docs in the CLI binary
 2. Installed extension docs under `<config dir>/homeboy/extensions/<extension_id>/docs/`
 
-**Map** generates machine-optimized codebase maps for AI documentation.
+**Map** is the `homeboy docs map <component-id>` subcommand. It generates
+machine-optimized codebase maps for AI documentation and does not render an
+embedded topic.
 
 ## Subcommands
 

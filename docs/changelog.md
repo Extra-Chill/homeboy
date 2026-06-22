@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.251.0] - 2026-06-22
+
+### Added
+- feat(agent-task): reconcile/flag stale active Lab runs
+- feat(agent-task): report secret-source readiness in auth status
+
+### Changed
+- Add fuzz operation family taxonomy
+- Add fuzz coverage skip summaries
+- Materialize Lab @file inputs
+
+### Fixed
+- fix(agent-task): carry dispatch component contracts
+- keep artifact roots runner-local
+
 ## [0.250.4] - 2026-06-22
 
 ### Changed
