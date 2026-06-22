@@ -15,6 +15,10 @@ const {
 const CASE_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 const RESULT_STATUSES = new Set(['passed', 'failed', 'errored', 'partial', 'skipped']);
 
+function normalizeWordPressFuzzSurfaceType(value) {
+	return normalizeWordPressSurfaceType(value);
+}
+
 function assertPlainObject(value, field) {
 	if (!value || typeof value !== 'object' || Array.isArray(value)) {
 		throw new Error(`${field} must be an object.`);
@@ -279,6 +283,7 @@ module.exports = {
 	WORDPRESS_SURFACE_DISCOVERY_SCHEMA,
 	WORDPRESS_FUZZ_PLAN_SCHEMA,
 	WORDPRESS_FUZZ_RESULT_SCHEMA,
+	normalizeWordPressFuzzSurfaceType,
 	normalizeWordPressSurfaceDiscovery,
 	normalizeWordPressFuzzPlan,
 	normalizeWordPressFuzzResult,

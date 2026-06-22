@@ -6,6 +6,9 @@ const {
 	buildWordPressFuzzPlanFromSurfaces,
 	collectWordPressFuzzPlanSurfaces,
 } = require('../lib/wordpress-fuzz-plan-from-surfaces');
+const {
+	normalizeWordPressRuntimeSurfaceDiscovery,
+} = require('../lib/wordpress-runtime-surface-discovery');
 
 const manifest = {
 	id: 'generic-core-surfaces',
@@ -69,6 +72,19 @@ const aliasPlan = buildWordPressFuzzPlanFromSurfaces({
 	],
 });
 assert.deepEqual(aliasPlan.targets.map((target) => target.type), ['rest-route', 'frontend-url', 'user', 'hook']);
+
+const runtimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({
+	id: 'runtime-surfaces',
+	surfaces: [
+		{ type: 'rest_route', route: '/wp/v2/posts', method: 'GET' },
+		{ type: 'admin_page', path: '/wp-admin/tools.php' },
+		{ type: 'ajax_action', action: 'heartbeat' },
+		{ type: 'db_table', table: 'wp_posts' },
+	],
+});
+const runtimePlan = buildWordPressFuzzPlanFromSurfaces(runtimeDiscovery);
+assert.deepEqual(runtimePlan.targets.map((target) => target.type), ['admin-page', 'ajax-action', 'database-table', 'rest-route']);
+assert.equal(runtimePlan.targets.find((target) => target.type === 'ajax-action').cases[0].intent, 'exercise-ajax-action');
 
 const nestedPlan = buildWordPressFuzzPlanFromSurfaces({
 	hooks: {

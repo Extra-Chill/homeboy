@@ -5,6 +5,7 @@ const {
 	WORDPRESS_SURFACE_DISCOVERY_SCHEMA,
 	WORDPRESS_FUZZ_PLAN_SCHEMA,
 	WORDPRESS_FUZZ_RESULT_SCHEMA,
+	normalizeWordPressFuzzSurfaceType,
 	normalizeWordPressSurfaceDiscovery,
 	normalizeWordPressFuzzPlan,
 	normalizeWordPressFuzzResult,
@@ -16,6 +17,7 @@ const discovery = normalizeWordPressSurfaceDiscovery({
 	surfaces: [
 		{ type: 'rest-route', id: 'wp-v2-posts', method: 'GET', route: '/wp/v2/posts' },
 		{ type: 'admin-page', path: '/wp-admin/edit.php', capability: 'edit_posts' },
+		{ type: 'ajax_action', id: 'ajax-heartbeat', action: 'heartbeat' },
 		{ kind: 'db-query', id: 'query-posts', query: 'SELECT * FROM wp_posts' },
 		{ kind: 'external_http', id: 'http-api', url: 'https://api.example.test/' },
 	],
@@ -24,8 +26,14 @@ const discovery = normalizeWordPressSurfaceDiscovery({
 assert.equal(discovery.schema, 'wordpress-surface-discovery/v1');
 assert.equal(discovery.surfaces[0].id, 'wp-v2-posts');
 assert.equal(discovery.surfaces[1].id, 'admin-page-2');
-assert.equal(discovery.surfaces[2].type, 'db-query');
-assert.equal(discovery.surfaces[3].type, 'external-http');
+assert.equal(discovery.surfaces[2].type, 'ajax-action');
+assert.equal(discovery.surfaces[3].type, 'db-query');
+assert.equal(discovery.surfaces[4].type, 'external-http');
+assert.equal(normalizeWordPressFuzzSurfaceType('rest_route'), 'rest-route');
+assert.equal(normalizeWordPressFuzzSurfaceType('admin_page'), 'admin-page');
+assert.equal(normalizeWordPressFuzzSurfaceType('ajax_action'), 'ajax-action');
+assert.equal(normalizeWordPressFuzzSurfaceType('db_table'), 'database-table');
+assert.equal(normalizeWordPressFuzzSurfaceType('database_query'), 'db-query');
 
 const plan = normalizeWordPressFuzzPlan({
 	schema: WORDPRESS_FUZZ_PLAN_SCHEMA,

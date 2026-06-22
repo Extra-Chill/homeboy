@@ -136,7 +136,7 @@ function targetFromSurface(surface, options = {}) {
 
 function operationForSurface(surface) {
 	const operation = { id: surface.operation_id || surface.operationId, surface_type: surface.type };
-	for (const key of ['id', 'name', 'hook', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
+	for (const key of ['id', 'name', 'hook', 'action', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
 		if (surface[key] !== undefined) {
 			operation[key] = surface[key];
 		}
@@ -147,6 +147,7 @@ function operationForSurface(surface) {
 function caseIntent(type) {
 	return {
 		'admin-page': 'request-admin-page',
+		'ajax-action': 'exercise-ajax-action',
 		block: 'render-block',
 		'cron-event': 'inspect-cron-event',
 		capability: 'check-capability-boundary',
