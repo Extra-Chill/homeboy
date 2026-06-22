@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const {
 	WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
 	WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
@@ -47,6 +48,7 @@ const stableInvocation = codeboxRunAgentTaskInvocation({
 assert.equal(stableInvocation.contract, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
 assert.equal(stableInvocation.implementation, 'stable-run-agent-task');
 assert.equal(stableInvocation.input.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
+assert.equal(stableInvocation.input.task_input, taskInput);
 assert.deepEqual(stableInvocation.args, [
 	WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 	'--input-file={{input_file}}',

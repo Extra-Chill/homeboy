@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const manifestPath = path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'wp-codebox.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 const provider = manifest.agent_task_executors[0];

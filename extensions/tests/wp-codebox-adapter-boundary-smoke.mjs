@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const runtimePackage = require(path.join(repoRoot, 'agent-runtimes', 'wp-codebox'));
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'agent-runtimes', 'wp-codebox', 'package.json'), 'utf8'));
 
