@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.55] - 2026-06-22
+
+### Changed
+- Mount fuzz workload roots in Codebox
+
 ## [3.12.54] - 2026-06-22
 
 ### Changed
