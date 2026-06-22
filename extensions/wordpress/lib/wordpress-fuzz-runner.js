@@ -16,6 +16,7 @@ const {
 const { buildWpCodeboxFuzzPlanRecipe } = require('./wp-codebox-fuzz-plan');
 const {
 	normalizeWpCodeboxFuzzRunResult,
+	runWpCodeboxFuzzRun,
 	wpCodeboxFuzzRunInput,
 	wpCodeboxFuzzRunTaskRequest,
 } = require('./wp-codebox-fuzz-run');
@@ -36,6 +37,18 @@ function readWordPressFuzzRunnerEnv(env = process.env) {
 }
 
 function buildWordPressFuzzRunnerResult(options = {}) {
+	const context = buildWordPressFuzzRunnerContext(options);
+	const codeboxResult = normalizeCodeboxResult(context.workload, { runId: context.runId });
+	return buildWordPressFuzzRunnerSummary({ ...context, codeboxResult });
+}
+
+async function runWordPressFuzzRunnerResult(options = {}) {
+	const context = buildWordPressFuzzRunnerContext(options);
+	const codeboxResult = await resolveCodeboxResult(context, options);
+	return buildWordPressFuzzRunnerSummary({ ...context, codeboxResult });
+}
+
+function buildWordPressFuzzRunnerContext(options = {}) {
 	const env = options.env || readWordPressFuzzRunnerEnv();
 	const workload = options.workload || readJsonFile(requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH'));
 	const runId = requiredString(env.runId || workload.run_id || workload.runId || workload.id, 'HOMEBOY_FUZZ_RUN_ID');
@@ -51,7 +64,33 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
 	});
 	const codeboxPlanRecipe = buildCodeboxPlanRecipe(workload);
-	const codeboxResult = normalizeCodeboxResult(workload, { runId });
+
+	return {
+		env,
+		workload,
+		runId,
+		workloadId,
+		seed,
+		maxDuration,
+		plan,
+		wpCodeboxInput,
+		taskRequest,
+		codeboxPlanRecipe,
+	};
+}
+
+function buildWordPressFuzzRunnerSummary({
+	workload,
+	runId,
+	workloadId,
+	seed,
+	maxDuration,
+	plan,
+	wpCodeboxInput,
+	taskRequest,
+	codeboxPlanRecipe,
+	codeboxResult,
+}) {
 	const coverage = aggregateCoverage(workload, codeboxResult);
 	const status = normalizeRunnerStatus(codeboxResult, coverage);
 	const homeboyFuzzCampaign = buildHomeboyFuzzCampaign({ runId, workloadId, plan, codeboxResult, status });
@@ -72,6 +111,26 @@ function buildWordPressFuzzRunnerResult(options = {}) {
 		coverage,
 		homeboy_fuzz_campaign: homeboyFuzzCampaign,
 		metadata: objectOrUndefined(workload.metadata),
+	});
+}
+
+async function resolveCodeboxResult(context, options = {}) {
+	if (hasPrecomputedCodeboxResult(context.workload)) {
+		return normalizeCodeboxResult(context.workload, { runId: context.runId });
+	}
+
+	const runner = options.runFuzzRun || options.runRuntimeTask || options.runTask;
+	if (typeof runner !== 'function') {
+		return normalizeCodeboxResult(context.workload, { runId: context.runId });
+	}
+
+	return runWpCodeboxFuzzRun({
+		...options,
+		taskId: context.runId,
+		input: context.wpCodeboxInput,
+		provider: context.workload.provider,
+		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
+		runFuzzRun: runner,
 	});
 }
 
@@ -129,7 +188,7 @@ function buildCodeboxPlanRecipe(workload) {
 }
 
 function normalizeCodeboxResult(workload, context = {}) {
-	const result = workload.wp_codebox_result || workload.wpCodeboxResult || workload.wp_codebox_suite_result || workload.wpCodeboxSuiteResult || workload.result;
+	const result = precomputedCodeboxResult(workload);
 	if (result) {
 		return normalizeWpCodeboxFuzzRunResult(result);
 	}
@@ -145,6 +204,14 @@ function normalizeCodeboxResult(workload, context = {}) {
 			},
 		],
 	});
+}
+
+function hasPrecomputedCodeboxResult(workload = {}) {
+	return Boolean(precomputedCodeboxResult(workload));
+}
+
+function precomputedCodeboxResult(workload = {}) {
+	return workload.wp_codebox_result || workload.wpCodeboxResult || workload.wp_codebox_suite_result || workload.wpCodeboxSuiteResult || workload.result;
 }
 
 function aggregateCoverage(workload, codeboxResult) {
@@ -234,6 +301,7 @@ module.exports = {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
+	runWordPressFuzzRunnerResult,
 	writeHomeboyFuzzResultsFile,
 	readWordPressFuzzRunnerEnv,
 };

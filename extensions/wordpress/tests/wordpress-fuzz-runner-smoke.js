@@ -10,6 +10,7 @@ const {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
+	runWordPressFuzzRunnerResult,
 } = require('../lib/wordpress-fuzz-runner');
 
 const workload = {
@@ -94,6 +95,44 @@ assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
 
+let dispatchedRequest;
+const dispatchPromise = runWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'dispatch-run',
+	},
+	workload,
+	runRuntimeTask: async (request) => {
+		dispatchedRequest = request;
+		assert.equal(request.task_id, 'dispatch-run');
+		assert.equal(request.executor.backend, 'codebox');
+		assert.equal(request.executor.config.runtime_task.ability, 'wp-codebox/fuzz-suite');
+		assert.equal(request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
+		assert.equal(request.executor.config.runtime_task.input.cases[0].target_id, 'rest-posts');
+		return {
+			json: {
+				schema: 'wp-codebox/fuzz-suite-result/v1',
+				request_id: request.task_id,
+				status: 'succeeded',
+				coverage_summary: { surface_count: 1, exercised_count: 1 },
+				artifactRefs: [
+					{ path: 'dispatch/fuzz-report.json', kind: 'report', contentType: 'application/json' },
+					{ path: 'dispatch/coverage.json', kind: 'coverage', contentType: 'application/json' },
+				],
+			},
+		};
+	},
+}).then((dispatchedResult) => {
+	assert(dispatchedRequest, 'runner should dispatch a Codebox fuzz suite request');
+	assert.equal(dispatchedResult.status, 'succeeded');
+	assert.equal(dispatchedResult.succeeded, true);
+	assert.equal(dispatchedResult.wp_codebox_result.request_id, 'dispatch-run');
+	assert.equal(dispatchedResult.wp_codebox_result.coverage_summary.surface_count, 1);
+	assert.deepEqual(dispatchedResult.wp_codebox_result.artifacts.map((artifact) => artifact.role), ['fuzz_report', 'coverage']);
+	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].semantic_key, 'fuzz.report');
+	assert.equal(dispatchedResult.homeboy_fuzz_campaign.metadata.artifact_refs[1].semantic_key, 'fuzz.coverage');
+});
+
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'));
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
@@ -126,4 +165,9 @@ assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 
-console.log('WordPress fuzz runner smoke passed.');
+dispatchPromise.then(() => {
+	console.log('WordPress fuzz runner smoke passed.');
+}).catch((error) => {
+	console.error(error);
+	process.exit(1);
+});
