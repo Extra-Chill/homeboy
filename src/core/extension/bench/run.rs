@@ -124,6 +124,15 @@ pub struct BenchRunFailure {
     pub diagnostics: Vec<BenchDiagnostic>,
 }
 
+type BenchRunExecutionOutcome = (
+    Option<BenchResults>,
+    bool,
+    i32,
+    Option<String>,
+    Option<BenchFailureMemorySample>,
+    Option<u128>,
+);
+
 #[derive(Debug, Clone)]
 pub struct BenchListWorkflowArgs {
     pub component_label: String,
@@ -1046,14 +1055,7 @@ fn run_sequential_runs(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(
-    Option<BenchResults>,
-    bool,
-    i32,
-    Option<String>,
-    Option<BenchFailureMemorySample>,
-    Option<u128>,
-)> {
+) -> Result<BenchRunExecutionOutcome> {
     let mut parsed_runs = Vec::new();
     let mut all_success = true;
     let mut first_failure_exit: Option<i32> = None;
@@ -1116,14 +1118,7 @@ fn run_single_dispatcher(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(
-    Option<BenchResults>,
-    bool,
-    i32,
-    Option<String>,
-    Option<BenchFailureMemorySample>,
-    Option<u128>,
-)> {
+) -> Result<BenchRunExecutionOutcome> {
     let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
     if results_file.exists() {
         std::fs::remove_file(&results_file).map_err(|e| {
@@ -1342,14 +1337,7 @@ fn run_concurrent_instances(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     run_dir: &RunDir,
-) -> Result<(
-    Option<BenchResults>,
-    bool,
-    i32,
-    Option<String>,
-    Option<BenchFailureMemorySample>,
-    Option<u128>,
-)> {
+) -> Result<BenchRunExecutionOutcome> {
     let concurrency = args.execution.concurrency;
     let execution_context = Arc::new(execution_context.clone());
     let component = Arc::new(component.clone());

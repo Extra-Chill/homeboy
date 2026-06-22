@@ -902,19 +902,19 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         .map(|workload| workload.id.clone())
         .or_else(|| args.workload_id.clone());
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
-    persist_fuzz_run_evidence(
-        args.run_id.as_deref(),
-        &ctx.component_id,
-        rig_id.as_deref(),
-        workload_id.as_deref(),
-        workload_path.as_deref(),
-        &status,
+    persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+        run_id: args.run_id.as_deref(),
+        component_id: &ctx.component_id,
+        rig_id: rig_id.as_deref(),
+        workload_id: workload_id.as_deref(),
+        workload_path: workload_path.as_deref(),
+        status: &status,
         exit_code,
         success,
-        &args,
-        &results_path,
-        results.as_ref(),
-    )?;
+        args: &args,
+        results_path: &results_path,
+        results: results.as_ref(),
+    })?;
     let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
 
@@ -1006,61 +1006,70 @@ fn fuzz_contract_unsupported(config: Option<&FuzzConfig>) -> Vec<&'static str> {
     unsupported
 }
 
-fn persist_fuzz_run_evidence(
-    run_id: Option<&str>,
-    component_id: &str,
-    rig_id: Option<&str>,
-    workload_id: Option<&str>,
-    workload_path: Option<&str>,
-    status: &str,
+struct FuzzRunEvidenceInput<'a> {
+    run_id: Option<&'a str>,
+    component_id: &'a str,
+    rig_id: Option<&'a str>,
+    workload_id: Option<&'a str>,
+    workload_path: Option<&'a str>,
+    status: &'a str,
     exit_code: i32,
     success: bool,
-    args: &FuzzRunArgs,
-    results_path: &Path,
-    results: Option<&FuzzCampaign>,
+    args: &'a FuzzRunArgs,
+    results_path: &'a Path,
+    results: Option<&'a FuzzCampaign>,
+}
+
+fn persist_fuzz_run_evidence(
+    input: FuzzRunEvidenceInput<'_>,
 ) -> homeboy::core::Result<Option<RunRecord>> {
-    let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) else {
+    let Some(run_id) = input.run_id.filter(|run_id| !run_id.trim().is_empty()) else {
         return Ok(None);
     };
     let store = ObservationStore::open_initialized()?;
     let now = chrono::Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
         "source": "homeboy fuzz run",
-        "workload_id": workload_id,
-        "workload_path": workload_path,
-        "seed": args.seed.clone(),
-        "max_duration": args.max_duration.clone(),
-        "passthrough_args": args.args.clone(),
-        "exit_code": exit_code,
-        "success": success,
-        "status": status,
-        "campaign_id": results.map(|campaign| campaign.id.as_str()),
-        "coverage_completeness": results.map(fuzz_coverage_completeness),
-        "gates": results.map(evaluate_fuzz_gates),
+        "workload_id": input.workload_id,
+        "workload_path": input.workload_path,
+        "seed": input.args.seed.clone(),
+        "max_duration": input.args.max_duration.clone(),
+        "passthrough_args": input.args.args.clone(),
+        "exit_code": input.exit_code,
+        "success": input.success,
+        "status": input.status,
+        "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
+        "coverage_completeness": input.results.map(fuzz_coverage_completeness),
+        "gates": input.results.map(evaluate_fuzz_gates),
     });
     let run = RunRecord {
         id: run_id.to_string(),
         kind: "fuzz".to_string(),
-        component_id: Some(component_id.to_string()),
+        component_id: Some(input.component_id.to_string()),
         started_at: now.clone(),
         finished_at: Some(now),
-        status: if success {
+        status: if input.success {
             RunStatus::Pass.as_str().to_string()
         } else {
             RunStatus::Fail.as_str().to_string()
         },
-        command: Some(fuzz_run_command(component_id, rig_id, workload_id, args)),
+        command: Some(fuzz_run_command(
+            input.component_id,
+            input.rig_id,
+            input.workload_id,
+            input.args,
+        )),
         cwd: std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().to_string()),
         homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         git_sha: None,
-        rig_id: rig_id.map(str::to_string),
+        rig_id: input.rig_id.map(str::to_string),
         metadata_json: metadata,
     };
     store.upsert_imported_run(&run)?;
-    if results_path.is_file() {
-        store.record_artifact(run_id, "fuzz_results", results_path)?;
+    if input.results_path.is_file() {
+        store.record_artifact(run_id, "fuzz_results", input.results_path)?;
     }
     Ok(Some(run))
 }
@@ -1844,6 +1853,7 @@ mod tests {
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),
+            lifecycle: None,
             provenance: None,
             replay: None,
             metadata: serde_json::Value::Null,
@@ -1903,6 +1913,7 @@ mod tests {
                 extra: std::collections::BTreeMap::new(),
             }],
             thresholds: Vec::new(),
+            lifecycle: None,
             provenance: None,
             replay: None,
             metadata: serde_json::Value::Null,
@@ -2003,6 +2014,7 @@ mod tests {
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),
+            lifecycle: None,
             provenance: None,
             replay: None,
             metadata: serde_json::Value::Null,
@@ -2166,19 +2178,19 @@ mod tests {
             let results_path = home.path().join("fuzz-results.json");
             std::fs::write(&results_path, "{}").expect("results file");
 
-            let persisted = persist_fuzz_run_evidence(
-                args.run_id.as_deref(),
-                "component-a",
-                args.rig.as_deref(),
-                args.workload_id.as_deref(),
-                Some("/tmp/fuzz/parser.json"),
-                "passed",
-                0,
-                true,
-                &args,
-                &results_path,
-                None,
-            )
+            let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                results_path: &results_path,
+                results: None,
+            })
             .expect("persist fuzz run")
             .expect("run record");
 
