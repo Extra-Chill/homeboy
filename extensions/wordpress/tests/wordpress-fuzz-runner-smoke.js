@@ -74,7 +74,7 @@ assert.equal(result.seed, 'seed-123');
 assert.equal(result.max_duration_seconds, 30);
 assert.equal(result.wp_codebox_input.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(result.wp_codebox_input.cases[0].target_id, 'rest-posts');
-assert.equal(result.wp_codebox_task_request.executor.config.runtime_task.ability, 'wp-codebox/fuzz-suite');
+assert.equal(result.wp_codebox_task_request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
 assert.equal(result.wp_codebox_plan_recipe.fuzzRun.cases[0].case_id, 'get-posts');
 assert.equal(result.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggregate/v1');
 assert.equal(result.coverage.totals.exercised, 1);
@@ -117,7 +117,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 		dispatchedRequest = request;
 		assert.equal(request.task_id, 'dispatch-run');
 		assert.equal(request.executor.backend, 'codebox');
-		assert.equal(request.executor.config.runtime_task.ability, 'wp-codebox/fuzz-suite');
+		assert.equal(request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
 		assert.equal(request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
 		assert.equal(request.executor.config.runtime_task.input.cases[0].target_id, 'rest-posts');
 		return {

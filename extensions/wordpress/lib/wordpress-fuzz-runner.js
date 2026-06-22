@@ -200,7 +200,7 @@ function normalizeCodeboxResult(workload, context = {}) {
 			{
 				severity: 'warning',
 				code: 'wp_codebox_fuzz_suite_execution_unsupported',
-				message: 'WP Codebox exposes the public fuzz suite contract, but no merged execution API was available to this runner. Provide wp_codebox_suite_result in the workload or install a Codebox runtime that executes wp-codebox/fuzz-suite/v1.',
+				message: 'WP Codebox exposes the public fuzz suite contract, but no merged execution API was available to this runner. Provide wp_codebox_suite_result in the workload or install a Codebox runtime that executes wp-codebox/run-fuzz-suite.',
 			},
 		],
 	});
