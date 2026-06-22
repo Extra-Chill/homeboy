@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.253.2] - 2026-06-22
+
+### Changed
+- refactor(agent-task): make fanout batch cook
+- test(agent-task): keep doctor runner route covered
+
+### Fixed
+- record queued worktrees from registered checkout
+- fix(agent-task): persist queued worktree state
+
 ## [0.253.1] - 2026-06-22
 
 ### Changed
