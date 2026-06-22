@@ -93,7 +93,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
         for value in [&status_value, &logs_value, &review_value] {
             assert_eq!(
                 value["diagnostic_summary"]["message"],
-                "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
             );
             assert_eq!(value["diagnostic_summary"]["class"], "provider_discovery");
             assert_eq!(value["diagnostic_summary"]["task_id"], "task-a");

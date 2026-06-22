@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(
             materialization_plan.env_passthrough,
             vec![
-                "AI_PROVIDER_OPENAI_CODEX_API_KEY".to_string(),
+                "EXAMPLE_PROVIDER_API_KEY".to_string(),
                 "SAMPLE_RUNTIME_BIN".to_string(),
                 "SAMPLE_RUNTIME_HOME".to_string()
             ]

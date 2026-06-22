@@ -236,10 +236,10 @@ fn remap_prunes_stale_unresolved_provider_plugin_path() {
         remote: "/home/user/_lab_workspaces/sample-plugin@cook-abc".to_string(),
     }];
     let config = serde_json::json!({
-        "provider": "codex",
+        "provider": "example-oauth",
         "provider_plugin_paths": [
             "/Users/user/Developer/sample-plugin@cook/vendor/provider",
-            "/Users/user/Developer/ai-provider-for-openai-codex-oauth-provider"
+            "/Users/user/Developer/example-oauth-provider"
         ]
     })
     .to_string();
@@ -276,9 +276,9 @@ fn remap_prunes_all_provider_plugin_paths_when_no_mappings() {
     // unresolvable on the runner and must be pruned so recipe validation never
     // sees a missing extra-plugin path. The array stays present but empty.
     let config = serde_json::json!({
-        "provider": "codex",
+        "provider": "example-oauth",
         "provider_plugin_paths": [
-            "/home/chubes/Developer/ai-provider-for-openai-codex-oauth-provider"
+            "/home/chubes/Developer/example-oauth-provider"
         ]
     })
     .to_string();
@@ -302,7 +302,7 @@ fn remap_prunes_all_provider_plugin_paths_when_no_mappings() {
         0
     );
     // Unrelated config is preserved.
-    assert_eq!(remapped["provider"], "codex");
+    assert_eq!(remapped["provider"], "example-oauth");
 }
 
 #[test]
@@ -342,10 +342,10 @@ fn injects_default_provider_config_for_agent_task_cook() {
     crate::test_support::with_isolated_home(|_| {
         defaults::save_config(&defaults::HomeboyConfig {
             settings: HashMap::from([
-                ("provider".to_string(), serde_json::json!("codex")),
+                ("provider".to_string(), serde_json::json!("example-oauth")),
                 (
                     "provider_plugin_paths".to_string(),
-                    serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
+                    serde_json::json!(["/Users/user/Developer/example-provider@oauth"]),
                 ),
             ]),
             ..defaults::HomeboyConfig::default()
@@ -368,10 +368,10 @@ fn injects_default_provider_config_for_agent_task_cook() {
             + 1;
         let config: serde_json::Value = serde_json::from_str(&out[cfg_idx]).expect("config");
 
-        assert_eq!(config["provider"], "codex");
+        assert_eq!(config["provider"], "example-oauth");
         assert_eq!(
             config["provider_plugin_paths"][0],
-            "/Users/user/Developer/ai-provider-for-openai@codex"
+            "/Users/user/Developer/example-provider@oauth"
         );
         assert!(out.iter().any(|arg| arg == "--prompt"));
     });
@@ -383,7 +383,7 @@ fn injected_default_provider_config_is_remappable() {
         defaults::save_config(&defaults::HomeboyConfig {
             settings: HashMap::from([(
                 "provider_plugin_paths".to_string(),
-                serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
+                serde_json::json!(["/Users/user/Developer/example-provider@oauth"]),
             )]),
             ..defaults::HomeboyConfig::default()
         })
@@ -400,8 +400,8 @@ fn injected_default_provider_config_is_remappable() {
         let remapped = remap_provider_config_in_args(
             &injected,
             &[LabPathRemap {
-                local: "/Users/user/Developer/ai-provider-for-openai@codex".to_string(),
-                remote: "/home/user/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+                local: "/Users/user/Developer/example-provider@oauth".to_string(),
+                remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth"
                     .to_string(),
             }],
         );
@@ -414,7 +414,7 @@ fn injected_default_provider_config_is_remappable() {
 
         assert_eq!(
             config["provider_plugin_paths"][0],
-            "/home/user/Developer/_lab_workspaces/ai-provider-for-openai@codex"
+            "/home/user/Developer/_lab_workspaces/example-provider@oauth"
         );
     });
 }
@@ -425,7 +425,7 @@ fn explicit_provider_config_prevents_default_injection() {
         defaults::save_config(&defaults::HomeboyConfig {
             settings: HashMap::from([(
                 "provider_plugin_paths".to_string(),
-                serde_json::json!(["/Users/user/Developer/ai-provider-for-openai@codex"]),
+                serde_json::json!(["/Users/user/Developer/example-provider@oauth"]),
             )]),
             ..defaults::HomeboyConfig::default()
         })
