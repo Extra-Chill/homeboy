@@ -13,6 +13,7 @@ use crate::core::execution_contract::{
 };
 use crate::core::observation::{ArtifactRecord, ObservationStore, RunRecord};
 use crate::core::paths;
+use crate::core::redaction::redact_argv_display;
 
 use super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
 use super::{load, status, Runner, RunnerArtifactRef, RunnerTunnelMode};
@@ -553,7 +554,7 @@ fn mirror_job_run(
         started_at: ms_to_rfc3339(job.started_at_ms.unwrap_or(job.created_at_ms)),
         finished_at: job.finished_at_ms.map(ms_to_rfc3339),
         status: job_status_as_run_status(job.status).to_string(),
-        command: Some(command.join(" ")),
+        command: Some(redact_argv_display(command)),
         cwd: Some(cwd.to_string()),
         homeboy_version: None,
         git_sha: None,

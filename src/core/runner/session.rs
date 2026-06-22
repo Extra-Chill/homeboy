@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::core::redaction::redact_argv_display;
+
 use crate::core::api_jobs::{ActiveRunnerJobSummary, Job, JobArtifactMetadata, JobStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,7 +261,7 @@ impl RunnerJob {
             job_id: job.id.to_string(),
             operation: job.operation.clone(),
             status: job.status,
-            command: command.join(" "),
+            command: redact_argv_display(command),
             cwd,
             source: source.to_string(),
             lifecycle_owner: if source == "broker" {
