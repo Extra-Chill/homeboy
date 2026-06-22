@@ -109,6 +109,123 @@ pub struct GithubPrView {
     pub merge_state: Option<String>,
     pub ci_state: String,
     pub ci_summary: String,
+    pub ci_next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityReconcileOutput {
+    pub component_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub action: String,
+    pub number: u64,
+    pub classification: String,
+    pub recommended_action: String,
+    pub github: PrMergeabilityGithubEvidence,
+    pub git: PrMergeabilityGitEvidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityGithubEvidence {
+    pub state: String,
+    pub base: String,
+    pub head: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    pub ci_state: String,
+    pub ci_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityGitEvidence {
+    pub base_ref: String,
+    pub base_sha: String,
+    pub head_ref: String,
+    pub head_sha: String,
+    pub merge_tree_clean: bool,
+    pub merge_tree_exit_code: Option<i32>,
+    pub merge_tree_stdout: String,
+    pub merge_tree_stderr: String,
+    pub head_matches_github: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrFleetOptions {
+    pub refs: Vec<String>,
+    pub update_branches: bool,
+    pub apply: bool,
+    pub merge_method: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubPrFleetOutput {
+    pub component_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub action: String,
+    pub success: bool,
+    pub apply: bool,
+    pub update_branches: bool,
+    pub summary: GithubPrFleetSummary,
+    pub items: Vec<GithubPrFleetItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GithubPrFleetSummary {
+    pub total: usize,
+    pub mergeable: usize,
+    pub merged: usize,
+    pub updated: usize,
+    pub blocked: usize,
+    pub errors: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubPrFleetItem {
+    pub input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    pub check_rollup: GithubPrCheckRollup,
+    pub stale_base: bool,
+    pub conflicts: bool,
+    pub mergeable: bool,
+    pub required_action: String,
+    pub updated: bool,
+    pub merged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GithubPrCheckRollup {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub unknown: usize,
 }
 
 /// Result of a find-many operation (list of matches).
@@ -218,6 +335,14 @@ pub struct PrFindOptions {
     pub head: Option<String>,
     pub state: PrState,
     pub limit: usize,
+    /// Optional workspace path. See [`IssueCreateOptions::path`].
+    pub path: Option<String>,
+}
+
+/// Parameters for reconciling GitHub PR mergeability with local git evidence.
+#[derive(Debug, Clone, Default)]
+pub struct PrMergeabilityReconcileOptions {
+    pub number: u64,
     /// Optional workspace path. See [`IssueCreateOptions::path`].
     pub path: Option<String>,
 }

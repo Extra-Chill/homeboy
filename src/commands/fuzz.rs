@@ -13,6 +13,7 @@ use homeboy::core::fuzz::{
     FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
     FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
+use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
@@ -592,6 +593,25 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     };
     let exit_code = runner_output.exit_code;
     let success = runner_output.success;
+    let status = if success { "passed" } else { "failed" }.to_string();
+    let rig_id = rig_context.map(|context| context.spec.id);
+    let workload_id = selected_workload
+        .map(|workload| workload.id.clone())
+        .or_else(|| args.workload_id.clone());
+    let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
+    persist_fuzz_run_evidence(
+        args.run_id.as_deref(),
+        &ctx.component_id,
+        rig_id.as_deref(),
+        workload_id.as_deref(),
+        workload_path.as_deref(),
+        &status,
+        exit_code,
+        success,
+        &args,
+        &results_path,
+        results.as_ref(),
+    )?;
     let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
 
     Ok((
@@ -599,12 +619,10 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
             kind: "fuzz".to_string(),
             command: "fuzz.run".to_string(),
             component: ctx.component_id,
-            rig_id: rig_context.map(|context| context.spec.id),
-            status: if success { "passed" } else { "failed" }.to_string(),
-            workload_id: selected_workload
-                .map(|workload| workload.id.clone())
-                .or(args.workload_id),
-            workload_path: selected_workload.and_then(|workload| workload.manifest_path.clone()),
+            rig_id,
+            status,
+            workload_id,
+            workload_path,
             run_id: args.run_id,
             seed: args.seed,
             max_duration: args.max_duration,
@@ -625,6 +643,99 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         },
         exit_code,
     ))
+}
+
+fn persist_fuzz_run_evidence(
+    run_id: Option<&str>,
+    component_id: &str,
+    rig_id: Option<&str>,
+    workload_id: Option<&str>,
+    workload_path: Option<&str>,
+    status: &str,
+    exit_code: i32,
+    success: bool,
+    args: &FuzzRunArgs,
+    results_path: &Path,
+    results: Option<&FuzzCampaign>,
+) -> homeboy::core::Result<Option<RunRecord>> {
+    let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let store = ObservationStore::open_initialized()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let metadata = serde_json::json!({
+        "source": "homeboy fuzz run",
+        "workload_id": workload_id,
+        "workload_path": workload_path,
+        "seed": args.seed.clone(),
+        "max_duration": args.max_duration.clone(),
+        "passthrough_args": args.args.clone(),
+        "exit_code": exit_code,
+        "success": success,
+        "status": status,
+        "campaign_id": results.map(|campaign| campaign.id.as_str()),
+        "coverage_completeness": results.map(fuzz_coverage_completeness),
+        "gates": results.map(evaluate_fuzz_gates),
+    });
+    let run = RunRecord {
+        id: run_id.to_string(),
+        kind: "fuzz".to_string(),
+        component_id: Some(component_id.to_string()),
+        started_at: now.clone(),
+        finished_at: Some(now),
+        status: if success {
+            RunStatus::Pass.as_str().to_string()
+        } else {
+            RunStatus::Fail.as_str().to_string()
+        },
+        command: Some(fuzz_run_command(component_id, rig_id, workload_id, args)),
+        cwd: std::env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string()),
+        homeboy_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        git_sha: None,
+        rig_id: rig_id.map(str::to_string),
+        metadata_json: metadata,
+    };
+    store.upsert_imported_run(&run)?;
+    if results_path.is_file() {
+        store.record_artifact(run_id, "fuzz_results", results_path)?;
+    }
+    Ok(Some(run))
+}
+
+fn fuzz_run_command(
+    component_id: &str,
+    rig_id: Option<&str>,
+    workload_id: Option<&str>,
+    args: &FuzzRunArgs,
+) -> String {
+    let mut parts = vec![
+        "homeboy".to_string(),
+        "fuzz".to_string(),
+        "run".to_string(),
+        component_id.to_string(),
+    ];
+    if let Some(rig_id) = rig_id {
+        parts.extend(["--rig".to_string(), rig_id.to_string()]);
+    }
+    if let Some(workload_id) = workload_id {
+        parts.extend(["--workload".to_string(), workload_id.to_string()]);
+    }
+    if let Some(run_id) = args.run_id.as_ref() {
+        parts.extend(["--run-id".to_string(), run_id.clone()]);
+    }
+    if let Some(seed) = args.seed.as_ref() {
+        parts.extend(["--seed".to_string(), seed.clone()]);
+    }
+    if let Some(max_duration) = args.max_duration.as_ref() {
+        parts.extend(["--max-duration".to_string(), max_duration.clone()]);
+    }
+    if !args.args.is_empty() {
+        parts.push("--".to_string());
+        parts.extend(args.args.clone());
+    }
+    parts.join(" ")
 }
 
 fn fuzz_evidence_followups(run_id: Option<&str>) -> Vec<String> {
@@ -1114,6 +1225,7 @@ fn select_workload<'a>(
 mod tests {
     use super::*;
     use clap::Parser;
+    use homeboy::test_support::with_isolated_home;
 
     #[derive(Parser)]
     struct FuzzCli {
@@ -1456,6 +1568,70 @@ mod tests {
         assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    }
+
+    #[test]
+    fn fuzz_run_persists_requested_run_id_and_results_artifact() {
+        with_isolated_home(|home| {
+            let args = FuzzRunArgs {
+                comp: PositionalComponentArgs {
+                    component: Some("component-a".to_string()),
+                    path: None,
+                },
+                rig: Some("package-fuzz".to_string()),
+                extension_override: ExtensionOverrideArgs { extensions: vec![] },
+                setting_args: SettingArgs {
+                    setting: vec![],
+                    setting_json: vec![],
+                },
+                workload_id: Some("parser".to_string()),
+                run_id: Some("proof-1".to_string()),
+                seed: Some("1234".to_string()),
+                max_duration: None,
+                args: vec![],
+            };
+            let results_path = home.path().join("fuzz-results.json");
+            std::fs::write(&results_path, "{}").expect("results file");
+
+            let persisted = persist_fuzz_run_evidence(
+                args.run_id.as_deref(),
+                "component-a",
+                args.rig.as_deref(),
+                args.workload_id.as_deref(),
+                Some("/tmp/fuzz/parser.json"),
+                "passed",
+                0,
+                true,
+                &args,
+                &results_path,
+                None,
+            )
+            .expect("persist fuzz run")
+            .expect("run record");
+
+            assert_eq!(persisted.id, "proof-1");
+            assert_eq!(persisted.kind, "fuzz");
+            assert_eq!(persisted.status, "pass");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run("proof-1")
+                .expect("get run")
+                .expect("persisted run");
+            assert_eq!(run.component_id.as_deref(), Some("component-a"));
+            assert_eq!(run.rig_id.as_deref(), Some("package-fuzz"));
+            assert_eq!(run.metadata_json["workload_id"], "parser");
+            assert_eq!(run.metadata_json["seed"], "1234");
+            assert!(run
+                .command
+                .as_deref()
+                .unwrap_or_default()
+                .contains("homeboy fuzz run component-a"));
+            let artifacts = store.list_artifacts("proof-1").expect("artifacts");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].kind, "fuzz_results");
+            assert_eq!(artifacts[0].artifact_type, "file");
+            assert!(std::path::Path::new(&artifacts[0].path).is_file());
+        });
     }
 
     #[test]
