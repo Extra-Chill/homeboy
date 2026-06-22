@@ -19,7 +19,8 @@ documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md)
 They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
 helper contract.
 
-Generic fanout/reconcile JSON planning is documented in
+Generic runtime fanout/reconcile planning and runner primitives live in
+`runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
 
 Integration-specific examples live under [`docs/integrations/`](docs/integrations/)

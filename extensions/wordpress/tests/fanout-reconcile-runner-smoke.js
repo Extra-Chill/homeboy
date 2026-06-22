@@ -1,14 +1,23 @@
 'use strict';
 
+/* eslint-disable no-console */
+
+/**
+ * External dependencies
+ */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+
+/**
+ * Internal dependencies
+ */
 const {
   createFanoutReconcilePlan,
   executeFanoutReconcileRun,
   groupFanoutItems,
-} = require('../lib/fanout-reconcile-runner');
+} = require('../../runtime-agent-ci/lib/fanout-reconcile-runner');
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
