@@ -46,6 +46,13 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "fuzz",
+        variant: "contract",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("contract"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
         variant: "list",
         discriminator_field: Some("variant"),
         discriminator_value: Some("list"),
@@ -53,9 +60,37 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "fuzz",
+        variant: "plan",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("plan"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
         variant: "run",
         discriminator_field: Some("variant"),
         discriminator_value: Some("run"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
+        variant: "validate",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("validate"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
+        variant: "report",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("report"),
+        golden_fixture: None,
+    },
+    PublicOutputVariantContract {
+        command: "fuzz",
+        variant: "replay",
+        discriminator_field: Some("variant"),
+        discriminator_value: Some("replay"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
