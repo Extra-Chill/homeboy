@@ -1,13 +1,21 @@
 'use strict';
 
+/**
+ * External dependencies
+ */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+/**
+ * Internal dependencies
+ */
 const {
   calculatePublishSet,
+  ensureReviewRequest,
   evaluateSideEffectPolicy,
+  preparePublication,
   publicationTemplates,
   publishWorkspace,
   validateWritablePaths,
@@ -67,6 +75,107 @@ assert.deepEqual(templates, {
   base: 'trunk',
 });
 
+const prepared = preparePublication({
+  target_repo: 'owner/repo',
+  agent_slug: 'fixture agent',
+  provider: 'openai',
+  model: 'gpt-5.5',
+  workload_id: 'fixture-workload',
+  runner_workspace: { branch: 'agent artifacts/{agent_slug}-{run_id}', from: 'origin/trunk' },
+}, {}, {
+  id: 'fixture-workload',
+  metadata: { job_id: 'job-1' },
+}, ['docs/generated.md'], {
+  env: { GITHUB_RUN_ID: '12345', HOMEBOY_HOST_LIFECYCLE_DRY_RUN: '1' },
+});
+assert.equal(prepared.changed, true);
+assert.equal(prepared.dry_run, true);
+assert.equal(prepared.branch, 'agent-artifacts/fixture-agent-12345');
+assert.deepEqual(prepared.publication_evidence_ref, {
+  type: 'branch',
+  provider: 'github',
+  repo: 'owner/repo',
+  head: 'agent-artifacts/fixture-agent-12345',
+  base: 'trunk',
+  url: '',
+  action: '',
+  pr_number: null,
+  pr_state: '',
+  files: ['docs/generated.md'],
+});
+
+{
+  const calls = [];
+  const review = ensureReviewRequest('/workspace', 'agent-artifacts/fixture-agent-12345', {
+    base: 'trunk',
+    title: 'Updated title',
+    body: 'Updated body',
+  }, {
+    run(command, args, options = {}) {
+      calls.push({ command, args, cwd: options.cwd });
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        return { status: 0, stdout: JSON.stringify({ number: 47, state: 'OPEN', url: 'https://github.com/owner/repo/pull/47' }), stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(review.action, 'updated');
+  assert.equal(review.url, 'https://github.com/owner/repo/pull/47');
+  assert.deepEqual(review.publication_evidence_ref, {
+    type: 'pull_request',
+    provider: 'github',
+    repo: '',
+    head: 'agent-artifacts/fixture-agent-12345',
+    base: 'trunk',
+    url: 'https://github.com/owner/repo/pull/47',
+    action: 'updated',
+    pr_number: 47,
+    pr_state: 'OPEN',
+    files: [],
+  });
+  assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
+    ['pr', 'view'],
+    ['pr', 'edit'],
+  ]);
+}
+
+{
+  const calls = [];
+  const review = ensureReviewRequest('/workspace', 'agent-artifacts/fixture-agent-12345', {
+    base: 'trunk',
+    title: 'Updated title',
+    body: 'Updated body',
+  }, {
+    env: { GITHUB_RUN_ID: '999' },
+    run(command, args, options = {}) {
+      calls.push({ command, args, cwd: options.cwd });
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        return { status: 0, stdout: JSON.stringify({ number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' }), stderr: '' };
+      }
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'reopen') {
+        return { status: 1, stdout: '', stderr: 'Could not open the pull request' };
+      }
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'create') {
+        return { status: 0, stdout: 'https://github.com/owner/repo/pull/1291\n', stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(review.action, 'created_after_closed_pr');
+  assert.equal(review.head, 'agent-artifacts/fixture-agent-12345-run-999');
+  assert.equal(review.closed_pr_number, 47);
+  assert.match(review.reopen_error, /Could not open the pull request/);
+  assert.equal(review.publication_evidence_ref.type, 'pull_request');
+  assert.equal(review.publication_evidence_ref.head, 'agent-artifacts/fixture-agent-12345-run-999');
+  assert.equal(review.publication_evidence_ref.action, 'created_after_closed_pr');
+  assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
+    ['pr', 'view'],
+    ['pr', 'reopen'],
+    ['pr', 'create'],
+  ]);
+  assert.equal(calls.some((call) => call.command === 'git' && call.args[0] === 'push'), true);
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-workspace-publication-lifecycle.'));
 try {
   const workspace = path.join(tmp, 'repo');
@@ -120,6 +229,18 @@ try {
   assert.equal(publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.equal(publication.action, 'created');
   assert.deepEqual(publication.files, ['docs/generated.md']);
+  assert.deepEqual(publication.publication_evidence_ref, {
+    type: 'pull_request',
+    provider: 'github',
+    repo: 'owner/repo',
+    head: 'agent-artifacts/fixture-agent-12345',
+    base: 'trunk',
+    url: 'https://github.com/owner/repo/pull/1291',
+    action: 'created',
+    pr_number: null,
+    pr_state: 'OPEN',
+    files: ['docs/generated.md'],
+  });
   assert.deepEqual(calls.filter((call) => call.command === 'gh').map((call) => call.args.slice(0, 2)), [
     ['pr', 'view'],
     ['pr', 'create'],
