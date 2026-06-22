@@ -11,7 +11,7 @@ pub type RunsEvidenceOutput = RunEvidenceReport<RunSummary>;
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let run = require_run(&store, run_id)?;
-    let artifacts = runs_service::enrich_artifact_links(store.list_artifacts(run_id)?);
+    let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
     let artifact_root = homeboy::core::artifacts::root()?;
     let disk_budget = disk::disk_budget(
         &artifact_root,
@@ -324,6 +324,84 @@ mod tests {
             assert_eq!(output.run.status, "running");
             assert_eq!(output.failure.status, "running");
             assert!(!output.failure.failed);
+        });
+    }
+
+    #[test]
+    fn evidence_includes_related_lab_fuzz_results_for_runner_failure() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let store = ObservationStore::open_initialized().expect("store");
+            let remote_job_id = "remote-job-5997";
+            let runner_run = store
+                .start_run(sample_run(
+                    "runner-exec",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "lab": {
+                            "runner": { "id": "lab-runner" },
+                            "remote_job_id": remote_job_id
+                        }
+                    }),
+                ))
+                .expect("runner run");
+            store
+                .finish_run(&runner_run.id, RunStatus::Fail, None)
+                .expect("finish runner run");
+            let fuzz_run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "lab": { "remote_job_id": remote_job_id }
+                    }),
+                ))
+                .expect("fuzz run");
+            store
+                .finish_run(&fuzz_run.id, RunStatus::Fail, None)
+                .expect("finish fuzz run");
+            let results_path = home.path().join("fuzz-results.json");
+            std::fs::write(
+                &results_path,
+                br#"{"schema":"homeboy/fuzz-result-envelope/v1","campaign":{"id":"raw"}}"#,
+            )
+            .expect("write fuzz results");
+            store
+                .record_artifact(&fuzz_run.id, "fuzz_results", &results_path)
+                .expect("record fuzz results");
+
+            let (output, _) = evidence(&runner_run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            let raw_results = output
+                .artifact_index
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.kind == "fuzz_results")
+                .expect("raw fuzz results artifact is discoverable");
+            assert_eq!(raw_results.artifact_type, "file");
+            assert_eq!(
+                raw_results.address.kind,
+                ArtifactAddressKind::LocalOperatorPath
+            );
+            let expected_fetch_command = format!(
+                "homeboy runs artifact get {} {} -o <path>",
+                fuzz_run.id, raw_results.id
+            );
+            assert_eq!(
+                raw_results.fetch_command.as_deref(),
+                Some(expected_fetch_command.as_str())
+            );
+            assert!(raw_results.exists);
+            homeboy::core::set_artifact_root_override(None);
         });
     }
 }
