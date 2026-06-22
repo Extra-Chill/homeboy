@@ -6,8 +6,10 @@ use homeboy::core::extension::{
     UpdateEntry,
 };
 use homeboy::core::project::{self, Project};
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::commands::runner::{wp_codebox_tool_diagnostics, RunnerToolDiagnostics};
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -259,7 +261,11 @@ pub enum ExtensionOutput {
         output: Option<homeboy::core::engine::command::CapturedOutput>,
     },
     #[serde(rename = "extension.setup")]
-    Setup { extension_id: String },
+    Setup {
+        extension_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wp_codebox: Option<RunnerToolDiagnostics>,
+    },
     #[serde(rename = "extension.install")]
     Install {
         extension_id: String,
@@ -280,6 +286,8 @@ pub enum ExtensionOutput {
         uninstalled_previous: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_revision: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wp_codebox: Option<RunnerToolDiagnostics>,
     },
     #[serde(rename = "extension.replace")]
     Replace {
@@ -622,6 +630,7 @@ fn refresh_extension(
 
     Ok((
         ExtensionOutput::Refresh {
+            wp_codebox: extension_wp_codebox_diagnostics(&result.extension_id),
             extension_id: result.extension_id,
             source: result.url,
             path: result.path.to_string_lossy().to_string(),
@@ -777,9 +786,30 @@ fn setup_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
     Ok((
         ExtensionOutput::Setup {
             extension_id: extension_id.to_string(),
+            wp_codebox: extension_wp_codebox_diagnostics(extension_id),
         },
         result.exit_code,
     ))
+}
+
+fn extension_wp_codebox_diagnostics(extension_id: &str) -> Option<RunnerToolDiagnostics> {
+    if extension_id != "wordpress" {
+        return None;
+    }
+    let env = [
+        "HOMEBOY_WP_CODEBOX_BIN",
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+        "HOMEBOY_WP_CODEBOX_INSTALL_DIR",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| (name.to_string(), value))
+    })
+    .collect::<BTreeMap<_, _>>();
+
+    Some(wp_codebox_tool_diagnostics(None, &env))
 }
 
 fn run_action(

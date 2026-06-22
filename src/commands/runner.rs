@@ -98,6 +98,18 @@ pub struct LabRunnerHomeboyOutput {
     pub upgrade_command: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerToolDiagnostics {
+    pub tool: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_binary: Option<String>,
+    pub configured_binary_source: &'static str,
+    pub managed_cache_source: String,
+    pub managed_cache_binary: String,
+    pub effective_binary_rule: &'static str,
+    pub diagnostic_command: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RunnerOperatorCommand {
     pub scope: &'static str,
@@ -206,6 +218,8 @@ pub struct RunnerSecretEnvReferenceOutput {
 pub struct RunnerEnvDiagnostics {
     pub server_shell_env: String,
     pub runner_job_env: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wp_codebox: Option<RunnerToolDiagnostics>,
 }
 
 #[derive(Args)]
@@ -1386,6 +1400,51 @@ fn lab_runner_homeboy_output(
     }
 }
 
+pub(crate) fn wp_codebox_tool_diagnostics(
+    runner_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> RunnerToolDiagnostics {
+    let configured = env
+        .get("HOMEBOY_WP_CODEBOX_BIN")
+        .cloned()
+        .or_else(|| env.get("HOMEBOY_SETTINGS_WP_CODEBOX_BIN").cloned());
+    let configured_binary_source = if env.contains_key("HOMEBOY_WP_CODEBOX_BIN") {
+        "HOMEBOY_WP_CODEBOX_BIN"
+    } else if env.contains_key("HOMEBOY_SETTINGS_WP_CODEBOX_BIN") {
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN"
+    } else {
+        "unset"
+    };
+    let install_dir = env
+        .get("HOMEBOY_WP_CODEBOX_INSTALL_DIR")
+        .cloned()
+        .unwrap_or_else(|| "${HOME}/.cache/homeboy/wp-codebox".to_string());
+    let managed_cache_source = format!("{}/source", install_dir.trim_end_matches('/'));
+    let managed_cache_binary = format!("{managed_cache_source}/packages/cli/dist/index.js");
+    RunnerToolDiagnostics {
+        tool: "wp-codebox",
+        configured_binary: configured,
+        configured_binary_source,
+        managed_cache_source,
+        managed_cache_binary,
+        effective_binary_rule:
+            "managed cache binary wins when executable; otherwise configured binary, then PATH",
+        diagnostic_command: wp_codebox_effective_binary_command(runner_id),
+    }
+}
+
+pub(crate) fn wp_codebox_effective_binary_command(runner_id: Option<&str>) -> String {
+    let script = "configured=${HOMEBOY_WP_CODEBOX_BIN:-${HOMEBOY_SETTINGS_WP_CODEBOX_BIN:-}}; install_dir=${HOMEBOY_WP_CODEBOX_INSTALL_DIR:-$HOME/.cache/homeboy/wp-codebox}; managed_source=$install_dir/source; managed_binary=$managed_source/packages/cli/dist/index.js; if [ -x \"$managed_binary\" ]; then effective=$managed_binary; source=managed_cache; elif [ -n \"$configured\" ]; then effective=$configured; source=configured; else effective=$(command -v wp-codebox 2>/dev/null || true); source=path; fi; revision=$(git -C \"$managed_source\" rev-parse --short HEAD 2>/dev/null || true); printf 'configured_binary=%s\nmanaged_cache_source=%s\nmanaged_cache_binary=%s\neffective_binary=%s\neffective_source=%s\nmanaged_cache_revision=%s\n' \"${configured:-}\" \"$managed_source\" \"$managed_binary\" \"${effective:-}\" \"$source\" \"${revision:-}\"";
+    match runner_id {
+        Some(runner_id) => format!(
+            "homeboy runner exec {} --raw -- bash -lc {}",
+            shell_arg(runner_id),
+            shell_arg(script)
+        ),
+        None => format!("bash -lc {}", shell_arg(script)),
+    }
+}
+
 fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
     let binary = shell_arg(homeboy_path);
     vec![
@@ -1458,6 +1517,11 @@ fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "homeboy_binary_upgrade",
             command: format!("homeboy upgrade --force --upgrade-runner {runner_arg}"),
             purpose: "Upgrade the Homeboy binary configured for this runner before reconnecting stale runs.",
+        },
+        LabFollowup {
+            label: "wp_codebox_effective_binary",
+            command: wp_codebox_effective_binary_command(Some(runner_id)),
+            purpose: "Print the configured WP Codebox binary, managed cache binary/source, effective binary/source, and managed cache revision used by runner workloads.",
         },
         LabFollowup {
             label: "exec",
@@ -1900,10 +1964,18 @@ fn display_path(path: std::path::PathBuf) -> String {
 fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
     let runner = runner::load(runner_id)?;
     let effective_env = runner::effective_env(runner_id)?;
-    let env = effective_env
-        .into_keys()
+    let diagnostic_env = effective_env.into_iter().collect::<BTreeMap<_, _>>();
+    let env = diagnostic_env
+        .keys()
+        .cloned()
         .map(|key| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
+
+    let wp_codebox = Some(wp_codebox_tool_diagnostics(
+        Some(runner_id),
+        &diagnostic_env,
+    ));
+
     let secret_env = runner
         .secret_env
         .into_iter()
@@ -1922,6 +1994,7 @@ fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
                 runner_job_env: "This output shows configured public env Homeboy injects into runner jobs. secret_env entries are shown as refs only; their values resolve on the runner at execution time and are never printed here.".to_string(),
+                wp_codebox,
             },
         },
         0,
@@ -2329,6 +2402,7 @@ mod tests {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
+                wp_codebox: None,
             },
         };
 
@@ -2365,6 +2439,7 @@ mod tests {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
+                wp_codebox: None,
             },
         };
 
@@ -2406,6 +2481,7 @@ mod tests {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "shell".to_string(),
                 runner_job_env: "runner".to_string(),
+                wp_codebox: None,
             },
         };
 
@@ -2420,6 +2496,47 @@ mod tests {
             true
         );
         assert!(!value.to_string().contains("dummy-secret"));
+    }
+
+    #[test]
+    fn wp_codebox_diagnostics_distinguish_configured_managed_and_effective() {
+        let diagnostics = wp_codebox_tool_diagnostics(
+            Some("homeboy-lab"),
+            &BTreeMap::from([
+                (
+                    "HOMEBOY_WP_CODEBOX_BIN".to_string(),
+                    "/stale/wp-codebox/packages/cli/dist/index.js".to_string(),
+                ),
+                (
+                    "HOMEBOY_WP_CODEBOX_INSTALL_DIR".to_string(),
+                    "/home/chubes/.cache/homeboy/wp-codebox".to_string(),
+                ),
+            ]),
+        );
+
+        assert_eq!(diagnostics.tool, "wp-codebox");
+        assert_eq!(
+            diagnostics.configured_binary.as_deref(),
+            Some("/stale/wp-codebox/packages/cli/dist/index.js")
+        );
+        assert_eq!(
+            diagnostics.configured_binary_source,
+            "HOMEBOY_WP_CODEBOX_BIN"
+        );
+        assert_eq!(
+            diagnostics.managed_cache_source,
+            "/home/chubes/.cache/homeboy/wp-codebox/source"
+        );
+        assert_eq!(
+            diagnostics.managed_cache_binary,
+            "/home/chubes/.cache/homeboy/wp-codebox/source/packages/cli/dist/index.js"
+        );
+        assert!(diagnostics
+            .effective_binary_rule
+            .contains("managed cache binary wins"));
+        assert!(diagnostics
+            .diagnostic_command
+            .contains("effective_source=%s"));
     }
 
     #[test]
