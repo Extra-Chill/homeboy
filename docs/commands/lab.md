@@ -11,16 +11,14 @@ managed follow-up work.
 
 ```bash
 homeboy lab status
-homeboy lab bench <component> [options] [-- <runner-args>]
 homeboy lab extension-sync --runner <runner-id> --source <url-or-path> --id <extension-id> --ref <ref>
 ```
 
 ## Description
 
-The `lab` command remains a compatibility shortcut for Lab runner availability,
-benchmark routing, and the Homeboy-managed follow-up commands to use when a Lab
-run needs diagnosis or replay. For normal benchmark runs, prefer
-`homeboy bench <component>`: Homeboy
+The `lab` command remains a compatibility shortcut for Lab runner availability
+and the Homeboy-managed follow-up commands to use when a Lab run needs diagnosis
+or replay. For normal benchmark runs, use `homeboy bench <component>`: Homeboy
 automatically selects a Lab runner when the component declares
 `lab.preferred_runner` or when exactly one Lab runner is configured.
 
@@ -79,11 +77,6 @@ runner Homeboy command before remote execution starts. Legacy
 `lab.self_command_prefix` values in `homeboy.json` are ignored and are not
 preserved by portable config rewrites.
 
-`homeboy lab bench` is a routing helper, not a benchmark executor. It prints the
-equivalent `homeboy bench ...` command plus the same managed follow-up hints so
-the operator can run the benchmark through the normal benchmark pipeline and keep
-failed follow-up work inside the Homeboy workflow.
-
 `homeboy lab extension-sync` updates a Lab runner's installed extension through
 the runner API. Use it to pin a runner-side runtime dependency, such as the
 installed Homeboy Extensions `wordpress` extension, to a specific source ref
@@ -106,8 +99,6 @@ debugging.
 ## Commands
 
 - `status`: Show configured Lab runners and benchmark routing guidance.
-- `bench`: Print the standard `homeboy bench ...` command for the provided
-  arguments with Lab routing guidance and managed follow-up commands.
 - `extension-sync`: Install or replace a Lab runner extension from a source and
   ref. Successful output returns the runner id, runner `homeboy_path`, install
   command, and remote execution output; failures surface the runner-side root

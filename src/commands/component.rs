@@ -160,6 +160,7 @@ enum ComponentCommand {
         skip_dependencies: bool,
     },
     /// Add a version target to a component
+    #[command(hide = true)]
     AddVersionTarget {
         /// Component ID
         id: String,
@@ -374,9 +375,17 @@ pub fn run(
             source.as_deref(),
             skip_dependencies,
         ),
-        ComponentCommand::AddVersionTarget { id, file, pattern } => {
-            add_version_target(&id, &file, &pattern)
-        }
+        ComponentCommand::AddVersionTarget { id, file, pattern } => Err(
+            homeboy::core::Error::validation_invalid_argument(
+                "component.add-version-target",
+                "`homeboy component add-version-target` is deprecated; use `homeboy component set --version-target`",
+                None,
+                Some(vec![format!(
+                    "Use: homeboy component set {} --version-target '{}::{}'",
+                    id, file, pattern
+                )]),
+            ),
+        ),
         ComponentCommand::Reconcile { id, apply } => reconcile(&id, apply),
         ComponentCommand::Artifacts { id, path, apply } => {
             artifacts(id.as_deref(), path.as_deref(), apply)
@@ -714,60 +723,6 @@ fn set(
                 exit_code,
             ))
         }
-    }
-}
-
-fn add_version_target(id: &str, file: &str, pattern: &str) -> CmdResult<ComponentOutput> {
-    // Validate pattern is a valid regex with capture group
-    component::validate_version_pattern(pattern)?;
-
-    // Load component to check existing targets
-    let comp = component::load(id).map_err(|e| e.with_contextual_hint())?;
-
-    // Validate no conflicting target exists
-    if let Some(ref existing) = comp.version_targets {
-        component::validate_version_target_conflict(existing, file, pattern, id)?;
-    }
-
-    let version_target = serde_json::json!({
-        "version_targets": [{
-            "file": file,
-            "pattern": pattern
-        }]
-    });
-
-    let json_string = homeboy::core::config::to_json_string(&version_target)?;
-
-    match component::merge(Some(id), &json_string, &[])? {
-        homeboy::core::MergeOutput::Single(result) => {
-            let comp = component::load(&result.id)?;
-            Ok((
-                ComponentOutput {
-                    command: "component.add-version-target".to_string(),
-                    id: Some(result.id),
-                    updated_fields: result.updated_fields,
-                    entity: Some({
-                        let mut value = serde_json::to_value(&comp).map_err(|error| {
-                            homeboy::core::Error::validation_invalid_argument(
-                                "component",
-                                "Failed to serialize component",
-                                Some(error.to_string()),
-                                None,
-                            )
-                        })?;
-                        if let Value::Object(ref mut map) = value {
-                            map.insert("id".to_string(), Value::String(comp.id.clone()));
-                        }
-                        value
-                    }),
-                    ..Default::default()
-                },
-                0,
-            ))
-        }
-        homeboy::core::MergeOutput::Bulk(_) => Err(homeboy::core::Error::internal_unexpected(
-            "Unexpected bulk result for single component".to_string(),
-        )),
     }
 }
 

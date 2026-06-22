@@ -28,12 +28,6 @@ enum LabCommand {
         #[arg(long)]
         runner: Option<String>,
     },
-    /// Print the runner-backed benchmark command for the provided bench args
-    Bench {
-        /// Arguments to pass after `homeboy bench`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Sync an extension install on a Lab runner by source and git ref
     ExtensionSync {
         /// Runner ID. Defaults to lab.preferred_runner or the only configured SSH Lab runner.
@@ -166,32 +160,6 @@ pub fn run(args: LabArgs, _global: &GlobalArgs) -> CmdResult<LabCommandOutput> {
                         "Use `homeboy config set /lab/preferred_runner '\"<runner-id>\"'` to set the default Lab runner.".to_string(),
                         "Use `homeboy config set /bench/local_execution '\"denied\"'` to make local benchmark execution fail closed.".to_string(),
                         "Use `--runner <runner-id>` only when multiple Lab runners are available and no default should be inferred.".to_string(),
-                    ],
-                })),
-                0,
-            ))
-        }
-        LabCommand::Bench { args } => {
-            let managed_followups =
-                lab_followups(preferred_runner.as_deref(), current_workspace.as_deref());
-            let mut bench_command = "homeboy bench".to_string();
-            if !args.is_empty() {
-                bench_command.push(' ');
-                bench_command.push_str(&args.join(" "));
-            }
-            Ok((
-                LabCommandOutput::Status(Box::new(LabOutput {
-                    command: "lab.bench",
-                    preferred_runner,
-                    selected_runner: None,
-                    config_key: "/lab/preferred_runner",
-                    config_path,
-                    current_workspace,
-                    managed_followups,
-                    guidance: vec![
-                        bench_command,
-                        "Homeboy auto-routes portable benchmarks to `lab.preferred_runner`, or to the only configured SSH Lab runner when there is exactly one.".to_string(),
-                        "Use `--runner <runner-id>` only to override an ambiguous or non-default Lab selection.".to_string(),
                     ],
                 })),
                 0,

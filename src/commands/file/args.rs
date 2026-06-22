@@ -122,6 +122,7 @@ pub(crate) enum FileCommand {
         recursive: bool,
     },
     /// Upload a local file or directory to a remote server
+    #[command(hide = true)]
     Upload {
         /// Server ID
         server: String,
