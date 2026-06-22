@@ -272,23 +272,16 @@ fn curl_release_artifact_command(
         "Accept: application/octet-stream".to_string(),
     ];
 
-    let config_stdin = auth_token
-        .map(|token| format!("header = \"Authorization: Bearer {}\"\n", token));
+    let config_stdin =
+        auth_token.map(|token| format!("header = \"Authorization: Bearer {}\"\n", token));
 
     if config_stdin.is_some() {
         args.extend(["--config".to_string(), "-".to_string()]);
     }
 
-    args.extend([
-        "-o".to_string(),
-        dest_path.to_string(),
-        url.to_string(),
-    ]);
+    args.extend(["-o".to_string(), dest_path.to_string(), url.to_string()]);
 
-    CurlReleaseArtifactCommand {
-        args,
-        config_stdin,
-    }
+    CurlReleaseArtifactCommand { args, config_stdin }
 }
 
 fn validate_downloaded_artifact(path: &Path, artifact_name: &str, url: &str) -> Result<()> {
