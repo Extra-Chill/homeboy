@@ -1,25 +1,32 @@
 #!/usr/bin/env node
 'use strict';
 
+/**
+ * External dependencies
+ */
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+/**
+ * Internal dependencies
+ */
 const {
 	codeboxRunAgentTaskInvocation,
 	codeboxTaskRequestFromAgentTaskRequest,
 } = require('../../../agent-runtimes/wp-codebox');
-
-/**
- * Internal dependencies
- */
 const {
 	buildWordPressFuzzRunnerResult,
 	readWordPressFuzzRunnerEnv,
 	runWordPressFuzzRunnerResult,
 	writeHomeboyFuzzResultsFile,
 } = require('../../lib/wordpress-fuzz-runner');
+const { loadWpCodeboxCoreFunction } = require('../../lib/wp-codebox-core-loader');
+const {
+	wpCodeboxFuzzSuiteAbility,
+	wpCodeboxRuntimeContractManifest,
+} = require('../../lib/wp-codebox-fuzz-run');
 
 
 (async () => {
@@ -45,8 +52,22 @@ async function buildRunnerResult(env) {
 
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
-	const inputFile = path.join(tempDir, 'agent-task-request.json');
 	const command = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+	const manifest = await discoverRuntimeContractManifest();
+	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
+
+	if (publicInvocation) {
+		try {
+			const publicResult = await runWpCodeboxPublicRuntimeCommand(command, publicInvocation, tempDir);
+			return { json: normalizeWpCodeboxAgentTaskOutput(publicResult, request) };
+		} catch (error) {
+			if (!shouldFallbackToRunAgentTask(error)) {
+				throw error;
+			}
+		}
+	}
+
+	const inputFile = path.join(tempDir, 'agent-task-request.json');
 	const invocation = wpCodeboxRunAgentTaskInvocation(request);
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
 
@@ -57,6 +78,67 @@ async function runWpCodeboxAgentTask(request) {
 	});
 
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
+}
+
+async function discoverRuntimeContractManifest() {
+	try {
+		const runtimeContractManifest = await loadWpCodeboxCoreFunction('runtimeContractManifest');
+		if (typeof runtimeContractManifest === 'function') {
+			return runtimeContractManifest();
+		}
+	} catch {
+		// Older WP Codebox installs do not publish the core package yet.
+	}
+	return wpCodeboxRuntimeContractManifest();
+}
+
+function wpCodeboxPublicRuntimeInvocation(request, options = {}) {
+	const runtimeTask = request.executor?.config?.runtime_task || {};
+	const ability = runtimeTask.ability || wpCodeboxFuzzSuiteAbility(options);
+	const command = wpCodeboxCommandFromPublicAbility(ability, options);
+	if (!command) {
+		return null;
+	}
+	return {
+		ability,
+		command,
+		input: {
+			...(runtimeTask.input || {}),
+			metadata: {
+				...(runtimeTask.input?.metadata || {}),
+				homeboy_agent_task_request: request,
+			},
+		},
+	};
+}
+
+function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
+	const contracts = wpCodeboxRuntimeContractManifest(options).abilities?.wordpressRuntime || {};
+	const publicAbilities = new Set([
+		contracts.runWorkload,
+		contracts.runFuzzSuite,
+		'wp-codebox/run-wordpress-workload',
+		'wp-codebox/run-fuzz-suite',
+	].filter(Boolean));
+	if (!publicAbilities.has(ability)) {
+		return '';
+	}
+	return String(ability).replace(/^wp-codebox\//, '');
+}
+
+async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir) {
+	const inputFile = path.join(tempDir, `${invocation.command}-request.json`);
+	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
+	return spawnJson(command, [invocation.command, '--input-file', inputFile, '--json'], {
+		cwd: process.cwd(),
+		env: process.env,
+	});
+}
+
+function shouldFallbackToRunAgentTask(error) {
+	const message = String(error?.message || '').toLowerCase();
+	return error?.code === 'ENOENT'
+		|| /unknown command|invalid command|not found|no such command|unrecognized command|unknown subcommand|unsupported command/.test(message);
 }
 
 function wpCodeboxRunAgentTaskInvocation(request) {
@@ -95,7 +177,11 @@ function spawnJson(command, args, options) {
 			if (code !== 0) {
 				const details = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
 				const message = parsed?.error?.message || details || `${command} exited with ${code}`;
-				reject(new Error(message));
+				const error = new Error(message);
+				error.exitCode = code;
+				error.stderr = stderr;
+				error.stdout = stdout;
+				reject(error);
 				return;
 			}
 			resolve(parsed || { stdout, stderr, status: code });
