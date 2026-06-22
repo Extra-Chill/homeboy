@@ -10,6 +10,7 @@
 //!
 //! See: https://github.com/Extra-Chill/homeboy/issues/784
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::core::component::Component;
@@ -146,23 +147,52 @@ pub fn download_release_artifact(
 
     log_status!("deploy", "Downloading release artifact: {}", url);
 
+    let auth_token = github_auth_token(&github.host);
+    let curl_command = curl_release_artifact_command(
+        &url,
+        dest_path.to_str().unwrap_or("artifact"),
+        auth_token.as_deref(),
+    );
+
     // Use curl for the download (follows redirects, handles GitHub's CDN)
-    let output = std::process::Command::new("curl")
-        .args([
-            "-fsSL", // fail silently, show errors, follow redirects
-            "--retry",
-            "3", // retry on transient failures
-            "-o",
-            dest_path.to_str().unwrap_or("artifact"),
-            &url,
-        ])
-        .output()
-        .map_err(|e| {
+    let mut command = std::process::Command::new("curl");
+    command.args(&curl_command.args);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    if curl_command.config_stdin.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+
+    let mut child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("download release artifact".to_string()),
+        )
+    })?;
+
+    if let Some(config_stdin) = curl_command.config_stdin {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
             Error::internal_io(
-                format!("Failed to run curl: {}", e),
+                "Failed to open curl stdin".to_string(),
                 Some("download release artifact".to_string()),
             )
         })?;
+
+        stdin.write_all(config_stdin.as_bytes()).map_err(|e| {
+            Error::internal_io(
+                format!("Failed to write curl config: {}", e),
+                Some("download release artifact".to_string()),
+            )
+        })?;
+    }
+
+    let output = child.wait_with_output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("download release artifact".to_string()),
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -204,6 +234,61 @@ pub fn download_release_artifact(
     );
 
     Ok(dest_path)
+}
+
+fn github_auth_token(host: &str) -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token", "--hostname", host])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+struct CurlReleaseArtifactCommand {
+    args: Vec<String>,
+    config_stdin: Option<String>,
+}
+
+fn curl_release_artifact_command(
+    url: &str,
+    dest_path: &str,
+    auth_token: Option<&str>,
+) -> CurlReleaseArtifactCommand {
+    let mut args = vec![
+        "-fsSL".to_string(),
+        "--retry".to_string(),
+        "3".to_string(),
+        "-H".to_string(),
+        "Accept: application/octet-stream".to_string(),
+    ];
+
+    let config_stdin = auth_token
+        .map(|token| format!("header = \"Authorization: Bearer {}\"\n", token));
+
+    if config_stdin.is_some() {
+        args.extend(["--config".to_string(), "-".to_string()]);
+    }
+
+    args.extend([
+        "-o".to_string(),
+        dest_path.to_string(),
+        url.to_string(),
+    ]);
+
+    CurlReleaseArtifactCommand {
+        args,
+        config_stdin,
+    }
 }
 
 fn validate_downloaded_artifact(path: &Path, artifact_name: &str, url: &str) -> Result<()> {
@@ -501,6 +586,45 @@ mod tests {
             "https://github.com/Extra-Chill/theme/releases/download/v1/theme.zip",
         )
         .expect("zip signature should be accepted");
+    }
+
+    #[test]
+    fn curl_release_artifact_command_sends_auth_header_via_stdin_config() {
+        let command = curl_release_artifact_command(
+            "https://github.example.com/example-org/theme/releases/download/v1/theme.zip",
+            "/tmp/theme.zip",
+            Some("secret-token"),
+        );
+
+        assert!(command
+            .args
+            .contains(&"Accept: application/octet-stream".to_string()));
+        assert!(command.args.contains(&"--config".to_string()));
+        assert!(command.args.contains(&"-".to_string()));
+        assert!(!command.args.iter().any(|arg| arg.contains("secret-token")));
+        assert_eq!(
+            command.config_stdin.as_deref(),
+            Some("header = \"Authorization: Bearer secret-token\"\n")
+        );
+        assert_eq!(
+            command.args.last().map(String::as_str),
+            Some("https://github.example.com/example-org/theme/releases/download/v1/theme.zip")
+        );
+    }
+
+    #[test]
+    fn curl_release_artifact_command_omits_auth_header_without_token() {
+        let command = curl_release_artifact_command(
+            "https://github.com/example-org/theme/releases/download/v1/theme.zip",
+            "/tmp/theme.zip",
+            None,
+        );
+
+        assert!(command
+            .args
+            .contains(&"Accept: application/octet-stream".to_string()));
+        assert!(!command.args.contains(&"--config".to_string()));
+        assert_eq!(command.config_stdin, None);
     }
 
     #[test]
