@@ -9,9 +9,10 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
-    parse_fuzz_results_file, FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance,
-    FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CONTRACT_VERSION,
-    FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
+    merge_fuzz_target_inventory, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance, FuzzRequiredArtifact,
+    FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
 };
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, RigSpec};
@@ -117,6 +118,10 @@ pub struct FuzzRunArgs {
     #[arg(long, value_name = "SEED")]
     seed: Option<String>,
 
+    /// Product-neutral fuzz target inventory JSON discovered before execution.
+    #[arg(long = "inventory", value_name = "PATH")]
+    inventory: Option<PathBuf>,
+
     /// Maximum runtime budget forwarded by future fuzz runners, e.g. 60s or 5m.
     #[arg(long, value_name = "DURATION")]
     max_duration: Option<String>,
@@ -217,8 +222,10 @@ pub struct FuzzRunOutput {
     pub workload_path: Option<String>,
     pub run_id: Option<String>,
     pub seed: Option<String>,
+    pub inventory_file: Option<String>,
     pub max_duration: Option<String>,
     pub passthrough_args: Vec<String>,
+    pub target_inventory: Option<FuzzTargetInventory>,
     pub execution: Option<FuzzExecutionOutput>,
     pub results: Option<FuzzCampaign>,
     pub runner_contract: FuzzRunnerContract,
@@ -436,24 +443,18 @@ fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
         .unwrap_or_else(|| format!("{}-fuzz-request", ctx.component_id));
     let rig_id = rig_context.as_ref().map(|context| context.spec.id.clone());
 
+    let target_inventory = build_target_inventory(
+        &ctx.component_id,
+        &workloads,
+        args.run.run_id.clone(),
+        args.run.inventory.as_deref(),
+    )?;
+
     Ok(FuzzPlanOutput {
         command: "fuzz.plan".to_string(),
         component: ctx.component_id.clone(),
         rig_id: rig_id.clone(),
-        target_inventory: FuzzTargetInventory {
-            schema: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
-            version: FUZZ_CONTRACT_VERSION,
-            id: format!("{}-inventory", ctx.component_id),
-            surfaces: Vec::new(),
-            targets: Vec::new(),
-            workloads: Vec::new(),
-            seeds: Vec::new(),
-            provenance: Some(fuzz_provenance(args.run.run_id.clone())),
-            metadata: serde_json::json!({
-                "declared_workloads": workloads,
-            }),
-            extra: std::collections::BTreeMap::new(),
-        },
+        target_inventory,
         request: FuzzExecutionRequest {
             schema: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
             version: FUZZ_CONTRACT_VERSION,
@@ -509,6 +510,7 @@ fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
         .clone()
         .or_else(|| args.run.run_id.clone())
         .unwrap_or_else(|| campaign.id.clone());
+    let metadata = fuzz_result_metadata(args.run.inventory.as_deref())?;
     let envelope = FuzzResultEnvelope {
         schema: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
         version: FUZZ_CONTRACT_VERSION,
@@ -535,7 +537,7 @@ fn run_report(args: FuzzReportArgs) -> homeboy::core::Result<FuzzReportOutput> {
         required_artifacts: default_fuzz_required_artifacts(),
         gates: default_fuzz_gates(),
         provenance: Some(fuzz_provenance(run_id)),
-        metadata: serde_json::Value::Null,
+        metadata,
         extra: std::collections::BTreeMap::new(),
     };
 
@@ -583,6 +585,12 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         ctx.extension_id.as_deref(),
     );
     let selected_workload = select_workload(&workloads, args.workload_id.as_deref())?;
+    let target_inventory = build_target_inventory(
+        &ctx.component_id,
+        &workloads,
+        args.run_id.clone(),
+        args.inventory.as_deref(),
+    )?;
     let run_dir = RunDir::create()?;
     let runner_output = run_fuzz_extension_script(&ctx, &args, selected_workload, &run_dir)?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
@@ -625,8 +633,12 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
             workload_path,
             run_id: args.run_id,
             seed: args.seed,
+            inventory_file: args
+                .inventory
+                .map(|path| path.to_string_lossy().to_string()),
             max_duration: args.max_duration,
             passthrough_args: args.args,
+            target_inventory: Some(target_inventory),
             execution: Some(FuzzExecutionOutput {
                 kind: "fuzz".to_string(),
                 extension_id: ctx.extension_id.unwrap_or_default(),
@@ -762,9 +774,52 @@ fn default_runner_contract() -> FuzzRunnerContract {
             "HOMEBOY_FUZZ_WORKLOAD_PATH",
             "HOMEBOY_FUZZ_RUN_ID",
             "HOMEBOY_FUZZ_SEED",
+            "HOMEBOY_FUZZ_INVENTORY_FILE",
             "HOMEBOY_FUZZ_MAX_DURATION",
         ],
     }
+}
+
+fn build_target_inventory(
+    component_id: &str,
+    workloads: &[FuzzWorkloadOutput],
+    run_id: Option<String>,
+    inventory_path: Option<&Path>,
+) -> homeboy::core::Result<FuzzTargetInventory> {
+    let mut inventory = FuzzTargetInventory {
+        schema: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
+        id: format!("{}-inventory", component_id),
+        surfaces: Vec::new(),
+        targets: Vec::new(),
+        workloads: Vec::new(),
+        seeds: Vec::new(),
+        provenance: Some(fuzz_provenance(run_id)),
+        metadata: serde_json::json!({
+            "declared_workloads": workloads,
+        }),
+        extra: std::collections::BTreeMap::new(),
+    };
+
+    if let Some(path) = inventory_path {
+        let discovered = parse_fuzz_target_inventory_file(path)?;
+        inventory.metadata["inventory_file"] =
+            serde_json::Value::String(path.to_string_lossy().to_string());
+        merge_fuzz_target_inventory(&mut inventory, discovered);
+    }
+
+    Ok(inventory)
+}
+
+fn fuzz_result_metadata(inventory_path: Option<&Path>) -> homeboy::core::Result<serde_json::Value> {
+    let Some(path) = inventory_path else {
+        return Ok(serde_json::Value::Null);
+    };
+    let inventory = parse_fuzz_target_inventory_file(path)?;
+    Ok(serde_json::json!({
+        "inventory_file": path.to_string_lossy(),
+        "target_inventory": inventory,
+    }))
 }
 
 fn fuzz_provenance(run_id: Option<String>) -> FuzzProvenance {
@@ -961,6 +1016,12 @@ fn fuzz_runner_env(
     }
     push_opt_env(&mut env, "HOMEBOY_FUZZ_RUN_ID", args.run_id.as_ref());
     push_opt_env(&mut env, "HOMEBOY_FUZZ_SEED", args.seed.as_ref());
+    if let Some(path) = args.inventory.as_ref() {
+        env.push((
+            "HOMEBOY_FUZZ_INVENTORY_FILE".to_string(),
+            path.to_string_lossy().to_string(),
+        ));
+    }
     push_opt_env(
         &mut env,
         "HOMEBOY_FUZZ_MAX_DURATION",
@@ -1247,6 +1308,8 @@ mod tests {
             "proof-1",
             "--seed",
             "1234",
+            "--inventory",
+            "/tmp/fuzz-inventory.json",
             "--max-duration",
             "60s",
             "--",
@@ -1261,6 +1324,10 @@ mod tests {
                 assert_eq!(run.workload_id.as_deref(), Some("parser"));
                 assert_eq!(run.run_id.as_deref(), Some("proof-1"));
                 assert_eq!(run.seed.as_deref(), Some("1234"));
+                assert_eq!(
+                    run.inventory.as_deref(),
+                    Some(Path::new("/tmp/fuzz-inventory.json"))
+                );
                 assert_eq!(run.max_duration.as_deref(), Some("60s"));
                 assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
             }
@@ -1298,8 +1365,10 @@ mod tests {
             workload_path: None,
             run_id: None,
             seed: None,
+            inventory_file: None,
             max_duration: None,
             passthrough_args: Vec::new(),
+            target_inventory: None,
             execution: None,
             results: None,
             runner_contract: FuzzRunnerContract {
@@ -1541,6 +1610,7 @@ mod tests {
             workload_id: Some("parser".to_string()),
             run_id: Some("proof-1".to_string()),
             seed: Some("1234".to_string()),
+            inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
             max_duration: Some("60s".to_string()),
             args: vec![],
         };
@@ -1567,6 +1637,10 @@ mod tests {
         )));
         assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
         assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
+        assert!(env.contains(&(
+            "HOMEBOY_FUZZ_INVENTORY_FILE".to_string(),
+            "/tmp/fuzz-inventory.json".to_string()
+        )));
         assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
     }
 
@@ -1667,8 +1741,10 @@ mod tests {
             workload_path: None,
             run_id: None,
             seed: None,
+            inventory_file: None,
             max_duration: None,
             passthrough_args: Vec::new(),
+            target_inventory: None,
             execution: Some(FuzzExecutionOutput {
                 kind: "fuzz".to_string(),
                 extension_id: "generic".to_string(),
