@@ -30,6 +30,7 @@ pub mod agent_task_loop_definition;
 pub mod agent_task_loop_runner_policy;
 mod agent_task_pr_body;
 pub mod agent_task_promotion;
+pub mod agent_task_prompts;
 pub mod agent_task_provider;
 pub mod agent_task_repo_loop_compile;
 pub mod agent_task_schedule;
