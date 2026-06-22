@@ -142,6 +142,38 @@ fn compile_loop_command_rejects_controller_only_sections() {
 }
 
 #[test]
+fn compile_loop_command_rejects_controller_workflow_gates_and_metrics() {
+    let error = loop_definition::compile_loop(CompileLoopArgs {
+        definition: serde_json::to_string(&json!({
+            "loop_id": "repo-loop-with-controller-gates",
+            "gates": [{ "gate_id": "review" }],
+            "metrics": [{ "metric_id": "fallback_blocks" }],
+            "workflows": [
+                {
+                    "workflow_id": "publish",
+                    "prompt": "Publish the output.",
+                    "gates": ["review"],
+                    "metrics": ["fallback_blocks"]
+                }
+            ]
+        }))
+        .expect("definition json"),
+    })
+    .expect_err("controller workflow gates and metrics are rejected");
+
+    assert!(error.message.contains("controller-only sections"));
+    let diagnostics = error.details["tried"].as_array().expect("diagnostics");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .as_str()
+        .unwrap_or_default()
+        .contains("workflows[publish].gates")));
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .as_str()
+        .unwrap_or_default()
+        .contains("workflows[publish].metrics")));
+}
+
+#[test]
 fn controller_materialize_merges_inputs_and_metadata_without_mutating_source() {
     let temp = tempfile::tempdir().expect("tempdir");
     let spec_path = temp.path().join("repo-loop.json");
