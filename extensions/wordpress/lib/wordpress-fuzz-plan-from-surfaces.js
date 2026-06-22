@@ -50,6 +50,7 @@ const SURFACE_COLLECTION_KEYS = [
 	'restRoutes',
 	'routes',
 ];
+const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const discovery = normalizeWordPressSurfaceDiscovery({
@@ -181,6 +182,39 @@ function surfaceTypeFromCollectionKey(key) {
 }
 
 function targetFromSurface(surface, options = {}) {
+	if (surface.type === 'rest-route') {
+		return restRouteTargetFromSurface(surface, options);
+	}
+	return genericTargetFromSurface(surface, options);
+}
+
+function restRouteTargetFromSurface(surface, options = {}) {
+	const methods = restMethodsForSurface(surface);
+	if (methods.length === 0) {
+		return genericTargetFromSurface(surface, options);
+	}
+
+	const operationId = surface.operation_id || surface.operationId || `${surface.id}:request-rest-route`;
+	const surfaceSkipReasons = reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason);
+	const surfaceDestructiveReasons = reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons);
+	return {
+		id: surface.id,
+		surface_id: surface.id,
+		type: surface.type,
+		operation_id: operationId,
+		cases: methods.map((method) => restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReasons, surfaceDestructiveReasons, options)),
+		metadata: {
+			label: surface.label,
+			type: surface.type,
+			skip_reasons: surfaceSkipReasons,
+			destructive_reasons: surfaceDestructiveReasons,
+			methods,
+			...(surface.metadata || {}),
+		},
+	};
+}
+
+function genericTargetFromSurface(surface, options = {}) {
 	const operation = operationForSurface(surface);
 	const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
 	const caseId = `${surface.id}-generic-fuzz`;
@@ -207,6 +241,37 @@ function targetFromSurface(surface, options = {}) {
 			...(surface.metadata || {}),
 		},
 	};
+}
+
+function restRouteCaseFromMethod(surface, method, operationId, surfaceSkipReasons, surfaceDestructiveReasons, options = {}) {
+	const safeMethod = SAFE_REST_METHODS.has(method);
+	const operation = { ...operationForSurface(surface), method };
+	const skipReasons = safeMethod ? surfaceSkipReasons : reasonList([...surfaceSkipReasons, 'mutating_rest_method_requires_explicit_opt_in']);
+	const destructiveReasons = safeMethod ? surfaceDestructiveReasons : reasonList([...surfaceDestructiveReasons, 'rest_method_mutates_state']);
+	return {
+		id: `${surface.id}-${method.toLowerCase()}-generic-fuzz`,
+		intent: 'request-rest-route',
+		operation_id: operationId,
+		operation,
+		seed: options.seed,
+		skip_reasons: skipReasons,
+		destructive_reasons: destructiveReasons,
+		metadata: {
+			surface,
+			rest_method: method,
+			auth: surface.auth || surface.authentication || surface.authorization || null,
+			safety: safeMethod ? { level: 'safe', mutates: false } : { level: 'mutating', mutates: true, requires_explicit_opt_in: true },
+			planned: !safeMethod,
+			gated: !safeMethod,
+		},
+	};
+}
+
+function restMethodsForSurface(surface) {
+	const rawMethods = surface.methods === undefined ? surface.method : surface.methods;
+	return [...new Set((Array.isArray(rawMethods) ? rawMethods : String(rawMethods || '').split(','))
+		.map((method) => String(method).trim().toUpperCase())
+		.filter(Boolean))].sort();
 }
 
 function operationForSurface(surface) {

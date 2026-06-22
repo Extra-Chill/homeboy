@@ -99,4 +99,46 @@ const nestedPlan = buildWordPressFuzzPlanFromSurfaces({
 });
 assert.deepEqual(nestedPlan.targets.map((target) => target.type), ['hook', 'hook', 'post-type', 'frontend-url', 'rest-route']);
 
+const legacyRestPlan = buildWordPressFuzzPlanFromSurfaces({
+	rest: [{ id: 'rest:legacy', route: '/wp/v2/legacy' }],
+});
+assert.equal(legacyRestPlan.targets[0].cases.length, 1);
+assert.equal(legacyRestPlan.targets[0].cases[0].id, 'rest:legacy-generic-fuzz');
+assert.equal(legacyRestPlan.targets[0].cases[0].operation.method, undefined);
+
+const methodAwareRestPlan = buildWordPressFuzzPlanFromSurfaces({
+	rest: [{
+		id: 'rest:wp-v2-posts',
+		route: '/wp/v2/posts',
+		methods: ['GET', 'POST', 'DELETE'],
+		auth: { required: true, source: 'permission_callback', capability: 'edit_posts' },
+		args: {
+			count: 2,
+			args: [
+				{ name: 'search', type: 'string', required: false },
+				{ name: 'status', type: 'string', required: true },
+			],
+		},
+	}],
+}, { seed: 'seed-rest' });
+const restTarget = methodAwareRestPlan.targets[0];
+assert.deepEqual(restTarget.cases.map((testCase) => testCase.operation.method), ['DELETE', 'GET', 'POST']);
+const getCase = restTarget.cases.find((testCase) => testCase.operation.method === 'GET');
+assert.equal(getCase.intent, 'request-rest-route');
+assert.deepEqual(getCase.skip_reasons, []);
+assert.deepEqual(getCase.destructive_reasons, []);
+assert.equal(getCase.metadata.safety.mutates, false);
+assert.equal(getCase.metadata.surface.args.count, 2);
+assert.equal(getCase.metadata.surface.args.args[1].required, true);
+assert.equal(getCase.seed, 'seed-rest');
+for (const method of ['POST', 'DELETE']) {
+	const testCase = restTarget.cases.find((entry) => entry.operation.method === method);
+	assert(testCase.skip_reasons.includes('mutating_rest_method_requires_explicit_opt_in'));
+	assert(testCase.destructive_reasons.includes('rest_method_mutates_state'));
+	assert.equal(testCase.metadata.planned, true);
+	assert.equal(testCase.metadata.gated, true);
+	assert.equal(testCase.metadata.safety.requires_explicit_opt_in, true);
+	assert.deepEqual(testCase.metadata.auth, { required: true, source: 'permission_callback', capability: 'edit_posts' });
+}
+
 console.log('WordPress fuzz plan from surfaces smoke passed.');
