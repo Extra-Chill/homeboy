@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.41] - 2026-06-22
+
+### Changed
+- Prefer managed Codebox cache for fuzz runs
+
 ## [3.12.40] - 2026-06-22
 
 ### Changed
