@@ -159,18 +159,12 @@ fn inject_lab_changed_files(
     if has_lab_changed_files_json(normalized_args) {
         return Ok(None);
     }
-    if changed_since.is_none() && !changed_only {
+    if changed_since.is_some() || !changed_only {
         return Ok(None);
     }
 
     let source_path = resolve_changed_scope_source_path(component_id, path_override)?;
-    let changed_files = if let Some(git_ref) = changed_since {
-        git::get_files_changed_since(&source_path, git_ref)?
-    } else if changed_only {
-        git::get_dirty_files(&source_path)?
-    } else {
-        return Ok(None);
-    };
+    let changed_files = git::get_dirty_files(&source_path)?;
     let payload = serde_json::to_string(&changed_files).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
             "failed to encode Lab changed-file payload: {error}"
@@ -653,6 +647,38 @@ mod tests {
         assert_eq!(command.hot_label, "test");
         assert!(command.portable);
         assert!(command.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn changed_since_lint_keeps_git_scope_for_lab_runner() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "--changed-since".to_string(),
+            "origin/main".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let rewritten = inject_lab_changed_files(&cli.command, &normalized).unwrap();
+
+        assert!(rewritten.is_none());
+    }
+
+    #[test]
+    fn changed_since_test_keeps_git_scope_for_lab_runner() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "test".to_string(),
+            "--changed-since=origin/main".to_string(),
+            "--skip-lint".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let rewritten = inject_lab_changed_files(&cli.command, &normalized).unwrap();
+
+        assert!(rewritten.is_none());
     }
 
     #[test]
