@@ -31,11 +31,6 @@ const DEFAULT_DIAGNOSIS_THRESHOLDS = {
 const DEFAULT_REST_OBSERVATION_MS = 1000;
 const DEFAULT_THIRD_PARTY_WATERFALL_GROUPS = [
 	{
-		id: 'woocommerce-store-api',
-		label: 'WooCommerce Store API',
-		urlIncludes: ['/wp-json/wc/store/', 'rest_route=/wc/store/'],
-	},
-	{
 		id: 'wordpress-assets',
 		label: 'WordPress assets',
 		urlIncludes: ['/wp-admin/', '/wp-content/', '/wp-includes/', '/wp-json/'],
@@ -51,6 +46,18 @@ const DEFAULT_THIRD_PARTY_WATERFALL_GROUPS = [
 		domains: ['gstatic.com', 'googleapis.com', 'google.com'],
 	},
 ];
+const WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS = Object.freeze({
+	woocommerce: Object.freeze({
+		waterfallGroups: Object.freeze([
+			Object.freeze({
+				id: 'woocommerce-store-api',
+				label: 'WooCommerce Store API',
+				urlIncludes: Object.freeze(['/wp-json/wc/store/', 'rest_route=/wc/store/']),
+			}),
+		]),
+		firstPartyWaterfallGroupIds: Object.freeze(['woocommerce-store-api']),
+	}),
+});
 const DEFAULT_GATE_THRESHOLDS = {
 	readyMsRegression: 250,
 	networkIdleMsRegression: 500,
@@ -294,6 +301,17 @@ function normalizeThirdPartyWaterfallGroups(groups) {
 		}));
 }
 
+function normalizeWaterfallProductAdapters(adapters) {
+	return (Array.isArray(adapters) ? adapters : [])
+		.map((adapter) => {
+			if (typeof adapter === 'string') {
+				return WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS[adapter] || null;
+			}
+			return isPlainObject(adapter) ? adapter : null;
+		})
+		.filter(Boolean);
+}
+
 function normalizeNetworkUrlPattern(url) {
 	const parsed = safeUrl(url);
 	if (!parsed) {
@@ -412,7 +430,12 @@ function flattenThirdPartyWaterfallMetrics(summary) {
 }
 
 function summarizeThirdPartyWaterfall(rows, options = {}) {
-	const groups = normalizeThirdPartyWaterfallGroups(options.groups || options.vendorGroups || options.waterfallGroups);
+	const productAdapters = normalizeWaterfallProductAdapters(options.productAdapters || options.product_adapters || options.productWaterfallAdapters || options.product_waterfall_adapters);
+	const groups = normalizeThirdPartyWaterfallGroups([
+		...normalizeThirdPartyWaterfallGroups(options.groups || options.vendorGroups || options.waterfallGroups).filter((group) => !DEFAULT_THIRD_PARTY_WATERFALL_GROUPS.some((defaultGroup) => defaultGroup.id === group.id)),
+		...productAdapters.flatMap((adapter) => normalizeThirdPartyWaterfallGroups(adapter.waterfallGroups || adapter.waterfall_groups)),
+		...normalizeThirdPartyWaterfallGroups(options.groups || options.vendorGroups || options.waterfallGroups).filter((group) => DEFAULT_THIRD_PARTY_WATERFALL_GROUPS.some((defaultGroup) => defaultGroup.id === group.id)),
+	]);
 	const topUrlLimit = Number(options.topUrlLimit ?? 10);
 	const duplicatePatternLimit = Number(options.duplicatePatternLimit ?? 10);
 	const grouped = new Map();
@@ -447,7 +470,12 @@ function summarizeThirdPartyWaterfall(rows, options = {}) {
 	const finalizedGroups = [...grouped.values()]
 		.map((group) => finalizeThirdPartyWaterfallGroup(group, topUrlLimit, duplicatePatternLimit))
 		.sort((a, b) => b.transferSizeBytes - a.transferSizeBytes || b.totalCount - a.totalCount || a.label.localeCompare(b.label));
-	const firstPartyGroupIds = new Set(['same-origin', 'wordpress-assets', 'woocommerce-store-api', 'unknown']);
+	const firstPartyGroupIds = new Set([
+		'same-origin',
+		'wordpress-assets',
+		'unknown',
+		...productAdapters.flatMap((adapter) => adapter.firstPartyWaterfallGroupIds || adapter.first_party_waterfall_group_ids || []),
+	]);
 	const thirdPartyGroups = finalizedGroups.filter((group) => !firstPartyGroupIds.has(group.id));
 	const summary = {
 		schema: 'homeboy/third-party-waterfall/v1',
@@ -3933,6 +3961,7 @@ module.exports = {
 	DEFAULT_REST_OBSERVATION_MS,
 	WORDPRESS_RESOURCE_INCLUDE,
 	DEFAULT_THIRD_PARTY_WATERFALL_GROUPS,
+	WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS,
 	classifyResourceUrl,
 	classifyWordPressRestPreloadOpportunities,
 	compareWordPressRestNetworkWaterfalls,
