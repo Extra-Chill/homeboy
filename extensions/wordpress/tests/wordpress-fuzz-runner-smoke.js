@@ -2,9 +2,18 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+
+const originalLoad = Module._load;
+Module._load = function loadWithoutRuntimeAgentCi(request, parent, isMain) {
+	if (request.includes('runtime-agent-ci')) {
+		throw new Error(`WordPress fuzz runner must be installable without runtime-agent-ci: ${request}`);
+	}
+	return originalLoad.call(this, request, parent, isMain);
+};
 
 const {
 	HOMEBOY_FUZZ_CAMPAIGN_SCHEMA,
@@ -12,6 +21,8 @@ const {
 	buildWordPressFuzzRunnerResult,
 	runWordPressFuzzRunnerResult,
 } = require('../lib/wordpress-fuzz-runner');
+
+Module._load = originalLoad;
 
 const workload = {
 	id: 'generic-wordpress-workload',
