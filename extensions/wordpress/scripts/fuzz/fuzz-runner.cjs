@@ -207,7 +207,7 @@ function findFuzzSuiteResult(value) {
 	if (value.schema === 'wp-codebox/fuzz-suite-result/v1') {
 		return value;
 	}
-	for (const key of ['result', 'output', 'json']) {
+	for (const key of ['result', 'output', 'json', 'raw', 'agent_task_result', 'agentTaskResult', 'agent_result', 'agentResult', 'agent_runtime', 'agentRuntime']) {
 		const nested = findFuzzSuiteResult(value[key]);
 		if (nested) {
 			return nested;
