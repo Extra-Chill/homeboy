@@ -23,8 +23,150 @@ pub(super) fn validate_remote_sync(component: &Component) -> Result<()> {
 }
 
 pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
-    let path = std::path::Path::new(&component.local_path);
+    let current_branch = current_branch(component)?;
+    let default_branch = default_branch(component);
+
+    if current_branch == default_branch {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release",
+        format!(
+            "Refusing to release from branch '{}' because the repo default branch is '{}'",
+            current_branch, default_branch
+        ),
+        None,
+        Some(vec![
+            format!(
+                "Check out '{}' before running `homeboy release --apply` for a default-branch release workflow",
+                default_branch
+            ),
+            format!(
+                "Rebase or merge '{}' onto '{}' and release from '{}' so the tag target is published through the default branch",
+                current_branch, default_branch, default_branch
+            ),
+            "If you only want a preview, use --dry-run".to_string(),
+        ]),
+    ))
+}
+
+pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<()> {
+    let current_branch = current_branch(component)?;
+    let default_branch = default_branch(component);
+    let remote_default_ref = format!("origin/{default_branch}");
+
+    let remote_default_revision = git::run_git(
+        std::path::Path::new(&component.local_path),
+        &["rev-parse", &remote_default_ref],
+        "git rev-parse remote default branch",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "release",
+            format!(
+                "Refusing to release from branch '{}' because the repo default branch '{}' is not available as '{}'",
+                current_branch, default_branch, remote_default_ref
+            ),
+            None,
+            Some(vec![
+                format!(
+                    "Fetch the default branch before running `homeboy release --apply`: git fetch origin {}",
+                    default_branch
+                ),
+                format!(
+                    "Release from '{}' so the tag target is published through the default branch",
+                    default_branch
+                ),
+            ]),
+        )
+    })?;
+
+    if git::is_ancestor(&component.local_path, &remote_default_revision, "HEAD")? {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release",
+        format!(
+            "Refusing to release from branch '{}' because it is not safely based on the repo default branch '{}'",
+            current_branch, default_branch
+        ),
+        None,
+        Some(vec![
+            format!(
+                "Rebase or merge '{}' onto '{}' before running `homeboy release --apply`",
+                current_branch, remote_default_ref
+            ),
+            format!(
+                "Release from '{}' so the tag target is reachable from the default branch",
+                default_branch
+            ),
+        ]),
+    ))
+}
+
+pub(super) fn validate_head_reachable_from_default_branch(component: &Component) -> Result<()> {
     let current_branch = command::run_in_optional(
+        &component.local_path,
+        "git",
+        &["symbolic-ref", "--short", "HEAD"],
+    )
+    .unwrap_or_else(|| "detached HEAD".to_string());
+    let default_branch = default_branch(component);
+    let remote_default_ref = format!("origin/{default_branch}");
+    let remote_default_revision = git::run_git(
+        std::path::Path::new(&component.local_path),
+        &["rev-parse", &remote_default_ref],
+        "git rev-parse remote default branch",
+    )
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "release",
+            format!(
+                "Refusing to release from {} because the repo default branch '{}' is not available as '{}'",
+                current_branch, default_branch, remote_default_ref
+            ),
+            None,
+            Some(vec![format!(
+                "Fetch the default branch before running `homeboy release --apply`: git fetch origin {}",
+                default_branch
+            )]),
+        )
+    })?;
+
+    if git::is_ancestor(&component.local_path, "HEAD", &remote_default_revision)? {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release",
+        format!(
+            "Refusing to release from {} because HEAD is not reachable from the repo default branch '{}'",
+            current_branch, default_branch
+        ),
+        None,
+        Some(vec![
+            format!(
+                "Check out '{}' or move the release tag target onto '{}' before running `homeboy release --apply`",
+                default_branch, remote_default_ref
+            ),
+            format!(
+                "Publish the release commit through '{}' before creating a GitHub Release",
+                default_branch
+            ),
+        ]),
+    ))
+}
+
+fn current_branch(component: &Component) -> Result<String> {
+    command::run_in_optional(
         &component.local_path,
         "git",
         &["symbolic-ref", "--short", "HEAD"],
@@ -38,60 +180,26 @@ pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
                 "Check out the default branch before releasing".to_string()
             ]),
         )
-    })?;
+    })
+}
 
-    let default_branch = command::run_in_optional(
+fn default_branch(component: &Component) -> String {
+    command::run_in_optional(
         &component.local_path,
         "git",
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .map(|value| value.trim().trim_start_matches("origin/").to_string())
     .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| "main".to_string());
-
-    if current_branch == default_branch {
-        return Ok(());
-    }
-
-    let remote_default_ref = format!("origin/{default_branch}");
-    let head_revision = git::run_git(path, &["rev-parse", "HEAD"], "git rev-parse HEAD")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let remote_default_revision = git::run_git(
-        path,
-        &["rev-parse", &remote_default_ref],
-        "git rev-parse remote default branch",
-    )
-    .ok()
-    .map(|value| value.trim().to_string())
-    .filter(|value| !value.is_empty());
-
-    if head_revision.is_some() && head_revision == remote_default_revision {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "release",
-        format!(
-            "Refusing to release from non-default branch '{}' (default: '{}')",
-            current_branch, default_branch
-        ),
-        None,
-        Some(vec![
-            format!("Check out '{}' before releasing", default_branch),
-            format!(
-                "A managed release worktree on another local branch is allowed only when HEAD exactly matches {}",
-                remote_default_ref
-            ),
-            "If you only want a preview, use --dry-run".to_string(),
-        ]),
-    ))
+    .unwrap_or_else(|| "main".to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_default_branch, validate_remote_sync};
+    use super::{
+        validate_default_branch, validate_default_branch_ancestry,
+        validate_head_reachable_from_default_branch, validate_remote_sync,
+    };
     use crate::core::component::Component;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
@@ -142,11 +250,13 @@ mod tests {
         let err = validate_default_branch(&git_component(dir)).expect_err("feature should fail");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("non-default branch 'feature'"));
+        assert!(err
+            .message
+            .contains("branch 'feature' because the repo default branch is 'main'"));
     }
 
     #[test]
-    fn test_validate_default_branch_allows_release_branch_at_remote_default_tip() {
+    fn test_validate_default_branch_blocks_release_branch_at_remote_default_tip() {
         let temp = tempfile::tempdir().expect("tempdir");
         let remote = temp.path().join("remote.git");
         let seed = temp.path().join("seed");
@@ -167,8 +277,13 @@ mod tests {
         run_git(temp.path(), &["clone", &remote_str, "checkout"]);
         run_git(&checkout, &["checkout", "-q", "-b", "release-local"]);
 
-        validate_default_branch(&git_component(&checkout))
-            .expect("release branch at origin/main tip should be allowed");
+        let err = validate_default_branch(&git_component(&checkout))
+            .expect_err("release branch at origin/main tip should fail");
+
+        assert!(err
+            .message
+            .contains("branch 'release-local' because the repo default branch is 'main'"));
+        assert!(err.details.to_string().contains("homeboy release --apply"));
     }
 
     #[test]
@@ -200,11 +315,87 @@ mod tests {
         let err = validate_default_branch(&git_component(&checkout))
             .expect_err("feature branch ahead of origin/main should fail");
 
-        assert!(err.message.contains("non-default branch 'feature'"));
+        assert!(err
+            .message
+            .contains("branch 'feature' because the repo default branch is 'main'"));
+        assert!(err.details.to_string().contains(
+            "release from 'main' so the tag target is published through the default branch"
+        ));
+    }
+
+    #[test]
+    fn test_validate_default_branch_ancestry_blocks_default_branch_not_based_on_remote_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["checkout", "--orphan", "replacement"]);
+        std::fs::write(checkout.join("README.md"), "replacement\n").expect("write fixture");
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-q", "-m", "Replacement root"]);
+        run_git(&checkout, &["branch", "-M", "main"]);
+
+        let err = validate_default_branch_ancestry(&git_component(&checkout))
+            .expect_err("unrelated local main should fail");
+
+        assert!(err.message.contains(
+            "branch 'main' because it is not safely based on the repo default branch 'main'"
+        ));
+        assert!(err.details.to_string().contains("homeboy release --apply"));
+    }
+
+    #[test]
+    fn test_validate_head_reachable_from_default_branch_blocks_detached_unreachable_head() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["checkout", "--orphan", "replacement"]);
+        std::fs::write(checkout.join("README.md"), "replacement\n").expect("write fixture");
+        run_git(&checkout, &["add", "."]);
+        run_git(&checkout, &["commit", "-q", "-m", "Replacement root"]);
+        run_git(&checkout, &["checkout", "--detach"]);
+
+        let err = validate_head_reachable_from_default_branch(&git_component(&checkout))
+            .expect_err("detached unreachable HEAD should fail");
+
+        assert!(err.message.contains(
+            "detached HEAD because HEAD is not reachable from the repo default branch 'main'"
+        ));
         assert!(err
             .details
             .to_string()
-            .contains("HEAD exactly matches origin/main"));
+            .contains("creating a GitHub Release"));
     }
 
     #[test]
