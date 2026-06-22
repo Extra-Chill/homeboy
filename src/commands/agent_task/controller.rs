@@ -267,8 +267,12 @@ fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdR
 }
 
 pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
-    let materialized =
-        materialize_controller_spec(&args.spec, args.inputs.as_deref(), &args.policy_results)?;
+    let materialized = materialize_controller_spec(
+        &args.spec,
+        args.inputs.as_deref(),
+        &args.policy_results,
+        None,
+    )?;
     Ok((materialized.value, 0))
 }
 
@@ -303,12 +307,16 @@ where
         ));
     }
 
-    let materialized =
-        materialize_controller_spec(&args.spec, args.inputs.as_deref(), &args.policy_results)?;
+    let defaults = ControllerDispatchDefaults::from_run_from_spec_args(&args);
+    let materialized = materialize_controller_spec(
+        &args.spec,
+        args.inputs.as_deref(),
+        &args.policy_results,
+        Some(&defaults),
+    )?;
     let from_spec = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest {
         spec: materialized.spec.clone(),
     })?;
-    let defaults = ControllerDispatchDefaults::from_run_from_spec_args(&args);
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
@@ -366,10 +374,14 @@ fn materialize_controller_spec(
     spec_source: &str,
     inputs_source: Option<&str>,
     policy_result_sources: &[String],
+    dispatch_defaults: Option<&ControllerDispatchDefaults>,
 ) -> homeboy::core::Result<MaterializedControllerSpec> {
     let source = agent_task_controller_service::load_materialize_spec_source(spec_source)?;
     let mut spec = source.spec;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, spec_source);
+    if let Some(defaults) = dispatch_defaults {
+        defaults.apply_to_spec(&mut spec);
+    }
     let run_inputs = match inputs_source {
         Some(inputs) => {
             serde_json::from_str(&config::read_json_spec_to_string(inputs)?).map_err(|error| {
@@ -461,6 +473,8 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
         )
     })?;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
+    let defaults = ControllerDispatchDefaults::from_from_spec_args(&args);
+    defaults.apply_to_spec(&mut spec);
     if args.doctor {
         return controller_from_spec_doctor(spec, &args);
     }
@@ -472,7 +486,7 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     let (resume_report, exit_code) = controller_resume_with_executor(
         report.loop_id.clone(),
         ExtensionProviderAgentTaskExecutor::discover(),
-        ControllerDispatchDefaults::from_from_spec_args(&args),
+        defaults,
     )?;
     Ok((
         serde_json::json!({
@@ -803,6 +817,107 @@ impl ControllerDispatchDefaults {
             provider_config: self.provider_config.clone(),
         }
     }
+
+    fn apply_to_spec(&self, spec: &mut AgentTaskRepoLoopSpec) {
+        if self.is_empty() {
+            return;
+        }
+        self.apply_to_spec_metadata(&mut spec.metadata);
+        self.apply_to_actions(&mut spec.actions);
+        for phase in &mut spec.phases {
+            self.apply_to_actions(&mut phase.actions);
+        }
+        if let Some(policy) = &mut spec.policy {
+            for transition in &mut policy.transitions {
+                self.apply_to_actions(&mut transition.actions);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.backend.is_none()
+            && self.selector.is_none()
+            && self.model.is_none()
+            && self.provider_config.is_none()
+    }
+
+    fn apply_to_spec_metadata(&self, metadata: &mut Value) {
+        let mut object = match std::mem::take(metadata) {
+            Value::Object(map) => map,
+            Value::Null => serde_json::Map::new(),
+            other => {
+                let mut map = serde_json::Map::new();
+                map.insert("repo_loop_metadata".to_string(), other);
+                map
+            }
+        };
+        let defaults = object
+            .entry("dispatch_defaults".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Value::Object(defaults) = defaults {
+            insert_default_string(defaults, "backend", self.backend.as_deref());
+            insert_default_string(defaults, "selector", self.selector.as_deref());
+            insert_default_string(defaults, "model", self.model.as_deref());
+            insert_default_string(defaults, "provider_config", self.provider_config.as_deref());
+        }
+        *metadata = Value::Object(object);
+    }
+
+    fn apply_to_actions(&self, actions: &mut [AgentTaskLoopPolicyAction]) {
+        for action in actions {
+            match action {
+                AgentTaskLoopPolicyAction::SpawnTask { request, .. }
+                | AgentTaskLoopPolicyAction::SpawnController { request, .. }
+                | AgentTaskLoopPolicyAction::SpawnSubloop { request, .. } => {
+                    self.apply_to_dispatch_request(request);
+                }
+                AgentTaskLoopPolicyAction::FanOut {
+                    request_template, ..
+                }
+                | AgentTaskLoopPolicyAction::RouteFinding {
+                    request_template, ..
+                } => {
+                    self.apply_to_dispatch_request(request_template);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_to_dispatch_request(&self, request: &mut Value) {
+        let Some(dispatch) = dispatch_object_mut(request) else {
+            return;
+        };
+        insert_default_string(dispatch, "backend", self.backend.as_deref());
+        insert_default_string(dispatch, "selector", self.selector.as_deref());
+        insert_default_string(dispatch, "model", self.model.as_deref());
+        insert_default_string(dispatch, "provider_config", self.provider_config.as_deref());
+    }
+}
+
+fn dispatch_object_mut(value: &mut Value) -> Option<&mut serde_json::Map<String, Value>> {
+    let object = value.as_object_mut()?;
+    if object.get("mode").and_then(Value::as_str) != Some("dispatch") {
+        return None;
+    }
+    if object.contains_key("dispatch") {
+        return object.get_mut("dispatch").and_then(Value::as_object_mut);
+    }
+    Some(object)
+}
+
+fn insert_default_string(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<&str>) {
+    if map
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        return;
+    }
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        map.insert(key.to_string(), Value::String(value.to_string()));
+    }
 }
 
 fn stamp_loop_runtime_metadata(
@@ -1106,5 +1221,30 @@ mod tests {
             command.core.provider_config.as_deref(),
             Some(r#"{"runtime_wordpress_version":"nightly"}"#)
         );
+    }
+
+    #[test]
+    fn controller_dispatch_defaults_apply_selector_when_missing() {
+        let overrides = ControllerDispatchDefaults {
+            backend: Some("fixture".to_string()),
+            selector: Some("fixture-provider".to_string()),
+            model: Some("gpt-test".to_string()),
+            provider_config: None,
+        }
+        .to_overrides();
+        let command = agent_task_controller_service::controller_request_dispatch_command(
+            &serde_json::json!({
+                "mode": "dispatch",
+                "dispatch": {
+                    "prompt": "Cook"
+                }
+            }),
+            &overrides,
+        )
+        .expect("dispatch command");
+
+        assert_eq!(command.backend.as_deref(), Some("fixture"));
+        assert_eq!(command.selector.as_deref(), Some("fixture-provider"));
+        assert_eq!(command.model.as_deref(), Some("gpt-test"));
     }
 }

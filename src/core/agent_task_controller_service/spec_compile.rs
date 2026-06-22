@@ -605,7 +605,15 @@ pub(super) fn apply_workflow_dispatch_defaults(
     else {
         return;
     };
-    for key in ["cwd", "workspace", "repo"] {
+    for key in [
+        "cwd",
+        "workspace",
+        "repo",
+        "backend",
+        "selector",
+        "model",
+        "provider_config",
+    ] {
         if dispatch.contains_key(key) {
             continue;
         }

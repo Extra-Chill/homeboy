@@ -178,7 +178,7 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
                 dispatch_model: None,
                 dispatch_provider_config: None,
             },
-            CapturingExecutor::default(),
+            ArtifactCapturingExecutor::default(),
         )
         .expect("run from spec");
 
@@ -208,6 +208,58 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
         assert_eq!(
             value["status"]["controller"]["metadata"]["run_key"],
             "run-from-spec-test"
+        );
+    });
+}
+
+#[test]
+fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
+    with_temp_home(|| {
+        let observed_request = Arc::new(Mutex::new(None));
+        let (value, exit_code) = controller_run_from_spec_with_test_executor(
+            AgentTaskControllerRunFromSpecArgs {
+                spec: serde_json::to_string(&json!({
+                    "loop_id": "run-from-spec-dispatch-defaults-loop",
+                    "workflows": [{ "workflow_id": "cook", "prompt": "Cook." }]
+                }))
+                .expect("spec json"),
+                inputs: None,
+                policy_results: Vec::new(),
+                max_actions: 1,
+                dispatch_backend: Some("fixture".to_string()),
+                dispatch_selector: None,
+                dispatch_model: Some("gpt-test".to_string()),
+                dispatch_provider_config: Some(
+                    r#"{"runtime_wordpress_version":"6.9"}"#.to_string(),
+                ),
+            },
+            CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect("run from spec");
+
+        let observed = observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("provider saw request");
+
+        assert_eq!(exit_code, 1, "{value:#}");
+        assert!(!value
+            .to_string()
+            .contains("requires --backend because no default backend policy is configured"));
+        assert_eq!(observed.executor.backend, "fixture");
+        assert_eq!(observed.executor.selector, None);
+        assert_eq!(observed.executor.model.as_deref(), Some("gpt-test"));
+        assert_eq!(observed.executor.config["runtime_wordpress_version"], "6.9");
+        assert_eq!(
+            value["from_spec"]["actions"][0]["action"]["request"]["dispatch"]["backend"],
+            "fixture"
+        );
+        assert_eq!(
+            value["materialization"]["spec"]["metadata"]["dispatch_defaults"]["backend"],
+            "fixture"
         );
     });
 }

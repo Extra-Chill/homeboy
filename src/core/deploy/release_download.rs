@@ -360,8 +360,12 @@ fn curl_release_artifact_command(
 ) -> CurlReleaseArtifactCommand {
     let mut args = vec!["-fsSL".to_string(), "--retry".to_string(), "3".to_string()];
 
-    let config_stdin = auth_token
-        .map(|token| format!("{}header = \"Accept: application/octet-stream\"\n", github_api_config(token)));
+    let config_stdin = auth_token.map(|token| {
+        format!(
+            "{}header = \"Accept: application/octet-stream\"\n",
+            github_api_config(token)
+        )
+    });
 
     if config_stdin.is_some() {
         args.extend(["--config".to_string(), "-".to_string()]);
