@@ -383,6 +383,8 @@ runWpCodeboxFuzzSuite({
 	}, { request: taskRequest });
 	assert.equal(embeddedArtifactOnly.succeeded, true);
 	assert.equal(embeddedArtifactOnly.artifacts[0].path, 'case/report.json');
+	assert.equal(embeddedArtifactOnly.artifacts[0].role, 'fuzz_report');
+	assert.equal(embeddedArtifactOnly.artifacts[0].name, 'case_report');
 	const doubleNested = normalizeWpCodeboxFuzzRunResult({
 		json: {
 			schema: 'wp-codebox/agent-task-run/v1',

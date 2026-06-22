@@ -650,7 +650,7 @@ function normalizeFuzzArtifact(artifact) {
 		return null;
 	}
 	const name = artifact.name || artifact.id || artifact.key || artifact.role || artifact.type || artifact.kind;
-	const role = normalizeFuzzArtifactRole(artifact.role || artifact.artifact_role || artifact.artifactRole || name || artifact.path || artifact.url || artifact.file);
+	const role = normalizeFuzzArtifactRole(artifact.role || artifact.artifact_role || artifact.artifactRole || artifact.kind || artifact.type || name || artifact.path || artifact.url || artifact.file);
 	if (!role) {
 		return null;
 	}
