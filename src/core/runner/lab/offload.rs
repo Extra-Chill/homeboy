@@ -71,7 +71,7 @@ use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
     lab_pre_dispatch_failure_message, materialize_inline_agent_task_plan_arg,
     materialize_inline_agent_task_tasks_arg, mirror_agent_task_run_plan_lifecycle,
-    parse_offloaded_dispatch_envelope_from_outputs,
+    parse_offloaded_agent_task_handoff_from_outputs,
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
@@ -1515,7 +1515,7 @@ fn run_lab_offload_inner(
         ));
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = agent_task_run_id.as_deref() {
-            if let Some(envelope) = parse_offloaded_dispatch_envelope_from_outputs(
+            if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
                 &exec_output.stdout,
                 &exec_output.stderr,
             )? {
@@ -1529,7 +1529,7 @@ fn run_lab_offload_inner(
                         stderr: &exec_output.stderr,
                         exit_code,
                     },
-                    &envelope,
+                    &handoff.envelope,
                 )? {
                     stderr.push_str(&format!(
                         "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
@@ -3359,12 +3359,16 @@ mod tests {
             stderr: r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Missing required field: cwd","details":{"field":"cwd"}}}"#.to_string(),
             source_snapshot: None,
             job: None,
+            runner_job: None,
             job_id: Some("job-123".to_string()),
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            artifacts: Vec::new(),
             metrics: None,
             capture: None,
+            runner_result: None,
+            handoff: None,
             diagnostics: None,
         };
         let mut stderr = String::new();
