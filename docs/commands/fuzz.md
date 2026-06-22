@@ -5,11 +5,12 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>]
 homeboy fuzz validate <results-file>
-homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--output-envelope <path>]
+homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
 homeboy fuzz replay [<case>] [--run-id <id>] [-- <runner-args>]
 ```
 
@@ -59,6 +60,16 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 `homeboy/fuzz-campaign/v1` campaign object there, `homeboy fuzz run` parses it
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
+
+`homeboy fuzz plan --inventory <path>`, `homeboy fuzz run --inventory <path>`,
+and `homeboy fuzz report --inventory <path>`
+accept a `homeboy/fuzz-target-inventory/v1` JSON file with discovered
+`surfaces`, `targets`, `workloads`, and `seeds`. Homeboy validates the inventory,
+merges it with the generated target inventory and declared workload metadata,
+embeds it in generated result envelope metadata when reporting, and exposes the
+path to runners as `HOMEBOY_FUZZ_INVENTORY_FILE`. The inventory contract is
+product-neutral; product-specific details belong in `metadata` or flattened extra
+fields on the inventory items.
 
 Campaigns can include a product-neutral coverage summary:
 

@@ -161,6 +161,21 @@ pub struct FuzzTarget {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl FuzzTarget {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_TARGET_SCHEMA);
+        require_schema(&self.schema, FUZZ_TARGET_SCHEMA, "fuzz target")?;
+        self.id = required_trimmed("target.id", &self.id)?;
+        self.kind = required_trimmed("target.kind", &self.kind)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.locator = normalize_optional_string(self.locator.take());
+        for operation in &mut self.operations {
+            operation.normalize()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuzzInput {
     pub name: String,
@@ -207,6 +222,19 @@ pub struct FuzzWorkload {
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzWorkload {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_WORKLOAD_SCHEMA);
+        require_schema(&self.schema, FUZZ_WORKLOAD_SCHEMA, "fuzz workload")?;
+        self.id = required_trimmed("workload.id", &self.id)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.surface_ids = normalize_string_vec(std::mem::take(&mut self.surface_ids));
+        self.operations = normalize_string_vec(std::mem::take(&mut self.operations));
+        self.seed_ids = normalize_string_vec(std::mem::take(&mut self.seed_ids));
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -294,6 +322,19 @@ pub struct FuzzSeed {
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzSeed {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_SEED_SCHEMA);
+        require_schema(&self.schema, FUZZ_SEED_SCHEMA, "fuzz seed")?;
+        self.id = required_trimmed("seed.id", &self.id)?;
+        self.kind = required_trimmed("seed.kind", &self.kind)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.value = normalize_optional_string(self.value.take());
+        self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -505,6 +546,42 @@ pub struct FuzzTargetInventory {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl FuzzTargetInventory {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut inventory: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        inventory.normalize()?;
+        Ok(inventory)
+    }
+
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_TARGET_INVENTORY_SCHEMA);
+        require_schema(
+            &self.schema,
+            FUZZ_TARGET_INVENTORY_SCHEMA,
+            "fuzz target inventory",
+        )?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz target inventory version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("inventory.id", &self.id)?;
+        for surface in &mut self.surfaces {
+            surface.normalize()?;
+        }
+        for target in &mut self.targets {
+            target.normalize()?;
+        }
+        for workload in &mut self.workloads {
+            workload.normalize()?;
+        }
+        for seed in &mut self.seeds {
+            seed.normalize()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzExecutionRequest {
     #[serde(default = "fuzz_execution_request_schema")]
@@ -649,6 +726,68 @@ pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
         ));
     }
     Ok(campaign)
+}
+
+pub fn parse_fuzz_target_inventory_file(path: &Path) -> Result<FuzzTargetInventory> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let value: Value = serde_json::from_str(&contents).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!(
+                "parse fuzz target inventory file {}",
+                path.display()
+            )),
+            Some(contents.clone()),
+        )
+    })?;
+    FuzzTargetInventory::from_value(value).map_err(|message| {
+        Error::validation_invalid_argument(
+            "inventory",
+            message,
+            Some(path.display().to_string()),
+            None,
+        )
+    })
+}
+
+pub fn merge_fuzz_target_inventory(
+    base: &mut FuzzTargetInventory,
+    mut discovered: FuzzTargetInventory,
+) {
+    base.surfaces.append(&mut discovered.surfaces);
+    base.targets.append(&mut discovered.targets);
+    base.workloads.append(&mut discovered.workloads);
+    base.seeds.append(&mut discovered.seeds);
+    if base.provenance.is_none() {
+        base.provenance = discovered.provenance;
+    }
+    merge_metadata(&mut base.metadata, discovered.metadata);
+    base.extra.append(&mut discovered.extra);
+}
+
+fn merge_metadata(base: &mut Value, discovered: Value) {
+    if discovered.is_null() {
+        return;
+    }
+    if base.is_null() {
+        *base = discovered;
+        return;
+    }
+    match (base, discovered) {
+        (Value::Object(base_map), Value::Object(incoming_map)) => {
+            for (key, value) in incoming_map {
+                base_map.entry(key).or_insert(value);
+            }
+        }
+        (base, incoming) => {
+            let previous = std::mem::take(base);
+            *base = serde_json::json!({
+                "homeboy_metadata": previous,
+                "merged_inventory_metadata": incoming,
+            });
+        }
+    }
 }
 
 pub fn default_fuzz_required_artifacts() -> Vec<FuzzRequiredArtifact> {
@@ -1169,5 +1308,81 @@ mod tests {
 
         assert_eq!(parsed.id, "campaign-1");
         assert_eq!(parsed.safety_class, FuzzSafetyClass::ReadOnly);
+    }
+
+    #[test]
+    fn parse_fuzz_target_inventory_file_reads_and_normalizes_inventory_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fuzz-inventory.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema": FUZZ_TARGET_INVENTORY_SCHEMA,
+                "id": " discovered ",
+                "surfaces": [{
+                    "id": " api ",
+                    "kind": " rest ",
+                    "safety_class": "read_only"
+                }],
+                "targets": [{
+                    "id": " target-1 ",
+                    "kind": " endpoint "
+                }],
+                "workloads": [{
+                    "id": " workload-1 ",
+                    "safety_class": "read_only",
+                    "surface_ids": [" api ", " "]
+                }],
+                "seeds": [{
+                    "id": " seed-1 ",
+                    "kind": " literal ",
+                    "tags": [" stable ", " "]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write fuzz inventory");
+
+        let parsed = parse_fuzz_target_inventory_file(&path).expect("parse fuzz inventory");
+
+        assert_eq!(parsed.id, "discovered");
+        assert_eq!(parsed.surfaces[0].id, "api");
+        assert_eq!(parsed.targets[0].kind, "endpoint");
+        assert_eq!(parsed.workloads[0].surface_ids, vec!["api"]);
+        assert_eq!(parsed.seeds[0].tags, vec!["stable"]);
+    }
+
+    #[test]
+    fn merge_fuzz_target_inventory_appends_discovered_contract_sections() {
+        let mut base = FuzzTargetInventory {
+            schema: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
+            version: FUZZ_CONTRACT_VERSION,
+            id: "base".to_string(),
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            seeds: Vec::new(),
+            provenance: None,
+            metadata: json!({ "declared_workloads": [] }),
+            extra: BTreeMap::new(),
+        };
+        let discovered = FuzzTargetInventory::from_value(json!({
+            "schema": FUZZ_TARGET_INVENTORY_SCHEMA,
+            "id": "discovered",
+            "surfaces": [{
+                "id": "api",
+                "kind": "rest",
+                "safety_class": "read_only"
+            }],
+            "metadata": { "producer": "runner" }
+        }))
+        .expect("inventory contract");
+
+        merge_fuzz_target_inventory(&mut base, discovered);
+
+        assert_eq!(base.id, "base");
+        assert_eq!(base.surfaces.len(), 1);
+        assert_eq!(base.metadata["declared_workloads"], json!([]));
+        assert_eq!(base.metadata["producer"], "runner");
     }
 }
