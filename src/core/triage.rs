@@ -9,7 +9,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -58,6 +58,7 @@ pub struct TriageLandingOptions {
     pub pr_refs: Vec<String>,
     pub branch_patterns: Vec<String>,
     pub source_issues: Vec<u64>,
+    pub ordered: bool,
     pub drilldown: bool,
     pub limit: usize,
 }
@@ -107,15 +108,30 @@ pub struct TriageLandingPr {
     pub url: String,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub head_branch: Option<String>,
     pub mergeability_state: TriageLandingMergeabilityState,
     pub check_state: TriageLandingCheckState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_repo: Option<String>,
     pub classification: TriageLandingClassification,
     pub suggested_next_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependent_rebase: Option<TriageLandingRebasePlan>,
     #[serde(flatten)]
     pub signals: TriagePullRequestSignals,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub check_failures: Vec<TriageCheckFailure>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageLandingRebasePlan {
+    pub after_pr: u64,
+    pub safe_to_update: bool,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -464,8 +480,13 @@ pub fn landing(options: TriageLandingOptions) -> Result<TriageLandingOutput> {
         }
     }
 
-    pull_requests.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.number.cmp(&b.number)));
-    pull_requests.dedup_by(|a, b| a.repo == b.repo && a.number == b.number);
+    if options.ordered {
+        dedupe_landing_prs_preserving_order(&mut pull_requests);
+        annotate_ordered_dependent_rebases(&mut pull_requests);
+    } else {
+        pull_requests.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.number.cmp(&b.number)));
+        pull_requests.dedup_by(|a, b| a.repo == b.repo && a.number == b.number);
+    }
     let summary = summarize_landing(&pull_requests);
 
     Ok(TriageLandingOutput {
@@ -1014,7 +1035,7 @@ fn fetch_landing_pr(
 }
 
 fn landing_pr_json_fields() -> &'static str {
-    "number,title,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,headRefName,comments,reviews,updatedAt,mergedAt"
+    "number,title,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,baseRefName,headRefName,headRepository,headRepositoryOwner,comments,reviews,updatedAt,mergedAt"
 }
 
 fn effective_landing_limit(options: &TriageLandingOptions) -> usize {
@@ -1207,8 +1228,14 @@ struct RawPr {
     merge_state_status: Option<String>,
     #[serde(default, rename = "statusCheckRollup")]
     status_check_rollup: Vec<Value>,
+    #[serde(default, rename = "baseRefName")]
+    base_ref_name: Option<String>,
     #[serde(default, rename = "headRefName")]
     head_ref_name: Option<String>,
+    #[serde(default, rename = "headRepository")]
+    head_repository: Option<RawPrHeadRepository>,
+    #[serde(default, rename = "headRepositoryOwner")]
+    head_repository_owner: Option<RawNamedNode>,
     #[serde(default, rename = "mergedAt")]
     merged_at: Option<String>,
     #[serde(default)]
@@ -1223,6 +1250,14 @@ struct RawPr {
     reviews: Vec<RawReview>,
     #[serde(default, rename = "updatedAt")]
     updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPrHeadRepository {
+    #[serde(default, rename = "nameWithOwner")]
+    name_with_owner: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn parse_landing_prs(
@@ -1274,11 +1309,14 @@ fn raw_pr_to_landing_pr(item: RawPr, repo: &GitHubRepo, drilldown: bool) -> Tria
         title: item.title,
         url: item.url,
         state: item.state,
+        base_branch: non_empty(item.base_ref_name),
         head_branch: non_empty(item.head_ref_name),
         mergeability_state: landing_mergeability_state(signals.merge_state.as_deref()),
         check_state: landing_check_state(signals.checks.as_deref()),
+        head_repo: raw_head_repo_name_with_owner(item.head_repository, item.head_repository_owner),
         classification,
         suggested_next_command: landing_next_command(classification, repo, item.number),
+        dependent_rebase: None,
         signals,
         check_failures,
     }
@@ -1303,6 +1341,69 @@ fn landing_check_state(checks: Option<&str>) -> TriageLandingCheckState {
         Some("FAILURE") => TriageLandingCheckState::Failed,
         None => TriageLandingCheckState::Unknown,
         Some(_) => TriageLandingCheckState::Other,
+    }
+}
+
+fn raw_head_repo_name_with_owner(
+    repo: Option<RawPrHeadRepository>,
+    owner: Option<RawNamedNode>,
+) -> Option<String> {
+    let repo = repo?;
+    if let Some(name_with_owner) = non_empty(repo.name_with_owner) {
+        return Some(name_with_owner);
+    }
+    let owner = owner.and_then(|owner| owner.login)?;
+    let name = non_empty(repo.name)?;
+    Some(format!("{owner}/{name}"))
+}
+
+fn dedupe_landing_prs_preserving_order(items: &mut Vec<TriageLandingPr>) {
+    let mut seen = BTreeSet::new();
+    items.retain(|item| seen.insert((item.repo.clone(), item.number)));
+}
+
+fn annotate_ordered_dependent_rebases(items: &mut [TriageLandingPr]) {
+    for index in 1..items.len() {
+        let previous = items[index - 1].number;
+        let plan = dependent_rebase_plan(&items[index], previous);
+        items[index].dependent_rebase = Some(plan);
+    }
+}
+
+fn dependent_rebase_plan(item: &TriageLandingPr, after_pr: u64) -> TriageLandingRebasePlan {
+    let Some(head_branch) = item.head_branch.as_deref() else {
+        return TriageLandingRebasePlan {
+            after_pr,
+            safe_to_update: false,
+            reason: "missing_head_branch".to_string(),
+            command: None,
+        };
+    };
+    let Some(base_branch) = item.base_branch.as_deref() else {
+        return TriageLandingRebasePlan {
+            after_pr,
+            safe_to_update: false,
+            reason: "missing_base_branch".to_string(),
+            command: None,
+        };
+    };
+    if item.head_repo.as_deref() != Some(item.repo.as_str()) {
+        return TriageLandingRebasePlan {
+            after_pr,
+            safe_to_update: false,
+            reason: "head_branch_not_in_base_repo".to_string(),
+            command: None,
+        };
+    }
+
+    TriageLandingRebasePlan {
+        after_pr,
+        safe_to_update: true,
+        reason: "same_repo_head_branch".to_string(),
+        command: Some(format!(
+            "gh pr checkout {} -R {} && git fetch origin {} && git rebase origin/{} && git push --force-with-lease origin HEAD:{}",
+            item.number, item.repo, base_branch, base_branch, head_branch
+        )),
     }
 }
 
