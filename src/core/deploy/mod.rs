@@ -38,6 +38,7 @@ use crate::core::project;
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
+    project::validate_component_local_paths(&project)?;
     let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
     orchestration::deploy_components(config, &project, &ctx, &base_path)
 }
@@ -260,4 +261,57 @@ pub fn resolve_shared_targets(component_ids: &[String]) -> Result<Vec<String>> {
     }
 
     Ok(project_ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::project::{Project, ProjectComponentAttachment};
+    use crate::test_support::with_isolated_home;
+
+    fn deploy_config() -> DeployConfig {
+        DeployConfig {
+            component_ids: vec!["plugin".to_string()],
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: true,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: None,
+            no_pull: false,
+            head: false,
+            tagged: false,
+        }
+    }
+
+    #[test]
+    fn deploy_planning_fails_closed_when_project_component_local_path_is_missing() {
+        with_isolated_home(|_| {
+            project::save(&Project {
+                id: "site".to_string(),
+                server_id: None,
+                base_path: Some("/srv/site".to_string()),
+                components: vec![ProjectComponentAttachment {
+                    id: "plugin".to_string(),
+                    local_path: "/tmp/homeboy-missing-component-path".to_string(),
+                    remote_path: Some("wp-content/plugins/plugin".to_string()),
+                }],
+                ..Project::default()
+            })
+            .expect("save project");
+
+            let err = run("site", &deploy_config()).expect_err("missing local_path should block");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("component local_path blockers"));
+            assert!(err.hints.iter().any(|hint| {
+                hint.message.contains(
+                    "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
+                )
+            }));
+        });
+    }
 }

@@ -34,7 +34,9 @@ pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
     ProjectPinListItem, ProjectPinOutput,
 };
-pub use readiness::calculate_deploy_readiness;
+pub use readiness::{
+    calculate_deploy_readiness, validate_component_local_path, validate_component_local_paths,
+};
 pub use report::{
     build_components_output, build_create_output, build_delete_output, build_init_output,
     build_list_output, build_path_resolution_output, build_pin_output, build_remove_output,

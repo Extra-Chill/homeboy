@@ -24,6 +24,7 @@ pub fn resolve_project_component_with_standalone_snapshot(
             .iter()
             .find(|component| component.id == component_id)
     {
+        super::super::validate_component_local_path(project, component_id)?;
         (
             discover_attached_component(Path::new(&attachment.local_path)).ok_or_else(|| {
                 Error::validation_invalid_argument(
@@ -332,5 +333,23 @@ mod tests {
                 Some("custom-extract {{artifact}}")
             );
         });
+    }
+
+    #[test]
+    fn status_resolution_reports_missing_component_local_path() {
+        let project = project_with_attachment(
+            Some("wp-content/plugins/fixture"),
+            "/tmp/homeboy-missing-component-path".to_string(),
+        );
+
+        let err = resolve_project_component(&project, "fixture").expect_err("missing local_path");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("missing local_path"));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message.contains(
+                "Component 'fixture' local_path '/tmp/homeboy-missing-component-path' does not exist",
+            )
+        }));
     }
 }
