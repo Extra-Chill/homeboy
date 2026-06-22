@@ -73,6 +73,7 @@ pub(super) struct PreparedComponentDeploy {
     pub cleanup_local_artifact: bool,
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn prepare_component_deploy(
     component: &Component,
     config: &DeployConfig,
@@ -574,6 +575,7 @@ fn failed_preflight_file_artifact_result(
         .with_build_exit_code(build_exit_code)
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_preflight_file_artifact(
     component: &Component,
     base_path: &str,
@@ -611,6 +613,8 @@ fn validate_preflight_file_artifact(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 fn resolve_preflight_artifact_path(
     component: &Component,
     config: &DeployConfig,
@@ -1339,9 +1343,10 @@ fn cleanup_build_dependencies(
 mod tests {
     use super::{
         artifact_requires_component_extract_command, bound_captured_read,
-        cleanup_deploy_build_artifact, failed_component_deploy_result,
+        cleanup_deploy_build_artifact, failed_component_deploy_result, release_artifact_plan,
         resolve_preflight_artifact_path, should_try_download_release_artifact,
-        validate_predeploy_artifact_version, ARTIFACT_VERSION_READ_LIMIT_BYTES,
+        validate_predeploy_artifact_version, ReleaseArtifactPlan,
+        ARTIFACT_VERSION_READ_LIMIT_BYTES,
     };
     use crate::core::component::{ArtifactInput, Component, VersionTarget};
     use crate::core::deploy::types::DeployConfig;

@@ -408,9 +408,8 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 /// forward so the default payload is unchanged.
 #[cfg(test)]
 mod tests {
-    use super::git_push::is_non_fast_forward_rejection;
     use super::package::store_artifacts_from_output;
-    use super::{github_release, run_cleanup, run_git_push, run_package};
+    use super::{github_release, run_cleanup, run_package};
     use crate::core::component::Component;
     use crate::core::deploy::release_download::GitHubRepo;
     use crate::core::extension::ExtensionManifest;
