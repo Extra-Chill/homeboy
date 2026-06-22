@@ -250,8 +250,8 @@ fn render_formatting_findings(out: &mut String, data: &Map<String, Value>) {
     }
 
     let files = string_array(&formatting, "files");
-    let command = string_value(&formatting, "suggested_command")
-        .unwrap_or_else(|| "cargo fmt".to_string());
+    let command =
+        string_value(&formatting, "suggested_command").unwrap_or_else(|| "cargo fmt".to_string());
     let summary = string_value(&formatting, "summary");
 
     out.push_str("- Formatting findings:");
@@ -746,8 +746,8 @@ fn has_any_lint_detail(data: &Map<String, Value>, error: &Map<String, Value>) ->
         "phpstan_summary",
         "build_failed",
     ]
-        .iter()
-        .any(|key| string_value(data, key).is_some())
+    .iter()
+    .any(|key| string_value(data, key).is_some())
         || !object_value(data, "formatting_findings").is_empty()
         || ["code", "message"]
             .iter()
