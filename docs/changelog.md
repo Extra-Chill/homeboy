@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.250.4] - 2026-06-22
+
+### Changed
+- move worktree process execution into core service (#5879)
+- move ecosystem literals out of dead_code detector (#5876)
+
 ## [0.250.3] - 2026-06-22
 
 ### Changed
