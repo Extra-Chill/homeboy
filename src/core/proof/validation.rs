@@ -7,6 +7,8 @@ use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 use super::*;
 
+const REQUIRED_PROOF_ARTIFACT_MISSING: &str = "required_proof_artifact_missing";
+
 pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
     let mut diagnostics = Vec::new();
     let value = match unwrap_command_envelope(value, &mut diagnostics) {
@@ -14,6 +16,7 @@ pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
         None => {
             return HomeboyProofValidationReport {
                 schema: HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string(),
+                status: validation_status(&diagnostics),
                 valid: false,
                 diagnostics,
             };
@@ -47,11 +50,7 @@ pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
         )),
     }
 
-    HomeboyProofValidationReport {
-        schema: HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string(),
-        valid: diagnostics.is_empty(),
-        diagnostics,
-    }
+    validation_report(diagnostics)
 }
 
 fn unwrap_command_envelope(
@@ -118,6 +117,7 @@ fn validate_homeboy_proof(
             diagnostics,
         );
     }
+    validate_required_proof_artifacts(proof, diagnostics);
     for (index, source_ref) in proof.provenance.source_refs.iter().enumerate() {
         validate_evidence_ref(
             source_ref,
@@ -151,6 +151,55 @@ fn validate_homeboy_proof(
             Some(format!("/gaps/{index}")),
         ));
     }
+}
+
+fn validate_required_proof_artifacts(
+    proof: &HomeboyProof,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    for (index, requirement) in proof.artifact_requirements.iter().enumerate() {
+        if !requirement.required {
+            continue;
+        }
+        if proof
+            .artifacts
+            .iter()
+            .any(|artifact| artifact_satisfies_requirement(artifact, requirement))
+        {
+            continue;
+        }
+        diagnostics.push(diagnostic(
+            REQUIRED_PROOF_ARTIFACT_MISSING,
+            format!(
+                "required {:?} artifact '{}' was declared but not recorded in proof artifacts",
+                requirement.purpose, requirement.id
+            ),
+            Some(format!("/artifact_requirements/{index}")),
+        ));
+    }
+}
+
+fn artifact_satisfies_requirement(
+    artifact: &HomeboyProofArtifactRef,
+    requirement: &HomeboyProofArtifactRequirement,
+) -> bool {
+    artifact.purpose == requirement.purpose
+        && artifact.id.as_ref().is_some_and(|id| id == &requirement.id)
+        && requirement
+            .kind
+            .as_ref()
+            .map(|kind| artifact.kind.as_ref() == Some(kind))
+            .unwrap_or(true)
+        && requirement
+            .label
+            .as_ref()
+            .map(|label| artifact.label.as_ref() == Some(label))
+            .unwrap_or(true)
+        && requirement
+            .semantic_key
+            .as_ref()
+            .map(|semantic_key| artifact.semantic_key.as_ref() == Some(semantic_key))
+            .unwrap_or(true)
 }
 
 fn validate_materialized_loop_spec(
@@ -252,6 +301,33 @@ fn diagnostic(
 
 fn path(value: &str) -> Option<String> {
     Some(value.to_string())
+}
+
+fn validation_report(
+    diagnostics: Vec<HomeboyProofValidationDiagnostic>,
+) -> HomeboyProofValidationReport {
+    let status = validation_status(&diagnostics);
+    HomeboyProofValidationReport {
+        schema: HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string(),
+        status,
+        valid: status == HomeboyProofValidationStatus::Passed,
+        diagnostics,
+    }
+}
+
+fn validation_status(
+    diagnostics: &[HomeboyProofValidationDiagnostic],
+) -> HomeboyProofValidationStatus {
+    if diagnostics.is_empty() {
+        return HomeboyProofValidationStatus::Passed;
+    }
+    if diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.code == REQUIRED_PROOF_ARTIFACT_MISSING)
+    {
+        return HomeboyProofValidationStatus::Incomplete;
+    }
+    HomeboyProofValidationStatus::Failed
 }
 
 pub(super) fn proof_validation_schema() -> String {
