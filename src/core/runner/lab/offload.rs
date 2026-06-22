@@ -28,6 +28,7 @@ use crate::command_contract::{
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
@@ -39,9 +40,10 @@ use super::super::execution::{
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args, inline_agent_task_prompt_files_in_args,
-    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
-    remap_provider_config_in_args, rewrite_lab_offload_args,
-    rewrite_runner_resident_lab_offload_args, LabPathRemap,
+    lab_at_file_specs, lab_offload_source_path, remap_agent_task_plan_in_args,
+    remap_lab_at_file_args, remap_path_settings_in_args, remap_provider_config_in_args,
+    rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args, LabAtFileSpec,
+    LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
@@ -831,6 +833,31 @@ fn prepare_lab_offload_workspace_stage(
             .build(),
     );
 
+    let at_file_specs =
+        lab_at_file_specs(&offload_args, Path::new(&synced.local_path), &remote_cwd)?;
+    materialize_lab_at_files_on_runner(runner_id, &at_file_specs)?;
+    if !at_file_specs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.materialize_at_files", "lab.materialize_at_files")
+                .inputs(
+                    PlanValues::new().json("count", at_file_specs.len()).json(
+                        "files",
+                        &at_file_specs
+                            .iter()
+                            .map(|spec| {
+                                serde_json::json!({
+                                    "local_path": spec.local_path.display().to_string(),
+                                    "remote_path": spec.remote_path.as_str(),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .build(),
+        );
+    }
+
     let synced_extra_workspaces = sync_extra_lab_workspaces(
         runner_id,
         &synced.local_path,
@@ -944,6 +971,7 @@ fn prepare_lab_offload_workspace_stage(
     let remapped_args =
         inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
+    let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
     let (remapped_args, synced_remapped_tasks) =
         materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
     plan = record_synced_remapped_workspace_entry(
@@ -993,6 +1021,77 @@ fn prepare_lab_offload_workspace_stage(
         synced_rigs,
         rig_component_path_overrides,
     })
+}
+
+fn materialize_lab_at_files_on_runner(runner_id: &str, specs: &[LabAtFileSpec]) -> Result<()> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let client = ssh_client_for_lab_runner(runner_id)?;
+    for spec in specs {
+        let parent = spec
+            .remote_path
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .unwrap_or(".");
+        let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(parent)));
+        if !mkdir.success {
+            return Err(lab_at_file_materialization_error(
+                runner_id,
+                spec,
+                format!("failed to create remote parent directory: {}", mkdir.stderr),
+            ));
+        }
+        let upload = client.upload_file(&spec.local_path.display().to_string(), &spec.remote_path);
+        if !upload.success {
+            return Err(lab_at_file_materialization_error(
+                runner_id,
+                spec,
+                format!("failed to upload file: {}", upload.stderr),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn ssh_client_for_lab_runner(runner_id: &str) -> Result<SshClient> {
+    let runner = load(runner_id)?;
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "Lab offload @file materialization requires an SSH runner with server_id",
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Register a direct SSH runner or configure a reverse-connected runner before Lab offload.".to_string(),
+            ]),
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env);
+    Ok(client)
+}
+
+fn lab_at_file_materialization_error(
+    runner_id: &str,
+    spec: &LabAtFileSpec,
+    reason: String,
+) -> Error {
+    Error::validation_invalid_argument(
+        "at_file",
+        format!(
+            "Lab offload cannot materialize @file argument `{}` on runner `{}`: {}",
+            spec.original_spec, runner_id, reason
+        ),
+        Some(spec.local_path.display().to_string()),
+        Some(vec![
+            format!("Controller-side file: {}", spec.local_path.display()),
+            format!("Runner-side file: {}", spec.remote_path),
+            "Ensure the selected runner is reachable and its workspace root is writable, then retry Lab offload.".to_string(),
+        ]),
+    )
 }
 
 fn run_lab_offload_inner(
