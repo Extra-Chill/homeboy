@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { runDeterministicLoop } = require('./deterministic-loop-runner');
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 
 function buildGenericAgentLoopRequest(options = {}) {
@@ -56,8 +57,22 @@ function runGenericAgentLoop(options = {}) {
   const runtime = requiredObject(options.runtime, 'runtime');
   const request = options.request || buildGenericAgentLoopRequest(options);
   const execute = options.execute || executeRuntimeProvider;
-  const outcome = normalizeOutcome(execute({ ...options, request, runtime }), request);
   const validationPolicy = options.validationPolicy || options.validation_policy || {};
+  const loop = runDeterministicLoop({
+    loopId: request.task_id,
+    maxIterations: 1,
+    state: { request },
+    buildIteration: ({ state }) => state.request,
+    execute: ({ input }) => normalizeOutcome(execute({ ...options, request: input, runtime }), input),
+    reconcile: ({ state, outcome, artifacts }) => ({
+      ...state,
+      status: outcome?.status || 'failed',
+      outcome,
+      artifacts,
+    }),
+    stopCriteria: () => true,
+  });
+  const outcome = loop.iterations[0]?.outcome || normalizeOutcome(null, request);
   validateGenericAgentLoopOutcomeContract({
     request,
     outcome,
@@ -67,7 +82,7 @@ function runGenericAgentLoop(options = {}) {
   });
   const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
   const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, validationPolicy);
-  return { request, outcome, results, assertion };
+  return { request, outcome, results, assertion, loop };
 }
 
 function executeRuntimeProvider(options = {}) {

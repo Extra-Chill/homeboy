@@ -7,7 +7,7 @@ const genericLoopRunner = require('../lib/generic-agent-loop-runner');
 assert.equal(
   Object.prototype.hasOwnProperty.call(genericLoopRunner, 'runDeterministicLoop'),
   false,
-  'generic runtime adapter must not export or own deterministic loop semantics'
+  'generic runtime adapter must not export deterministic loop internals'
 );
 
 const runtime = { id: 'fixture-runtime', executor: { backend: 'fixture', path: '/unused' } };
@@ -63,6 +63,9 @@ assert.equal(result.request.task_id, 'fixture-workload');
 assert.equal(result.outcome.status, 'succeeded');
 assert.equal(result.results.scenarios[0].id, 'fixture-workload');
 assert.equal(result.assertion.completion_outcome_satisfied, true);
-assert.equal(Object.prototype.hasOwnProperty.call(result, 'loop'), false);
+assert.equal(result.loop.schema, 'homeboy/deterministic-loop-result/v1');
+assert.equal(result.loop.status, 'completed');
+assert.equal(result.loop.state.status, 'succeeded');
+assert.equal(result.loop.iterations.length, 1);
 
 process.stdout.write('Generic agent loop runner adapter delegation check passed\n');
