@@ -1000,31 +1000,7 @@ fn gh_command(github: &GitHubRepo, config: &GithubConfig, args: &[&str]) -> std:
 }
 
 pub(super) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<(String, String)> {
-    let mut env = Vec::new();
-    if github.host != "github.com" {
-        env.push(("GH_HOST".to_string(), github.host.clone()));
-    }
-
-    let Some(host_config) = config.hosts.get(&github.host) else {
-        return env;
-    };
-
-    if let Some(proxy) = host_config
-        .proxy
-        .as_deref()
-        .filter(|proxy| !proxy.is_empty())
-    {
-        env.push(("HTTPS_PROXY".to_string(), proxy.to_string()));
-    }
-
-    for (key, value) in &host_config.env {
-        if !key.is_empty() && key != "GH_HOST" {
-            env.retain(|(existing, _)| existing != key);
-            env.push((key.clone(), value.clone()));
-        }
-    }
-
-    env
+    crate::core::git::github_cli_env(&github.host, config)
 }
 
 #[cfg(test)]
@@ -1341,6 +1317,46 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn repair_commands_include_configured_enterprise_proxy() {
+        let github = GitHubRepo {
+            host: "github.enterprise.test".to_string(),
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+        };
+        let config = GithubConfig {
+            hosts: HashMap::from([(
+                "github.enterprise.test".to_string(),
+                GithubHostConfig {
+                    proxy: Some("https://proxy.example.test:8443".to_string()),
+                    env: HashMap::new(),
+                },
+            )]),
+        };
+
+        let repair = github_release_repair_commands(
+            "v1.2.3",
+            &github,
+            &config,
+            &[],
+            None,
+            Some("build/v1.2.3-release-notes.md"),
+        );
+
+        assert!(repair.create_command.starts_with(
+            "GH_HOST=github.enterprise.test HTTPS_PROXY=https://proxy.example.test:8443 gh release create v1.2.3"
+        ));
+        assert_eq!(
+            repair.view_command,
+            "GH_HOST=github.enterprise.test HTTPS_PROXY=https://proxy.example.test:8443 gh release view v1.2.3 -R owner/repo"
+        );
+        assert!(repair
+            .env_hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Configured HTTPS_PROXY is included"));
     }
 
     #[test]

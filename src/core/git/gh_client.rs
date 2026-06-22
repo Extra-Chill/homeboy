@@ -172,17 +172,18 @@ pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)
         env.push(("GH_HOST".to_string(), host.to_string()));
     }
 
-    let Some(host_config) = config.hosts.get(host) else {
-        return env;
-    };
-
+    let host_config = config.hosts.get(host);
     if let Some(proxy) = host_config
-        .proxy
-        .as_deref()
+        .and_then(|host_config| host_config.proxy.clone())
+        .or_else(|| inherited_enterprise_https_proxy(host))
         .filter(|proxy| !proxy.is_empty())
     {
-        env.push(("HTTPS_PROXY".to_string(), proxy.to_string()));
+        env.push(("HTTPS_PROXY".to_string(), proxy));
     }
+
+    let Some(host_config) = host_config else {
+        return env;
+    };
 
     for (key, value) in &host_config.env {
         if !key.is_empty() && key != "GH_HOST" {
@@ -192,6 +193,18 @@ pub fn github_cli_env(host: &str, config: &GithubConfig) -> Vec<(String, String)
     }
 
     env
+}
+
+fn inherited_enterprise_https_proxy(host: &str) -> Option<String> {
+    if host == "github.com" {
+        return None;
+    }
+
+    std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok()
+        .map(|proxy| proxy.trim().to_string())
+        .filter(|proxy| !proxy.is_empty())
 }
 
 #[cfg(test)]
@@ -216,7 +229,7 @@ mod tests {
         hosts.insert(
             "github.example.com".to_string(),
             GithubHostConfig {
-                proxy: Some("socks5://127.0.0.1:8080".to_string()),
+                proxy: Some("https://proxy.example.test:8443".to_string()),
                 env: HashMap::new(),
             },
         );
@@ -227,7 +240,37 @@ mod tests {
         assert!(env.contains(&("GH_HOST".to_string(), "github.example.com".to_string())));
         assert!(env.contains(&(
             "HTTPS_PROXY".to_string(),
-            "socks5://127.0.0.1:8080".to_string()
+            "https://proxy.example.test:8443".to_string()
+        )));
+    }
+
+    #[test]
+    fn github_cli_env_sets_enterprise_host_without_implicit_proxy() {
+        let env = github_cli_env("github.enterprise.test", &GithubConfig::default());
+
+        assert_eq!(
+            env,
+            vec![("GH_HOST".to_string(), "github.enterprise.test".to_string())]
+        );
+    }
+
+    #[test]
+    fn github_cli_env_uses_configured_enterprise_proxy() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            "github.enterprise.test".to_string(),
+            GithubHostConfig {
+                proxy: Some("https://proxy.example.test:9443".to_string()),
+                env: HashMap::new(),
+            },
+        );
+        let config = GithubConfig { hosts };
+
+        let env = github_cli_env("github.enterprise.test", &config);
+
+        assert!(env.contains(&(
+            "HTTPS_PROXY".to_string(),
+            "https://proxy.example.test:9443".to_string()
         )));
     }
 }
