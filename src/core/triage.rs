@@ -52,12 +52,24 @@ pub struct TriageOptions {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct TriageLandingOptions {
+    pub target: TriageTarget,
+    pub repo: Option<String>,
+    pub pr_refs: Vec<String>,
+    pub branch_patterns: Vec<String>,
+    pub source_issues: Vec<u64>,
+    pub drilldown: bool,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum TriageCommandOutput {
     Report(TriageOutput),
     Watch(TriageWatchOutput),
     CiFailure(CiFailureTriageOutput),
+    Landing(TriageLandingOutput),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +117,57 @@ pub struct CiFailureTriageOptions {
     pub repo: Option<String>,
     pub max_checks: usize,
     pub snippet_lines: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageLandingOutput {
+    pub command: &'static str,
+    pub target: ScopeOutput,
+    pub summary: TriageLandingSummary,
+    pub pull_requests: Vec<TriageLandingPr>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<TriageUnresolved>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TriageLandingSummary {
+    pub total: usize,
+    pub merged: usize,
+    pub clean_mergeable: usize,
+    pub conflict_repair_needed: usize,
+    pub checks_pending: usize,
+    pub baseline_red_inconclusive: usize,
+    pub candidate_red: usize,
+    pub unknown: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageLandingPr {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_branch: Option<String>,
+    pub classification: TriageLandingClassification,
+    pub suggested_next_command: String,
+    #[serde(flatten)]
+    pub signals: TriagePullRequestSignals,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_failures: Vec<TriageCheckFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageLandingClassification {
+    Merged,
+    CleanMergeable,
+    ConflictRepairNeeded,
+    ChecksPending,
+    BaselineRedInconclusive,
+    CandidateRed,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -741,6 +804,49 @@ fn unique_sorted(values: impl Iterator<Item = String>) -> Vec<String> {
     values
 }
 
+pub fn landing(options: TriageLandingOptions) -> Result<TriageLandingOutput> {
+    let target = options.target.clone();
+    let repos = resolve_landing_repos(&options)?;
+    if repos.len() > 1 && options.pr_refs.iter().any(|raw| is_bare_pr_number(raw)) {
+        return Err(Error::validation_invalid_argument(
+            "pr_refs",
+            "bare PR numbers require --repo or a landing scope that resolves to one repo",
+            None,
+            Some(vec![
+                "Use owner/repo#number or a GitHub PR URL for fleet-wide landing dashboards"
+                    .to_string(),
+            ]),
+        ));
+    }
+    let mut pull_requests = Vec::new();
+    let mut unresolved = Vec::new();
+
+    for repo in repos {
+        let repo_slug = format!("{}/{}", repo.owner, repo.repo);
+        match fetch_landing_prs_for_repo(&repo, &options) {
+            Ok(mut prs) => pull_requests.append(&mut prs),
+            Err(reason) => unresolved.push(TriageUnresolved {
+                component_id: repo_slug,
+                local_path: String::new(),
+                reason,
+                sources: vec!["triage.landing".to_string()],
+            }),
+        }
+    }
+
+    pull_requests.sort_by(|a, b| a.repo.cmp(&b.repo).then(a.number.cmp(&b.number)));
+    pull_requests.dedup_by(|a, b| a.repo == b.repo && a.number == b.number);
+    let summary = summarize_landing(&pull_requests);
+
+    Ok(TriageLandingOutput {
+        command: "triage.landing",
+        target: ScopeOutput::from(&target),
+        summary,
+        pull_requests,
+        unresolved,
+    })
+}
+
 fn triage_component_has_items(component: &TriageComponentReport) -> bool {
     component
         .issues
@@ -1097,6 +1203,217 @@ fn fetch_prs(
     Ok(items)
 }
 
+fn resolve_landing_repos(options: &TriageLandingOptions) -> Result<Vec<GitHubRepo>> {
+    if let Some(repo) = &options.repo {
+        return parse_landing_repo(repo).map(|repo| vec![repo]);
+    }
+
+    let refs = resolve_target_components(&options.target)?;
+    let mut repos = Vec::new();
+    let mut unresolved = Vec::new();
+    for component_ref in refs {
+        match resolve_repo(&component_ref) {
+            Ok(resolved) => repos.push(resolved.repo),
+            Err(reason) => unresolved.push(reason),
+        }
+    }
+    repos.sort_by(|a, b| a.owner.cmp(&b.owner).then(a.repo.cmp(&b.repo)));
+    repos.dedup_by(|a, b| a.owner == b.owner && a.repo == b.repo);
+    if repos.is_empty() {
+        return Err(Error::internal_unexpected(format!(
+            "No GitHub repos resolved for landing target: {}",
+            unresolved.join("; ")
+        )));
+    }
+    Ok(repos)
+}
+
+fn parse_landing_repo(raw: &str) -> Result<GitHubRepo> {
+    parse_github_url(raw)
+        .or_else(|| {
+            let (owner, repo) = raw.split_once('/')?;
+            Some(GitHubRepo {
+                host: "github.com".to_string(),
+                owner: owner.trim().to_string(),
+                repo: repo.trim_end_matches(".git").trim().to_string(),
+            })
+        })
+        .filter(|repo| !repo.owner.is_empty() && !repo.repo.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "repo",
+                "expected GitHub repo as owner/name or GitHub URL",
+                Some(raw.to_string()),
+                None,
+            )
+        })
+}
+
+fn fetch_landing_prs_for_repo(
+    repo: &GitHubRepo,
+    options: &TriageLandingOptions,
+) -> std::result::Result<Vec<TriageLandingPr>, String> {
+    ensure_gh_ready()?;
+    let mut items = Vec::new();
+    let mut explicit_numbers = Vec::new();
+    for raw in &options.pr_refs {
+        if let Some(reference) = parse_landing_pr_ref(raw, repo)? {
+            if reference.owner == repo.owner && reference.repo == repo.repo {
+                explicit_numbers.push(reference.number);
+            }
+        }
+    }
+
+    for number in explicit_numbers {
+        items.push(fetch_landing_pr(repo, number, options.drilldown)?);
+    }
+
+    if !options.branch_patterns.is_empty()
+        || (options.pr_refs.is_empty() && options.source_issues.is_empty())
+    {
+        let mut listed = fetch_landing_open_prs(repo, options)?;
+        if !options.branch_patterns.is_empty() {
+            listed.retain(|item| {
+                item.head_branch.as_deref().is_some_and(|branch| {
+                    options
+                        .branch_patterns
+                        .iter()
+                        .any(|pattern| branch_matches(pattern, branch))
+                })
+            });
+        }
+        items.append(&mut listed);
+    }
+
+    for issue_number in &options.source_issues {
+        for linked in fetch_linked_prs(repo, *issue_number)? {
+            items.push(fetch_landing_pr(repo, linked.number, options.drilldown)?);
+        }
+    }
+
+    Ok(items)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LandingPrRef {
+    owner: String,
+    repo: String,
+    number: u64,
+}
+
+fn parse_landing_pr_ref(
+    raw: &str,
+    default_repo: &GitHubRepo,
+) -> std::result::Result<Option<LandingPrRef>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(number) = trimmed.trim_start_matches('#').parse::<u64>() {
+        return Ok(Some(LandingPrRef {
+            owner: default_repo.owner.clone(),
+            repo: default_repo.repo.clone(),
+            number,
+        }));
+    }
+    let (repo_raw, number_raw) = trimmed
+        .rsplit_once('#')
+        .or_else(|| trimmed.rsplit_once("/pull/"))
+        .ok_or_else(|| format!("PR ref must be a number, owner/repo#number, or PR URL: {raw}"))?;
+    let number = number_raw
+        .parse::<u64>()
+        .map_err(|_| format!("PR ref number must be a positive integer: {raw}"))?;
+    let repo = parse_github_url(repo_raw)
+        .or_else(|| {
+            let (owner, repo) = repo_raw.split_once('/')?;
+            Some(GitHubRepo {
+                host: "github.com".to_string(),
+                owner: owner.to_string(),
+                repo: repo.trim_end_matches(".git").to_string(),
+            })
+        })
+        .ok_or_else(|| format!("PR ref repo must be owner/name or GitHub URL: {raw}"))?;
+    Ok(Some(LandingPrRef {
+        owner: repo.owner,
+        repo: repo.repo,
+        number,
+    }))
+}
+
+fn is_bare_pr_number(raw: &str) -> bool {
+    let trimmed = raw.trim().trim_start_matches('#');
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn fetch_landing_open_prs(
+    repo: &GitHubRepo,
+    options: &TriageLandingOptions,
+) -> std::result::Result<Vec<TriageLandingPr>, String> {
+    let args = vec![
+        "pr".to_string(),
+        "list".to_string(),
+        "-R".to_string(),
+        format!("{}/{}", repo.owner, repo.repo),
+        "--state".to_string(),
+        "open".to_string(),
+        "--limit".to_string(),
+        effective_landing_limit(options).to_string(),
+        "--json".to_string(),
+        landing_pr_json_fields().to_string(),
+    ];
+    let raw = run_gh(&args)?;
+    parse_landing_prs(&raw, repo, options.drilldown)
+}
+
+fn fetch_landing_pr(
+    repo: &GitHubRepo,
+    number: u64,
+    drilldown: bool,
+) -> std::result::Result<TriageLandingPr, String> {
+    let args = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        number.to_string(),
+        "-R".to_string(),
+        format!("{}/{}", repo.owner, repo.repo),
+        "--json".to_string(),
+        landing_pr_json_fields().to_string(),
+    ];
+    let raw = run_gh(&args)?;
+    parse_landing_pr(&raw, repo, drilldown)
+}
+
+fn landing_pr_json_fields() -> &'static str {
+    "number,title,url,state,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,headRefName,comments,reviews,updatedAt,mergedAt"
+}
+
+fn effective_landing_limit(options: &TriageLandingOptions) -> usize {
+    if options.limit == 0 {
+        30
+    } else {
+        options.limit
+    }
+}
+
+fn branch_matches(pattern: &str, branch: &str) -> bool {
+    if pattern == "*" || pattern == branch {
+        return true;
+    }
+    if let Some(contains) = pattern
+        .strip_prefix('*')
+        .and_then(|value| value.strip_suffix('*'))
+    {
+        return branch.contains(contains);
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return branch.starts_with(prefix);
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return branch.ends_with(suffix);
+    }
+    branch.contains(pattern)
+}
+
 fn effective_limit(options: &TriageOptions) -> usize {
     if options.limit == 0 {
         30
@@ -1260,6 +1577,10 @@ struct RawPr {
     merge_state_status: Option<String>,
     #[serde(default, rename = "statusCheckRollup")]
     status_check_rollup: Vec<Value>,
+    #[serde(default, rename = "headRefName")]
+    head_ref_name: Option<String>,
+    #[serde(default, rename = "mergedAt")]
+    merged_at: Option<String>,
     #[serde(default)]
     labels: Vec<RawNamedNode>,
     #[serde(default)]
@@ -1272,6 +1593,153 @@ struct RawPr {
     reviews: Vec<RawReview>,
     #[serde(default, rename = "updatedAt")]
     updated_at: Option<String>,
+}
+
+fn parse_landing_prs(
+    raw: &str,
+    repo: &GitHubRepo,
+    drilldown: bool,
+) -> std::result::Result<Vec<TriageLandingPr>, String> {
+    let parsed: Vec<RawPr> = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
+    Ok(parsed
+        .into_iter()
+        .map(|item| raw_pr_to_landing_pr(item, repo, drilldown))
+        .collect())
+}
+
+fn parse_landing_pr(
+    raw: &str,
+    repo: &GitHubRepo,
+    drilldown: bool,
+) -> std::result::Result<TriageLandingPr, String> {
+    let parsed: RawPr = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
+    Ok(raw_pr_to_landing_pr(parsed, repo, drilldown))
+}
+
+fn raw_pr_to_landing_pr(item: RawPr, repo: &GitHubRepo, drilldown: bool) -> TriageLandingPr {
+    let signals = TriagePullRequestSignals {
+        checks: summarize_checks(&item.status_check_rollup),
+        review_decision: non_empty(item.review_decision),
+        merge_state: non_empty(item.merge_state_status),
+        comments_count: usize_to_i64(item.comments.len()),
+        reviews_count: usize_to_i64(item.reviews.len()),
+        last_comment_at: latest_comment_at(&item.comments),
+        last_review_at: latest_review_at(&item.reviews),
+        ..TriagePullRequestSignals::default()
+    };
+    let check_failures = if drilldown {
+        summarize_check_failures(&item.status_check_rollup)
+    } else {
+        Vec::new()
+    };
+    let classification = classify_landing_pr(
+        &item.state,
+        item.merged_at.as_deref(),
+        signals.checks.as_deref(),
+        signals.merge_state.as_deref(),
+    );
+    TriageLandingPr {
+        repo: format!("{}/{}", repo.owner, repo.repo),
+        number: item.number,
+        title: item.title,
+        url: item.url,
+        state: item.state,
+        head_branch: non_empty(item.head_ref_name),
+        classification,
+        suggested_next_command: landing_next_command(classification, repo, item.number),
+        signals,
+        check_failures,
+    }
+}
+
+pub(crate) fn classify_landing_pr(
+    state: &str,
+    merged_at: Option<&str>,
+    checks: Option<&str>,
+    merge_state: Option<&str>,
+) -> TriageLandingClassification {
+    if state == "MERGED" || merged_at.is_some() {
+        return TriageLandingClassification::Merged;
+    }
+    if matches!(
+        merge_state,
+        Some("DIRTY" | "BEHIND" | "BLOCKED" | "HAS_HOOKS")
+    ) {
+        return TriageLandingClassification::ConflictRepairNeeded;
+    }
+    if matches!(checks, Some("PENDING")) || (merge_state == Some("CLEAN") && checks.is_none()) {
+        return TriageLandingClassification::ChecksPending;
+    }
+    if checks == Some("FAILURE") {
+        return TriageLandingClassification::CandidateRed;
+    }
+    if merge_state == Some("CLEAN") && checks == Some("SUCCESS") {
+        return TriageLandingClassification::CleanMergeable;
+    }
+    if checks.is_none() || matches!(merge_state, None | Some("UNKNOWN" | "UNSTABLE")) {
+        return TriageLandingClassification::BaselineRedInconclusive;
+    }
+    TriageLandingClassification::Unknown
+}
+
+fn landing_next_command(
+    classification: TriageLandingClassification,
+    repo: &GitHubRepo,
+    number: u64,
+) -> String {
+    let reference = format!("{}/{}#{}", repo.owner, repo.repo, number);
+    match classification {
+        TriageLandingClassification::Merged => {
+            format!("homeboy triage --watch {reference} --until merged")
+        }
+        TriageLandingClassification::CleanMergeable => {
+            format!("homeboy triage --watch {reference} --until green-mergeable")
+        }
+        TriageLandingClassification::ConflictRepairNeeded => {
+            format!(
+                "gh pr checkout {number} -R {}/{} && git rebase origin/main",
+                repo.owner, repo.repo
+            )
+        }
+        TriageLandingClassification::ChecksPending => {
+            format!("homeboy triage --watch {reference} --until green")
+        }
+        TriageLandingClassification::BaselineRedInconclusive => {
+            format!("gh pr checks {number} -R {}/{}", repo.owner, repo.repo)
+        }
+        TriageLandingClassification::CandidateRed => {
+            format!(
+                "gh pr checks {number} -R {}/{} --fail-fast",
+                repo.owner, repo.repo
+            )
+        }
+        TriageLandingClassification::Unknown => {
+            format!("gh pr view {number} -R {}/{} --web", repo.owner, repo.repo)
+        }
+    }
+}
+
+fn summarize_landing(items: &[TriageLandingPr]) -> TriageLandingSummary {
+    let mut summary = TriageLandingSummary {
+        total: items.len(),
+        ..Default::default()
+    };
+    for item in items {
+        match item.classification {
+            TriageLandingClassification::Merged => summary.merged += 1,
+            TriageLandingClassification::CleanMergeable => summary.clean_mergeable += 1,
+            TriageLandingClassification::ConflictRepairNeeded => {
+                summary.conflict_repair_needed += 1
+            }
+            TriageLandingClassification::ChecksPending => summary.checks_pending += 1,
+            TriageLandingClassification::BaselineRedInconclusive => {
+                summary.baseline_red_inconclusive += 1
+            }
+            TriageLandingClassification::CandidateRed => summary.candidate_red += 1,
+            TriageLandingClassification::Unknown => summary.unknown += 1,
+        }
+    }
+    summary
 }
 
 fn parse_prs(
