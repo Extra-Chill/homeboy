@@ -13,6 +13,7 @@ const RECIPE_BUILDER_MODULE_OPTIONS = {
 	packageCandidates: [
 		'@automattic/wp-codebox-core/recipe-builders',
 		'wp-codebox-workspace/recipe-builders',
+		// Compatibility fallback for WP Codebox builds before focused package entrypoints.
 		'@automattic/wp-codebox-core',
 	],
 	packageDistEntries: ['recipe-builders.js', 'index.js'],

@@ -6,6 +6,7 @@ const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { runtimeContractSchemas } = require('../../agent-runtimes/wp-codebox');
 
 const originalLoad = Module._load;
 Module._load = function loadWithoutRuntimeAgentCi(request, parent, isMain) {
@@ -75,7 +76,8 @@ assert.equal(result.max_duration_seconds, 30);
 assert.equal(result.wp_codebox_input.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(result.wp_codebox_input.cases[0].target_id, 'rest-posts');
 assert.equal(result.wp_codebox_task_request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
-assert.equal(result.wp_codebox_plan_recipe.fuzzRun.cases[0].case_id, 'get-posts');
+assert.equal(result.wp_codebox_plan_recipe.fuzzRun, undefined);
+assert.equal(result.wp_codebox_plan_recipe.fuzzSuite.cases[0].case_id, 'get-posts');
 assert.equal(result.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggregate/v1');
 assert.equal(result.coverage.totals.exercised, 1);
 assert.equal(result.homeboy_fuzz_campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
@@ -179,38 +181,26 @@ assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suit
 
 const fakeCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-wp-codebox.js');
 fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
-fs.mkdirSync(path.join(tempDir, 'packages/wordpress-plugin'), { recursive: true });
-fs.writeFileSync(path.join(tempDir, 'packages/wordpress-plugin/wp-codebox.php'), '<?php // fixture');
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
+const command = process.argv[2];
 const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-if (request.schema !== 'wp-codebox/run-agent-task/v1' || !request.goal || !request.runtime_task) {
-  process.stderr.write('invalid run-agent-task input');
+if (command !== 'run-fuzz-suite') {
+  process.stderr.write('expected public run-fuzz-suite command');
   process.exit(1);
 }
-if (request.sandbox_tool_policy?.schema !== 'wp-codebox/sandbox-tool-policy/v1' || request.sandbox_tool_policy?.version !== 1 || !request.sandbox_tool_policy?.tools?.length) {
-  process.stderr.write('invalid sandbox tool policy');
-  process.exit(1);
-}
-if (!request.extra_plugins?.some((plugin) => plugin.slug === 'wp-codebox' && plugin.activate === true)) {
-  process.stderr.write('missing wp-codebox extra plugin');
+if (request.schema !== 'wp-codebox/fuzz-suite/v1' || request.metadata?.homeboy_agent_task_request?.task_id !== 'dispatch-cli-run') {
+  process.stderr.write('invalid public fuzz-suite input');
   process.exit(1);
 }
 process.stdout.write(JSON.stringify({
-  success: true,
-  agent_task_result: {
-    raw: {
-      result: {
-        schema: 'wp-codebox/fuzz-suite-result/v1',
-        request_id: request.id,
-        status: 'succeeded',
-        artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
-        coverage_summary: { surface_count: 1, exercised_count: 1 }
-      }
-    }
-  }
+  schema: 'wp-codebox/fuzz-suite-result/v1',
+  request_id: request.id,
+  status: 'succeeded',
+  artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+  coverage_summary: { surface_count: 1, exercised_count: 1 }
 }));
 `);
 fs.chmodSync(fakeCodeboxBin, 0o755);
@@ -232,6 +222,73 @@ const dispatchCliResult = JSON.parse(dispatchCli.stdout);
 assert.equal(dispatchCliResult.succeeded, true);
 assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
 assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
+
+const legacyCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-legacy-wp-codebox.js');
+fs.writeFileSync(legacyCodeboxBin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const command = process.argv[2];
+if (command === 'run-fuzz-suite') {
+  process.stderr.write('unknown command: run-fuzz-suite');
+  process.exit(1);
+}
+const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
+const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+if (command !== 'run-agent-task' || request.schema !== '${runtimeContractSchemas().agentTask.runRequest}' || request.task_id !== 'legacy-dispatch-cli-run') {
+  process.stderr.write('invalid run-agent-task fallback input');
+  process.exit(1);
+}
+if (request.runtime_task || request.artifact_declarations || request.sandbox_tool_policy || request.extra_plugins) {
+  process.stderr.write('fallback rebuilt the Codebox task payload instead of delegating to the adapter');
+  process.exit(1);
+}
+if (request.task_input?.schema !== 'wp-codebox/task-input/v1') {
+  process.stderr.write('missing delegated task input');
+  process.exit(1);
+}
+if (request.task_input?.runtime_task?.ability !== 'wp-codebox/run-fuzz-suite' || request.task_input?.runtime_task?.input?.schema !== 'wp-codebox/fuzz-suite/v1') {
+  process.stderr.write('missing fuzz runtime task');
+  process.exit(1);
+}
+if (request.task_input?.artifact_declarations?.[0]?.name !== 'wp-codebox-fuzz-suite-result' || !request.task_input?.expected_artifacts?.includes('wordpress-fuzz-coverage')) {
+  process.stderr.write('missing delegated artifact contract');
+  process.exit(1);
+}
+if (request.task_input?.parent_request?.task_id !== 'legacy-dispatch-cli-run') {
+  process.stderr.write('missing parent request metadata');
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({
+  success: true,
+  agent_task_run_result: {
+    schema: '${runtimeContractSchemas().agentTask.runResult}',
+    result: {
+      schema: 'wp-codebox/fuzz-suite-result/v1',
+      request_id: request.task_id,
+      status: 'succeeded',
+      artifactRefs: [{ path: 'legacy/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+      coverage_summary: { surface_count: 1, exercised_count: 1 }
+    }
+  }
+}));
+`);
+fs.chmodSync(legacyCodeboxBin, 0o755);
+
+const legacyDispatchCli = spawnSync(runnerPath, [], {
+	encoding: 'utf8',
+	env: {
+		...process.env,
+		HOMEBOY_WP_CODEBOX_BIN: legacyCodeboxBin,
+		HOMEBOY_WP_CODEBOX_PLUGIN_PATH: path.join(tempDir, 'packages/wordpress-plugin'),
+		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'legacy-dispatch-cli-workload',
+		HOMEBOY_FUZZ_RUN_ID: 'legacy-dispatch-cli-run',
+	},
+});
+
+assert.equal(legacyDispatchCli.status, 0, legacyDispatchCli.stderr);
+const legacyDispatchCliResult = JSON.parse(legacyDispatchCli.stdout);
+assert.equal(legacyDispatchCliResult.succeeded, true);
+assert.equal(legacyDispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'legacy/fuzz-report.json');
 
 dispatchPromise.then(() => {
 	console.log('WordPress fuzz runner smoke passed.');

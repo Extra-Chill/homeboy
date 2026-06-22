@@ -5,12 +5,12 @@ const { existsSync } = require('node:fs');
 const { homedir } = require('node:os');
 const { pathToFileURL } = require('node:url');
 
-const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
+const DEFAULT_CODEBOX_CONTRACTS_MODULE = '@automattic/wp-codebox-core/contracts';
 const RUNTIME_CONTRACT_MANIFEST_SCHEMA = 'wp-codebox/runtime-contract-manifest/v1';
 
 const DEPRECATED_RUNTIME_CONTRACT_FALLBACK = {
   status: 'deprecated',
-  replacement: '@automattic/wp-codebox-core runtimeContractManifest()',
+  replacement: '@automattic/wp-codebox-core/contracts runtimeContractManifest()',
   reason: 'Homeboy Extensions must consume WP Codebox public package contracts instead of carrying schema copies.',
 };
 
@@ -188,7 +188,13 @@ function coreModuleCandidates(options = {}) {
     return [normalizeCoreModuleSpecifier(explicit)];
   }
 
-  const candidates = [DEFAULT_CODEBOX_CORE_MODULE, 'wp-codebox-workspace/core'];
+  const candidates = [
+    DEFAULT_CODEBOX_CONTRACTS_MODULE,
+    'wp-codebox-workspace/contracts',
+    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
+    '@automattic/wp-codebox-core',
+    'wp-codebox-workspace/core',
+  ];
   for (const candidate of setupCacheCoreModuleCandidates(options)) {
     if (existsSync(candidate) && !candidates.includes(candidate)) {
       candidates.push(candidate);
@@ -200,6 +206,9 @@ function coreModuleCandidates(options = {}) {
 function setupCacheCoreModuleCandidates(options = {}) {
   const installRoot = options.wpCodeboxInstallDir || process.env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.resolve(homedir(), '.cache/homeboy/wp-codebox');
   return [
+    path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/contracts.js'),
+    path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/contracts.js'),
+    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
     path.resolve(installRoot, 'source/node_modules/@automattic/wp-codebox-core/dist/index.js'),
     path.resolve(installRoot, 'release/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist/index.js'),
   ];

@@ -9,7 +9,7 @@ const readyScript = path.join(__dirname, '..', 'scripts', 'build', 'check-wp-cod
 const fixtureCoreModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-recipe-builder.mjs');
 const missingBenchBuilderModule = path.join(__dirname, 'fixtures', 'wp-codebox-core-missing-bench-builder.mjs');
 const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-install-'));
-const cachedCoreModule = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
+const cachedCoreModule = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'recipe-builders.js');
 fs.mkdirSync(path.dirname(cachedCoreModule), { recursive: true });
 fs.copyFileSync(fixtureCoreModule, cachedCoreModule);
 
@@ -67,6 +67,7 @@ assert.deepEqual(recipe.inputs.extraPlugins[0], { source: '/tmp/extra-plugin.zip
 assert.deepEqual(recipe.inputs.workloads.map((workload) => workload.id), ['fixture-workload', 'other-workload']);
 assert.deepEqual(recipe.inputs.pluginRuntime, input.options.pluginRuntime);
 assert.deepEqual(recipe.inputs.siteSeeds, [{
+	schema: 'homeboy/wordpress-fixture-site-seed/v1',
 	type: 'fixture',
 	name: 'generic-fixture-content',
 	source: 'fixtures/content.json',

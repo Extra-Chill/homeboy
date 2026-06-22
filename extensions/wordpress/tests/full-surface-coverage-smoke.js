@@ -83,6 +83,15 @@ const codeboxValidation = validateFullSurfaceCoverageArtifacts({
 assert.equal(codeboxValidation.status, 'passed');
 assert.equal(codeboxValidation.producedSurfaceCount, 4);
 
+const semanticKeyValidation = validateFullSurfaceCoverageArtifacts({
+	requiredSurfaces: ['browserRequests'],
+	artifactRefs: [
+		{ semantic_key: 'browser.request.coverage', path: 'files/request-coverage.json' },
+	],
+});
+assert.equal(semanticKeyValidation.status, 'passed');
+assert.equal(semanticKeyValidation.surfaces.browserRequests.artifactRefs[0].semantic_key, 'browser.request.coverage');
+
 const codeboxManifestRefs = normalizeFullSurfaceCoverageArtifactRefs({
 	artifacts: {
 		directory: '/tmp/wp-codebox-artifacts',
@@ -109,6 +118,19 @@ const restDbProfileValidation = validateFullSurfaceCoverageArtifacts({
 	],
 });
 assert.equal(restDbProfileValidation.status, 'passed');
+
+const pathOnlySubstringValidation = validateFullSurfaceCoverageArtifacts({
+	requiredSurfaces: ['serverRequests', 'browserRequests'],
+	artifactRefs: [
+		{ path: 'files/not-external-http-guardrail.json' },
+		{ name: 'browser-request-coverage-not-an-artifact', path: 'files/browser-request-coverage-not-an-artifact.json' },
+	],
+});
+assert.equal(pathOnlySubstringValidation.status, 'failed');
+assert.equal(pathOnlySubstringValidation.producedSurfaceCount, 0);
+assert.deepEqual(pathOnlySubstringValidation.missingSurfaces, ['browserRequests', 'serverRequests']);
+assert.equal(pathOnlySubstringValidation.surfaces.serverRequests.diagnosticFallbackRefs.length, 1);
+assert.equal(pathOnlySubstringValidation.surfaces.browserRequests.diagnosticFallbackRefs.length, 1);
 
 const validation = validateFullSurfaceCoverageArtifacts({
 	requiredSurfaces: ['rest', 'database', 'serverRequests', 'browserRequests'],

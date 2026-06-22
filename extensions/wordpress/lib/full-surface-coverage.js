@@ -17,6 +17,22 @@ const SURFACE_ALIASES = {
 	browserRequests: ['browser_requests', 'browser-requests', 'browserRequests', 'browser_network', 'browser-network', 'browser-request-coverage', 'browser-request-coverage-artifact'],
 };
 
+const SURFACE_ARTIFACT_SCHEMAS = {
+	rest: ['homeboy/wordpress-rest-route-matrix-artifact/v1', 'homeboy/wordpress-rest-route-matrix-budgets/v1'],
+	ajax: ['homeboy/wordpress-ajax-action-surface/v1', 'homeboy/wordpress-ajax-action-plan/v1'],
+	database: ['homeboy/wordpress-db-inventory/v1', 'homeboy/wordpress-rest-db-query-profile/v1'],
+	serverRequests: ['homeboy/wordpress-external-http-guardrail/v1'],
+	browserRequests: ['homeboy/browser-request-coverage/v1'],
+};
+
+const SURFACE_SEMANTIC_KEYS = {
+	rest: ['wordpress.rest.route_matrix', 'wordpress.rest.request_cases', 'wordpress.rest.coverage'],
+	ajax: ['wordpress.ajax.action_surface', 'wordpress.ajax.action_plan', 'wordpress.ajax.coverage'],
+	database: ['wordpress.database.inventory', 'wordpress.database.query_profile', 'wordpress.database.coverage'],
+	serverRequests: ['wordpress.server_requests.external_http_guardrail', 'wordpress.server_requests.coverage'],
+	browserRequests: ['wordpress.browser_requests.coverage', 'browser.request.coverage'],
+};
+
 const SURFACE_LABELS = {
 	rest: 'REST API',
 	ajax: 'AJAX actions',
@@ -89,6 +105,9 @@ function normalizeFullSurfaceCoverageArtifactRefs(input = {}) {
 			name: String(rawRef.name || rawRef.label || ''),
 			kind: String(rawRef.kind || rawRef.type || ''),
 			role: String(rawRef.role || rawRef.artifact_role || rawRef.artifactRole || ''),
+			semantic_key: String(rawRef.semantic_key || rawRef.semanticKey || ''),
+			surface_id: String(rawRef.surface_id || rawRef.surfaceId || rawRef.coverage_id || rawRef.coverageId || ''),
+			target_id: String(rawRef.target_id || rawRef.targetId || ''),
 			artifact_schema: String(rawRef.artifact_schema || rawRef.artifactSchema || rawRef.content_schema || rawRef.contentSchema || rawRef.source_schema || ''),
 			source_schema: String(rawRef.schema && rawRef.schema !== 'homeboy/artifact-ref/v1' ? rawRef.schema : ''),
 			path: String(rawRef.path || rawRef.pathname || rawRef.file || rawRef.directory || rawRef.relativePath || rawRef.relative_path || ''),
@@ -97,7 +116,7 @@ function normalizeFullSurfaceCoverageArtifactRefs(input = {}) {
 			file_refs: Array.isArray(rawRef.file_refs) ? rawRef.file_refs : Array.isArray(rawRef.fileRefs) ? rawRef.fileRefs : [],
 			metadata: isObject(rawRef.metadata) ? rawRef.metadata : {},
 		};
-		const key = `${ref.kind}:${ref.role}:${ref.artifact_id || ref.name || ref.path || ref.url || ref.artifact_schema}`;
+		const key = `${ref.kind}:${ref.role}:${ref.semantic_key}:${ref.surface_id}:${ref.target_id}:${ref.artifact_id || ref.name || ref.path || ref.url || ref.artifact_schema}`;
 		if (seen.has(key)) {
 			continue;
 		}
@@ -239,10 +258,14 @@ function validateFullSurfaceCoverageArtifacts(input = {}) {
 	const artifactRefs = collectFullSurfaceCoverageArtifactRefs(input.artifactRefs || input.artifact_refs || input.artifacts || input.benchmarkArtifacts || input.benchmark_artifacts || input.benchResults || input.bench_results || input.results || input.scenarios ? input : input.artifactRefs || []);
 	const surfaces = Object.fromEntries(manifest.requiredSurfaces.map((surface) => {
 		const matchingRefs = artifactRefs.filter((ref) => artifactRefMatchesSurface(ref, surface));
+		const diagnosticFallbackRefs = matchingRefs.length > 0
+			? []
+			: artifactRefs.filter((ref) => artifactRefMatchesSurfaceFallback(ref, surface));
 		return [surface, {
 			required: true,
 			produced: matchingRefs.length > 0,
 			artifactRefs: matchingRefs,
+			diagnosticFallbackRefs,
 		}];
 	}));
 	const missingSurfaces = Object.entries(surfaces)
@@ -294,9 +317,48 @@ function buildFullSurfaceCoverageArtifactFromRefs(input = {}) {
 }
 
 function artifactRefMatchesSurface(ref, surface) {
-	const aliases = SURFACE_ALIASES[surface].map(normalizeMatchValue);
+	const aliases = normalizedSurfaceAliases(surface);
+	const schemas = (SURFACE_ARTIFACT_SCHEMAS[surface] || []).map(normalizeMatchValue);
+	const semanticKeys = (SURFACE_SEMANTIC_KEYS[surface] || []).map(normalizeMatchValue);
+	return artifactRefStructuredMatchValues(ref).some(({ field, value }) => {
+		const normalized = normalizeMatchValue(value);
+		if (!normalized) {
+			return false;
+		}
+		if (field === 'artifact_schema' || field === 'source_schema') {
+			return schemas.includes(normalized);
+		}
+		if (field === 'semantic_key') {
+			return semanticKeys.includes(normalized) || aliases.includes(normalized);
+		}
+		return aliases.includes(normalized);
+	});
+}
+
+function artifactRefMatchesSurfaceFallback(ref, surface) {
+	const aliases = normalizedSurfaceAliases(surface);
 	const values = artifactRefMatchValues(ref).map(normalizeMatchValue);
 	return values.some((value) => aliases.some((alias) => value.includes(alias)));
+}
+
+function normalizedSurfaceAliases(surface) {
+	return SURFACE_ALIASES[surface].map(normalizeMatchValue);
+}
+
+function artifactRefStructuredMatchValues(ref) {
+	return [
+		{ field: 'kind', value: ref.kind },
+		{ field: 'role', value: ref.role },
+		{ field: 'name', value: ref.name },
+		{ field: 'artifact_schema', value: ref.artifact_schema },
+		{ field: 'source_schema', value: ref.source_schema },
+		{ field: 'semantic_key', value: ref.semantic_key },
+		{ field: 'surface_id', value: ref.surface_id },
+		{ field: 'target_id', value: ref.target_id },
+		...ref.capabilities.map((value) => ({ field: 'capability', value })),
+		...artifactRefFileStructuredValues(ref.file_refs),
+		...artifactRefMetadataStructuredValues(ref.metadata),
+	].filter(({ value }) => Boolean(value));
 }
 
 function artifactRefMatchValues(ref) {
@@ -325,6 +387,25 @@ function artifactRefFileValues(fileRefs) {
 	});
 }
 
+function artifactRefFileStructuredValues(fileRefs) {
+	return (Array.isArray(fileRefs) ? fileRefs : []).flatMap((fileRef) => {
+		if (!isObject(fileRef)) {
+			return [];
+		}
+		const schema = fileRef.artifact_schema || fileRef.artifactSchema || fileRef.content_schema || fileRef.contentSchema || fileRef.source_schema;
+		return [
+			{ field: 'kind', value: fileRef.kind || fileRef.type },
+			{ field: 'role', value: fileRef.role || fileRef.artifact_role || fileRef.artifactRole },
+			{ field: 'name', value: fileRef.name || fileRef.label },
+			{ field: 'artifact_schema', value: schema },
+			{ field: 'source_schema', value: fileRef.schema && fileRef.schema !== 'homeboy/artifact-ref/v1' ? fileRef.schema : '' },
+			{ field: 'semantic_key', value: fileRef.semantic_key || fileRef.semanticKey },
+			{ field: 'surface_id', value: fileRef.surface_id || fileRef.surfaceId || fileRef.coverage_id || fileRef.coverageId },
+			{ field: 'target_id', value: fileRef.target_id || fileRef.targetId },
+		];
+	});
+}
+
 function artifactRefMetadataValues(metadata) {
 	if (!isObject(metadata)) {
 		return [];
@@ -341,6 +422,27 @@ function artifactRefMetadataValues(metadata) {
 		metadata.wp_codebox?.id,
 		metadata.wp_codebox?.kind,
 		metadata.wp_codebox?.name,
+	];
+}
+
+function artifactRefMetadataStructuredValues(metadata) {
+	if (!isObject(metadata)) {
+		return [];
+	}
+	return [
+		{ field: 'kind', value: metadata.kind || metadata.type },
+		{ field: 'role', value: metadata.role || metadata.artifact_role || metadata.artifactRole },
+		{ field: 'name', value: metadata.name || metadata.label },
+		{ field: 'artifact_schema', value: metadata.artifact_schema || metadata.artifactSchema || metadata.content_schema || metadata.contentSchema },
+		{ field: 'source_schema', value: metadata.source_schema || metadata.sourceSchema || metadata.schema },
+		{ field: 'semantic_key', value: metadata.semantic_key || metadata.semanticKey },
+		{ field: 'surface_id', value: metadata.surface_id || metadata.surfaceId || metadata.coverage_id || metadata.coverageId },
+		{ field: 'target_id', value: metadata.target_id || metadata.targetId },
+		{ field: 'kind', value: metadata.wp_codebox?.kind },
+		{ field: 'role', value: metadata.wp_codebox?.role },
+		{ field: 'semantic_key', value: metadata.wp_codebox?.semantic_key || metadata.wp_codebox?.semanticKey },
+		{ field: 'surface_id', value: metadata.wp_codebox?.surface_id || metadata.wp_codebox?.surfaceId },
+		{ field: 'target_id', value: metadata.wp_codebox?.target_id || metadata.wp_codebox?.targetId },
 	];
 }
 

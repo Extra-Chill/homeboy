@@ -60,8 +60,13 @@ assert.equal(
 	manifest.helpers.editorCanvasProbes,
 	path.resolve(__dirname, '..', 'lib', 'editor-canvas-probes.js')
 );
+assert.equal(manifest.helpers.woocommerceExpensiveShipping, undefined);
 assert.equal(
-	manifest.helpers.woocommerceExpensiveShipping,
+	manifest.productAdapters.woocommerce.helpers.benchFixtures,
+	path.resolve(__dirname, '..', 'scripts', 'bench', 'lib', 'woocommerce-fixtures.php')
+);
+assert.equal(
+	manifest.productAdapters.woocommerce.helpers.expensiveShipping,
 	path.resolve(__dirname, '..', 'scripts', 'bench', 'lib', 'woocommerce-expensive-shipping.php')
 );
 
