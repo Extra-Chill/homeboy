@@ -254,16 +254,12 @@ fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
     }
 
     let combined = format!("{}\n{}", output.stdout, output.stderr).to_lowercase();
-    [
-        "playground bootstrap helper not found",
-        "playground php crash",
-        "bootstrap failure:",
-        "test harness infrastructure failure",
-        "lint runner infrastructure failure",
-        "failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
-    ]
-    .iter()
-    .any(|needle| combined.contains(needle))
+    // Core only matches ecosystem-agnostic infra markers. Ecosystem-specific
+    // failure signatures must be detected by the extension that owns that
+    // ecosystem, not hardcoded here.
+    extension::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS
+        .iter()
+        .any(|needle| combined.contains(needle))
 }
 
 #[cfg(test)]
@@ -496,12 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn code_quality_failure_message_detects_pre_runner_playground_fatal_output() {
-        let output = runner_output(
-            1,
-            "Fatal error: Uncaught Error: Failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
-            "",
-        );
+    fn code_quality_failure_message_detects_generic_infra_marker_at_exit_one() {
+        // Core only recognizes ecosystem-agnostic infra markers. Ecosystem-specific
+        // failure signatures are detected by the owning extension, not here.
+        let output = runner_output(1, "test harness infrastructure failure", "");
 
         assert!(is_runner_infrastructure_failure(&output));
         assert_eq!(

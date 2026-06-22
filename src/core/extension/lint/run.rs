@@ -907,18 +907,17 @@ pub(crate) fn self_check_output_is_harness_failure(
     }
 
     let combined = format!("{}\n{}", stdout, stderr).to_lowercase();
+    // Core matches only ecosystem-agnostic markers: generic shell/harness
+    // wiring failures plus the shared neutral infra markers. Ecosystem-specific
+    // failure signatures (interpreter crashes, bootstrap script paths, etc.)
+    // must be detected by the extension that owns that ecosystem, not here.
     [
         "runner-steps.sh",
         "no such file or directory",
         "command not found",
-        "playground bootstrap helper not found",
-        "playground php crash",
-        "bootstrap failure:",
-        "test harness infrastructure failure",
-        "lint runner infrastructure failure",
-        "failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
     ]
     .iter()
+    .chain(extension::GENERIC_INFRASTRUCTURE_FAILURE_MARKERS.iter())
     .any(|needle| combined.contains(needle))
 }
 
@@ -1620,10 +1619,12 @@ mod tests {
     }
 
     #[test]
-    fn self_check_output_is_harness_failure_detects_playground_bootstrap_fatal() {
+    fn self_check_output_is_harness_failure_detects_generic_infra_marker() {
+        // Core only recognizes ecosystem-agnostic infra markers at exit 1.
+        // Ecosystem-specific signatures are detected by the owning extension.
         assert!(self_check_output_is_harness_failure(
             1,
-            "Fatal error: Failed opening required '/homeboy-extension/scripts/lib/playground-bootstrap.php'",
+            "lint runner infrastructure failure",
             ""
         ));
     }

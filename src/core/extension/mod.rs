@@ -97,7 +97,7 @@ pub use runner::{ExtensionRunner, RunnerOutput};
 pub use runner_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, ExtensionPhaseTiming,
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
-    VerificationPhase,
+    VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
 };
 pub use runtime_helper::{
     helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
