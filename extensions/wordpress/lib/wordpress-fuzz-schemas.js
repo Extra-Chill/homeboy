@@ -357,7 +357,11 @@ function normalizeCaseStatus(status, budgetFindings) {
 	if (budgetFindings.length > 0 && (!status || status === 'passed')) {
 		return 'failed';
 	}
-	return status || 'errored';
+	return normalizeFuzzStatus(status || 'errored');
+}
+
+function normalizeFuzzStatus(status) {
+	return 'error' === status ? 'errored' : status;
 }
 
 function findingToDiagnostic(finding) {
@@ -440,7 +444,7 @@ function normalizeWordPressFuzzResult(result) {
 		budget_failure_count: countBudgetFindings(cases) + resultBudgetFindings.length,
 		...(result.summary || {}),
 	};
-	const status = result.status || (summary.failed || summary.errored || summary.budget_failure_count ? 'failed' : 'passed');
+	const status = normalizeFuzzStatus(result.status || (summary.failed || summary.errored || summary.budget_failure_count ? 'failed' : 'passed'));
 	if (!RESULT_STATUSES.has(status)) {
 		throw new Error(`Unsupported WordPress fuzz result status: ${status}`);
 	}
