@@ -496,6 +496,7 @@ mod tests {
             portability: LabCommandPortability::Portable,
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::GitCheckoutRequired,
+            capture_mutation_patch: true,
             mutation_flag: Some("--keep-overlay"),
             extra_required_tools: LAB_TRACE_EXTRA_TOOLS,
             routing_policy: LabRoutingPolicy {

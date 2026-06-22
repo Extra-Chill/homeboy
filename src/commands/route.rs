@@ -54,6 +54,7 @@ pub fn route_after_parse(
     let observer = lab_dispatch_observer(cli, normalized_args, trace_runner_id.as_deref());
     let active_run_id = observer.run_id().map(str::to_string);
 
+    let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
 
     // For component-targeted write/fix commands (`homeboy lint --fix <component>`,
@@ -67,7 +68,7 @@ pub fn route_after_parse(
     let scoped_args = inject_lab_changed_files(&cli.command, normalized_args)?;
     let normalized_args = scoped_args.as_deref().unwrap_or(normalized_args);
 
-    let rewritten_args = (mutation_flag.is_some())
+    let rewritten_args = capture_mutation_patch
         .then(|| rewrite_component_target_to_path(&cli.command, normalized_args))
         .flatten()
         .or_else(|| rewrite_ad_hoc_lab_workspace_to_path(&cli.command, normalized_args));
@@ -85,7 +86,7 @@ pub fn route_after_parse(
                 cli.lab_only,
             ),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
-            capture_patch: mutation_flag.is_some(),
+            capture_patch: capture_mutation_patch,
             mutation_flag,
             timeout: None,
             active_run_id: active_run_id.as_deref(),

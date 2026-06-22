@@ -207,6 +207,7 @@ pub struct CommandDescriptor {
     pub output: CommandOutputDescriptor,
     pub supports_lab_runner: bool,
     pub lab_runner_unsupported_reason: Option<&'static str>,
+    pub lab_offload_captures_mutation_patch: bool,
     pub lab_offload_mutation_flag: Option<&'static str>,
 }
 
@@ -231,6 +232,7 @@ impl CommandOutputDescriptor {
             output: self,
             supports_lab_runner: false,
             lab_runner_unsupported_reason: None,
+            lab_offload_captures_mutation_patch: false,
             lab_offload_mutation_flag: None,
         };
         apply_lab_contract_to_descriptor(&mut descriptor, contract);
