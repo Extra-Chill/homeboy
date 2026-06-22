@@ -2611,6 +2611,8 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            stale_runner_jobs: Vec::new(),
+            stale_runner_job_count: 0,
             active_job_state: RunnerActiveJobState::Available,
             active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
             active_job_error: None,
