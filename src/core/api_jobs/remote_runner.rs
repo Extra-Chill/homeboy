@@ -28,6 +28,8 @@ pub struct JobArtifactMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
@@ -289,7 +291,14 @@ impl JobStore {
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
-            stored.job.artifacts = result.artifacts;
+            stored.job.artifacts = result
+                .artifacts
+                .into_iter()
+                .map(|mut artifact| {
+                    artifact.content_base64 = None;
+                    artifact
+                })
+                .collect();
         }
         self.persist()?;
 

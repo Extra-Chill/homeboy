@@ -1775,6 +1775,7 @@ mod tests {
                         mime: Some("application/json".to_string()),
                         size_bytes: Some(42),
                         sha256: Some("abc123".to_string()),
+                        content_base64: None,
                         metadata: Some(json!({ "kind": "test_report" })),
                     }],
                     artifact_refs: Vec::new(),
