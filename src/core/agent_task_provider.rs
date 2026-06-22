@@ -3709,7 +3709,8 @@ mod tests {
         provider.backend = "synthetic-runtime".to_string();
 
         let providers = [provider];
-        let resolution = resolve_provider_for_backend(&providers, "synthetic-runtime", Some("fast"));
+        let resolution =
+            resolve_provider_for_backend(&providers, "synthetic-runtime", Some("fast"));
 
         assert_eq!(
             resolution,
@@ -4612,7 +4613,10 @@ process.stdout.write(JSON.stringify({
             .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
             .expect("provider default source discovered");
         assert_eq!(source.source, "json-file");
-        assert_eq!(source.path.as_deref(), Some("~/.example-provider/auth.json"));
+        assert_eq!(
+            source.path.as_deref(),
+            Some("~/.example-provider/auth.json")
+        );
         assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 
