@@ -298,11 +298,15 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
 }
 
 #[test]
-fn dispatch_provider_id_alias_maps_to_selector() {
+fn cook_dispatch_provider_id_alias_maps_to_selector() {
     let cli = Cli::try_parse_from([
         "homeboy",
         "agent-task",
-        "dispatch",
+        "cook",
+        "--to-worktree",
+        "homeboy@cook-provider-id",
+        "--verify",
+        "true",
         "--backend",
         "sample-backend",
         "--dispatch-provider-id",
@@ -315,12 +319,12 @@ fn dispatch_provider_id_alias_maps_to_selector() {
     let Commands::AgentTask(agent_task) = cli.command else {
         panic!("expected agent-task command");
     };
-    let AgentTaskCommand::Dispatch(args) = agent_task.command else {
-        panic!("expected dispatch command");
+    let AgentTaskCommand::Cook(args) = agent_task.command else {
+        panic!("expected cook command");
     };
 
-    assert_eq!(args.selector.as_deref(), Some("sample-provider"));
-    assert_eq!(args.model, None);
+    assert_eq!(args.dispatch.selector.as_deref(), Some("sample-provider"));
+    assert_eq!(args.dispatch.model, None);
 }
 
 #[test]

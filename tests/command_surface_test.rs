@@ -48,11 +48,25 @@ fn agent_task_prompt_store_commands_parse() {
     Cli::try_parse_from([
         "homeboy",
         "agent-task",
-        "dispatch",
+        "cook",
+        "--repo",
+        "homeboy",
+        "--to-worktree",
+        "homeboy@prompt-ref-test",
         "--prompt",
         "prompt:issue-123",
+        "--verify",
+        "homeboy test homeboy",
     ])
-    .expect("stored prompt refs should parse as prompt values");
+    .expect("stored prompt refs should parse as cook prompt values");
+}
+
+#[test]
+fn agent_task_dispatch_is_not_public_cli_surface() {
+    let surface = current_command_surface();
+
+    assert!(!surface.contains_path(&["agent-task", "dispatch"]));
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "dispatch", "--prompt", "x"]).is_err());
 }
 
 #[test]

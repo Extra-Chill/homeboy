@@ -4,7 +4,7 @@
 //! sibling module lets the `agent_task` root stay a thin dispatcher over the
 //! handler modules (`auth`, `controller`, `run`, `status`, `review`). The
 //! command tree is grouped by boundary: lifecycle commands own durable run
-//! records, cook-loop commands compose lifecycle primitives into reviewer
+//! records, cook commands compose lifecycle primitives into reviewer
 //! workflows, provider commands expose executor contracts/auth, and controller
 //! commands own long-running loop state.
 
@@ -135,12 +135,10 @@ pub struct AgentTaskArgs {
 pub enum AgentTaskCommand {
     /// Readiness: run the one-command cook readiness repair chain and return a single ready/blocked verdict.
     Doctor(AgentTaskDoctorArgs),
-    /// Cook: run one workspace task through the patch handoff workflow.
-    Cook(DispatchArgs),
+    /// Cook: dispatch, promote, verify, retry red gates, and finalize a one-shot PR task.
+    Cook(AgentTaskCookArgs),
     /// Loop: operate a durable multi-agent loop with on/off and resume controls.
     Loop(AgentTaskLoopArgs),
-    /// Lifecycle: build and queue agent tasks without hand-authored provider JSON.
-    Dispatch(DispatchArgs),
     /// Lifecycle: run an agent-task plan through extension-declared executor providers.
     RunPlan(RunPlanArgs),
     /// Lifecycle: execute a previously submitted durable agent-task run.
@@ -175,7 +173,7 @@ pub enum AgentTaskCommand {
     Promote(PromoteArgs),
     /// Review: finalize a green cook run into a review-ready pull request.
     FinalizePr(FinalizePrArgs),
-    /// Review: convert deterministic gate results into a cook-loop retry or stop decision.
+    /// Review: convert deterministic gate results into a cook retry or stop decision.
     GateFeedback(GateFeedbackArgs),
     /// Provider: list extension-declared agent-task executor providers and optional secret readiness.
     Providers(ProvidersArgs),
@@ -376,6 +374,67 @@ pub struct CompileLoopArgs {
     /// AgentTaskLoopDefinition JSON file, @file, inline JSON, or - for stdin.
     #[arg(long, value_name = "SPEC")]
     pub definition: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskCookArgs {
+    #[command(flatten)]
+    pub dispatch: DispatchArgs,
+
+    /// Repo-cooking goal. Alias for the dispatch prompt when --prompt is omitted.
+    #[arg(long, value_name = "TEXT")]
+    pub goal: Option<String>,
+
+    /// Target managed worktree handle where candidate patches are promoted.
+    #[arg(long, value_name = "HANDLE")]
+    pub to_worktree: String,
+
+    /// External workspace provider command. When omitted, HOMEBOY_AGENT_TASK_PROMOTION_COMMAND is used.
+    #[arg(long, value_name = "COMMAND")]
+    pub provider_command: Option<String>,
+
+    #[command(flatten)]
+    pub gates: VerifyGateArgs,
+
+    /// Maximum cook gate attempts, including the first candidate.
+    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
+    pub max_attempts: u32,
+
+    /// Stop after the first green promotion without committing, pushing, or opening/updating a PR.
+    #[arg(long = "no-finalize")]
+    pub no_finalize: bool,
+
+    /// PR base branch used by finalization.
+    #[arg(long, default_value = "main", value_name = "BRANCH")]
+    pub base: String,
+
+    /// PR head branch. Defaults to the current branch in the promoted worktree.
+    #[arg(long, value_name = "BRANCH")]
+    pub head: Option<String>,
+
+    /// PR title. Defaults to a title derived from --repo or --task-url.
+    #[arg(long, value_name = "TEXT")]
+    pub title: Option<String>,
+
+    /// Commit message for the verified candidate changes.
+    #[arg(long, value_name = "TEXT")]
+    pub commit_message: Option<String>,
+
+    /// Protected branch that may not be finalized directly. Repeatable.
+    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
+    pub protected_branches: Vec<String>,
+
+    /// AI tool disclosure line for the PR body.
+    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
+    pub ai_tool: String,
+
+    /// AI assistance scope for the PR body.
+    #[arg(
+        long,
+        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
+        value_name = "TEXT"
+    )]
+    pub ai_used_for: String,
 }
 
 #[derive(Args, Debug)]

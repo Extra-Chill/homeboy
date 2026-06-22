@@ -27,7 +27,7 @@ pub use args::{
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerStatusArgs, AgentTaskDoctorArgs, AgentTaskFanoutArgs,
+    AgentTaskControllerStatusArgs, AgentTaskCookArgs, AgentTaskDoctorArgs, AgentTaskFanoutArgs,
     AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
     AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
@@ -38,16 +38,11 @@ pub use args::{
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
-pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
-        AgentTaskCommand::Cook(dispatch_args) => {
-            super::agent_task_dispatch::cook(dispatch_args, global)
-        }
+        AgentTaskCommand::Cook(cook_args) => run::run_cook(cook_args),
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
-        AgentTaskCommand::Dispatch(dispatch_args) => {
-            super::agent_task_dispatch::run(dispatch_args, global)
-        }
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::RunNext => run::run_next(),

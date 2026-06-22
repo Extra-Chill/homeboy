@@ -1,7 +1,9 @@
-//! Durable run lifecycle handlers: run-plan, run, run-next, submit, resume, and retry.
+//! Durable run lifecycle handlers: cook, run-plan, run, run-next, submit,
+//! resume, and retry.
 
 use serde_json::Value;
 
+use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -9,7 +11,7 @@ use homeboy::core::agent_tasks::scheduler::{
 use homeboy::core::agent_tasks::service as agent_task_service;
 
 use super::super::CmdResult;
-use super::args::{RetryArgs, RunPlanArgs, StatusArgs, SubmitArgs};
+use super::args::{AgentTaskCookArgs, RetryArgs, RunPlanArgs, StatusArgs, SubmitArgs};
 
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
@@ -25,6 +27,99 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
         }
     }
     value
+}
+
+pub(super) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+    run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+pub(super) fn run_cook_with_executor<E>(args: AgentTaskCookArgs, executor: E) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    if !args.gates.has_deterministic_gate() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "agent-task cook requires at least one deterministic --verify or --private-verify gate",
+            None,
+            None,
+        ));
+    }
+
+    let mut dispatch_args = args.dispatch.clone();
+    if dispatch_args.prompt.is_none() {
+        dispatch_args.prompt = args.goal.clone();
+    }
+    dispatch_args.core.queue_only = false;
+    let (dispatch_value, _dispatch_exit) =
+        dispatch_service::run_dispatch_command(dispatch_args.into(), executor.clone())?;
+    let run_id = dispatch_value["run_id"]
+        .as_str()
+        .ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(
+                "agent-task cook dispatch step did not return a run_id".to_string(),
+            )
+        })?
+        .to_string();
+    let cook_id = run_id.clone();
+    let title = args
+        .title
+        .clone()
+        .unwrap_or_else(|| default_loop_title(&args));
+    let commit_message = args
+        .commit_message
+        .clone()
+        .unwrap_or_else(|| default_loop_commit_message(&args));
+    let result = agent_task_service::run_cook(
+        agent_task_service::AgentTaskCookServiceOptions {
+            cook_id,
+            initial_run_id: run_id,
+            to_worktree: args.to_worktree,
+            provider_command: args.provider_command,
+            gates: args.gates.into(),
+            max_attempts: args.max_attempts,
+            no_finalize: args.no_finalize,
+            base: args.base,
+            head: args.head,
+            title,
+            commit_message,
+            source_refs: args.dispatch.task_url.into_iter().collect(),
+            protected_branches: args.protected_branches,
+            ai_tool: args.ai_tool.clone(),
+            ai_model: args
+                .dispatch
+                .model
+                .or_else(|| ai_model_from_tool(&args.ai_tool)),
+            ai_used_for: args.ai_used_for,
+        },
+        executor,
+    )?;
+    Ok((
+        serde_json::to_value(result.value).unwrap_or(Value::Null),
+        result.exit_code,
+    ))
+}
+
+fn ai_model_from_tool(ai_tool: &str) -> Option<String> {
+    let start = ai_tool.find('(')?;
+    let end = ai_tool[start + 1..].find(')')? + start + 1;
+    let model = ai_tool[start + 1..end].trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
+fn default_loop_title(args: &AgentTaskCookArgs) -> String {
+    let target = args
+        .dispatch
+        .repo
+        .as_deref()
+        .or(args.dispatch.task_url.as_deref())
+        .unwrap_or("agent task");
+    format!("Cook {target}")
+}
+
+fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
+    let target = args.dispatch.repo.as_deref().unwrap_or("agent task");
+    format!("fix: cook {target}")
 }
 
 pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {

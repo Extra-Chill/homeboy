@@ -104,32 +104,27 @@ mod tests {
     fn command_invocation_reads_flag_value_forms() {
         let cases = [
             (
-                args(&["homeboy", "agent-task", "dispatch", "--run-id", "abc"]),
+                args(&["homeboy", "agent-task", "cook", "--run-id", "abc"]),
                 Some("abc"),
             ),
             (
-                args(&["homeboy", "agent-task", "dispatch", "--run-id=abc"]),
+                args(&["homeboy", "agent-task", "cook", "--run-id=abc"]),
                 Some("abc"),
             ),
+            (args(&["homeboy", "agent-task", "cook", "--run-id"]), None),
             (
-                args(&["homeboy", "agent-task", "dispatch", "--run-id"]),
+                args(&["homeboy", "agent-task", "cook", "--run-id", "--other"]),
                 None,
             ),
             (
-                args(&["homeboy", "agent-task", "dispatch", "--run-id", "--other"]),
-                None,
-            ),
-            (
-                args(&["homeboy", "agent-task", "dispatch", "--", "--run-id", "abc"]),
+                args(&["homeboy", "agent-task", "cook", "--", "--run-id", "abc"]),
                 None,
             ),
         ];
 
         for (input, expected) in cases {
             let invocation = CommandInvocation::for_subcommand(&input, "agent-task").unwrap();
-            let action_index = invocation
-                .child_index_matching(&["dispatch", "cook"])
-                .unwrap();
+            let action_index = invocation.child_index_matching(&["cook"]).unwrap();
             assert_eq!(
                 invocation.option_value_after(action_index, "--run-id"),
                 expected
@@ -139,11 +134,9 @@ mod tests {
 
     #[test]
     fn arg_editor_inserts_after_subcommand_child() {
-        let input = args(&["homeboy", "agent-task", "dispatch", "--repo", "homeboy"]);
+        let input = args(&["homeboy", "agent-task", "cook", "--repo", "homeboy"]);
         let invocation = CommandInvocation::for_subcommand(&input, "agent-task").unwrap();
-        let action_index = invocation
-            .child_index_matching(&["dispatch", "cook"])
-            .unwrap();
+        let action_index = invocation.child_index_matching(&["cook"]).unwrap();
 
         let edited = ArgEditor::new(&input)
             .insert_after(
@@ -157,7 +150,7 @@ mod tests {
             args(&[
                 "homeboy",
                 "agent-task",
-                "dispatch",
+                "cook",
                 "--run-id",
                 "generated",
                 "--repo",
@@ -168,7 +161,7 @@ mod tests {
 
     #[test]
     fn command_invocation_detects_subcommand_before_passthrough_only() {
-        let input = args(&["homeboy", "lab", "exec", "--", "agent-task", "dispatch"]);
+        let input = args(&["homeboy", "lab", "exec", "--", "agent-task", "cook"]);
 
         assert_eq!(
             CommandInvocation::for_subcommand(&input, "lab")

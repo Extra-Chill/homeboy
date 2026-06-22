@@ -248,7 +248,9 @@ impl LabLocalExecutionPolicy {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
-const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/run-plan/retry --run";
+const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
+    "agent-task cook requires at least one deterministic --verify or --private-verify gate";
+const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
@@ -285,8 +287,8 @@ pub struct LabRunnerSupportSummary {
 const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
-        message_label: "agent-task dispatch/cook/run-plan",
-        hint_label: "agent-task dispatch/cook/run-plan",
+        message_label: "agent-task cook/run-plan",
+        hint_label: "agent-task cook/run-plan",
     },
     LabSupportedCommandSummary {
         contract_labels: &[
@@ -444,9 +446,14 @@ impl Commands {
     pub fn lab_contract(&self) -> Option<LabCommandContract> {
         let mut contract = match self {
             Commands::AgentTask(agent_task::AgentTaskArgs {
+                command: agent_task::AgentTaskCommand::Cook(args),
+            }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
+                AGENT_TASK_RUN_LAB_LABEL,
+                AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Cook(_)
-                    | agent_task::AgentTaskCommand::Dispatch(_)
                     | agent_task::AgentTaskCommand::RunPlan(_)
                     | agent_task::AgentTaskCommand::Retry(agent_task::RetryArgs { run: true, .. }),
             }) => LabCommandContract::portable(
@@ -587,7 +594,10 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
+        agent_task::AgentTaskCommand::Cook(agent_task::AgentTaskCookArgs {
+            dispatch: args,
+            ..
+        }) => {
             let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
                 || args
                     .workspace

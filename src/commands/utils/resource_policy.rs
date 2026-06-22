@@ -597,7 +597,7 @@ mod tests {
         let _lock = env_lock();
         let _guard = EnvVarGuard::set(crate::core::runner::RUNNER_HOSTED_EXEC_ENV, "1");
         let warning = evaluate(
-            lab_supported_hot("agent-task dispatch/cook/run-plan"),
+            lab_supported_hot("agent-task cook/run-plan"),
             &resources(ResourceRecommendation::Hot),
         )
         .expect("hot machines warn");

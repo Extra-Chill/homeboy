@@ -8,7 +8,7 @@ use crate::core::agent_task::{
     AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::core::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
-use crate::core::agent_task_cook_loop::AGENT_TASK_COOK_LOOP_REPORT_SCHEMA;
+use crate::core::agent_task_cook_loop::AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA;
 use crate::core::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA;
 use crate::core::agent_task_lifecycle::AgentTaskRunState;
 use crate::core::agent_task_loop_controller::{
@@ -69,7 +69,7 @@ pub struct AgentTaskCoreContractSchemas {
     pub tool_dispatch_evidence: String,
     pub gate_report: String,
     pub promotion_report: String,
-    pub cook_loop_report: String,
+    pub cook_feedback_report: String,
     pub loop_controller: String,
     pub loop_controller_status: String,
     pub loop_definition: String,
@@ -145,7 +145,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             tool_dispatch_evidence: AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA.to_string(),
             gate_report: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             promotion_report: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-            cook_loop_report: AGENT_TASK_COOK_LOOP_REPORT_SCHEMA.to_string(),
+            cook_feedback_report: AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA.to_string(),
             loop_controller: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
             loop_controller_status: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
             loop_definition: AGENT_TASK_LOOP_DEFINITION_SCHEMA.to_string(),

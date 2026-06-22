@@ -7,7 +7,6 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::core::agent_task_aggregate::AgentTaskAggregateReport;
 use crate::core::agent_task_dispatch_plan::{
     build_dispatch_plan_with_provider_requirements, preflight_dispatch_provider_secrets,
 };
@@ -38,17 +37,6 @@ pub enum BackendSelectionSource {
     Policy,
     /// Resolved from the Homeboy config `agent_task.default_backend`.
     Config,
-}
-
-impl BackendSelectionSource {
-    /// Short human label for summary/warning rendering.
-    pub fn label(self) -> &'static str {
-        match self {
-            BackendSelectionSource::Cli => "cli (--backend)",
-            BackendSelectionSource::Policy => "config (component/extension default)",
-            BackendSelectionSource::Config => "config (homeboy default)",
-        }
-    }
 }
 
 /// The effective backend plus where it came from and whether it overrides the
@@ -296,7 +284,7 @@ pub fn resolve_dispatch_request_with_default_and_config(
             let resolved = default_backend(command.repo.as_deref())?.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "backend",
-                    "agent-task dispatch requires --backend because no default backend policy is configured",
+                    "agent-task cook requires --backend because no default backend policy is configured",
                     None,
                     Some(vec![
                         "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
@@ -348,30 +336,6 @@ pub fn resolve_dispatch_request_with_default_and_config(
     })
 }
 
-/// Render a human-readable, single-line-per-field backend selection summary for
-/// the command adapter to print to stderr before dispatch (#5685). Kept in the
-/// service so the wording stays consistent across cook and dispatch surfaces.
-pub fn render_backend_selection_summary(selection: &BackendSelection) -> String {
-    let mut lines = vec![
-        "agent-task backend selection:".to_string(),
-        format!("  backend: {}", selection.backend),
-        format!("  source:  {}", selection.source.label()),
-    ];
-    match selection.default_backend.as_deref() {
-        Some(default) => lines.push(format!("  default: {default}")),
-        None => lines.push("  default: <none configured>".to_string()),
-    }
-    if selection.overrides_default {
-        if let Some(default) = selection.default_backend.as_deref() {
-            lines.push(format!(
-                "  warning: --backend '{}' overrides the configured default '{}'",
-                selection.backend, default
-            ));
-        }
-    }
-    lines.join("\n")
-}
-
 /// Run a dispatch invocation end to end: resolve the request, dispatch it through
 /// the scheduler, and adapt the report into a JSON value plus process exit code.
 pub fn run_dispatch_command<E>(
@@ -398,145 +362,8 @@ where
     Ok((command_json_value(result.value)?, result.exit_code))
 }
 
-/// Run a cook invocation: dispatch the request and attach the cook handoff
-/// envelope describing the patch-artifact boundary and promotion next actions.
-pub fn run_cook_command<E>(command: AgentTaskDispatchCommand, executor: E) -> Result<(Value, i32)>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    let catalog = AgentTaskProviderCatalog::discover();
-    run_cook_command_with_provider_catalog(command, executor, &catalog)
-}
-
-pub fn run_cook_command_with_provider_catalog<E>(
-    command: AgentTaskDispatchCommand,
-    executor: E,
-    catalog: &AgentTaskProviderCatalog,
-) -> Result<(Value, i32)>
-where
-    E: AgentTaskExecutorAdapter,
-{
-    let target_worktree = command.workspace.clone();
-    let (mut value, exit_code) =
-        run_dispatch_command_with_provider_catalog(command, executor, catalog)?;
-    value["handoff"] = cook_handoff(&value, target_worktree.as_deref());
-    Ok((value, exit_code))
-}
-
 fn command_json_value<T: Serialize>(value: T) -> Result<Value> {
     serde_json::to_value(value).map_err(|error| Error::internal_json(error.to_string(), None))
-}
-
-fn cook_handoff(value: &Value, to_worktree: Option<&str>) -> Value {
-    let run_id = value["run_id"].as_str().unwrap_or("<run-id>");
-    let run_command = agent_task_run_command(value, run_id);
-    let run_next_command = agent_task_run_next_command(value);
-    let aggregate_path = value["aggregate_path"].as_str().unwrap_or(run_id);
-    let aggregate_review = value
-        .get("aggregate")
-        .and_then(|aggregate| serde_json::from_value::<AgentTaskAggregate>(aggregate.clone()).ok())
-        .map(|aggregate| AgentTaskAggregateReport::from(aggregate.outcomes))
-        .unwrap_or_else(|| AgentTaskAggregateReport::from(Vec::new()));
-    let promotion_commands =
-        cook_promotion_commands(aggregate_path, to_worktree, &aggregate_review);
-    let patch_artifact_produced = !promotion_commands.is_empty();
-    let mut next_actions = Vec::new();
-
-    if patch_artifact_produced {
-        next_actions.push("patch artifact produced; promote one candidate before claiming worktree changes or PR completion".to_string());
-        if to_worktree.is_some() {
-            next_actions.push(
-                "run one `promote_commands` entry to apply the patch into the target worktree"
-                    .to_string(),
-            );
-        } else {
-            next_actions.push(format!(
-                "run `homeboy agent-task review {run_id} --to-worktree <handle>` to generate exact promote commands"
-            ));
-        }
-        next_actions.push(format!(
-            "after promotion and verification, run `homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>`"
-        ));
-    } else if value["queued"].as_bool().unwrap_or(false) {
-        next_actions.push(format!(
-            "queued only; run `{run_command}` or let a daemon claim it with `{run_next_command}`"
-        ));
-    } else {
-        next_actions.push("no patch artifact was produced; inspect `aggregate` candidates before retrying or reporting".to_string());
-    }
-
-    serde_json::json!({
-        "schema": "homeboy/agent-task-cook-handoff/v1",
-        "states": {
-            "patch_artifact_produced": patch_artifact_produced,
-            "patch_promoted": false,
-            "pr_opened": false
-        },
-        "boundary": if value["queued"].as_bool().unwrap_or(false) {
-            "queued"
-        } else if patch_artifact_produced {
-            "patch_artifact_only"
-        } else {
-            "no_patch_artifact"
-        },
-        "promote_commands": promotion_commands,
-        "finalize_command": format!(
-            "homeboy agent-task finalize-pr --run-id {run_id} --path <promoted-worktree-path> --title <title> --commit-message <message>"
-        ),
-        "next_actions": next_actions
-    })
-}
-
-fn agent_task_run_command(value: &Value, run_id: &str) -> String {
-    match value
-        .pointer("/record/metadata/runner_id")
-        .and_then(Value::as_str)
-        .filter(|runner_id| !runner_id.trim().is_empty())
-    {
-        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task run {run_id}"),
-        None => format!("homeboy agent-task run {run_id}"),
-    }
-}
-
-fn agent_task_run_next_command(value: &Value) -> String {
-    match value
-        .pointer("/record/metadata/runner_id")
-        .and_then(Value::as_str)
-        .filter(|runner_id| !runner_id.trim().is_empty())
-    {
-        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task run-next"),
-        None => "homeboy agent-task run-next".to_string(),
-    }
-}
-
-fn cook_promotion_commands(
-    source: &str,
-    to_worktree: Option<&str>,
-    review: &AgentTaskAggregateReport,
-) -> Vec<Vec<String>> {
-    review
-        .apply_candidates
-        .iter()
-        .flat_map(|candidate| {
-            candidate.artifact_ids.iter().map(move |artifact_id| {
-                let mut command = vec![
-                    "homeboy".to_string(),
-                    "agent-task".to_string(),
-                    "promote".to_string(),
-                    source.to_string(),
-                    "--task-id".to_string(),
-                    candidate.task_id.clone(),
-                    "--artifact-id".to_string(),
-                    artifact_id.clone(),
-                ];
-                if let Some(to_worktree) = to_worktree {
-                    command.push("--to-worktree".to_string());
-                    command.push(to_worktree.to_string());
-                }
-                command
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -610,51 +437,5 @@ mod tests {
         assert_eq!(selection.source, BackendSelectionSource::Policy);
         // Default-policy selections never count as an explicit override.
         assert!(!selection.overrides_default);
-    }
-
-    #[test]
-    fn summary_includes_override_warning_only_for_cli_override() {
-        let override_selection = BackendSelection {
-            backend: "claude-code".to_string(),
-            source: BackendSelectionSource::Cli,
-            default_backend: Some("opencode".to_string()),
-            overrides_default: true,
-        };
-        let summary = render_backend_selection_summary(&override_selection);
-        assert!(summary.contains("backend: claude-code"));
-        assert!(summary.contains("cli (--backend)"));
-        assert!(summary.contains("warning:"));
-        assert!(summary.contains("overrides the configured default 'opencode'"));
-
-        let default_selection = BackendSelection {
-            backend: "opencode".to_string(),
-            source: BackendSelectionSource::Config,
-            default_backend: Some("opencode".to_string()),
-            overrides_default: false,
-        };
-        let summary = render_backend_selection_summary(&default_selection);
-        assert!(!summary.contains("warning:"));
-    }
-
-    #[test]
-    fn queued_cook_handoff_uses_recorded_runner_context() {
-        let handoff = cook_handoff(
-            &serde_json::json!({
-                "run_id": "agent-task-queued",
-                "queued": true,
-                "record": {
-                    "metadata": {
-                        "runner_id": "homeboy-lab"
-                    }
-                }
-            }),
-            None,
-        );
-
-        let next_action = handoff["next_actions"][0].as_str().expect("next action");
-        assert!(
-            next_action.contains("homeboy --runner homeboy-lab agent-task run agent-task-queued")
-        );
-        assert!(next_action.contains("homeboy --runner homeboy-lab agent-task run-next"));
     }
 }
