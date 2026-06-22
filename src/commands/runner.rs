@@ -11,9 +11,9 @@ use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::runners::{
     self as runner, runner_job_log_snapshot, ReverseRunnerConnectOptions,
-    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerExecOutput, RunnerKind, RunnerSession, RunnerStatusReport,
-    RunnerTunnelMode,
+    ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput,
+    RunnerKind, RunnerSession, RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy::core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 use homeboy::core::stream_capture::StreamCaptureMetadata;
@@ -1269,6 +1269,17 @@ fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
         return Vec::new();
     };
     let mut hints = Vec::new();
+    if report.active_job_state == RunnerActiveJobState::Unavailable {
+        let reason = report
+            .active_job_error
+            .as_ref()
+            .map(|err| err.message.as_str())
+            .unwrap_or("active-job status endpoint was unavailable");
+        hints.push(format!(
+            "Active-job status for `{}` is unavailable: {reason}. Treat active_job_count=0 as unknown, not idle.",
+            report.runner_id
+        ));
+    }
     match session.mode {
         RunnerTunnelMode::DirectSsh => {
             if report.active_job_count > 0 {
@@ -1978,6 +1989,9 @@ mod tests {
                 artifact_refs: Vec::new(),
             }],
             active_job_count: 1,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+            active_job_error: None,
             session_path: "/tmp/session.json".to_string(),
         };
 

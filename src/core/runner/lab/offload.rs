@@ -61,9 +61,10 @@ use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::agent_task_bridge::{
@@ -2531,6 +2532,9 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            active_job_state: RunnerActiveJobState::Available,
+            active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+            active_job_error: None,
             session_path: "/tmp/lab.json".to_string(),
         }
     }
