@@ -10,8 +10,8 @@ use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
     merge_fuzz_target_inventory, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
-    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance, FuzzRequiredArtifact,
-    FuzzReplayMetadata, FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CAMPAIGN_SCHEMA,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance, FuzzReplayMetadata,
+    FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
     FUZZ_TARGET_INVENTORY_SCHEMA,
 };
