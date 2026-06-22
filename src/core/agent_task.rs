@@ -61,6 +61,11 @@ pub struct AgentTaskPreparedWorkspace {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskExecutionHandle {
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskExecutionHandleKind::is_provider_run"
+    )]
+    pub kind: AgentTaskExecutionHandleKind,
     pub task_id: String,
     pub backend: String,
     pub run_id: String,
@@ -68,6 +73,22 @@ pub struct AgentTaskExecutionHandle {
     pub stream_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskExecutionHandleKind {
+    QueuedRecord,
+    LocalPid,
+    RunnerJob,
+    #[default]
+    ProviderRun,
+}
+
+impl AgentTaskExecutionHandleKind {
+    pub(crate) fn is_provider_run(&self) -> bool {
+        matches!(self, Self::ProviderRun)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1628,6 +1649,7 @@ mod tests {
         };
 
         let handle = AgentTaskExecutionHandle {
+            kind: AgentTaskExecutionHandleKind::ProviderRun,
             task_id: "task-1".to_string(),
             backend: capabilities.backend.clone(),
             run_id: "run-1".to_string(),

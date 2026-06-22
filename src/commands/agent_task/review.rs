@@ -10,7 +10,9 @@ use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::promotion::{
     promote, AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
 };
-use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::core::agent_tasks::provider::{
+    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+};
 use homeboy::core::agent_tasks::service as agent_task_service;
 use homeboy::core::agent_tasks::{AgentTaskAggregate, AgentTaskAggregateReport, AgentTaskRequest};
 use homeboy::core::config;
@@ -297,7 +299,13 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let catalog = if args.refresh {
+        AgentTaskProviderCatalog::refresh()
+    } else {
+        AgentTaskProviderCatalog::discover()
+    };
+    let catalog_version = catalog.version.clone();
+    let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
     let providers = executor.providers();
     let fallback_sources =
         homeboy::core::agent_tasks::provider::provider_secret_sources_for_providers(providers);
@@ -320,6 +328,10 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
+            "catalog": {
+                "refreshed": args.refresh,
+                "version": catalog_version,
+            },
             "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
             "providers": providers,
             "readiness_validation": {

@@ -5,11 +5,11 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
-    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
-    AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
+    AgentTaskExecutionHandleKind, AgentTaskExecutor, AgentTaskFailureClassification,
+    AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
+    AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_provider::{role_aliases_for_provider, AgentTaskProviderRoleAliases};
 use crate::core::agent_task_scheduler::{
@@ -161,6 +161,11 @@ pub struct AgentTaskArtifactRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunProviderHandle {
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskExecutionHandleKind::is_provider_run"
+    )]
+    pub kind: AgentTaskExecutionHandleKind,
     pub task_id: String,
     pub backend: String,
     pub provider_run_id: String,
@@ -1302,6 +1307,7 @@ fn provider_handle_from_outcome_metadata(
         })?;
 
     Some(AgentTaskRunProviderHandle {
+        kind: AgentTaskExecutionHandleKind::ProviderRun,
         task_id: outcome.task_id.clone(),
         backend: provider.to_string(),
         provider_run_id: provider_run_id.to_string(),
@@ -1362,6 +1368,7 @@ fn run_provider_handle(
     handle: AgentTaskExecutionHandle,
 ) -> AgentTaskRunProviderHandle {
     AgentTaskRunProviderHandle {
+        kind: handle.kind,
         task_id: handle.task_id,
         backend: handle.backend,
         provider_run_id: handle.run_id,
@@ -2181,6 +2188,7 @@ mod tests {
             let mut aggregate = succeeded_aggregate(&plan);
             aggregate.outcomes[0].metadata = json!({
                 "provider_handle": AgentTaskExecutionHandle {
+                    kind: AgentTaskExecutionHandleKind::ProviderRun,
                     task_id: "task-a".to_string(),
                     backend: "sample-runtime".to_string(),
                     run_id: "provider-run-123".to_string(),

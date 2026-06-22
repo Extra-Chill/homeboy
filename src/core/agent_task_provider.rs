@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(not(test))]
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,9 @@ use crate::core::{agent_runtime_manifest, component, defaults, extension, Error}
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-capability-contract/v1";
+
+#[cfg(not(test))]
+static PROVIDER_CATALOG: OnceLock<RwLock<AgentTaskProviderCatalog>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderCapabilityContract {
@@ -131,6 +134,8 @@ pub struct AgentTaskRuntimeContract {
         skip_serializing_if = "AgentTaskRuntimeNormalization::is_empty"
     )]
     pub normalization: AgentTaskRuntimeNormalization,
+    #[serde(default, skip_serializing_if = "AgentTaskRuntimeApplyBack::is_empty")]
+    pub apply_back: AgentTaskRuntimeApplyBack,
 }
 
 impl AgentTaskRuntimeContract {
@@ -138,7 +143,38 @@ impl AgentTaskRuntimeContract {
         self.capabilities.is_empty()
             && self.lifecycle_states.is_empty()
             && self.normalization.is_empty()
+            && self.apply_back.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeApplyBack {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutation_artifacts: Vec<AgentTaskRuntimeMutationArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_git_checkout: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
+impl AgentTaskRuntimeApplyBack {
+    fn is_empty(&self) -> bool {
+        self.mutation_artifacts.is_empty()
+            && self.requires_git_checkout.is_none()
+            && self.strategy.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentTaskRuntimeMutationArtifact {
+    pub name: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -147,11 +183,15 @@ pub struct AgentTaskRuntimeLifecycleStates {
     pub execution_states: BTreeMap<String, AgentTaskExecutionState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub outcome_statuses: BTreeMap<String, AgentTaskOutcomeStatus>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failure_classifications: BTreeMap<String, AgentTaskFailureClassification>,
 }
 
 impl AgentTaskRuntimeLifecycleStates {
     fn is_empty(&self) -> bool {
-        self.execution_states.is_empty() && self.outcome_statuses.is_empty()
+        self.execution_states.is_empty()
+            && self.outcome_statuses.is_empty()
+            && self.failure_classifications.is_empty()
     }
 }
 
@@ -539,11 +579,19 @@ pub struct AgentTaskProviderWorkspaceMaterialization {
     pub spec: Option<WorkspaceMaterializationSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<WorkspaceMountSpec>,
+    #[serde(default, skip_serializing_if = "AgentTaskRuntimeApplyBack::is_empty")]
+    pub apply_back: AgentTaskRuntimeApplyBack,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
 
 impl AgentTaskProviderWorkspaceMaterialization {
+    pub fn requires_cwd_git_checkout(&self) -> bool {
+        self.apply_back.requires_git_checkout == Some(true)
+            || self.requires_git == Some(true)
+            || self.cwd.as_deref() == Some("git_checkout")
+    }
+
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if let Some(spec) = &self.spec {
@@ -708,16 +756,30 @@ pub struct AgentTaskProviderCatalog {
     pub providers: Vec<AgentTaskExecutorProvider>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl AgentTaskProviderCatalog {
     pub fn discover() -> Self {
         #[cfg(not(test))]
         {
-            static PROVIDER_CATALOG: OnceLock<AgentTaskProviderCatalog> = OnceLock::new();
-            return PROVIDER_CATALOG
-                .get_or_init(discover_provider_catalog)
-                .clone();
+            let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(discover_provider_catalog()));
+            return catalog.read().expect("provider catalog lock").clone();
+        }
+        #[cfg(test)]
+        {
+            discover_provider_catalog()
+        }
+    }
+
+    pub fn refresh() -> Self {
+        #[cfg(not(test))]
+        {
+            let refreshed = discover_provider_catalog();
+            let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(refreshed.clone()));
+            *catalog.write().expect("provider catalog lock") = refreshed.clone();
+            return refreshed;
         }
         #[cfg(test)]
         {
@@ -757,6 +819,10 @@ fn discover_provider_catalog() -> AgentTaskProviderCatalog {
     AgentTaskProviderCatalog {
         providers: catalog.providers,
         diagnostics: catalog.diagnostics,
+        version: Some(format!(
+            "discovered:{}",
+            chrono::Utc::now().timestamp_millis()
+        )),
     }
 }
 
@@ -1115,10 +1181,11 @@ fn provider_requires_cwd_git_checkout_with_providers(
     selector: Option<&str>,
 ) -> bool {
     select_provider_by_backend(providers, backend, selector)
-        .and_then(|provider| provider.workspace_materialization.as_ref())
-        .map(|materialization| {
-            materialization.requires_git == Some(true)
-                || materialization.cwd.as_deref() == Some("git_checkout")
+        .map(|provider| {
+            provider.runtime_contract.apply_back.requires_git_checkout == Some(true)
+                || provider.workspace_materialization.as_ref().is_some_and(
+                    AgentTaskProviderWorkspaceMaterialization::requires_cwd_git_checkout,
+                )
         })
         .unwrap_or(false)
 }
@@ -2717,20 +2784,31 @@ fn normalize_provider_runtime_contract(
     }
 
     if let Some(status_path) = normalization.status_path.as_deref() {
-        if let Some(status) = dotted_value(outcome, status_path).and_then(Value::as_str) {
+        if let Some(status) = dotted_value(outcome, status_path)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
             if let Some(mapped_status) = provider
                 .runtime_contract
                 .lifecycle_states
                 .outcome_statuses
-                .get(status)
+                .get(&status)
                 .copied()
             {
                 outcome.status = mapped_status;
-                if mapped_status != AgentTaskOutcomeStatus::Succeeded
-                    && outcome.failure_classification.is_none()
-                {
-                    outcome.failure_classification = Some(AgentTaskFailureClassification::Unknown);
-                }
+            }
+            if let Some(mapped_classification) = provider
+                .runtime_contract
+                .lifecycle_states
+                .failure_classifications
+                .get(&status)
+                .copied()
+            {
+                outcome.failure_classification = Some(mapped_classification);
+            } else if outcome.status != AgentTaskOutcomeStatus::Succeeded
+                && outcome.failure_classification.is_none()
+            {
+                outcome.failure_classification = Some(AgentTaskFailureClassification::Unknown);
             }
         }
     }
@@ -3200,7 +3278,8 @@ mod tests {
                 "capabilities": ["sandbox", "artifacts"],
                 "lifecycle_states": {
                     "execution_states": { "queued": "queued", "done": "succeeded" },
-                    "outcome_statuses": { "ok": "succeeded", "error": "failed" }
+                    "outcome_statuses": { "ok": "succeeded", "error": "failed" },
+                    "failure_classifications": { "error": "provider" }
                 },
                 "normalization": {
                     "status_path": "outputs.runtime.status",
@@ -3351,6 +3430,7 @@ mod tests {
                     "done".to_string(),
                     AgentTaskOutcomeStatus::Succeeded,
                 )]),
+                failure_classifications: BTreeMap::new(),
             },
             normalization: AgentTaskRuntimeNormalization {
                 status_path: Some("outputs.runtime.status".to_string()),
@@ -3376,6 +3456,7 @@ mod tests {
                     },
                 ],
             },
+            apply_back: AgentTaskRuntimeApplyBack::default(),
         };
 
         let outcome = run_provider_command(&request, &provider);
@@ -3417,6 +3498,13 @@ mod tests {
         provider.backend = "sample-runtime".to_string();
         provider.runtime_contract.lifecycle_states.outcome_statuses =
             BTreeMap::from([("failed".to_string(), AgentTaskOutcomeStatus::Failed)]);
+        provider
+            .runtime_contract
+            .lifecycle_states
+            .failure_classifications = BTreeMap::from([(
+            "failed".to_string(),
+            AgentTaskFailureClassification::Provider,
+        )]);
         provider.runtime_contract.normalization.status_path =
             Some("outputs.sample_runtime.state".to_string());
 
@@ -3425,7 +3513,7 @@ mod tests {
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
         assert_eq!(
             outcome.failure_classification,
-            Some(AgentTaskFailureClassification::Unknown)
+            Some(AgentTaskFailureClassification::Provider)
         );
     }
 
@@ -4551,6 +4639,7 @@ process.stdout.write(JSON.stringify({
             artifact_paths: Vec::new(),
             spec: None,
             mounts: Vec::new(),
+            apply_back: AgentTaskRuntimeApplyBack::default(),
             extra: BTreeMap::new(),
         });
 
@@ -4762,7 +4851,33 @@ process.stdout.write(JSON.stringify({
             artifact_paths: vec![".homeboy/provider".to_string()],
             spec: None,
             mounts: Vec::new(),
+            apply_back: AgentTaskRuntimeApplyBack::default(),
             extra: BTreeMap::new(),
+        });
+
+        assert!(provider_requires_cwd_git_checkout_with_providers(
+            &[provider],
+            "test",
+            None
+        ));
+    }
+
+    #[test]
+    fn provider_apply_back_contract_declares_git_checkout_requirement() {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
+            apply_back: AgentTaskRuntimeApplyBack {
+                requires_git_checkout: Some(true),
+                strategy: Some("mutation_artifacts".to_string()),
+                mutation_artifacts: vec![AgentTaskRuntimeMutationArtifact {
+                    name: "patch".to_string(),
+                    path: "outputs.runtime.artifacts.patch".to_string(),
+                    kind: Some("patch".to_string()),
+                    semantic_key: Some("workspace.patch".to_string()),
+                    apply_method: Some("git_apply".to_string()),
+                }],
+            },
+            ..AgentTaskProviderWorkspaceMaterialization::default()
         });
 
         assert!(provider_requires_cwd_git_checkout_with_providers(
@@ -4782,6 +4897,7 @@ process.stdout.write(JSON.stringify({
             artifact_paths: Vec::new(),
             spec: None,
             mounts: Vec::new(),
+            apply_back: AgentTaskRuntimeApplyBack::default(),
             extra: BTreeMap::new(),
         });
 

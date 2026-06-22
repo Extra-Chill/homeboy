@@ -93,6 +93,7 @@ pub struct AgentTaskCoreProviderCapabilityContract {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskCoreContractEnums {
+    pub execution_handle_kind: Vec<String>,
     pub execution_state: Vec<String>,
     pub task_state: Vec<String>,
     pub run_state: Vec<String>,
@@ -212,6 +213,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "artifact_paths",
                 "spec",
                 "mounts",
+                "apply_back",
                 "extra",
             ]),
             workspace_mount_spec_fields: string_vec(&[
@@ -226,6 +228,12 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             ]),
         },
         enums: AgentTaskCoreContractEnums {
+            execution_handle_kind: string_vec(&[
+                "queued_record",
+                "local_pid",
+                "runner_job",
+                "provider_run",
+            ]),
             execution_state: enum_values(&[
                 AgentTaskExecutionState::Queued,
                 AgentTaskExecutionState::Running,
