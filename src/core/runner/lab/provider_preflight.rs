@@ -1,6 +1,6 @@
 //! AgentTask provider preflight for Lab offload.
 //!
-//! Before dispatching an `agent-task dispatch`/`cook`/`loop` command to a Lab
+//! Before dispatching an `agent-task cook` command to a Lab
 //! runner, Homeboy verifies that the requested executor backend/selector is
 //! actually selectable *on that runner* — not just locally. This module owns
 //! that command-specific bridge end to end:

@@ -119,15 +119,13 @@ pub fn route_after_parse(
 fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
     let (label, concurrency, task_count) = match command {
         Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Cook(args)
-                | crate::commands::agent_task::AgentTaskCommand::Dispatch(args),
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(args),
         }) => (
-            "agent-task local fanout",
-            args.concurrency,
-            args.tasks.len()
-                + usize::from(args.prompt.is_some())
-                + usize::from(args.core.tasks_json.is_some()),
+            "agent-task cook local fanout",
+            args.dispatch.concurrency,
+            args.dispatch.tasks.len()
+                + usize::from(args.dispatch.prompt.is_some())
+                + usize::from(args.dispatch.core.tasks_json.is_some()),
         ),
         _ => return None,
     };

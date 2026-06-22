@@ -54,16 +54,12 @@ fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
             "refactor",
         ),
         (
-            parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-            "agent-task dispatch/cook/run-plan",
-        ),
-        (
             parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-            "agent-task dispatch/cook/run-plan",
+            "agent-task cook/run-plan",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
-            "agent-task dispatch/cook/run-plan",
+            "agent-task cook/run-plan",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"]),
@@ -219,7 +215,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     assert_eq!(
         lab_runner_supported_labels().as_slice(),
         &[
-            "agent-task dispatch/cook/run-plan",
+            "agent-task cook/run-plan",
             "agent-task controller from-spec --resume/materialize/resume",
             "agent-task retry --run",
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
@@ -316,7 +312,6 @@ fn test_supports_lab_runner() {
     ]);
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
     assert!(cli.command.supports_lab_runner());
-
     let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
     assert_eq!(cli.runner.as_deref(), Some("lab-a"));
     assert!(cli.command.supports_lab_runner());
@@ -425,11 +420,21 @@ fn test_lab_command_contracts_cover_hot_commands() {
             .release_gate
     );
     assert!(
-        !parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
-            .lab_contract()
-            .expect("agent-task contract")
-            .routing_policy
-            .release_gate
+        !parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "homeboy@smoke",
+            "--verify",
+            "true",
+            "--prompt",
+            "cook",
+        ])
+        .lab_contract()
+        .expect("agent-task contract")
+        .routing_policy
+        .release_gate
     );
 
     for args in [
@@ -643,7 +648,17 @@ fn agent_task_git_checkout_policy_uses_default_backend_when_backend_is_omitted()
 
 #[test]
 fn agent_task_git_checkout_policy_keeps_non_cwd_dispatch_snapshot_eligible() {
-    let command = parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]);
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
+        "--prompt",
+        "cook",
+    ]);
     let Commands::AgentTask(args) = command else {
         panic!("expected agent-task command");
     };
@@ -660,7 +675,11 @@ fn agent_task_git_checkout_policy_treats_workspace_like_cwd() {
     let command = parsed_command(&[
         "homeboy",
         "agent-task",
-        "dispatch",
+        "cook",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
         "--workspace",
         "/work/repo",
         "--prompt",
@@ -693,6 +712,59 @@ fn agent_task_loop_status_is_durable_controller_surface_not_cook_dispatch() {
         parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"])
             .lab_contract()
             .is_none()
+    );
+}
+
+#[test]
+fn agent_task_git_checkout_policy_covers_cook_dispatch_workspace() {
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "homeboy@smoke",
+        "--verify",
+        "true",
+        "--cwd",
+        "/work/repo",
+        "--backend",
+        "generic-patch-provider",
+        "--selector",
+        "selected",
+        "--prompt",
+        "cook",
+    ]);
+    let Commands::AgentTask(ref args) = command else {
+        panic!("expected agent-task command");
+    };
+
+    assert!(!agent_task_provider_requires_cwd_git_checkout_with(
+        &args.command,
+        || Some("default-patch-provider".to_string()),
+        |backend, _| backend == "default-patch-provider",
+    ));
+    assert_eq!(
+        parsed_command(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "homeboy@smoke",
+            "--verify",
+            "true",
+            "--cwd",
+            "/work/repo",
+            "--backend",
+            "generic-patch-provider",
+            "--selector",
+            "selected",
+            "--prompt",
+            "cook",
+        ])
+        .lab_contract()
+            .expect("agent-task cook contract")
+            .workspace_mode_policy,
+        LabWorkspaceModePolicy::GitCheckoutRequired
     );
 }
 

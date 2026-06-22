@@ -33,11 +33,11 @@ pub fn build_dispatch_plan_with_provider_requirements(
     if request.prompt.is_none() && request.tasks.is_empty() && request.core.tasks_json.is_none() {
         return Err(Error::validation_invalid_argument(
             "prompt",
-            "agent-task dispatch requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
+            "agent-task cook requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
             None,
             Some(vec![
-                "Example: homeboy agent-task dispatch --repo sample-plugin --cwd /path/to/worktree --prompt @task.txt".to_string(),
-                "Wave input: homeboy agent-task dispatch --tasks @tasks.json --concurrency 8".to_string(),
+                "Example: homeboy agent-task cook --repo sample-plugin --cwd /path/to/worktree --to-worktree sample-plugin@fix-issue --verify 'npm test' --prompt @task.txt".to_string(),
+                "Wave input: homeboy agent-task cook --tasks @tasks.json --concurrency 8 --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
             ]),
         ));
     }
@@ -163,7 +163,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
                 "task_url": request.task_url,
                 "prompt_source": prompt_spec,
-                "dispatch": "agent-task dispatch",
+                "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
             }),
         });
@@ -281,7 +281,7 @@ fn resolve_dispatch_workspace(
             return Err(Error::validation_invalid_argument(
                 "cwd",
                 format!(
-                    "agent-task dispatch workspace '{}' is not a directory",
+                    "agent-task cook workspace '{}' is not a directory",
                     path.display()
                 ),
                 Some(cwd.clone()),
@@ -304,7 +304,7 @@ fn resolve_dispatch_workspace(
         Error::validation_invalid_argument(
             "workspace",
             format!(
-                "agent-task dispatch workspace '{}' is neither an existing directory nor a Homeboy worktree record",
+                "agent-task cook workspace '{}' is neither an existing directory nor a Homeboy worktree record",
                 workspace
             ),
             Some(workspace.clone()),
@@ -409,7 +409,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
     let context = serde_json::from_str::<Value>(&raw).map_err(|error| {
         Error::validation_invalid_json(
             error,
-            Some("agent-task dispatch client context".to_string()),
+            Some("agent-task cook client context".to_string()),
             Some(raw),
         )
     })?;
@@ -417,7 +417,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
     if !context.is_object() {
         return Err(Error::validation_invalid_argument(
             "client-context",
-            "agent-task dispatch --client-context must resolve to a JSON object",
+            "agent-task cook --client-context must resolve to a JSON object",
             None,
             None,
         ));
@@ -432,7 +432,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
 fn provider_config_must_be_object_error() -> Error {
     Error::validation_invalid_argument(
         "provider-config",
-        "agent-task dispatch --provider-config must resolve to a JSON object",
+        "agent-task cook --provider-config must resolve to a JSON object",
         None,
         None,
     )
@@ -450,7 +450,7 @@ fn dispatch_provider_config(
         let explicit = serde_json::from_str::<Value>(&raw).map_err(|error| {
             Error::validation_invalid_json(
                 error,
-                Some("agent-task dispatch provider config".to_string()),
+                Some("agent-task cook provider config".to_string()),
                 Some(raw),
             )
         })?;
@@ -476,7 +476,7 @@ fn dispatch_provider_config(
     if !config.is_object() {
         return Err(Error::validation_invalid_argument(
             "provider-config",
-            "agent-task dispatch --provider-config root must remain a JSON object after materializing configured refs",
+            "agent-task cook --provider-config root must remain a JSON object after materializing configured refs",
             None,
             None,
         ));
@@ -529,7 +529,7 @@ fn collect_component_contracts_from_value(
             .map_err(|error| {
                 Error::validation_invalid_argument(
                     format!("{label}.{key}"),
-                    format!("agent-task dispatch {label}.{key} must be an array of component contracts: {error}"),
+                    format!("agent-task cook {label}.{key} must be an array of component contracts: {error}"),
                     Some(raw.to_string()),
                     None,
                 )
@@ -592,7 +592,7 @@ fn read_text_spec(spec: &str, label: &str) -> Result<String> {
 
     config::read_json_spec_to_string(spec).map_err(|error| {
         Error::internal_unexpected(format!(
-            "failed to read agent-task dispatch {label} input: {error}"
+            "failed to read agent-task cook {label} input: {error}"
         ))
     })
 }
@@ -606,7 +606,7 @@ fn read_dispatch_tasks_json(spec: Option<&str>) -> Result<Vec<String>> {
     let value: Value = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_json(
             error,
-            Some("agent-task dispatch tasks".to_string()),
+            Some("agent-task cook tasks".to_string()),
             Some(raw.clone()),
         )
     })?;
@@ -632,7 +632,7 @@ fn task_prompts_from_json_items(items: Vec<Value>) -> Result<Vec<String>> {
 fn invalid_tasks_json_error() -> Error {
     Error::validation_invalid_argument(
         "tasks",
-        "agent-task dispatch --tasks expects a JSON array or object with a tasks array",
+        "agent-task cook --tasks expects a JSON array or object with a tasks array",
         None,
         None,
     )
@@ -649,7 +649,7 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<String> {
                 Error::validation_invalid_argument(
                     "tasks",
                     format!(
-                        "agent-task dispatch task item {} must include a string prompt or instructions field",
+                        "agent-task cook task item {} must include a string prompt or instructions field",
                         index + 1
                     ),
                     None,
@@ -659,7 +659,7 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<String> {
         _ => Err(Error::validation_invalid_argument(
             "tasks",
             format!(
-                "agent-task dispatch task item {} must be a string or object",
+                "agent-task cook task item {} must be a string or object",
                 index + 1
             ),
             None,

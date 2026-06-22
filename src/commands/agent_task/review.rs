@@ -316,7 +316,8 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "agent-task providers --validate-readiness requires --backend",
                 None,
                 Some(vec![
-                    "Pass the same --backend value that the agent-task dispatch/cook command will use.".to_string(),
+                    "Pass the same --backend value that the agent-task cook command will use."
+                        .to_string(),
                 ]),
             )
         })?;

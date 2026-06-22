@@ -11,7 +11,8 @@ use crate::core::agent_task_gate::{
 use crate::core::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
-pub const AGENT_TASK_COOK_LOOP_REPORT_SCHEMA: &str = "homeboy/agent-task-cook-loop-report/v1";
+pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
+    "homeboy/agent-task-cook-feedback-report/v1";
 const RISKY_CHANGED_FILE_THRESHOLD: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,7 +31,7 @@ pub struct AgentTaskCookLoopOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopReport {
-    #[serde(default = "cook_loop_report_schema")]
+    #[serde(default = "cook_feedback_report_schema")]
     pub schema: String,
     pub status: AgentTaskCookLoopStatus,
     pub attempt: u32,
@@ -123,7 +124,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     };
 
     AgentTaskCookLoopReport {
-        schema: AGENT_TASK_COOK_LOOP_REPORT_SCHEMA.to_string(),
+        schema: AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA.to_string(),
         status,
         attempt: options.attempt,
         max_attempts: options.max_attempts,
@@ -433,8 +434,8 @@ fn worktree_root_hint(report: &AgentTaskPromotionReport) -> Option<String> {
         .map(str::to_string)
 }
 
-fn cook_loop_report_schema() -> String {
-    AGENT_TASK_COOK_LOOP_REPORT_SCHEMA.to_string()
+fn cook_feedback_report_schema() -> String {
+    AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA.to_string()
 }
 
 #[cfg(test)]

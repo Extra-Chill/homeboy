@@ -13,7 +13,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 - **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
 - **Cook/review:** workspace task conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
 - **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
-- **Prompt store:** Homeboy-owned markdown prompts for reusable dispatch/cook input.
+- **Prompt store:** Homeboy-owned markdown prompts for reusable cook/controller input.
 - **Loop/controller:** durable multi-agent loop state with on/off, revolutions, handoffs, continuation policy, and resume/stop controls.
 
 ## Subcommands
@@ -22,7 +22,6 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 | Subcommand | Purpose |
 |---|---|
-| `dispatch` | Build and queue common workspace agent tasks without hand-authored provider JSON. |
 | `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
 | `run <run-id>` | Execute a previously submitted durable run. |
 | `run-next` | Claim and execute the oldest queued durable run. |
@@ -72,7 +71,7 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
-| `gate-feedback` | Convert deterministic gate results into a cook-loop retry or stop decision. |
+| `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
 ## Lab Guardrails
 
@@ -104,7 +103,7 @@ processes start. Compact `agent-task status` includes `execution_location` as
 
 `agent-task prompts` stores markdown prompt files under Homeboy's data directory,
 not under the current repo/worktree. Save prompt content with inline text,
-`@file`, or `-` for stdin, then reference it from `dispatch` or `cook`
+`@file`, or `-` for stdin, then reference it from `cook` or controller specs
 with `prompt:<id>` anywhere a prompt string is accepted.
 
 ```bash
@@ -310,17 +309,21 @@ the controller and immediately run pending handoffs. `loop resume` refuses to
 run off loops and stops once the persisted or supplied revolution limit is
 reached.
 
-## Dispatch
+## Cook
 
-`agent-task dispatch` builds a durable task plan from common workspace inputs
-without requiring hand-authored provider JSON:
+`agent-task cook` is the one-shot end-to-end PR workflow. It dispatches an agent,
+promotes the selected patch into the target worktree, runs deterministic gates,
+retries red gates within the configured budget, then commits, pushes, and opens or
+updates a PR.
 
 ```bash
-homeboy agent-task dispatch \
+homeboy agent-task cook \
   --repo sample-plugin \
   --cwd /path/to/worktree \
+  --to-worktree sample-plugin@fix-issue \
   --provider-config @provider-config.json \
   --client-context @client-context.json \
+  --verify "npm test" \
   --prompt @task.txt
 ```
 
@@ -329,7 +332,7 @@ adapters may include whatever correlation data they need to reconcile their own
 notifications or UI state, but Homeboy does not interpret transport-specific
 identifiers in core lifecycle state. Provider-specific execution settings belong
 in `--provider-config`; durable lifecycle commands remain headless and can be
-claimed later with `agent-task run` or `agent-task run-next`.
+inspected later with `agent-task status`, `agent-task logs`, or `agent-task review`.
 
 `--backend` selects the generic executor backend, `--dispatch-provider-id` (also
 accepted as `--selector`) selects a specific provider id for that backend, and
@@ -399,18 +402,16 @@ depending on transport-local state.
 ```bash
 run_id="homeboy-3357-$(date +%s)"
 
-homeboy agent-task dispatch \
+homeboy agent-task cook \
   --repo homeboy \
   --cwd /path/to/homeboy@fix-issue \
+  --to-worktree homeboy@fix-issue-3357-agent-task-non-chat-flow \
   --task-url https://github.com/Extra-Chill/homeboy/issues/3357 \
   --concurrency 4 \
   --attempts 2 \
+  --verify "homeboy test homeboy" \
   --run-id "$run_id" \
-  --queue-only \
   --prompt @task.txt
-
-# A daemon or later terminal process can claim work without chat history.
-homeboy agent-task run-next
 
 # One review envelope contains lifecycle state, logs, artifacts, aggregate
 # reconciliation, promotion candidates, and next actions.
@@ -547,7 +548,7 @@ a visible deterministic gate in the promoted worktree. Promotion reports gate
 results as `deterministic_gates[]` using
 `homeboy/agent-task-gate-report/v1`. Failed visible gates set promotion
 `status: "gate_failed"`, exit nonzero, and include
-`failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook-loop
+`failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook
 agent task can receive exact failure context instead of a generic shell error.
 
 Use `--private-verify <command>` for orchestrator-only completion gates that
@@ -560,7 +561,7 @@ policies are `summary-only` (default), `redacted`, `no-detail`, and
 evidence to the agent.
 
 `agent-task gate-feedback` converts a promotion report and the original
-`AgentTaskRequest` into a provider-neutral cook-loop decision:
+`AgentTaskRequest` into a provider-neutral cook feedback decision:
 
 ```bash
 homeboy agent-task gate-feedback \
@@ -572,7 +573,7 @@ homeboy agent-task gate-feedback \
   --current-diff @current.diff
 ```
 
-The command returns `homeboy/agent-task-cook-loop-report/v1`. Red gates with
+The command returns `homeboy/agent-task-cook-feedback-report/v1`. Red gates with
 remaining budget produce `status: "retry_requested"` and a complete
 `follow_up_request` containing the failed command, exit status, log tails,
 changed files, patch artifact ref, current diff context, and source run/task
@@ -618,7 +619,7 @@ plugin paths, workspace roots, and path-valued settings. Lab offload evidence
 records the original and remapped paths in `workspace_mapping.workspaces` using
 the `component_contract` role.
 
-When the intended checkout already exists on a Lab runner, dispatch from that
+When the intended checkout already exists on a Lab runner, cook from that
 runner-side checkout through `runner exec` instead of forcing a controller-local
 hot run:
 
@@ -628,23 +629,27 @@ homeboy runner exec homeboy-lab \
   -- homeboy agent-task cook \
     --repo homeboy \
     --cwd /srv/homeboy/checkouts/homeboy \
+    --to-worktree homeboy@remote-cook \
+    --verify "homeboy test homeboy" \
     --prompt @task.txt
 ```
 
 `runner exec` marks non-local jobs as runner-hosted, so nested `agent-task cook`
 commands pass the non-interactive resource preflight without `--force-hot`.
 
-## Dispatch Workspaces
+## Cook Workspaces
 
-`agent-task dispatch` accepts generic Homeboy workspace inputs and does not
+`agent-task cook` accepts generic Homeboy workspace inputs and does not
 resolve product-specific workspace handles itself.
 
 Use `--cwd <PATH>` when the caller already knows the checkout or worktree path:
 
 ```bash
-homeboy agent-task dispatch \
+homeboy agent-task cook \
   --repo homeboy \
   --cwd /path/to/homeboy@fix-issue \
+  --to-worktree homeboy@fix-issue \
+  --verify "homeboy test homeboy" \
   --prompt @task.txt
 ```
 
@@ -653,15 +658,17 @@ existing workspace path:
 
 ```bash
 homeboy worktree create homeboy --branch fix/issue-123
-homeboy agent-task dispatch \
+homeboy agent-task cook \
   --workspace homeboy@fix-issue-123 \
+  --to-worktree homeboy@fix-issue-123 \
+  --verify "homeboy test homeboy" \
   --prompt @task.txt
 ```
 
 External workspace managers should resolve their own handles to local paths and
-call dispatch with `--cwd <resolved-path>`.
+call cook with `--cwd <resolved-path>`.
 
-When `agent-task cook` or `agent-task dispatch` is Lab-offloaded with a
+When `agent-task cook` is Lab-offloaded with a
 patch-producing provider, `--cwd` must point at a clean git checkout with
 `remote.origin.url` configured. Homeboy uses that contract to materialize a real
 runner-side git checkout/worktree before provider dispatch so generated files can

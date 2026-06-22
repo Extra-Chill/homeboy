@@ -1,28 +1,6 @@
 use clap::Args;
-use serde_json::Value;
 
-use homeboy::core::agent_task_dispatch_service::render_backend_selection_summary;
-use homeboy::core::agent_tasks::dispatch_service::{
-    self, AgentTaskDispatchCommand, DispatchCoreInputs,
-};
-use homeboy::core::agent_tasks::provider::{
-    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
-};
-
-use super::{CmdResult, GlobalArgs};
-
-/// Print the effective backend selection (and any override warning) to stderr
-/// before dispatch so operators can see which backend will run and where the
-/// selection came from. Resolution happens here without consuming `command`;
-/// dispatch re-resolves identically. Errors are intentionally swallowed — the
-/// summary is best-effort and the dispatch path surfaces the real error (#5685).
-fn print_backend_selection_summary(command: &AgentTaskDispatchCommand) {
-    if let Ok(request) = dispatch_service::resolve_dispatch_request(command.clone()) {
-        if let Some(selection) = request.backend_selection.as_ref() {
-            eprintln!("{}", render_backend_selection_summary(selection));
-        }
-    }
-}
+use homeboy::core::agent_tasks::dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
 
 /// CLI surface for the dispatch inputs shared across dispatch carriers. Flattened
 /// into [`DispatchArgs`] so the `--tasks/--provider-config/--client-context/
@@ -147,40 +125,19 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
     }
 }
 
-pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    let catalog = AgentTaskProviderCatalog::discover();
-    let command: AgentTaskDispatchCommand = args.into();
-    print_backend_selection_summary(&command);
-    dispatch_service::run_dispatch_command_with_provider_catalog(
-        command,
-        ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
-        &catalog,
-    )
-}
-
-pub(crate) fn cook(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    let catalog = AgentTaskProviderCatalog::discover();
-    let command: AgentTaskDispatchCommand = args.into();
-    print_backend_selection_summary(&command);
-    dispatch_service::run_cook_command_with_provider_catalog(
-        command,
-        ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
-        &catalog,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::core::agent_task::AgentTaskRequest;
+    use homeboy::core::agent_tasks::dispatch_service;
     use homeboy::core::agent_tasks::scheduler::{
         AgentTaskExecutionContext, AgentTaskExecutorAdapter,
     };
     use homeboy::core::agent_tasks::{
-        AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_ARTIFACT_SCHEMA,
-        AGENT_TASK_OUTCOME_SCHEMA,
+        AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
     };
+    use serde_json::Value;
 
     #[test]
     fn dispatch_adapter_preserves_queue_only_envelope_shape() {
@@ -212,92 +169,6 @@ mod tests {
                 .as_str()
                 .expect("plan path")
                 .ends_with("plan.json"));
-        });
-    }
-
-    #[test]
-    fn cook_output_marks_patch_artifact_handoff_boundary() {
-        with_isolated_home(|_| {
-            let workspace = tempfile::tempdir()
-                .expect("workspace")
-                .keep()
-                .display()
-                .to_string();
-            let patch_path = std::path::Path::new(&workspace).join("changes.patch");
-            std::fs::write(&patch_path, "diff --git a/file b/file\n").expect("patch fixture");
-            let transcript_path = std::path::Path::new(&workspace).join("transcript.log");
-            std::fs::write(&transcript_path, "cook transcript\n").expect("transcript fixture");
-            let (value, exit_code) = dispatch_service::run_cook_command(
-                dispatch_args(DispatchArgOverrides {
-                    prompt: Some("Cook a patch.".to_string()),
-                    workspace: Some(workspace.clone()),
-                    run_id: Some("cook-handoff".to_string()),
-                    ..DispatchArgOverrides::default()
-                })
-                .into(),
-                PatchExecutor {
-                    patch_path,
-                    transcript_path,
-                },
-            )
-            .expect("cook run");
-
-            assert_eq!(exit_code, 0);
-            assert_eq!(value["handoff"]["states"]["patch_artifact_produced"], true);
-            assert_eq!(value["handoff"]["states"]["patch_promoted"], false);
-            assert_eq!(value["handoff"]["states"]["pr_opened"], false);
-            assert_eq!(value["handoff"]["boundary"], "patch_artifact_only");
-            assert_eq!(
-                value["handoff"]["promote_commands"][0],
-                serde_json::json!([
-                    "homeboy",
-                    "agent-task",
-                    "promote",
-                    value["aggregate_path"].as_str().expect("aggregate path"),
-                    "--task-id",
-                    "cook-task",
-                    "--artifact-id",
-                    "patch-1",
-                    "--to-worktree",
-                    workspace
-                ])
-            );
-            assert!(value["handoff"]["finalize_command"]
-                .as_str()
-                .expect("finalize command")
-                .contains("homeboy agent-task finalize-pr --run-id cook-handoff"));
-        });
-    }
-
-    #[test]
-    fn queued_cook_handoff_surfaces_run_command_without_patch_claims() {
-        with_isolated_home(|_| {
-            let (value, exit_code) = dispatch_service::run_cook_command(
-                dispatch_args(DispatchArgOverrides {
-                    prompt: Some("Queue this cook.".to_string()),
-                    run_id: Some("cook-queued".to_string()),
-                    core: DispatchCoreInputs {
-                        queue_only: true,
-                        ..DispatchCoreInputs::default()
-                    },
-                    ..DispatchArgOverrides::default()
-                })
-                .into(),
-                PatchExecutor {
-                    patch_path: std::path::PathBuf::new(),
-                    transcript_path: std::path::PathBuf::new(),
-                },
-            )
-            .expect("queued cook");
-
-            assert_eq!(exit_code, 0);
-            assert_eq!(value["handoff"]["states"]["patch_artifact_produced"], false);
-            assert_eq!(value["handoff"]["states"]["patch_promoted"], false);
-            assert_eq!(value["handoff"]["states"]["pr_opened"], false);
-            assert!(value["handoff"]["next_actions"][0]
-                .as_str()
-                .expect("next action")
-                .contains("homeboy agent-task run cook-queued"));
         });
     }
 
@@ -382,70 +253,6 @@ mod tests {
                 summary: Some("ok".to_string()),
                 failure_classification: None,
                 artifacts: Vec::new(),
-                typed_artifacts: Vec::new(),
-                evidence_refs: Vec::new(),
-                diagnostics: Vec::new(),
-                outputs: Value::Null,
-                workflow: None,
-                follow_up: None,
-                metadata: Value::Null,
-            }
-        }
-    }
-
-    struct PatchExecutor {
-        patch_path: std::path::PathBuf,
-        transcript_path: std::path::PathBuf,
-    }
-
-    impl AgentTaskExecutorAdapter for PatchExecutor {
-        fn execute(
-            &self,
-            _request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            AgentTaskOutcome {
-                schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: "cook-task".to_string(),
-                status: AgentTaskOutcomeStatus::Succeeded,
-                summary: Some("patch ready".to_string()),
-                failure_classification: None,
-                artifacts: vec![
-                    AgentTaskArtifact {
-                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "patch-1".to_string(),
-                        kind: "patch".to_string(),
-                        name: Some("changes.patch".to_string()),
-                        label: None,
-                        role: None,
-                        semantic_key: None,
-                        path: Some(self.patch_path.display().to_string()),
-                        url: None,
-                        mime: None,
-                        size_bytes: std::fs::metadata(&self.patch_path)
-                            .ok()
-                            .map(|metadata| metadata.len()),
-                        sha256: None,
-                        metadata: Value::Null,
-                    },
-                    AgentTaskArtifact {
-                        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "transcript-1".to_string(),
-                        kind: "transcript".to_string(),
-                        name: Some("transcript.log".to_string()),
-                        label: None,
-                        role: None,
-                        semantic_key: None,
-                        path: Some(self.transcript_path.display().to_string()),
-                        url: None,
-                        mime: None,
-                        size_bytes: std::fs::metadata(&self.transcript_path)
-                            .ok()
-                            .map(|metadata| metadata.len()),
-                        sha256: None,
-                        metadata: Value::Null,
-                    },
-                ],
                 typed_artifacts: Vec::new(),
                 evidence_refs: Vec::new(),
                 diagnostics: Vec::new(),

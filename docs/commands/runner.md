@@ -71,7 +71,7 @@ Lab offload support is intentionally command-specific:
 
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
-| `agent-task dispatch` / `agent-task cook` / `agent-task loop` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
+| `agent-task cook` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
 | `agent-task controller from-spec --resume` / `agent-task controller materialize` / `agent-task controller resume` | No | Yes | Runner-hosted controller lifecycle work. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
 | `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |

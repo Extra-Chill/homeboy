@@ -768,7 +768,7 @@ where
                         0,
                     ));
                 }
-                let finalization = finalize_loop_pr(&options, &cook_id, &promotion)?;
+                let finalization = finalize_cook_pr(&options, &cook_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -1081,7 +1081,7 @@ fn promote_attempt(
     })
 }
 
-fn finalize_loop_pr(
+fn finalize_cook_pr(
     options: &AgentTaskCookServiceOptions,
     cook_id: &str,
     promotion: &AgentTaskPromotionReport,
