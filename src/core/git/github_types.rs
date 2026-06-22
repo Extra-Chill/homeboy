@@ -71,6 +71,81 @@ pub struct GithubPrView {
     pub ci_summary: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PrFleetOptions {
+    pub refs: Vec<String>,
+    pub update_branches: bool,
+    pub apply: bool,
+    pub merge_method: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubPrFleetOutput {
+    pub component_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub action: String,
+    pub success: bool,
+    pub apply: bool,
+    pub update_branches: bool,
+    pub summary: GithubPrFleetSummary,
+    pub items: Vec<GithubPrFleetItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GithubPrFleetSummary {
+    pub total: usize,
+    pub mergeable: usize,
+    pub merged: usize,
+    pub updated: usize,
+    pub blocked: usize,
+    pub errors: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubPrFleetItem {
+    pub input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    pub check_rollup: GithubPrCheckRollup,
+    pub stale_base: bool,
+    pub conflicts: bool,
+    pub mergeable: bool,
+    pub required_action: String,
+    pub updated: bool,
+    pub merged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GithubPrCheckRollup {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub unknown: usize,
+}
+
 /// Result of a find-many operation (list of matches).
 #[derive(Debug, Clone, Serialize)]
 pub struct GithubFindOutput {
