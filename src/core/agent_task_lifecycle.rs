@@ -2182,6 +2182,55 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
+        with_isolated_home(|_| {
+            let mut plan = test_plan();
+            plan.tasks[0].workspace.cleanup = Some("preserve".to_string());
+            let mut aggregate = succeeded_aggregate(&plan);
+            aggregate.outcomes[0].artifacts = vec![artifact_ref_artifact(
+                "patch",
+                "patch",
+                None,
+                Some("/tmp/patch.diff"),
+            )];
+            aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "file:///tmp/transcript.json".to_string(),
+                label: Some("provider transcript".to_string()),
+            }];
+
+            let record = record_completed_run(&plan, &aggregate, Some("run/store-contract"))
+                .expect("completed run recorded");
+            let loaded = status("run/store-contract").expect("status loaded by unsanitized id");
+            let log = logs("run/store-contract").expect("logs loaded by unsanitized id");
+            let artifact_report =
+                artifacts("run/store-contract").expect("artifacts loaded by unsanitized id");
+            let records = list_records().expect("records listed");
+
+            assert_eq!(record.run_id, "run_store-contract");
+            assert!(run_record_exists("run/store-contract").expect("record exists"));
+            assert_eq!(loaded.state, AgentTaskRunState::Succeeded);
+            assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
+            assert_eq!(
+                loaded.lifecycle.execution.state,
+                RunExecutionState::Succeeded
+            );
+            assert_eq!(loaded.lifecycle.cleanup.state, CleanupState::Preserved);
+            assert_eq!(
+                loaded.lifecycle.artifact_retention.status,
+                ArtifactRetentionStatus::Retained
+            );
+            assert_eq!(log.schema, schemas::RUN_LOG);
+            assert_eq!(log.events[0].state, AgentTaskState::Succeeded);
+            assert_eq!(artifact_report.schema, schemas::RUN_ARTIFACTS);
+            assert_eq!(artifact_report.artifacts[0].id, "patch");
+            assert_eq!(artifact_report.evidence_refs[0].kind, "transcript");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].run_id, "run_store-contract");
+        });
+    }
+
+    #[test]
     fn completed_run_persists_opaque_provider_handles_from_outcome_metadata() {
         with_isolated_home(|_| {
             let plan = test_plan();

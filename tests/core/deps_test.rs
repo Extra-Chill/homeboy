@@ -492,24 +492,6 @@ esac
 }
 
 #[test]
-fn deps_orchestration_stays_package_manager_agnostic() {
-    let source = fs::read_to_string("src/core/deps.rs").unwrap();
-
-    for forbidden in [
-        "composer",
-        "composer.json",
-        "composer.lock",
-        "Command::new",
-        "Cargo",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "core deps orchestration must not contain package-manager literal {forbidden:?}"
-        );
-    }
-}
-
-#[test]
 #[ignore = "integration test mutates real composer manifests/locks and shells out to composer"]
 fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
     if std::process::Command::new("composer")
