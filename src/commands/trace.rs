@@ -14,7 +14,7 @@ use homeboy::core::extension::trace::{
     TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::observation::{ActiveObservation, NewRunRecord};
+use homeboy::core::observation::{ActiveObservation, NewRunRecord, ObservationStore};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
@@ -614,7 +614,7 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
                 }
             }));
         if let Ok(cwd) = std::env::current_dir() {
-            builder = builder.cwd_path(cwd);
+            builder = builder.cwd_path(&cwd);
         }
         builder.build()
     })
