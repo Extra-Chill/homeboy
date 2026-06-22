@@ -143,12 +143,12 @@ pub fn update(
 /// Install a component's dependencies through its resolved dependency providers.
 ///
 /// This is the detection/config-driven replacement for hardcoded
-/// "composer install / npm install / pnpm install / yarn install" CI policy:
-/// the package manager(s) are chosen by [`provider::resolve_dependency_providers`]
-/// based on the files present in the workspace (composer.json, package.json,
-/// lockfiles) and the component/extension manifest — not by shell literals in
-/// the calling environment. CI (or any caller) runs `homeboy component setup`
-/// or `homeboy deps install` and lets core own the policy.
+/// per-ecosystem install CI policy: the package manager(s) are chosen by
+/// [`provider::resolve_dependency_providers`] based on the manifest and lock
+/// files present in the workspace and the component/extension manifest — not
+/// by shell literals in the calling environment. CI (or any caller) runs
+/// `homeboy component setup` or `homeboy deps install` and lets core own the
+/// policy.
 pub fn install(
     component_id: Option<&str>,
     path_override: Option<&str>,

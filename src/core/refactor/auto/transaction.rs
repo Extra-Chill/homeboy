@@ -17,8 +17,8 @@
 //! - Drift-file classification: [`crate::core::component::drift`].
 //! - Git primitives: [`crate::core::git`] (`stage_all`, `commit_*`, `run_git`).
 //!
-//! The transaction is intentionally agnostic: it knows nothing about Rust, PHP,
-//! JS, or any particular ecosystem. It operates purely on git state, the
+//! The transaction is intentionally agnostic: it knows nothing about any
+//! particular language or ecosystem. It operates purely on git state, the
 //! component's declared drift files, and the supplied CI context.
 //!
 //! [Extra-Chill/homeboy-action]: https://github.com/Extra-Chill/homeboy-action

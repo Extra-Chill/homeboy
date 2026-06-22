@@ -141,10 +141,10 @@ enum ComponentCommand {
     /// Prepare a component for build/test: install its declared extensions and
     /// install its dependencies through detected providers.
     ///
-    /// Core-owned replacement for hardcoded CI install/refresh + composer/npm/
-    /// pnpm/yarn dependency setup. The package manager is chosen by detection
-    /// and manifest config, never by shell literals. CI calls this instead of
-    /// orchestrating the sequence itself.
+    /// Core-owned replacement for hardcoded CI install/refresh + per-ecosystem
+    /// dependency setup. The package manager is chosen by detection and manifest
+    /// config, never by shell literals. CI calls this instead of orchestrating
+    /// the sequence itself.
     Setup {
         /// Component ID (optional when --path is provided)
         id: Option<String>,

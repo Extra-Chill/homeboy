@@ -249,7 +249,7 @@ pub(super) fn deploy_components(
     // Post-deploy front-end smoke check (opt-in, project-scoped). Runs only when
     // something actually deployed — a runtime-fataling release that returns 500
     // to fresh visitors should fail the deploy here so it gets rolled back
-    // instead of sitting live. Catches runtime errors that `php -l`/syntax-only
+    // instead of sitting live. Catches runtime errors that a syntax-only
     // preflight structurally cannot. See homeboy#5471.
     if succeeded > 0 {
         if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {
