@@ -33,6 +33,16 @@ const {
   loadWpCodeboxCore,
 } = requireWpCodeboxCoreLoader();
 
+const WP_CODEBOX_RUN_RESULTS_MODULE_OPTIONS = {
+  packageCandidates: [
+    '@automattic/wp-codebox-core/run-results',
+    'wp-codebox-workspace/run-results',
+    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
+    '@automattic/wp-codebox-core',
+  ],
+  packageDistEntries: ['run-results.js', 'index.js'],
+};
+
 function requireWpCodeboxCoreLoader() {
   const candidates = [
     path.resolve(__dirname, '../../../../wordpress/lib/wp-codebox-core-loader'),
@@ -537,7 +547,7 @@ function missingModelPreflightPayload(taskInput) {
 }
 
 async function loadCodeboxCoreNormalizers() {
-  const module = await loadWpCodeboxCore();
+  const module = await loadWpCodeboxCore(WP_CODEBOX_RUN_RESULTS_MODULE_OPTIONS);
   if (typeof module?.normalizeAgentTaskRunResult === 'function' || typeof module?.normalizeRecipeRunSummary === 'function') {
     return {
       normalizeAgentTaskRunResult: typeof module.normalizeAgentTaskRunResult === 'function' ? module.normalizeAgentTaskRunResult : null,

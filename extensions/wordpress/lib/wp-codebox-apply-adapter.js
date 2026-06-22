@@ -17,6 +17,15 @@ const ADAPTER_ID = 'homeboy/wp-codebox-apply-adapter/v1';
 const APPLY_RESULT_SCHEMA = 'homeboy/apply-result/v1';
 const WP_CODEBOX_PREFLIGHT_SCHEMA = 'wp-codebox/artifact-apply-preflight/v1';
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'trunk', 'develop']);
+const WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS = {
+  packageCandidates: [
+    '@automattic/wp-codebox-core/artifacts',
+    'wp-codebox-workspace/artifacts',
+    // Compatibility fallback for WP Codebox builds before focused package entrypoints.
+    '@automattic/wp-codebox-core',
+  ],
+  packageDistEntries: ['artifacts.js', 'index.js'],
+};
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -251,7 +260,10 @@ function normalizeWpCodeboxPreflight(input) {
 }
 
 async function normalizeWpCodeboxPreflightAsync(input) {
-  const normalizeArtifactApplyPreflight = await loadWpCodeboxCoreFunction('normalizeArtifactApplyPreflight', input);
+  const normalizeArtifactApplyPreflight = await loadWpCodeboxCoreFunction('normalizeArtifactApplyPreflight', {
+    ...WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS,
+    ...input,
+  });
   if (!normalizeArtifactApplyPreflight) {
     return normalizeWpCodeboxPreflight(input);
   }
@@ -264,7 +276,10 @@ async function normalizeWpCodeboxPreflightAsync(input) {
 }
 
 async function wpCodeboxApplyRequestFromBundleAsync(options) {
-  const createArtifactApplyRequest = await loadWpCodeboxCoreFunction('createArtifactApplyRequest', options);
+  const createArtifactApplyRequest = await loadWpCodeboxCoreFunction('createArtifactApplyRequest', {
+    ...WP_CODEBOX_ARTIFACTS_MODULE_OPTIONS,
+    ...options,
+  });
   if (!createArtifactApplyRequest) {
     return wpCodeboxApplyRequestFromBundle(options);
   }

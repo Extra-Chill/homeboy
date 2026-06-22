@@ -62,7 +62,7 @@ assert.match(diagnosticResult.stderr, /\/missing\/wp-codebox-core\.mjs/);
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-workspace-'));
 const installRoot = path.join(workspaceRoot, 'wp-codebox-install');
-const discoveredModule = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
+const discoveredModule = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'recipe-builders.js');
 fs.mkdirSync(path.dirname(discoveredModule), { recursive: true });
 fs.copyFileSync(fixtureCoreModule, discoveredModule);
 

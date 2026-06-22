@@ -15,10 +15,10 @@ const {
 } = require('./wordpress-fuzz-schemas');
 const { buildWpCodeboxFuzzPlanRecipe } = require('./wp-codebox-fuzz-plan');
 const {
-	normalizeWpCodeboxFuzzRunResult,
-	runWpCodeboxFuzzRun,
-	wpCodeboxFuzzRunInput,
-	wpCodeboxFuzzRunTaskRequest,
+	normalizeWpCodeboxFuzzSuiteResult,
+	runWpCodeboxFuzzSuite,
+	wpCodeboxFuzzSuiteInput,
+	wpCodeboxFuzzSuiteTaskRequest,
 } = require('./wp-codebox-fuzz-run');
 const { aggregateWordPressFuzzCoverage } = require('./wordpress-fuzz-coverage-aggregate');
 
@@ -57,7 +57,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const maxDuration = numericValue(env.maxDuration ?? workload.max_duration ?? workload.maxDuration);
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
 	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration });
-	const taskRequest = wpCodeboxFuzzRunTaskRequest({
+	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
 		input: wpCodeboxInput,
 		provider: workload.provider,
@@ -119,18 +119,18 @@ async function resolveCodeboxResult(context, options = {}) {
 		return normalizeCodeboxResult(context.workload, { runId: context.runId });
 	}
 
-	const runner = options.runFuzzRun || options.runRuntimeTask || options.runTask;
+	const runner = options.runFuzzSuite || options.runFuzzRun || options.runRuntimeTask || options.runTask;
 	if (typeof runner !== 'function') {
 		return normalizeCodeboxResult(context.workload, { runId: context.runId });
 	}
 
-	return runWpCodeboxFuzzRun({
+	return runWpCodeboxFuzzSuite({
 		...options,
 		taskId: context.runId,
 		input: context.wpCodeboxInput,
 		provider: context.workload.provider,
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
-		runFuzzRun: runner,
+		runFuzzSuite: runner,
 	});
 }
 
@@ -148,7 +148,7 @@ function normalizeRunnerPlan(input) {
 }
 
 function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration }) {
-	return wpCodeboxFuzzRunInput({
+	return wpCodeboxFuzzSuiteInput({
 		id: runId,
 		target: workload.target || { type: 'wordpress', workload_id: workloadId },
 		workload: stripUndefined({
@@ -190,9 +190,9 @@ function buildCodeboxPlanRecipe(workload) {
 function normalizeCodeboxResult(workload, context = {}) {
 	const result = precomputedCodeboxResult(workload);
 	if (result) {
-		return normalizeWpCodeboxFuzzRunResult(result);
+		return normalizeWpCodeboxFuzzSuiteResult(result);
 	}
-	return normalizeWpCodeboxFuzzRunResult({
+	return normalizeWpCodeboxFuzzSuiteResult({
 		schema: 'wp-codebox/fuzz-suite-result/v1',
 		request_id: context.runId,
 		status: 'skipped',

@@ -4,6 +4,7 @@
  * Internal dependencies
  */
 const { isPlainObject } = require('./shared');
+const { normalizeWordPressSurfaceType } = require('./wordpress-surface-types');
 
 function sortText(a, b) {
 	return String(a || '').localeCompare(String(b || ''));
@@ -24,26 +25,7 @@ function normalizeToken(value) {
 }
 
 function normalizeSurfaceType(value) {
-	const type = String(value || '').trim();
-	return {
-		action: 'hook',
-		admin: 'admin-page',
-		admin_page: 'admin-page',
-		cron: 'cron-event',
-		database: 'database-table',
-		db: 'database-table',
-		db_query: 'db-query',
-		database_query: 'db-query',
-		external_http: 'external-http',
-		http: 'external-http',
-		filter: 'hook',
-		frontend: 'frontend-url',
-		frontend_url: 'frontend-url',
-		option_setting: 'option',
-		post_type: 'post-type',
-		rest: 'rest-route',
-		rest_route: 'rest-route',
-	}[type] || type;
+	return normalizeWordPressSurfaceType(value, { allowUnknown: true });
 }
 
 function optionalNumber(value) {

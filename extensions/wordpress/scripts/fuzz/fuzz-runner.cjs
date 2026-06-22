@@ -6,6 +6,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+const {
+	codeboxRunAgentTaskInvocation,
+	codeboxTaskRequestFromAgentTaskRequest,
+} = require('../../../agent-runtimes/wp-codebox');
+
 /**
  * Internal dependencies
  */
@@ -42,9 +47,10 @@ async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const inputFile = path.join(tempDir, 'agent-task-request.json');
 	const command = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
-	fs.writeFileSync(inputFile, `${JSON.stringify(wpCodeboxRunAgentTaskInput(request, { wpCodeboxBin: command }), null, 2)}\n`);
+	const invocation = wpCodeboxRunAgentTaskInvocation(request);
+	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
 
-	const args = ['run-agent-task', '--input-file', inputFile, '--json'];
+	const args = wpCodeboxInvocationArgs(invocation, inputFile);
 	const result = await spawnJson(command, args, {
 		cwd: process.cwd(),
 		env: process.env,
@@ -53,77 +59,21 @@ async function runWpCodeboxAgentTask(request) {
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
 }
 
-function wpCodeboxRunAgentTaskInput(request, options = {}) {
-	return {
-		schema: 'wp-codebox/run-agent-task/v1',
-		id: request.task_id,
-		goal: request.instructions || 'Run the WordPress fuzz suite and return the declared fuzz artifacts.',
-		agent_workload: {
-			schema: 'wp-codebox/agent-workload/v1',
-			id: request.task_id,
-			goal: request.instructions || 'Run the WordPress fuzz suite and return the declared fuzz artifacts.',
-			agent_runtime: {
-				runtime_task: request.executor?.config?.runtime_task,
-			},
-		},
-		runtime_task: request.executor?.config?.runtime_task,
-		extra_plugins: wpCodeboxRuntimePlugins(options.wpCodeboxBin),
-		allowed_tools: ['homeboy/no-runtime-tools'],
-		sandbox_tool_policy: denyAllSandboxToolPolicy(),
-		artifact_declarations: request.artifact_declarations,
-		expected_artifacts: request.expected_artifacts,
-		metadata: {
-			...(request.metadata || {}),
-			homeboy_agent_task_request: request,
-		},
-	};
+function wpCodeboxRunAgentTaskInvocation(request) {
+	const taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
+	return codeboxRunAgentTaskInvocation({
+		taskInput,
+		taskId: request.task_id,
+	});
 }
 
-function wpCodeboxRuntimePlugins(wpCodeboxBin) {
-	const source = wpCodeboxPluginSource(wpCodeboxBin);
-	if (!source) {
-		return [];
-	}
-	return [{
-		source,
-		slug: 'wp-codebox',
-		pluginFile: 'wp-codebox/wp-codebox.php',
-		activate: true,
-		loadAs: 'plugin',
-	}];
-}
-
-function wpCodeboxPluginSource(wpCodeboxBin) {
-	const explicit = process.env.HOMEBOY_WP_CODEBOX_PLUGIN_PATH || process.env.WP_CODEBOX_PLUGIN_PATH;
-	if (explicit && fs.existsSync(explicit)) {
-		return explicit;
-	}
-	if (!wpCodeboxBin || wpCodeboxBin === 'wp-codebox') {
-		return '';
-	}
-	const candidate = path.resolve(path.dirname(wpCodeboxBin), '../../wordpress-plugin');
-	return fs.existsSync(candidate) ? candidate : '';
-}
-
-function denyAllSandboxToolPolicy() {
-	return {
-		schema: 'wp-codebox/sandbox-tool-policy/v1',
-		version: 1,
-		tools: [
-			{
-				id: 'homeboy/no-runtime-tools',
-				runtime_tool_id: 'homeboy_no_runtime_tools',
-				allowed: false,
-				runtime: {
-					environment: 'control_plane',
-					capability_scope: 'control_plane',
-				},
-			},
-		],
-		metadata: {
-			source: 'homeboy-extension-wordpress/fuzz-runner',
-		},
-	};
+function wpCodeboxInvocationArgs(invocation, inputFile) {
+	return invocation.args.flatMap((arg) => {
+		if (arg === '--input-file={{input_file}}') {
+			return ['--input-file', inputFile];
+		}
+		return [String(arg).replace('{{input_file}}', inputFile)];
+	});
 }
 
 function spawnJson(command, args, options) {
@@ -175,6 +125,7 @@ function normalizeWpCodeboxAgentTaskOutput(output, request) {
 		output?.json,
 		output?.result,
 		output?.output,
+		output?.agent_task_run_result,
 		output?.agent_runtime?.result,
 		output?.recipe_run?.result,
 		output,
@@ -207,7 +158,7 @@ function findFuzzSuiteResult(value) {
 	if (value.schema === 'wp-codebox/fuzz-suite-result/v1') {
 		return value;
 	}
-	for (const key of ['result', 'output', 'json', 'raw', 'agent_task_result', 'agentTaskResult', 'agent_result', 'agentResult', 'agent_runtime', 'agentRuntime']) {
+	for (const key of ['result', 'output', 'json', 'raw', 'agent_task_run_result', 'agentTaskRunResult', 'agent_task_result', 'agentTaskResult', 'agent_result', 'agentResult', 'agent_runtime', 'agentRuntime']) {
 		const nested = findFuzzSuiteResult(value[key]);
 		if (nested) {
 			return nested;
