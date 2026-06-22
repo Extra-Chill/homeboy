@@ -18,27 +18,27 @@ fn runner_workload_contract_serializes_versioned_shape() {
     let contract = parsed_command(&["homeboy", "trace"])
         .lab_contract()
         .expect("trace should declare a Lab contract");
-    let workload = contract.runner_workload(
-        "workload-1",
-        "plan-1",
-        RunnerWorkloadAssignment {
+    let workload = contract.runner_workload(RunnerWorkloadInput {
+        workload_id: "workload-1".to_string(),
+        plan_id: "plan-1".to_string(),
+        assignment: RunnerWorkloadAssignment {
             runner_id: Some("lab-a".to_string()),
             runner_mode: Some("direct_ssh".to_string()),
             source: Some("explicit".to_string()),
         },
-        RunnerWorkloadState {
+        state: RunnerWorkloadState {
             status: "offloaded".to_string(),
             remote_workspace: Some("/srv/homeboy/work".to_string()),
             fallback_reason: None,
         },
-        RunnerWorkloadMutationPolicy {
+        mutation_policy: RunnerWorkloadMutationPolicy {
             capture_patch: false,
             mutation_flag: Some("--keep-overlay".to_string()),
             allow_dirty_lab_workspace: false,
         },
-        Some("workspace_mapping".to_string()),
-        Some("proof-1".to_string()),
-    );
+        workspace_mapping_ref: Some("workspace_mapping".to_string()),
+        proof_id: Some("proof-1".to_string()),
+    });
 
     let serialized = serde_json::to_value(workload).expect("workload should serialize");
     assert_eq!(serialized["schema"], RUNNER_WORKLOAD_SCHEMA);

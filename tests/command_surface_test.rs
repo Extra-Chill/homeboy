@@ -76,7 +76,7 @@ fn agent_task_discovery_commands_use_typed_args() {
             }
             other => panic!("expected agent-task list, got {other:?}"),
         },
-        other => panic!("expected agent-task command, got {other:?}"),
+        _ => panic!("expected agent-task command"),
     }
 
     match active.command {
@@ -88,7 +88,7 @@ fn agent_task_discovery_commands_use_typed_args() {
             }
             other => panic!("expected agent-task active, got {other:?}"),
         },
-        other => panic!("expected agent-task command, got {other:?}"),
+        _ => panic!("expected agent-task command"),
     }
 
     match latest.command {
@@ -98,7 +98,7 @@ fn agent_task_discovery_commands_use_typed_args() {
             }
             other => panic!("expected agent-task latest, got {other:?}"),
         },
-        other => panic!("expected agent-task command, got {other:?}"),
+        _ => panic!("expected agent-task command"),
     }
 
     assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--dry-run"]).is_err());
