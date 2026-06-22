@@ -640,11 +640,12 @@ where
         if !reconciliation.metadata.is_null() {
             state.metadata = merge_metadata(state.metadata, reconciliation.metadata);
         }
+        let reconciled_status = state.status;
         push_event_and_checkpoint(
             &mut state,
             sink,
             "iteration.reconciled",
-            state.status,
+            reconciled_status,
             reconciliation.artifact_refs,
             Value::Null,
         )?;
@@ -655,21 +656,23 @@ where
 
     if state.iteration >= spec.max_iterations && !spec.stop.statuses.contains(&state.status) {
         state.status = DeterministicLoopStatus::Blocked;
+        let blocked_status = state.status;
         push_event_and_checkpoint(
             &mut state,
             sink,
             "loop.max_iterations_reached",
-            state.status,
+            blocked_status,
             Vec::new(),
             serde_json::json!({ "max_iterations": spec.max_iterations }),
         )?;
     }
     validate_deterministic_loop_result(&state, &spec)?;
+    let finished_status = state.status;
     push_event_and_checkpoint(
         &mut state,
         sink,
         "loop.finished",
-        state.status,
+        finished_status,
         Vec::new(),
         Value::Null,
     )?;
