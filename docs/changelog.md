@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.2] - 2026-06-22
+
+### Changed
+- split api_jobs.rs god-file
+- split browser_evidence_compare.rs god-file into modules
+
+### Fixed
+- Fix run-from-spec dispatch defaults
+- download private GHE release assets via API
+
 ## [0.255.1] - 2026-06-22
 
 ### Fixed
