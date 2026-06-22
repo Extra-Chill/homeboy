@@ -644,26 +644,7 @@ fn record_queued_worktree(
     let worktree_path = PathBuf::from(path).canonicalize().map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("DMC worktree path {path}")))
     })?;
-    let source_checkout = component::resolve_target(TargetSpec {
-        component_id: Some(&options.repo),
-        path_override: None,
-        project: None,
-        capability: None,
-        allow_synthetic: false,
-        accept_bare_directory: false,
-        ..TargetSpec::default()
-    })?
-    .git_root
-    .ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "repo",
-            "DMC worktree queue source component is not inside a git checkout",
-            Some(options.repo.clone()),
-            None,
-        )
-    })?
-    .canonicalize()
-    .map_err(|err| Error::internal_io(err.to_string(), Some(options.repo.clone())))?;
+    let source_checkout = registered_component_git_root(&options.repo)?;
     let record = TaskWorktreeRecord {
         id: handle.to_string(),
         component_id: options.repo.clone(),
@@ -678,6 +659,21 @@ fn record_queued_worktree(
         state: TaskWorktreeState::Active,
     };
     write_record(&metadata_dir()?, &record)
+}
+
+fn registered_component_git_root(repo: &str) -> Result<PathBuf> {
+    let component = component::load(repo)?;
+    let git_root = git::get_git_root(&component.local_path).map_err(|_| {
+        Error::validation_invalid_argument(
+            "repo",
+            "DMC worktree queue source component is not inside a git checkout",
+            Some(repo.to_string()),
+            None,
+        )
+    })?;
+    PathBuf::from(git_root)
+        .canonicalize()
+        .map_err(|err| Error::internal_io(err.to_string(), Some(repo.to_string())))
 }
 
 fn dmc_add_command(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
@@ -1057,6 +1053,7 @@ mod tests {
             run_git(&source, &["config", "user.email", "homeboy@example.com"]);
             run_git(&source, &["config", "user.name", "Homeboy Test"]);
             fs::write(source.join("README.md"), "initial\n").unwrap();
+            fs::write(source.join("homeboy.json"), r#"{"id":"homeboy"}"#).unwrap();
             run_git(&source, &["add", "."]);
             run_git(&source, &["commit", "-q", "-m", "initial"]);
             write_component_registration(home.path(), "homeboy", &source);
@@ -1065,7 +1062,7 @@ mod tests {
             fs::write(
                 &dmc,
                 format!(
-                    "#!/bin/sh\nmkdir -p '{}'\nprintf 'Path: {}\\n'\n",
+                    "#!/bin/sh\nif [ \"$5\" = \"locks\" ]; then\n  printf '{{\"database\":{{\"locks\":[]}},\"filesystem\":{{\"locks\":[]}}}}\\n'\n  exit 0\nfi\nmkdir -p '{}'\nprintf 'Path: {}\\n'\n",
                     worktree_path.display(),
                     worktree_path.display()
                 ),
