@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.253.0] - 2026-06-22
+
+### Added
+- feat(agent-task): concise Codebox provider preflight diagnostics (#5561)
+
 ## [0.252.1] - 2026-06-22
 
 ### Changed
