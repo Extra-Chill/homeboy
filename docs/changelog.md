@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.253.1] - 2026-06-22
+
+### Changed
+- Remove hidden lab command surface
+- stabilize lab runner loop semantics expectations
+- apply rustfmt after loop semantics rebase
+- format lab contract descriptor assignment
+- refactor(agent-task): split provider module
+- centralize workload construction
+- refactor(agent-task): reserve loop for durable controllers
+- Unify Lab secret env handoff
+- Add visible command manifest surface
+- declare mutation patch capture
+- Type agent-task discovery command args
+- Remove deprecated file upload command
+
+### Fixed
+- remove playground/codebox ecosystem leaks from failure detection
+- drop stale workload label helpers
+- score preferred runners by readiness
+- unify offloaded run evidence identity
+
 ## [0.253.0] - 2026-06-22
 
 ### Added
