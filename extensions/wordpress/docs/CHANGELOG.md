@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.19] - 2026-06-22
+
+### Changed
+- Surface WP Codebox fuzz dispatch failures
+
 ## [3.12.18] - 2026-06-22
 
 ### Changed
