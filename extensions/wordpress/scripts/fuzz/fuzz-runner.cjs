@@ -41,9 +41,9 @@ async function buildRunnerResult(env) {
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const inputFile = path.join(tempDir, 'agent-task-request.json');
-	fs.writeFileSync(inputFile, `${JSON.stringify(wpCodeboxRunAgentTaskInput(request), null, 2)}\n`);
-
 	const command = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+	fs.writeFileSync(inputFile, `${JSON.stringify(wpCodeboxRunAgentTaskInput(request, { wpCodeboxBin: command }), null, 2)}\n`);
+
 	const args = ['run-agent-task', '--input-file', inputFile, '--json'];
 	const result = await spawnJson(command, args, {
 		cwd: process.cwd(),
@@ -53,7 +53,7 @@ async function runWpCodeboxAgentTask(request) {
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
 }
 
-function wpCodeboxRunAgentTaskInput(request) {
+function wpCodeboxRunAgentTaskInput(request, options = {}) {
 	return {
 		schema: 'wp-codebox/run-agent-task/v1',
 		id: request.task_id,
@@ -67,6 +67,7 @@ function wpCodeboxRunAgentTaskInput(request) {
 			},
 		},
 		runtime_task: request.executor?.config?.runtime_task,
+		extra_plugins: wpCodeboxRuntimePlugins(options.wpCodeboxBin),
 		allowed_tools: ['homeboy/no-runtime-tools'],
 		sandbox_tool_policy: denyAllSandboxToolPolicy(),
 		artifact_declarations: request.artifact_declarations,
@@ -76,6 +77,32 @@ function wpCodeboxRunAgentTaskInput(request) {
 			homeboy_agent_task_request: request,
 		},
 	};
+}
+
+function wpCodeboxRuntimePlugins(wpCodeboxBin) {
+	const source = wpCodeboxPluginSource(wpCodeboxBin);
+	if (!source) {
+		return [];
+	}
+	return [{
+		source,
+		slug: 'wp-codebox',
+		pluginFile: 'wp-codebox/wp-codebox.php',
+		activate: true,
+		loadAs: 'plugin',
+	}];
+}
+
+function wpCodeboxPluginSource(wpCodeboxBin) {
+	const explicit = process.env.HOMEBOY_WP_CODEBOX_PLUGIN_PATH || process.env.WP_CODEBOX_PLUGIN_PATH;
+	if (explicit && fs.existsSync(explicit)) {
+		return explicit;
+	}
+	if (!wpCodeboxBin || wpCodeboxBin === 'wp-codebox') {
+		return '';
+	}
+	const candidate = path.resolve(path.dirname(wpCodeboxBin), '../../wordpress-plugin');
+	return fs.existsSync(candidate) ? candidate : '';
 }
 
 function denyAllSandboxToolPolicy() {

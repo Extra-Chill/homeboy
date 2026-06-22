@@ -177,7 +177,10 @@ assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 
-const fakeCodeboxBin = path.join(tempDir, 'fake-wp-codebox.js');
+const fakeCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-wp-codebox.js');
+fs.mkdirSync(path.dirname(fakeCodeboxBin), { recursive: true });
+fs.mkdirSync(path.join(tempDir, 'packages/wordpress-plugin'), { recursive: true });
+fs.writeFileSync(path.join(tempDir, 'packages/wordpress-plugin/wp-codebox.php'), '<?php // fixture');
 const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -189,6 +192,10 @@ if (request.schema !== 'wp-codebox/run-agent-task/v1' || !request.goal || !reque
 }
 if (request.sandbox_tool_policy?.schema !== 'wp-codebox/sandbox-tool-policy/v1' || request.sandbox_tool_policy?.version !== 1 || !request.sandbox_tool_policy?.tools?.length) {
   process.stderr.write('invalid sandbox tool policy');
+  process.exit(1);
+}
+if (!request.extra_plugins?.some((plugin) => plugin.slug === 'wp-codebox' && plugin.activate === true)) {
+  process.stderr.write('missing wp-codebox extra plugin');
   process.exit(1);
 }
 process.stdout.write(JSON.stringify({
