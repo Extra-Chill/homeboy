@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::core::agent_task::{
-    AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
+    AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionHandle,
     AgentTaskExecutionHandleKind, AgentTaskExecutor, AgentTaskFailureClassification,
     AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest,
     AgentTaskSourceRef, AgentTaskWorkflowEvidence, AgentTaskWorkspace, AgentTaskWorkspaceMode,
@@ -409,6 +409,109 @@ pub fn record_run_aggregate(
 ) -> Result<AgentTaskRunRecord> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     record_aggregate(&mut record, plan, aggregate)
+}
+
+pub fn record_pre_execution_failure(
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    phase: &str,
+    error: &Error,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let mut record = store::read_record(&run_id)?;
+    let task_count = plan.tasks.len();
+    let failed = task_count;
+    let diagnostic = AgentTaskDiagnostic {
+        class: "pre_execution_failure".to_string(),
+        message: error.message.clone(),
+        data: json!({
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "details": error.details.clone(),
+            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+        }),
+    };
+    let outcomes = plan
+        .tasks
+        .iter()
+        .map(|task| AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: task.task_id.clone(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some(format!(
+                "agent-task pre-execution {phase} failed: {}",
+                error.message
+            )),
+            failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "agent-task-pre-execution-failure".to_string(),
+                uri: format!("homeboy://agent-task/run/{run_id}/status"),
+                label: Some("Agent-task pre-execution failure".to_string()),
+            }],
+            diagnostics: vec![diagnostic.clone()],
+            outputs: json!({
+                "schema": "homeboy/agent-task-pre-execution-failure/v1",
+                "phase": phase,
+                "error_code": error.code.as_str(),
+                "message": error.message,
+                "details": error.details.clone(),
+                "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+            }),
+            workflow: None,
+            follow_up: None,
+            metadata: json!({
+                "kind": "pre_execution_failure",
+                "phase": phase,
+                "error_code": error.code.as_str(),
+            }),
+        })
+        .collect();
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: plan.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            failed,
+            ..AgentTaskAggregateTotals::default()
+        },
+        outcomes,
+        events: plan
+            .tasks
+            .iter()
+            .map(|task| AgentTaskProgressEvent {
+                task_id: task.task_id.clone(),
+                state: AgentTaskState::Failed,
+                attempt: 1,
+                message: Some(format!(
+                    "agent-task pre-execution {phase} failed: {}",
+                    error.message
+                )),
+            })
+            .collect(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            max_concurrency: plan.options.max_concurrency,
+            completed: failed,
+            ..AgentTaskQueueStatus::default()
+        },
+    };
+    let mut failed_record = record_aggregate(&mut record, plan, &aggregate)?;
+    let metadata = failed_record.ensure_metadata_object();
+    metadata.insert(
+        "pre_execution_failure".to_string(),
+        json!({
+            "phase": phase,
+            "error_code": error.code.as_str(),
+            "message": error.message,
+            "hints": error.hints.iter().map(|hint| hint.message.as_str()).collect::<Vec<_>>(),
+        }),
+    );
+    store::write_record(&failed_record)?;
+    Ok(failed_record)
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch
