@@ -10,10 +10,12 @@ const { spawnSync } = require('node:child_process');
  */
 const {
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-	AGENT_TASK_OUTCOME_SCHEMA,
 	AGENT_TASK_REQUEST_SCHEMA,
 	agentTaskProviderContractFields,
 } = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
+const {
+	normalizeAgentTaskOutcome,
+} = require('../../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
 const PI_PROVIDER_LABEL = 'Pi agent task executor';
@@ -52,21 +54,21 @@ function providerContract(options = {}) {
 }
 
 function outcome(request = {}, values = {}) {
-	return {
-		schema: AGENT_TASK_OUTCOME_SCHEMA,
-		task_id: request.task_id || '',
+	return normalizeAgentTaskOutcome(outcomeRequest(request), values, {
+		provider: PI_PROVIDER_ID,
+		providerLabel: 'Pi agent',
 		status: values.status || 'provider_error',
-		...(values.failure_classification ? { failure_classification: values.failure_classification } : {}),
-		...(values.failure_code ? { failure_code: values.failure_code } : {}),
+		failureClassification: values.failure_classification,
+		failureCode: values.failure_code,
 		summary: values.summary || 'Pi agent task executor did not produce a detailed outcome.',
-		diagnostics: values.diagnostics || [],
 		artifacts: [],
-		evidence_refs: [],
-		metadata: {
-			provider: PI_PROVIDER_ID,
-			...(values.metadata || {}),
-		},
-	};
+		evidenceRefs: [],
+		metadata: values.metadata || {},
+	});
+}
+
+function outcomeRequest(request = {}) {
+	return request.task_id ? request : { ...request, task_id: 'unknown-task' };
 }
 
 function validationFailure(request, message) {
