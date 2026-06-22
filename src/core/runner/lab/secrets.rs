@@ -2,9 +2,9 @@
 //!
 //! Splits agent-task vs trace secret discovery from the offload orchestrator so
 //! that the secret env contract for each command family stays close to its
-//! parser. Both entry points (`hydrate_agent_task_secret_env`,
-//! `hydrate_trace_secret_env`) mutate the runner exec environment in place and
-//! return diagnostic metadata that is embedded into the Lab offload envelope.
+//! parser. `build_lab_secret_env_handoff_plan` is the single offload boundary:
+//! it resolves controller-owned secret values once, records runner-deferred
+//! requirements by name, and exposes only redacted diagnostics for metadata.
 
 use std::collections::HashMap;
 
@@ -26,6 +26,86 @@ use super::args_util::{non_empty_arg, subcommand_index};
 /// Provenance key used when a missing runner secret_env name is contributed by
 /// the plan's provider runner requirements rather than an individual task.
 const PLAN_PROVIDER_PROVENANCE: &str = "plan:provider";
+const LAB_SECRET_ENV_HANDOFF_SCHEMA: &str = "homeboy/lab-secret-env-handoff/v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LabSecretEnvHandoffPlan {
+    pub(super) env_delta: HashMap<String, String>,
+    pub(super) diagnostics: serde_json::Value,
+    pub(super) secret_env_names: Vec<String>,
+    pub(super) runner_deferred_secret_env: Vec<String>,
+}
+
+pub(super) fn build_lab_secret_env_handoff_plan(
+    args: &[String],
+    mut env_delta: HashMap<String, String>,
+) -> Result<LabSecretEnvHandoffPlan> {
+    let agent_task_secret_env = hydrate_agent_task_secret_env(args, &mut env_delta)?;
+    let trace_secret_env = hydrate_trace_secret_env(args, &mut env_delta)?;
+    let tunnel_secret_env = hydrate_tunnel_secret_env(args, &mut env_delta)?;
+    let mut secret_env_names = declared_agent_task_secret_env(args);
+    secret_env_names.extend(declared_trace_secret_env(args));
+    secret_env_names.extend(declared_tunnel_secret_env(args));
+    secret_env_names.sort();
+    secret_env_names.dedup();
+
+    let mut runner_deferred_secret_env = Vec::new();
+    runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&agent_task_secret_env));
+    runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
+    runner_deferred_secret_env.sort();
+    runner_deferred_secret_env.dedup();
+
+    let diagnostics = serde_json::json!({
+        "schema": LAB_SECRET_ENV_HANDOFF_SCHEMA,
+        "final_env_delta": redacted_env_delta_metadata(&env_delta),
+        "secret_env_names": secret_env_names.clone(),
+        "runner_deferred_secret_env": runner_deferred_secret_env
+            .iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "source": "runner",
+                "required": true,
+            }))
+            .collect::<Vec<_>>(),
+        "agent_task_secret_env": agent_task_secret_env,
+        "trace_secret_env": trace_secret_env,
+        "tunnel_secret_env": tunnel_secret_env,
+    });
+
+    Ok(LabSecretEnvHandoffPlan {
+        env_delta,
+        diagnostics,
+        secret_env_names,
+        runner_deferred_secret_env,
+    })
+}
+
+fn redacted_env_delta_metadata(env_delta: &HashMap<String, String>) -> Vec<serde_json::Value> {
+    let mut names = env_delta.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "forwarded_to_runner": true,
+                "value_preview": "<redacted>",
+                "redacted": true,
+            })
+        })
+        .collect()
+}
+
+fn runner_deferred_secret_env_names(metadata: &serde_json::Value) -> Vec<String> {
+    metadata
+        .get("runner_deferred_secret_env")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
 
 pub(super) fn hydrate_agent_task_secret_env(
     args: &[String],
@@ -755,6 +835,79 @@ mod tests {
         assert!(!rendered.contains("sk_test_fake_not_real"));
 
         std::env::remove_var("HOMEBOY_TRACE_SECRET_TEST_KEY");
+    }
+
+    #[test]
+    fn lab_secret_env_handoff_plan_reports_redacted_env_delta_and_exact_names() {
+        let args = vec![
+            "homeboy".to_string(),
+            "trace".to_string(),
+            "compare".to_string(),
+            "woocommerce-gateway-stripe".to_string(),
+            "real-wallet".to_string(),
+            "--secret-env=HOMEBOY_TRACE_HANDOFF_SECRET_TEST".to_string(),
+        ];
+        let mut env_delta = HashMap::new();
+        env_delta.insert(
+            "HOMEBOY_PUBLIC_CONTEXT".to_string(),
+            "still-redacted-in-diagnostics".to_string(),
+        );
+        std::env::set_var("HOMEBOY_TRACE_HANDOFF_SECRET_TEST", "trace-secret-value");
+
+        let plan = build_lab_secret_env_handoff_plan(&args, env_delta).expect("handoff plan");
+
+        assert_eq!(
+            plan.env_delta
+                .get("HOMEBOY_TRACE_HANDOFF_SECRET_TEST")
+                .map(String::as_str),
+            Some("trace-secret-value")
+        );
+        assert_eq!(
+            plan.secret_env_names,
+            vec!["HOMEBOY_TRACE_HANDOFF_SECRET_TEST".to_string()]
+        );
+        assert!(plan.runner_deferred_secret_env.is_empty());
+        let rendered = plan.diagnostics.to_string();
+        assert!(rendered.contains("homeboy/lab-secret-env-handoff/v1"));
+        assert!(rendered.contains("HOMEBOY_TRACE_HANDOFF_SECRET_TEST"));
+        assert!(rendered.contains("HOMEBOY_PUBLIC_CONTEXT"));
+        assert!(!rendered.contains("trace-secret-value"));
+        assert!(!rendered.contains("still-redacted-in-diagnostics"));
+
+        std::env::remove_var("HOMEBOY_TRACE_HANDOFF_SECRET_TEST");
+    }
+
+    #[test]
+    fn lab_secret_env_handoff_plan_reports_runner_deferred_requirements() {
+        let args = vec![
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+            "--token-env=HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string(),
+        ];
+
+        let plan = build_lab_secret_env_handoff_plan(&args, HashMap::new()).expect("handoff plan");
+
+        assert!(plan.env_delta.is_empty());
+        assert_eq!(
+            plan.secret_env_names,
+            vec!["HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string()]
+        );
+        assert_eq!(
+            plan.runner_deferred_secret_env,
+            vec!["HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string()]
+        );
+        assert_eq!(
+            plan.diagnostics["runner_deferred_secret_env"][0]["name"],
+            "HOMEBOY_RUNNER_PREVIEW_TOKEN"
+        );
+        assert_eq!(
+            plan.diagnostics["runner_deferred_secret_env"][0]["required"],
+            true
+        );
     }
 
     #[test]
