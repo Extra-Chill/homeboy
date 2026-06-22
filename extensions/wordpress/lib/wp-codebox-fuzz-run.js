@@ -126,6 +126,7 @@ function wpCodeboxFuzzSuiteInput(options = {}) {
 	return stripUndefined({
 		schema: wpCodeboxFuzzSuiteSchema(options),
 		id: options.id || options.runId || options.run_id,
+		goal: options.goal || options.instructions,
 		version: options.version,
 		target: options.target,
 		cases: normalizeArray(options.cases),

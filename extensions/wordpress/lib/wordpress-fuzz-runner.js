@@ -56,12 +56,14 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const seed = env.seed || workload.seed || null;
 	const maxDuration = numericValue(env.maxDuration ?? workload.max_duration ?? workload.maxDuration);
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
-	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration });
+	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
+	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions });
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
 		input: wpCodeboxInput,
 		provider: workload.provider,
 		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
+		instructions,
 	});
 	const codeboxPlanRecipe = buildCodeboxPlanRecipe(workload);
 
@@ -130,8 +132,14 @@ async function resolveCodeboxResult(context, options = {}) {
 		input: context.wpCodeboxInput,
 		provider: context.workload.provider,
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
+		instructions: context.taskRequest.instructions,
 		runFuzzSuite: runner,
 	});
+}
+
+function fuzzSuiteInstructions({ workload, workloadId, runId }) {
+	const label = workload.label || workloadId || workload.id || runId;
+	return `Run WordPress fuzz suite ${label} and return the declared fuzz artifacts.`;
 }
 
 function normalizeRunnerPlan(input) {
@@ -147,9 +155,10 @@ function normalizeRunnerPlan(input) {
 	});
 }
 
-function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration }) {
+function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions }) {
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
+		goal: instructions,
 		target: workload.target || { type: 'wordpress', workload_id: workloadId },
 		workload: stripUndefined({
 			id: workloadId,
