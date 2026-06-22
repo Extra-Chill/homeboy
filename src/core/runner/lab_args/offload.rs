@@ -118,12 +118,33 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg.starts_with("--output=") || arg.starts_with("--artifact-root=") {
             continue;
         }
-        stripped.push(arg.clone());
+        stripped.push(remap_lab_offload_arg(arg, &ordered));
     }
     if !has_force_hot {
         stripped.insert(1, "--force-hot".to_string());
     }
     stripped
+}
+
+fn remap_lab_offload_arg(arg: &str, mappings: &[&LabPathRemap]) -> String {
+    if let Some(raw_path) = arg.strip_prefix('@') {
+        return remap_local_path(raw_path, mappings)
+            .map(|remapped| format!("@{remapped}"))
+            .unwrap_or_else(|| arg.to_string());
+    }
+
+    if let Some((prefix, value)) = arg.split_once('=') {
+        if let Some(raw_path) = value.strip_prefix('@') {
+            return remap_local_path(raw_path, mappings)
+                .map(|remapped| format!("{prefix}=@{remapped}"))
+                .unwrap_or_else(|| arg.to_string());
+        }
+        return remap_local_path(value, mappings)
+            .map(|remapped| format!("{prefix}={remapped}"))
+            .unwrap_or_else(|| arg.to_string());
+    }
+
+    remap_local_path(arg, mappings).unwrap_or_else(|| arg.to_string())
 }
 
 pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(

@@ -1044,6 +1044,64 @@ fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
 }
 
 #[test]
+fn lab_args_rewrite_remaps_absolute_at_file_args() {
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "controller".to_string(),
+        "materialize".to_string(),
+        "@/Users/user/Developer/wp-site-generator/.github/homeboy/controllers/static-site-generation-loop.controller.json".to_string(),
+        "--inputs=@/Users/user/Developer/wp-site-generator/.ci/site-generation-loop.controller-run-inputs.json".to_string(),
+        "--policy-result".to_string(),
+        "@/Users/user/Developer/wp-site-generator/.ci/site-generation-loop.complexity-policy-result.json".to_string(),
+    ];
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/wp-site-generator".to_string(),
+        remote: "/home/user/_lab_workspaces/wp-site-generator".to_string(),
+    }];
+
+    assert_eq!(
+        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/wp-site-generator", &mappings),
+        vec![
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "agent-task".to_string(),
+            "controller".to_string(),
+            "materialize".to_string(),
+            "@/home/user/_lab_workspaces/wp-site-generator/.github/homeboy/controllers/static-site-generation-loop.controller.json".to_string(),
+            "--inputs=@/home/user/_lab_workspaces/wp-site-generator/.ci/site-generation-loop.controller-run-inputs.json".to_string(),
+            "--policy-result".to_string(),
+            "@/home/user/_lab_workspaces/wp-site-generator/.ci/site-generation-loop.complexity-policy-result.json".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn lab_args_rewrite_remaps_standalone_absolute_file_args() {
+    let args = vec![
+        "homeboy".to_string(),
+        "report".to_string(),
+        "/Users/user/Developer/project/.ci/report.json".to_string(),
+        "--config=/Users/user/Developer/project/.ci/config.json".to_string(),
+    ];
+    let mappings = vec![LabPathRemap {
+        local: "/Users/user/Developer/project".to_string(),
+        remote: "/home/user/_lab_workspaces/project".to_string(),
+    }];
+
+    assert_eq!(
+        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings),
+        vec![
+            "homeboy".to_string(),
+            "--force-hot".to_string(),
+            "report".to_string(),
+            "/home/user/_lab_workspaces/project/.ci/report.json".to_string(),
+            "--config=/home/user/_lab_workspaces/project/.ci/config.json".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn lab_args_materializes_relative_at_file_specs_under_remote_workspace() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join(".ci")).expect("create .ci");
