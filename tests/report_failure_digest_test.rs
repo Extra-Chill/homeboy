@@ -266,6 +266,10 @@ fn renders_lint_failure_digest_from_fixture() {
     assert!(markdown.contains("## Failure Digest"));
     assert!(markdown.contains("### Lint Failure Digest"));
     assert!(markdown.contains("- Lint summary: **3 lint finding(s)**"));
+    assert!(markdown.contains("- Formatting findings: FMT SUMMARY: 2 files need formatting"));
+    assert!(markdown.contains("    - `src/main.rs`"));
+    assert!(markdown.contains("    - `src/commands/lint.rs`"));
+    assert!(markdown.contains("  - Suggested command: `cargo fmt`"));
     assert!(markdown.contains("- Actionable lint findings (3 shown):"));
     assert!(markdown.contains(
         "1. `src/widget.php:12` [error] phpcs/Squiz.Commenting.FunctionComment.Missing: Missing function doc comment"

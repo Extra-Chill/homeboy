@@ -10,6 +10,11 @@
       "rerun_recommended": true,
       "changed_files": ["src/widget.php"]
     },
+    "formatting_findings": {
+      "files": ["src/main.rs", "src/commands/lint.rs"],
+      "summary": "FMT SUMMARY: 2 files need formatting",
+      "suggested_command": "cargo fmt"
+    },
     "findings": [
       {
         "tool": "phpcs",

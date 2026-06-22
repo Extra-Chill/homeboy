@@ -226,6 +226,7 @@ fn render_lint_section(out: &mut String, output_dir: &Path, run_url: &str) {
         let _ = writeln!(out, "- Build failed: {}", build_failed);
     }
     render_error_details(out, &error);
+    render_formatting_findings(out, &data);
 
     let top_violations = string_array(&data, "top_violations");
     let findings = array_value(&data, "findings");
@@ -237,6 +238,40 @@ fn render_lint_section(out: &mut String, output_dir: &Path, run_url: &str) {
     }
     render_full_log(out, "lint", run_url);
     out.push('\n');
+}
+
+fn render_formatting_findings(out: &mut String, data: &Map<String, Value>) {
+    let formatting = object_value(data, "formatting_findings");
+    if formatting.is_empty() {
+        return;
+    }
+
+    let files = string_array(&formatting, "files");
+    let command = string_value(&formatting, "suggested_command")
+        .unwrap_or_else(|| "cargo fmt".to_string());
+    let summary = string_value(&formatting, "summary");
+
+    out.push_str("- Formatting findings:");
+    if let Some(summary) = summary {
+        let _ = write!(out, " {}", summary);
+    }
+    out.push('\n');
+    if files.is_empty() {
+        out.push_str("  - Files needing formatting: unavailable from formatter output\n");
+    } else {
+        out.push_str("  - Files needing formatting:\n");
+        for file in files.iter().take(LINT_FINDING_DIGEST_LIMIT) {
+            let _ = writeln!(out, "    - `{}`", file);
+        }
+        if files.len() > LINT_FINDING_DIGEST_LIMIT {
+            let _ = writeln!(
+                out,
+                "    - {} more file(s) omitted from this comment; see `lint.json` or the full lint log.",
+                files.len() - LINT_FINDING_DIGEST_LIMIT
+            );
+        }
+    }
+    let _ = writeln!(out, "  - Suggested command: `{}`", command);
 }
 
 fn render_test_section(out: &mut String, output_dir: &Path, run_url: &str) {
@@ -603,8 +638,9 @@ fn has_any_lint_detail(data: &Map<String, Value>, error: &Map<String, Value>) ->
         "phpstan_summary",
         "build_failed",
     ]
-    .iter()
-    .any(|key| string_value(data, key).is_some())
+        .iter()
+        .any(|key| string_value(data, key).is_some())
+        || !object_value(data, "formatting_findings").is_empty()
         || ["code", "message"]
             .iter()
             .any(|key| string_value(error, key).is_some())

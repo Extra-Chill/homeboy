@@ -37,6 +37,8 @@ pub struct LintCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_comparison: Option<BaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatting_findings: Option<super::run::FormattingFindings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub producer_summaries: Vec<FindingProducerSummary>,
@@ -96,6 +98,7 @@ pub fn from_main_workflow_with_ci_context(
             autofix: result.autofix,
             hints: result.hints,
             baseline_comparison: result.baseline_comparison,
+            formatting_findings: result.formatting_findings,
             findings: if json_summary { None } else { result.findings },
             producer_summaries: result.producer_summaries,
             summary: result.summary,
@@ -206,6 +209,7 @@ pub fn from_lint_fix(component_label: String, run: RefactorSourceRun) -> (LintCo
             autofix: Some(autofix),
             hints,
             baseline_comparison: None,
+            formatting_findings: None,
             findings: None,
             producer_summaries: Vec::new(),
             summary: None,
@@ -251,6 +255,7 @@ mod tests {
             autofix: None,
             hints: None,
             baseline_comparison: None,
+            formatting_findings: None,
             findings: Some(vec![
                 HomeboyFinding::builder("eslint", "eslint error").build(),
                 HomeboyFinding::builder("phpstan", "phpstan error").build(),
