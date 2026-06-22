@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.50] - 2026-06-22
+
+### Changed
+- Normalize fuzz error statuses
+
 ## [3.12.49] - 2026-06-22
 
 ### Changed
