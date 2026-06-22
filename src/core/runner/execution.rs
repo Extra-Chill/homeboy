@@ -31,9 +31,9 @@ use super::resource_metrics::{
     measured_command_output, measured_command_output_until_cancelled, RunnerResourceMetrics,
 };
 use super::{
-    connect, load, select_runner_transport, status, Runner, RunnerCapabilityPreflight,
-    RunnerHandoff, RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerResult, RunnerTransport,
-    RunnerTunnelMode,
+    connect, load, select_runner_transport, status, Runner, RunnerArtifactRef,
+    RunnerCapabilityPreflight, RunnerHandoff, RunnerJob, RunnerKind, RunnerLifecycleOwner,
+    RunnerMutationArtifacts, RunnerResult, RunnerTransport, RunnerTunnelMode,
 };
 use super::{normalize_runner_command_env, resolve_runner_secret_env};
 
@@ -100,6 +100,8 @@ pub struct RunnerExecOutput {
     pub mirror_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation_artifacts: Option<RunnerMutationArtifacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -471,6 +473,7 @@ fn runner_result(
     stdout: &str,
     stderr: &str,
     mirror_run_id: Option<&str>,
+    mutation_artifacts: Option<RunnerMutationArtifacts>,
 ) -> RunnerResult {
     RunnerResult {
         exit_code,
@@ -484,6 +487,7 @@ fn runner_result(
         stdout_bytes: Some(stdout.len()),
         stderr_bytes: Some(stderr.len()),
         mirror_run_id: mirror_run_id.map(str::to_string),
+        mutation_artifacts,
         artifact_refs: job
             .map(|job| job.artifacts.iter().map(Into::into).collect())
             .unwrap_or_default(),
@@ -506,8 +510,54 @@ fn runner_handoff(
         },
         job,
         workspace_lease: None,
+        workspace_leases: None,
         result,
     }
+}
+
+fn mutation_artifacts_from_job(job: &Job, result: &Value) -> Option<RunnerMutationArtifacts> {
+    let patch_artifact_id = result
+        .get("patch")
+        .or_else(|| result.pointer("/data/patch"))
+        .and_then(|patch| {
+            patch
+                .get("patch_artifact_id")
+                .or_else(|| patch.get("artifact_id"))
+        })
+        .and_then(Value::as_str);
+    let patch_ref = patch_artifact_id
+        .and_then(|id| job.artifacts.iter().find(|artifact| artifact.id == id))
+        .or_else(|| {
+            job.artifacts
+                .iter()
+                .find(|artifact| artifact_is_kind(artifact, "lab_fix_patch"))
+        })
+        .map(RunnerArtifactRef::from);
+    let file_bundle_ref = job
+        .artifacts
+        .iter()
+        .find(|artifact| artifact_is_kind(artifact, "mutation_file_bundle"))
+        .map(RunnerArtifactRef::from);
+    let operation_log_ref = job
+        .artifacts
+        .iter()
+        .find(|artifact| artifact_is_kind(artifact, "mutation_operation_log"))
+        .map(RunnerArtifactRef::from);
+    let artifacts = RunnerMutationArtifacts {
+        patch_ref,
+        file_bundle_ref,
+        operation_log_ref,
+    };
+    (!artifacts.is_empty()).then_some(artifacts)
+}
+
+fn artifact_is_kind(artifact: &JobArtifactMetadata, kind: &str) -> bool {
+    artifact
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("kind"))
+        .and_then(Value::as_str)
+        == Some(kind)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -635,6 +685,7 @@ fn exec_via_reverse_broker(
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     let artifacts = job.artifacts.clone();
+    let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
 
     print_lab_offload_handoff(
         &runner.id,
@@ -651,6 +702,7 @@ fn exec_via_reverse_broker(
         &stdout,
         &stderr,
         mirror_run_id.as_deref(),
+        mutation_artifacts.clone(),
     );
     let handoff = runner_handoff(
         runner,
@@ -678,6 +730,7 @@ fn exec_via_reverse_broker(
             job_events: Some(events),
             mirror_run_id,
             patch,
+            mutation_artifacts,
             artifacts,
             metrics,
             capture,
@@ -809,6 +862,7 @@ fn exec_via_daemon(
     let patch = mirror.as_ref().and_then(|evidence| evidence.patch.clone());
     let mirror_run_id = mirror.as_ref().map(|evidence| evidence.run.id.clone());
     let artifacts = job.artifacts.clone();
+    let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
     print_lab_offload_handoff(
         &runner.id,
         Some(&cwd),
@@ -824,6 +878,7 @@ fn exec_via_daemon(
         &stdout,
         &stderr,
         mirror_run_id.as_deref(),
+        mutation_artifacts.clone(),
     );
     let handoff = runner_handoff(
         runner,
@@ -851,6 +906,7 @@ fn exec_via_daemon(
             job_events: Some(events),
             mirror_run_id,
             patch,
+            mutation_artifacts,
             artifacts,
             metrics,
             capture,
@@ -937,6 +993,7 @@ fn detached_handoff_output(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
@@ -2153,7 +2210,7 @@ fn exec_output(
         RunnerExecMode::ReverseBroker => "reverse_broker",
         RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
     };
-    let runner_result = runner_result(None, exit_code, &stdout, &stderr, None);
+    let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);
     let handoff = runner_handoff(runner, transport, None, Some(runner_result.clone()));
     (
         RunnerExecOutput {
@@ -2174,6 +2231,7 @@ fn exec_output(
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: output.metrics,
             capture: output.capture,
@@ -2689,6 +2747,7 @@ mod tests {
             job_events: None,
             mirror_run_id: None,
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
@@ -4260,6 +4319,23 @@ mod tests {
                     .as_ref()
                     .and_then(|patch| patch.get("patch_artifact_path").and_then(Value::as_str)),
                 Some("metadata-only:reverse-patch")
+            );
+            assert_eq!(
+                output
+                    .mutation_artifacts
+                    .as_ref()
+                    .and_then(|artifacts| artifacts.patch_ref.as_ref())
+                    .map(|artifact| artifact.artifact_id.as_str()),
+                Some("reverse-patch")
+            );
+            assert_eq!(
+                output
+                    .runner_result
+                    .as_ref()
+                    .and_then(|result| result.mutation_artifacts.as_ref())
+                    .and_then(|artifacts| artifacts.patch_ref.as_ref())
+                    .map(|artifact| artifact.artifact_id.as_str()),
+                Some("reverse-patch")
             );
             assert!(output
                 .job_events

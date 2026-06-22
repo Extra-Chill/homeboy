@@ -283,6 +283,37 @@ pub struct RunnerWorkspaceLease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerNamedWorkspaceLease {
+    pub name: String,
+    pub lease: RunnerWorkspaceLease,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerWorkspaceLeaseSet {
+    pub primary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leases: Vec<RunnerNamedWorkspaceLease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerMutationArtifacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_bundle_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_log_ref: Option<RunnerArtifactRef>,
+}
+
+impl RunnerMutationArtifacts {
+    pub fn is_empty(&self) -> bool {
+        self.patch_ref.is_none()
+            && self.file_bundle_ref.is_none()
+            && self.operation_log_ref.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResult {
     pub exit_code: i32,
     pub status: JobStatus,
@@ -292,6 +323,8 @@ pub struct RunnerResult {
     pub stderr_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_artifacts: Option<RunnerMutationArtifacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerArtifactRef>,
 }
@@ -305,6 +338,8 @@ pub struct RunnerHandoff {
     pub job: Option<RunnerJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_lease: Option<RunnerWorkspaceLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_leases: Option<RunnerWorkspaceLeaseSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RunnerResult>,
 }
