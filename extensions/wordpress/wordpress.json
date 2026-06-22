@@ -947,6 +947,13 @@
       "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
     },
     {
+      "id": "build_nested_packages",
+      "label": "Build nested package.json directories",
+      "type": "boolean",
+      "default": true,
+      "description": "Whether the WordPress package builder should recursively run build scripts in nested package.json directories after the root frontend build. Disable for components whose root build already produces all required nested frontend assets. Can be overridden with HOMEBOY_BUILD_NESTED_PACKAGES=0."
+    },
+    {
       "id": "bench_env",
       "label": "Bench env passthrough",
       "type": "object",

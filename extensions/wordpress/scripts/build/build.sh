@@ -669,8 +669,54 @@ $manifest = [
 ];
 
 file_put_contents( getenv( 'HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_MANIFEST' ), json_encode( $manifest, JSON_UNESCAPED_SLASHES ) . "\n" );
-file_put_contents( getenv( 'HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_LIST' ), $list );
+    file_put_contents( getenv( 'HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_LIST' ), $list );
 PHP
+}
+
+wordpress_setting() {
+    local key="$1"
+    local default_value="$2"
+
+    HOMEBOY_WORDPRESS_SETTING_KEY="$key" \
+    HOMEBOY_WORDPRESS_SETTING_DEFAULT="$default_value" \
+    php <<'PHP'
+<?php
+$settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
+if ( ! is_array( $settings ) ) {
+	$settings = [];
+}
+
+$key     = (string) getenv( 'HOMEBOY_WORDPRESS_SETTING_KEY' );
+$default = (string) getenv( 'HOMEBOY_WORDPRESS_SETTING_DEFAULT' );
+$value   = array_key_exists( $key, $settings ) ? $settings[ $key ] : $default;
+
+if ( is_bool( $value ) ) {
+	echo $value ? '1' : '0';
+	return;
+}
+
+if ( null === $value ) {
+	echo '';
+	return;
+}
+
+echo (string) $value;
+PHP
+}
+
+should_build_nested_packages() {
+    local value="${HOMEBOY_BUILD_NESTED_PACKAGES:-}"
+    if [ -z "$value" ]; then
+        value="$(wordpress_setting build_nested_packages 1)"
+    fi
+
+    case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off|skip|disabled)
+            return 1
+            ;;
+    esac
+
+    return 0
 }
 
 include_package_artifacts() {
@@ -903,7 +949,11 @@ build_project() {
     clean_previous_builds
     install_production_deps
     build_frontend_assets
-    build_nested_packages
+    if should_build_nested_packages; then
+        build_nested_packages
+    else
+        print_status "Skipping nested package builds (build_nested_packages disabled)"
+    fi
     copy_project_files
 
     if ! validate_php_syntax; then
