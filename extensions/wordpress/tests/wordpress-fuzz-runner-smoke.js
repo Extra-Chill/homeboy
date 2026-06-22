@@ -97,9 +97,12 @@ assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'));
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
+const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload)}\n`);
 
-const cli = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs')], {
+assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
+
+const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
