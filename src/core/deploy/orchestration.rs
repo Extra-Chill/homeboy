@@ -509,8 +509,9 @@ fn with_dry_run_artifact_plan(
     component: &Component,
     config: &DeployConfig,
 ) -> ComponentDeployResult {
-    let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
-    let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
+    let deploy_config = component.deploy_config();
+    let is_git_deploy = deploy_config.is_git_deploy();
+    let is_file_deploy = deploy_config.is_file_deploy();
     if is_git_deploy || is_file_deploy {
         return result;
     }
