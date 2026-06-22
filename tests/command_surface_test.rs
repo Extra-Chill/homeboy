@@ -64,8 +64,7 @@ fn agent_task_dispatch_is_not_public_cli_surface() {
     let surface = current_command_surface();
 
     assert!(!surface.contains_path(&["agent-task", "dispatch"]));
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "dispatch", "--prompt", "x"])
-        .is_err());
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "dispatch", "--prompt", "x"]).is_err());
 }
 
 #[test]
