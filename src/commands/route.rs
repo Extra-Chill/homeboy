@@ -1,4 +1,5 @@
 use homeboy::cli_surface::{Cli, Commands};
+use homeboy::core::component::{self, TargetSpec};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest, NoopLabDispatchObserver,
@@ -68,10 +69,8 @@ pub fn route_after_parse(
     let scoped_args = inject_lab_changed_files(&cli.command, normalized_args)?;
     let normalized_args = scoped_args.as_deref().unwrap_or(normalized_args);
 
-    let rewritten_args = capture_mutation_patch
-        .then(|| rewrite_component_target_to_path(&cli.command, normalized_args))
-        .flatten()
-        .or_else(|| rewrite_ad_hoc_lab_workspace_to_path(&cli.command, normalized_args));
+    let rewritten_args =
+        lab_route_source_path_args(&cli.command, normalized_args, capture_mutation_patch);
     let routed_args = rewritten_args.as_deref().unwrap_or(normalized_args);
 
     let outcome = lab_routing::dispatch_lab_offload(
@@ -214,14 +213,11 @@ fn resolve_changed_scope_source_path(
     component_id: Option<&String>,
     path_override: Option<&String>,
 ) -> homeboy::core::Result<String> {
-    use homeboy::core::engine::execution_context::{self, ResolveOptions};
-
-    let ctx = execution_context::resolve(&ResolveOptions {
-        component_id: component_id.cloned(),
-        path_override: path_override.cloned(),
-        ..ResolveOptions::default()
-    })?;
-    Ok(ctx.source_path.to_string_lossy().to_string())
+    let target = component::resolve_target(TargetSpec::new(
+        component_id.map(String::as_str),
+        path_override.map(String::as_str),
+    ))?;
+    Ok(target.source_path.to_string_lossy().to_string())
 }
 
 /// Build the Lab dispatch observer for the parsed command. Only `trace`
@@ -378,6 +374,20 @@ fn lab_offload_command(
     )))
 }
 
+fn lab_route_source_path_args(
+    command: &Commands,
+    normalized_args: &[String],
+    capture_mutation_patch: bool,
+) -> Option<Vec<String>> {
+    if capture_mutation_patch {
+        if let Some(rewritten) = rewrite_component_target_to_path(command, normalized_args) {
+            return Some(rewritten);
+        }
+    }
+
+    rewrite_ad_hoc_lab_workspace_to_path(command, normalized_args)
+}
+
 /// When a `lint --fix` / `refactor --write` command targets a component by id
 /// (positionally or via `--component`/`--components`), resolve that component to
 /// its on-disk source path and rewrite the offload args to `--path <source>`.
@@ -427,14 +437,8 @@ fn rewrite_component_target_to_path(
 /// when resolution fails so the caller can fall back to the original args and
 /// let the normal offload path surface any downstream error.
 fn resolve_component_source_path(component_id: &str) -> Option<String> {
-    use homeboy::core::engine::execution_context::{self, ResolveOptions};
-
-    let ctx = execution_context::resolve(&ResolveOptions {
-        component_id: Some(component_id.to_string()),
-        ..ResolveOptions::default()
-    })
-    .ok()?;
-    Some(ctx.source_path.to_string_lossy().to_string())
+    let target = component::resolve_target(TargetSpec::new(Some(component_id), None)).ok()?;
+    Some(target.source_path.to_string_lossy().to_string())
 }
 
 /// Lab sync already materializes the controller CWD when no explicit source path
@@ -1010,6 +1014,78 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_only() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--lab-only".to_string(),
+            "agent-task".to_string(),
+            "fanout".to_string(),
+            "submit-batch".to_string(),
+            "--input".to_string(),
+            "fanout.json".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+        assert_eq!(command.hot_label, "agent-task fanout submit-batch");
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.infer_source_path_tools);
+
+        let err = route_after_parse(&cli, &normalized, None)
+            .expect_err("fanout submit-batch must not run locally under --lab-only");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("Lab-only execution refused local execution"));
+        assert!(err.message.contains("automatic Lab offload disabled"));
+    }
+
+    #[test]
+    fn agent_task_fanout_state_reads_are_runner_resident() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "fanout",
+                "status",
+                "fanout-batch-123",
+            ],
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "fanout",
+                "artifacts",
+                "fanout-batch-123",
+            ],
+        ] {
+            let cli = Cli::parse_from(args);
+
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            assert_eq!(command.hot_label, "agent-task fanout status/artifacts");
+            assert!(command.portable);
+            assert!(!command.routing_policy.default_lab_offload);
+            assert_eq!(
+                command.source_path_mode,
+                runners::LabOffloadSourcePathMode::RunnerResident
+            );
+            assert_eq!(
+                command.workspace_mode_policy,
+                runners::LabOffloadWorkspaceModePolicy::RunnerResident
+            );
+            assert!(command.required_extensions.is_empty());
+            assert!(!command.routing_policy.requires_extension_parity);
+            assert!(!command.routing_policy.infer_source_path_tools);
+        }
+    }
+
+    #[test]
     fn tunnel_service_start_supports_explicit_runner_discovery() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -1243,6 +1319,29 @@ mod tests {
         ];
 
         assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
+    }
+
+    #[test]
+    fn changed_scope_source_path_uses_shared_target_resolution() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let source_path = resolve_changed_scope_source_path(None, Some(&path))
+            .expect("path override should resolve through TargetSpec");
+
+        assert_eq!(source_path, path);
+    }
+
+    #[test]
+    fn lab_route_source_path_args_keeps_component_id_without_patch_capture() {
+        let cli = Cli::parse_from(["homeboy", "lint", "sample-component"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "lint".to_string(),
+            "sample-component".to_string(),
+        ];
+
+        assert!(lab_route_source_path_args(&cli.command, &normalized, false).is_none());
     }
 
     #[test]

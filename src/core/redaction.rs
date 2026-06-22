@@ -21,6 +21,7 @@ impl Default for RedactionPolicy {
                 "bearer",
                 "client_secret",
                 "cookie",
+                "credential",
                 "key",
                 "nonce",
                 "passwd",
@@ -127,6 +128,10 @@ impl RedactionPolicy {
         self.redact_json_with_key(None, value)
     }
 
+    pub fn redact_argv(&self, argv: &[String]) -> Vec<String> {
+        redact_argv_with_policy(argv, self)
+    }
+
     fn redact_json_with_key(&self, key: Option<&str>, value: &Value) -> Value {
         if key.is_some_and(|key| self.is_sensitive_key(key) || self.is_sensitive_header(key)) {
             return Value::String(self.replacement.clone());
@@ -179,6 +184,104 @@ pub fn redact_url(value: &str) -> String {
 
 pub fn redact_json(value: &Value) -> Value {
     RedactionPolicy::default().redact_json(value)
+}
+
+pub fn redact_argv(argv: &[String]) -> Vec<String> {
+    RedactionPolicy::default().redact_argv(argv)
+}
+
+pub fn redact_argv_display(argv: &[String]) -> String {
+    redact_argv(argv).join(" ")
+}
+
+fn redact_argv_with_policy(argv: &[String], policy: &RedactionPolicy) -> Vec<String> {
+    let mut redacted = Vec::with_capacity(argv.len());
+    let mut redact_next_for: Option<String> = None;
+
+    for arg in argv {
+        if let Some(flag) = redact_next_for.take() {
+            redacted.push(redact_split_flag_value(&flag, arg, policy));
+            continue;
+        }
+
+        if sensitive_whole_value_flag(arg) || sensitive_pair_value_flag(arg) {
+            redacted.push(arg.clone());
+            redact_next_for = Some(arg.clone());
+            continue;
+        }
+
+        if let Some((flag, value)) = arg.split_once('=') {
+            if sensitive_whole_value_flag(flag) {
+                redacted.push(format!("{flag}={}", policy.replacement()));
+                continue;
+            }
+            if sensitive_pair_value_flag(flag) {
+                redacted.push(format!("{flag}={}", redact_key_value_arg(value, policy)));
+                continue;
+            }
+        }
+
+        redacted.push(redact_sensitive_inline_arg(arg, policy));
+    }
+
+    redacted
+}
+
+fn redact_split_flag_value(flag: &str, value: &str, policy: &RedactionPolicy) -> String {
+    if sensitive_whole_value_flag(flag) {
+        policy.replacement().to_string()
+    } else {
+        redact_key_value_arg(value, policy)
+    }
+}
+
+fn sensitive_whole_value_flag(flag: &str) -> bool {
+    matches!(
+        normalize_flag(flag).as_str(),
+        "secret_env"
+            | "provider_auth"
+            | "provider_auth_json"
+            | "provider_auth_token"
+            | "provider_access_token"
+            | "provider_refresh_token"
+            | "access_token"
+            | "refresh_token"
+            | "api_key"
+            | "password"
+            | "token"
+    )
+}
+
+fn sensitive_pair_value_flag(flag: &str) -> bool {
+    matches!(normalize_flag(flag).as_str(), "setting" | "setting_json")
+}
+
+fn normalize_flag(flag: &str) -> String {
+    normalize_key(flag.trim_start_matches('-'))
+}
+
+fn redact_key_value_arg(value: &str, policy: &RedactionPolicy) -> String {
+    let Some((key, raw_value)) = value.split_once('=') else {
+        if let Ok(json) = serde_json::from_str::<Value>(value) {
+            return policy.redact_json(&json).to_string();
+        }
+        return redact_sensitive_inline_arg(value, policy);
+    };
+    if policy.is_sensitive_key(key) || policy.is_sensitive_header(key) {
+        return format!("{key}={}", policy.replacement());
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(raw_value) {
+        return format!("{key}={}", policy.redact_json(&json));
+    }
+    format!("{key}={}", redact_sensitive_inline_arg(raw_value, policy))
+}
+
+fn redact_sensitive_inline_arg(value: &str, policy: &RedactionPolicy) -> String {
+    if looks_like_url(value) {
+        policy.redact_url(value)
+    } else {
+        policy.redact_string(value)
+    }
 }
 
 fn normalize_key(key: &str) -> String {
@@ -302,6 +405,52 @@ mod tests {
         assert_eq!(
             policy.redact_json(&json!({ "x-private": "secret" })),
             json!({ "x-private": "***" })
+        );
+    }
+
+    #[test]
+    fn redacts_sensitive_argv_split_and_equals_forms() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--setting".to_string(),
+            "api_token=abc123".to_string(),
+            "--setting=password=hunter2".to_string(),
+            "--setting-json".to_string(),
+            r#"provider={"access_token":"token-value","safe":"ok"}"#.to_string(),
+            "--setting-json".to_string(),
+            r#"{"client_secret":"client-secret","safe":"ok"}"#.to_string(),
+            r#"--setting-json={"refresh_token":"refresh-value","safe":"ok"}"#.to_string(),
+            "--secret-env".to_string(),
+            "OPENAI_API_KEY=sk-test".to_string(),
+            "--secret-env=ANTHROPIC_API_KEY=sk-ant".to_string(),
+            "--provider-auth-token".to_string(),
+            "provider-token".to_string(),
+            "--url=https://example.test/?token=query-token&ok=1".to_string(),
+        ];
+
+        assert_eq!(
+            redact_argv(&argv),
+            vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--setting".to_string(),
+                "api_token=[REDACTED]".to_string(),
+                "--setting=password=[REDACTED]".to_string(),
+                "--setting-json".to_string(),
+                r#"provider={"access_token":"[REDACTED]","safe":"ok"}"#.to_string(),
+                "--setting-json".to_string(),
+                r#"{"client_secret":"[REDACTED]","safe":"ok"}"#.to_string(),
+                r#"--setting-json={"refresh_token":"[REDACTED]","safe":"ok"}"#.to_string(),
+                "--secret-env".to_string(),
+                "[REDACTED]".to_string(),
+                "--secret-env=[REDACTED]".to_string(),
+                "--provider-auth-token".to_string(),
+                "[REDACTED]".to_string(),
+                "--url=https://example.test/?token=[REDACTED]&ok=1".to_string(),
+            ]
         );
     }
 }

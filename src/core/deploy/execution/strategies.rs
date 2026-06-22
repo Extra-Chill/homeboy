@@ -239,7 +239,7 @@ pub(super) fn execute_artifact_deploy(
         prepared.cleanup_local_artifact,
     );
     let Some(artifact_path) = prepared.artifact_path.as_ref() else {
-        return ComponentDeployResult::failed(
+        let result = ComponentDeployResult::failed(
             component,
             base_path,
             prepared.local_version.clone(),
@@ -250,11 +250,12 @@ pub(super) fn execute_artifact_deploy(
             ),
         )
         .with_build_exit_code(prepared.build_exit_code);
+        return with_prepared_artifact_source(result, prepared);
     };
     let artifact_input_metadata = match artifact_inputs::resolve_metadata(component) {
         Ok(inputs) => inputs,
         Err(err) => {
-            return ComponentDeployResult::failed(
+            let result = ComponentDeployResult::failed(
                 component,
                 base_path,
                 prepared.local_version.clone(),
@@ -263,6 +264,7 @@ pub(super) fn execute_artifact_deploy(
             )
             .with_remote_path(install_dir.to_string())
             .with_build_exit_code(prepared.build_exit_code);
+            return with_prepared_artifact_source(result, prepared);
         }
     };
 
@@ -312,7 +314,7 @@ pub(super) fn execute_artifact_deploy(
             ) {
                 Ok(version) => version,
                 Err(error) => {
-                    return ComponentDeployResult::failed(
+                    let result = ComponentDeployResult::failed(
                         component,
                         base_path,
                         prepared.local_version.clone(),
@@ -323,6 +325,7 @@ pub(super) fn execute_artifact_deploy(
                     .with_artifact_inputs(artifact_input_metadata)
                     .with_build_exit_code(prepared.build_exit_code)
                     .with_deploy_exit_code(Some(exit_code));
+                    return with_prepared_artifact_source(result, prepared);
                 }
             };
 
@@ -342,39 +345,56 @@ pub(super) fn execute_artifact_deploy(
             }
             run_post_deploy_hooks(&ctx.client, component, install_dir, base_path);
 
-            ComponentDeployResult::new(component, base_path)
+            let result = ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
                 .with_versions(prepared.local_version.clone(), reported_remote_version)
                 .with_remote_path(install_dir.to_string())
                 .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
-                .with_deploy_exit_code(Some(exit_code))
+                .with_deploy_exit_code(Some(exit_code));
+            with_prepared_artifact_source(result, prepared)
         }
         Ok(DeployResult {
             success: false,
             exit_code,
             error,
             ..
-        }) => ComponentDeployResult::failed(
-            component,
-            base_path,
-            prepared.local_version.clone(),
-            prepared.remote_version.clone(),
-            error.unwrap_or_default(),
-        )
-        .with_remote_path(install_dir.to_string())
-        .with_build_exit_code(prepared.build_exit_code)
-        .with_deploy_exit_code(Some(exit_code)),
-        Err(err) => ComponentDeployResult::failed(
-            component,
-            base_path,
-            prepared.local_version.clone(),
-            prepared.remote_version.clone(),
-            err.to_string(),
-        )
-        .with_remote_path(install_dir.to_string())
-        .with_build_exit_code(prepared.build_exit_code),
+        }) => {
+            let result = ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                error.unwrap_or_default(),
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code)
+            .with_deploy_exit_code(Some(exit_code));
+            with_prepared_artifact_source(result, prepared)
+        }
+        Err(err) => {
+            let result = ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                err.to_string(),
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code);
+            with_prepared_artifact_source(result, prepared)
+        }
     }
+}
+
+fn with_prepared_artifact_source(
+    mut result: ComponentDeployResult,
+    prepared: &PreparedComponentDeploy,
+) -> ComponentDeployResult {
+    if let Some(source) = prepared.artifact_source {
+        result = result.with_artifact_source(source);
+    }
+    result
 }
 
 /// Remove the local build artifact created for a deploy.

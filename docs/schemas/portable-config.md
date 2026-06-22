@@ -9,6 +9,7 @@ A `homeboy.json` file in a repo root defines portable component configuration th
   "id": "string",
   "remote_path": "string",
   "build_artifact": "string",
+  "deploy_together": ["component-id"],
   "extract_command": "string",
   "version_targets": [
     {
@@ -73,6 +74,7 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `id` | Required stable component identifier |
 | `remote_path` | Deploy target relative to project `base_path` |
 | `build_artifact` | Build output path relative to repo root |
+| `deploy_together` | Component IDs that must be deployed in the same operation as this component |
 | `extract_command` | Post-upload command (supports `{artifact}`, `{targetDir}`) |
 | `version_targets` | Version detection patterns (`file`, `pattern`, optional `artifact_path`) |
 | `changelog_target` | Path to changelog file |
@@ -80,6 +82,8 @@ homeboy component create --local-path /path/to/repo --changelog-target "CHANGELO
 | `extensions` | Extension configuration (e.g., `{"wordpress": {}}`) |
 
 Build, lint, test, bench, and trace behavior resolves from `scripts.<capability>` first, then linked extensions. Use `scripts.build` for component-owned shell builds; component-level `build_command` is not supported.
+
+Use `deploy_together` for coupled components that are versioned or built separately but must stay in sync at runtime. When a deploy selection includes one member of a declared group without the rest, Homeboy fails the plan before building or uploading.
 
 ## Precedence
 

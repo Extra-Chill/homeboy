@@ -16,7 +16,7 @@ use crate::core::api_jobs::{
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::engine::shell;
 use crate::core::error::{Error, ErrorCode, Result};
-use crate::core::redaction::RedactionPolicy;
+use crate::core::redaction::{redact_argv, redact_argv_display, RedactionPolicy};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 
@@ -465,12 +465,13 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
         .unwrap_or("runner command exited non-zero")
         .to_string();
     let execution = serde_json::to_value(output).unwrap_or(Value::Null);
-    let command = output.argv.join(" ");
+    let command = redact_argv_display(&output.argv);
+    let redacted_argv = redact_argv(&output.argv);
     let mut details = json!({
         "runner_id": output.runner_id,
         "job_id": output.job_id,
         "remote_cwd": output.remote_cwd,
-        "command": output.argv,
+        "command": redacted_argv,
         "exit_code": output.exit_code,
         "execution": execution,
     });
@@ -755,7 +756,7 @@ fn exec_via_reverse_broker(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode: RunnerExecMode::ReverseBroker,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -933,7 +934,7 @@ fn exec_via_daemon(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode: RunnerExecMode::Daemon,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -1020,7 +1021,7 @@ fn detached_handoff_output(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code: 0,
             stdout,
@@ -1125,7 +1126,7 @@ fn daemon_job_wait_timeout(
     error.details["runner_id"] = Value::String(runner.id.clone());
     error.details["job_id"] = Value::String(job_id.clone());
     error.details["remote_cwd"] = Value::String(cwd.to_string());
-    error.details["command"] = json!(command);
+    error.details["command"] = json!(redact_argv(command));
     match mirrored {
         Ok(run) => {
             error.details["active_run_id"] = Value::String(run.id.clone());
@@ -2258,7 +2259,7 @@ fn exec_output(
             runner_id: runner.id.clone(),
             dry_run: false,
             mode,
-            argv: command,
+            argv: redact_argv(&command),
             remote_cwd: cwd,
             exit_code,
             stdout,
@@ -2550,7 +2551,7 @@ fn runner_exec_failure_context_hint(output: &RunnerExecOutput) -> String {
         .unwrap_or("unknown persisted run");
     format!(
         "Canonical failed command: `{}`; runner job: `{job}`; persisted run: `{run}`; contract field: `{field}`; reason: {}.",
-        context.command.join(" "),
+        redact_argv_display(&context.command),
         context.reason
     )
 }

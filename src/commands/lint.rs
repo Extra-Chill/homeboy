@@ -23,8 +23,8 @@ use super::utils::args::{
 use super::utils::observed_workflow::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 use super::{CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-    LINT_LAB_LABEL,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
+    LabCommandContract, LINT_LAB_LABEL,
 };
 
 #[derive(Args)]
@@ -113,6 +113,10 @@ impl LintArgs {
         }
 
         None
+    }
+
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        CommandPortabilityContract::lab_optional(self.lab_contract())
     }
 
     pub fn is_full_workspace_run(&self) -> bool {

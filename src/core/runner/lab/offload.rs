@@ -22,6 +22,7 @@ use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::redaction::{redact_argv, redact_argv_display};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
@@ -206,6 +207,32 @@ fn local_execution_denied_error(reason: &str, runner_id: Option<&str>) -> Error 
     )
 }
 
+fn is_build_command(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == "build")
+}
+
+fn build_lab_replacement_hints(runner_id: Option<&str>) -> Vec<String> {
+    let runner = runner_id.unwrap_or("<runner-id>");
+    vec![
+        format!(
+            "Materialize the build workspace first: homeboy runner workspace sync {runner} --path <local-worktree> --mode snapshot"
+        ),
+        format!(
+            "Then run the build in the returned runner_path: homeboy runner exec {runner} --cwd <runner_path> -- homeboy build <component>"
+        ),
+    ]
+}
+
+fn unsupported_build_lab_error(field: &'static str, runner_id: Option<&str>) -> Error {
+    Error::validation_invalid_argument(
+        field,
+        "homeboy build is not Lab-portable yet; it requires an explicit runner workspace sync and runner exec handoff instead of --runner/--lab-only on build."
+            .to_string(),
+        runner_id.map(str::to_string),
+        Some(build_lab_replacement_hints(runner_id)),
+    )
+}
+
 pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadOutcome> {
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -222,12 +249,18 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     let mut plan = base_lab_plan(request.command.as_ref());
     let Some(contract) = request.command.clone() else {
         if let Some(runner_id) = request.explicit_runner {
+            if is_build_command(request.normalized_args) {
+                return Err(unsupported_build_lab_error("runner", Some(runner_id)));
+            }
             return Err(unsupported_runner_error(
                 runner_id,
                 lab_runner_support_summary().unsupported_message,
             ));
         }
         if request.local_policy.deny_local_execution() {
+            if is_build_command(request.normalized_args) {
+                return Err(unsupported_build_lab_error("lab_only", None));
+            }
             return Err(local_execution_denied_error(
                 "command has no Lab contract",
                 None,
@@ -576,7 +609,7 @@ fn run_runner_resident_lab_offload(
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &command))
+            .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
 
@@ -595,7 +628,7 @@ fn run_runner_resident_lab_offload(
 
     eprintln!(
         "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
-        command.join(" "),
+        redact_argv_display(&command),
         runner_id,
         runner_workspace_root
     );
@@ -984,7 +1017,7 @@ fn prepare_lab_offload_workspace_stage(
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &command))
+            .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
 
@@ -1248,7 +1281,7 @@ fn run_lab_offload_inner(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
         source_path.display(),
         source_checkout_ref_display(&source_checkout),
-        command_prefix.argv.join(" "),
+        redact_argv_display(&command_prefix.argv),
         runner_id,
     );
     let capability_contract =
@@ -1368,7 +1401,7 @@ fn run_lab_offload_inner(
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
-        command.join(" "),
+        redact_argv_display(&command),
         runner_id,
         remote_cwd
     );
@@ -1634,8 +1667,8 @@ fn run_lab_offload_inner(
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
                         identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                        local_command: request.normalized_args.to_vec(),
-                        remote_command: remote_command.clone(),
+                        local_command: redact_argv(request.normalized_args),
+                        remote_command: redact_argv(&remote_command),
                         remote_workspace: &remote_cwd,
                         stdout: &exec_output.stdout,
                         stderr: &exec_output.stderr,
@@ -1662,8 +1695,8 @@ fn run_lab_offload_inner(
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
                 agent_task_lifecycle::AgentTaskPreDispatchFailure {
                     identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                    local_command: request.normalized_args.to_vec(),
-                    remote_command: remote_command.clone(),
+                    local_command: redact_argv(request.normalized_args),
+                    remote_command: redact_argv(&remote_command),
                     remote_workspace: &remote_cwd,
                     failure_message: &failure_message,
                     stdout: &exec_output.stdout,
@@ -2130,8 +2163,8 @@ fn missing_mutation_patch_error(
     exec_output: &super::super::RunnerExecOutput,
 ) -> Error {
     let flag_label = mutation_flag.unwrap_or("write");
-    let original_command = normalized_args.join(" ");
-    let remote_command = exec_output.argv.join(" ");
+    let original_command = redact_argv_display(normalized_args);
+    let remote_command = redact_argv_display(&exec_output.argv);
     let patch_artifact_id = exec_output
         .patch
         .as_ref()
@@ -2205,7 +2238,7 @@ fn append_runner_failure_context_summary(
         .unwrap_or("unknown contract field");
     stderr.push_str(&format!(
         "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`; contract field `{field}`; reason: {}.\n",
-        context.command.join(" "),
+        redact_argv_display(&context.command),
         context.runner_id,
         context.reason
     ));
@@ -3661,6 +3694,82 @@ mod tests {
         };
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("Lab-only execution refused"));
+    }
+
+    #[test]
+    fn build_runner_error_gives_managed_runner_replacement() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &[
+                "homeboy".to_string(),
+                "build".to_string(),
+                "homeboy".to_string(),
+            ],
+            explicit_runner: Some("homeboy-lab"),
+            force_hot: false,
+            local_policy: LabLocalExecutionPolicy::default(),
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+        });
+
+        let Err(err) = outcome else {
+            panic!("build --runner should fail before local execution");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("homeboy build is not Lab-portable yet"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+                "homeboy runner workspace sync homeboy-lab --path <local-worktree> --mode snapshot"
+            ))));
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+                "homeboy runner exec homeboy-lab --cwd <runner_path> -- homeboy build <component>"
+            ))));
+    }
+
+    #[test]
+    fn build_lab_only_error_gives_managed_runner_replacement() {
+        let outcome = execute_lab_offload(LabOffloadRequest {
+            command: None,
+            normalized_args: &[
+                "homeboy".to_string(),
+                "build".to_string(),
+                "homeboy".to_string(),
+            ],
+            explicit_runner: None,
+            force_hot: false,
+            local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
+            allow_dirty_lab_workspace: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+        });
+
+        let Err(err) = outcome else {
+            panic!("build --lab-only should fail before local execution");
+        };
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("homeboy build is not Lab-portable yet"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+                "homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot"
+            ))));
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
+                "homeboy runner exec <runner-id> --cwd <runner_path> -- homeboy build <component>"
+            ))));
     }
 
     #[test]
