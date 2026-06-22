@@ -6,6 +6,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::json;
@@ -460,6 +461,7 @@ fn remote_runner_result_from_exec_output(
     if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
         data["mirror_run_id"] = json!(mirror_run_id);
     }
+    let artifacts = mirror_file_artifact_content(exec_output.artifacts, &exec_output.remote_cwd);
     RemoteRunnerJobResult {
         exit_code,
         stdout: Some(exec_output.stdout),
@@ -468,7 +470,7 @@ fn remote_runner_result_from_exec_output(
         mutation_artifacts,
         data: Some(data),
         observation_run_ids: exec_output.mirror_run_id.into_iter().collect(),
-        artifacts: exec_output.artifacts,
+        artifacts,
         artifact_refs: exec_output
             .runner_result
             .map(|result| {
@@ -483,6 +485,7 @@ fn remote_runner_result_from_exec_output(
                         mime: artifact.mime,
                         size_bytes: artifact.size_bytes,
                         sha256: artifact.sha256,
+                        content_base64: None,
                         metadata: None,
                     })
                     .collect()
@@ -491,6 +494,38 @@ fn remote_runner_result_from_exec_output(
         metrics: exec_output.metrics,
         capture: exec_output.capture,
     }
+}
+
+fn mirror_file_artifact_content(
+    artifacts: Vec<JobArtifactMetadata>,
+    remote_cwd: &str,
+) -> Vec<JobArtifactMetadata> {
+    artifacts
+        .into_iter()
+        .map(|mut artifact| {
+            if artifact.content_base64.is_none() {
+                if let Some(path) = artifact.path.as_deref().map(|path| {
+                    let path = std::path::PathBuf::from(path);
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        std::path::Path::new(remote_cwd).join(path)
+                    }
+                }) {
+                    if path.is_file() {
+                        if let Ok(content) = std::fs::read(&path) {
+                            artifact.size_bytes = artifact
+                                .size_bytes
+                                .or_else(|| u64::try_from(content.len()).ok());
+                            artifact.content_base64 =
+                                Some(base64::engine::general_purpose::STANDARD.encode(content));
+                        }
+                    }
+                }
+            }
+            artifact
+        })
+        .collect()
 }
 
 fn cancelled_output(
@@ -876,6 +911,7 @@ mod tests {
                     mime: Some("text/x-diff".to_string()),
                     size_bytes: Some(42),
                     sha256: Some("abc123".to_string()),
+                    content_base64: None,
                     metadata: Some(json!({ "kind": "lab_fix_patch" })),
                 }],
                 metrics: None,
@@ -904,6 +940,58 @@ mod tests {
                 .and_then(|artifacts| artifacts.patch_ref.as_ref())
                 .map(|artifact| artifact.artifact_id.as_str()),
             Some("patch.diff")
+        );
+    }
+
+    #[test]
+    fn reverse_worker_result_mirrors_file_artifact_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_path = dir.path().join("report.txt");
+        std::fs::write(&artifact_path, b"worker artifact bytes").expect("write artifact");
+
+        let result = remote_runner_result_from_exec_output(
+            super::super::execution::RunnerExecOutput {
+                variant: "exec",
+                command: "runner.exec",
+                runner_id: "lab".to_string(),
+                dry_run: false,
+                mode: RunnerExecMode::Local,
+                argv: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                remote_cwd: dir.path().display().to_string(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                source_snapshot: None,
+                job: None,
+                runner_job: None,
+                job_id: None,
+                job_events: None,
+                mirror_run_id: None,
+                patch: None,
+                mutation_artifacts: None,
+                artifacts: vec![JobArtifactMetadata {
+                    id: "report".to_string(),
+                    name: Some("report.txt".to_string()),
+                    path: Some("report.txt".to_string()),
+                    url: None,
+                    mime: Some("text/plain".to_string()),
+                    size_bytes: Some(21),
+                    sha256: None,
+                    content_base64: None,
+                    metadata: None,
+                }],
+                metrics: None,
+                capture: None,
+                runner_result: None,
+                handoff: None,
+                diagnostics: None,
+            },
+            0,
+        );
+
+        assert_eq!(
+            result.artifacts[0].content_base64.as_deref(),
+            Some("d29ya2VyIGFydGlmYWN0IGJ5dGVz")
         );
     }
 

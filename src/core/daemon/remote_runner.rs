@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::{daemon_endpoint_response, error_response, HttpResponse};
 use crate::core::api_jobs::{
-    JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    JobArtifactMetadata, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
 use crate::core::error::{Error, Result};
 use crate::core::paths;
@@ -150,7 +150,7 @@ pub(in crate::core::daemon) fn route(
 }
 
 fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
-    let Some((job_id, artifact_id)) = job_artifact_path(path) else {
+    let Some((job_id, artifact_id, content)) = job_artifact_path(path) else {
         return error_response(
             404,
             Error::validation_invalid_argument(
@@ -164,7 +164,12 @@ fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
         );
     };
 
-    match lookup_artifact(job_id, &artifact_id, job_store) {
+    let result = if content {
+        lookup_artifact_content(job_id, &artifact_id, job_store)
+    } else {
+        lookup_artifact(job_id, &artifact_id, job_store)
+    };
+    match result {
         Ok(body) => daemon_endpoint_response("runner.jobs.artifacts.lookup", body),
         Err(err) => error_response(404, err),
     }
@@ -172,6 +177,11 @@ fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
 
 fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Result<Value> {
     let job = job_store.get(job_id)?;
+    let encoded_artifact_id = crate::core::execution_contract::encode_uri_component(artifact_id);
+    let content_path = format!("/runner/jobs/{job_id}/artifacts/{encoded_artifact_id}/content");
+    let content_available = mirrored_artifact_content(job_id, artifact_id, job_store)?
+        .and_then(|artifact| artifact.content_base64)
+        .is_some();
     let artifact = job
         .artifacts
         .iter()
@@ -183,7 +193,7 @@ fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Res
                 format!("remote runner artifact record not found: {artifact_id}"),
                 Some(artifact_id.to_string()),
                 Some(vec![
-                    "Reverse broker artifact lookup exposes metadata posted with the finished job; artifact bytes are not stored by the broker yet.".to_string(),
+                    "Reverse broker artifact lookup exposes metadata posted with the finished job and a content path when worker-mirrored bytes are present.".to_string(),
                 ]),
             )
         })?;
@@ -194,15 +204,86 @@ fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Res
         "artifact_id": artifact_id,
         "artifact": artifact,
         "retrieval": {
-            "mode": "metadata_only",
-            "content_available": false,
-            "content_url": null,
-            "fetch_command": null,
-            "metadata_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
-            "future_content_path": format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
-            "hint": "Reverse broker artifacts currently retain metadata only. Use runner-side artifact commands for bytes until broker content proxying lands."
+            "mode": "broker_content_path",
+            "content_available": content_available,
+            "content_url": if content_available { json!(content_path.clone()) } else { Value::Null },
+            "fetch_command": if content_available { json!(format!("curl -fsS {content_path}")) } else { Value::Null },
+            "metadata_path": format!("/runner/jobs/{job_id}/artifacts/{encoded_artifact_id}"),
+            "content_path": content_path,
+            "hint": "Reverse broker artifacts are mirrored from the worker finish payload and can be fetched through the broker content path."
         }
     }))
+}
+
+fn lookup_artifact_content(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Result<Value> {
+    let artifact = mirrored_artifact_content(job_id, artifact_id, job_store)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("remote runner artifact content not found: {artifact_id}"),
+            Some(artifact_id.to_string()),
+            Some(vec![
+                "Only artifacts mirrored by the reverse worker finish payload can be fetched from the broker content path.".to_string(),
+            ]),
+        )
+    })?;
+    let content_base64 = artifact.content_base64.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("remote runner artifact content not mirrored: {artifact_id}"),
+            Some(artifact_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(json!({
+        "command": "api.runner.jobs.artifacts.content",
+        "job_id": job_id.to_string(),
+        "artifact_id": artifact.id,
+        "content_available": true,
+        "retrieval": inline_content_retrieval(),
+        "filename": artifact.name.unwrap_or_else(|| artifact_id.to_string()),
+        "mime": artifact.mime,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+        "content_base64": content_base64,
+    }))
+}
+
+fn mirrored_artifact_content(
+    job_id: Uuid,
+    artifact_id: &str,
+    job_store: &JobStore,
+) -> Result<Option<JobArtifactMetadata>> {
+    for event in job_store.events(job_id)?.into_iter().rev() {
+        if event.kind != JobEventKind::Result {
+            continue;
+        }
+        let Some(data) = event.data else {
+            continue;
+        };
+        let result: RemoteRunnerJobResult = serde_json::from_value(data).map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse remote runner result event".to_string()),
+            )
+        })?;
+        if let Some(artifact) = result
+            .artifacts
+            .into_iter()
+            .find(|artifact| artifact.id == artifact_id)
+        {
+            return Ok(Some(artifact));
+        }
+    }
+    Ok(None)
+}
+
+fn inline_content_retrieval() -> Value {
+    json!({
+        "mode": "inline_base64",
+        "content_available": true,
+        "content_field": "content_base64",
+        "encoding": "base64",
+    })
 }
 
 fn reconcile(job_store: &JobStore) -> Result<Value> {
@@ -366,10 +447,15 @@ fn job_path(path: &str) -> Option<(Uuid, &str)> {
     Some((job_id, operation))
 }
 
-fn job_artifact_path(path: &str) -> Option<(Uuid, String)> {
+fn job_artifact_path(path: &str) -> Option<(Uuid, String, bool)> {
     let tail = path.strip_prefix("/runner/jobs/")?;
     let (job_id, tail) = tail.split_once('/')?;
     let artifact_id = tail.strip_prefix("artifacts/")?;
+    let (artifact_id, content) = if let Some(artifact_id) = artifact_id.strip_suffix("/content") {
+        (artifact_id, true)
+    } else {
+        (artifact_id, false)
+    };
     if artifact_id.is_empty() || artifact_id.contains('/') {
         return None;
     }
@@ -377,6 +463,7 @@ fn job_artifact_path(path: &str) -> Option<(Uuid, String)> {
     Some((
         job_id,
         crate::core::execution_contract::decode_uri_component(artifact_id),
+        content,
     ))
 }
 
@@ -636,6 +723,103 @@ mod auth_tests {
         );
         assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
         assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+    }
+
+    #[test]
+    fn broker_artifact_content_path_returns_worker_mirrored_bytes() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+
+        let finish = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/finish"),
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": {
+                    "exit_code": 0,
+                    "artifacts": [{
+                        "id": "report.txt",
+                        "name": "report.txt",
+                        "path": "/worker/report.txt",
+                        "mime": "text/plain",
+                        "size_bytes": 21,
+                        "content_base64": "d29ya2VyIGFydGlmYWN0IGJ5dGVz"
+                    }]
+                }
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
+        assert!(finish.body["body"]["job"]["artifacts"][0]
+            .get("content_base64")
+            .is_none());
+
+        let metadata = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/artifacts/report.txt"),
+            None,
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(
+            metadata.status_code, 200,
+            "metadata body: {}",
+            metadata.body
+        );
+        assert_eq!(
+            metadata.body["body"]["retrieval"]["content_available"],
+            json!(true)
+        );
+        assert_eq!(
+            metadata.body["body"]["retrieval"]["content_path"],
+            json!(format!(
+                "/runner/jobs/{job_id}/artifacts/report.txt/content"
+            ))
+        );
+
+        let content = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/artifacts/report.txt/content"),
+            None,
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(content.status_code, 200, "content body: {}", content.body);
+        assert_eq!(content.body["body"]["content_available"], json!(true));
+        assert_eq!(
+            content.body["body"]["retrieval"]["mode"],
+            json!("inline_base64")
+        );
+        assert_eq!(
+            content.body["body"]["content_base64"],
+            json!("d29ya2VyIGFydGlmYWN0IGJ5dGVz")
+        );
     }
 
     #[test]

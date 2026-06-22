@@ -1418,6 +1418,7 @@ mod tests {
                 mime: None,
                 size_bytes: None,
                 sha256: None,
+                content_base64: None,
                 metadata: None,
             }],
         };
@@ -1552,6 +1553,7 @@ mod tests {
                 mime: None,
                 size_bytes: None,
                 sha256: None,
+                content_base64: None,
                 metadata: None,
             }],
         };
