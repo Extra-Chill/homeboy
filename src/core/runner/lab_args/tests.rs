@@ -401,8 +401,7 @@ fn injected_default_provider_config_is_remappable() {
             &injected,
             &[LabPathRemap {
                 local: "/Users/user/Developer/example-provider@oauth".to_string(),
-                remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth"
-                    .to_string(),
+                remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth".to_string(),
             }],
         );
         let cfg_idx = remapped

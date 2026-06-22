@@ -1536,7 +1536,10 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
             json!("task-overlay-prepare")
         );
         assert_eq!(failed["failure_summary"]["phase"], json!("prepare"));
-        assert_eq!(failed["failure_summary"]["provider"], json!("synthetic-runtime"));
+        assert_eq!(
+            failed["failure_summary"]["provider"],
+            json!("synthetic-runtime")
+        );
         assert_eq!(
             failed["failure_summary"]["failure_phase"],
             json!("runtime_overlay_preparation")
