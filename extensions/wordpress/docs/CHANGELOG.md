@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.31] - 2026-06-22
+
+### Changed
+- Require public Codebox result envelopes
+
 ## [3.12.30] - 2026-06-22
 
 ### Changed
