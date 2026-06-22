@@ -774,7 +774,6 @@
         "structural::src/core/code_audit/core_fingerprint.rs::GodFile",
         "structural::src/core/code_audit/detectors/field_patterns.rs::GodFile",
         "structural::src/core/code_audit/mod.rs::GodFile",
-        "structural::src/core/component/audit.rs::GodFile",
         "structural::src/core/component/inventory.rs::GodFile",
         "structural::src/core/component/inventory.rs::HighItemCount",
         "structural::src/core/component/mod.rs::GodFile",
