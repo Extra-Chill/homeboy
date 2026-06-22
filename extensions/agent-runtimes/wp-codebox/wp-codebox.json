@@ -212,6 +212,16 @@
           "remediation": "Install WP Codebox or set the generic runtime_bin executor config; HOMEBOY_WP_CODEBOX_BIN remains a legacy compatibility env alias."
         }
       ],
+      "runner_sources": [
+        {
+          "id": "wp-codebox.source",
+          "label": "WP Codebox source cache",
+          "path": "~/.cache/homeboy/wp-codebox/source",
+          "remote_url": "https://github.com/Automattic/wp-codebox.git",
+          "git_ref": "main",
+          "remediation": "Refresh the managed WP Codebox source cache before dispatching WP Codebox-backed runner workloads."
+        }
+      ],
       "workspace_tools": {
         "readonly": [
           "workspace_ls",
