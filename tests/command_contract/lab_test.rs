@@ -110,6 +110,44 @@ fn rig_check_supports_lab_runner_but_rig_up_stays_local_only() {
 }
 
 #[test]
+fn lab_route_contract_carries_command_specific_requirements() {
+    let command = parsed_command(&["homeboy", "trace"]);
+
+    let route_contract = command
+        .lab_route_contract()
+        .expect("route contract resolves")
+        .expect("trace has a Lab route contract");
+
+    assert_eq!(route_contract.command.hot_label, "trace");
+    assert!(route_contract.requires_playwright);
+    assert!(route_contract.required_extensions.is_empty());
+    assert!(
+        !route_contract
+            .command
+            .routing_policy
+            .infer_source_path_tools
+    );
+}
+
+#[test]
+fn local_execution_policy_names_legacy_flag_combinations() {
+    let default_policy = LabLocalExecutionPolicy::default();
+    assert!(!default_policy.allow_local_hot());
+    assert!(!default_policy.allow_local_fallback());
+    assert!(!default_policy.deny_local_execution());
+
+    let permissive_policy = LabLocalExecutionPolicy::from_flags(true, true, false);
+    assert!(permissive_policy.allow_local_hot());
+    assert!(permissive_policy.allow_local_fallback());
+    assert!(!permissive_policy.deny_local_execution());
+
+    let lab_only_policy = LabLocalExecutionPolicy::from_flags(true, true, true);
+    assert!(!lab_only_policy.allow_local_hot());
+    assert!(!lab_only_policy.allow_local_fallback());
+    assert!(lab_only_policy.deny_local_execution());
+}
+
+#[test]
 fn test_supports_lab_runner() {
     assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
     assert!(

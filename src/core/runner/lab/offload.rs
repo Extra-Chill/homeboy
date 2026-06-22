@@ -95,20 +95,7 @@ use super::workspace_plan::{
     lab_workspace_sync_mode_with_source_policy, preflight_patch_provider_git_checkout,
 };
 
-/// Local-execution escape hatches shared across the Lab routing and offload
-/// request layers. Grouping these two flags keeps the policy shape identical
-/// wherever a Lab command is allowed to stay local instead of offloading.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LabLocalExecutionPolicy {
-    /// Permit a `--force-hot` portable command to stay local even when a
-    /// default Lab runner exists.
-    pub allow_local_hot: bool,
-    /// Permit a selected Lab runner to fall back to local execution after
-    /// offload preflight fails.
-    pub allow_local_fallback: bool,
-    /// Fail instead of returning a local execution outcome.
-    pub deny_local_execution: bool,
-}
+pub use crate::command_contract::LabLocalExecutionPolicy;
 
 pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
@@ -249,7 +236,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 lab_runner_support_summary().unsupported_message,
             ));
         }
-        if request.local_policy.deny_local_execution {
+        if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(
                 "command has no Lab contract",
                 None,
@@ -273,7 +260,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         let reason = contract
             .unsupported_reason
             .unwrap_or("command is local-only");
-        if request.local_policy.deny_local_execution {
+        if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(reason, None));
         }
         plan = disabled_select_runner_plan(plan, reason);
@@ -281,7 +268,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     }
 
     if request.explicit_runner.is_none() && !contract.routing_policy.default_lab_offload {
-        if request.local_policy.deny_local_execution {
+        if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(
                 "automatic Lab offload disabled",
                 None,
@@ -303,10 +290,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         &contract,
         request.explicit_runner,
         request.force_hot,
-        request.local_policy.allow_local_hot,
+        request.local_policy.allow_local_hot(),
     )?;
     let Some(selection) = selection else {
-        let reason = if request.force_hot && request.local_policy.allow_local_hot {
+        let reason = if request.force_hot && request.local_policy.allow_local_hot() {
             "force_hot_local_override"
         } else if request.force_hot {
             "force_hot"
@@ -323,7 +310,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
-        if request.local_policy.deny_local_execution {
+        if request.local_policy.deny_local_execution() {
             return Err(local_execution_denied_error(reason, None));
         }
         return Ok(skipped_automatic_run_local(plan, reason));
@@ -405,13 +392,13 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     "release_gate",
                 ));
             }
-            if request.local_policy.deny_local_execution {
+            if request.local_policy.deny_local_execution() {
                 return Err(local_execution_denied_error(
                     &reason,
                     Some(&selection.runner_id),
                 ));
             }
-            if !request.local_policy.allow_local_fallback {
+            if !request.local_policy.allow_local_fallback() {
                 return Err(selected_runner_fallback_error(
                     &selection,
                     "Lab offload selected a runner but could not prepare it for remote execution",
@@ -1293,7 +1280,7 @@ fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
-                if request.local_policy.deny_local_execution {
+                if request.local_policy.deny_local_execution() {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 return Ok(automatic_capability_fallback(
@@ -1340,8 +1327,8 @@ fn run_lab_offload_inner(
                         &runner_status,
                         reason,
                         remediation,
-                        request.local_policy.allow_local_fallback,
-                        request.local_policy.deny_local_execution,
+                        request.local_policy.allow_local_fallback(),
+                        request.local_policy.deny_local_execution(),
                     );
                 }
                 LabRunnerSelectionSource::Explicit => {
@@ -1539,9 +1526,9 @@ fn run_lab_offload_inner(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if request.local_policy.deny_local_execution {
+                        if request.local_policy.deny_local_execution() {
                             Err(local_execution_denied_error(&reason, Some(runner_id)))
-                        } else if !request.local_policy.allow_local_fallback {
+                        } else if !request.local_policy.allow_local_fallback() {
                             Err(selected_runner_fallback_error(
                                 &selection,
                                 "Lab offload selected a runner but its daemon did not respond",
@@ -3749,11 +3736,7 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "test".to_string()],
             explicit_runner: None,
             force_hot: true,
-            local_policy: LabLocalExecutionPolicy {
-                allow_local_hot: true,
-                allow_local_fallback: false,
-                deny_local_execution: false,
-            },
+            local_policy: LabLocalExecutionPolicy::from_flags(true, false, false),
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,
@@ -3777,11 +3760,7 @@ mod tests {
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
             force_hot: false,
-            local_policy: LabLocalExecutionPolicy {
-                allow_local_hot: false,
-                allow_local_fallback: false,
-                deny_local_execution: true,
-            },
+            local_policy: LabLocalExecutionPolicy::from_flags(false, false, true),
             allow_dirty_lab_workspace: false,
             capture_patch: false,
             mutation_flag: None,

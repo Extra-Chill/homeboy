@@ -79,11 +79,11 @@ pub fn route_after_parse(
             normalized_args: routed_args,
             explicit_runner: cli.runner.as_deref(),
             force_hot: cli.force_hot,
-            local_policy: runners::LabLocalExecutionPolicy {
-                allow_local_hot: cli.allow_local_hot,
-                allow_local_fallback: cli.allow_local_fallback,
-                deny_local_execution: cli.lab_only,
-            },
+            local_policy: runners::LabLocalExecutionPolicy::from_flags(
+                cli.allow_local_hot,
+                cli.allow_local_fallback,
+                cli.lab_only,
+            ),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             capture_patch: mutation_flag.is_some(),
             mutation_flag,
@@ -374,13 +374,11 @@ fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()>
 fn lab_offload_command(
     command: &Commands,
 ) -> homeboy::core::Result<Option<runners::LabOffloadCommand>> {
-    let Some(contract) = command.lab_contract() else {
+    let Some(route_contract) = command.lab_route_contract()? else {
         return Ok(None);
     };
-    let required_extensions = command.lab_required_extensions()?;
-    Ok(Some(lab_routing::lab_offload_command_from_contract(
-        contract,
-        required_extensions,
+    Ok(Some(lab_routing::lab_offload_command_from_route_contract(
+        route_contract,
     )))
 }
 
