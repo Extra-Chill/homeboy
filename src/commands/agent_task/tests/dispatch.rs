@@ -278,6 +278,7 @@ fn controller_dispatch_args_preserve_top_level_workspace_context_in_plan() {
         concurrency: args.concurrency,
         run_id: args.run_id,
         core: args.core.into(),
+        backend_selection: None,
     };
     let plan = homeboy::core::agent_tasks::dispatch_service::build_dispatch_plan_with_provider_requirements(
             &dispatch_request,

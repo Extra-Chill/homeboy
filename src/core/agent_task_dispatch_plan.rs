@@ -1265,6 +1265,7 @@ mod tests {
                 },
                 queue_only: overrides.core.queue_only,
             },
+            backend_selection: None,
         }
     }
 
