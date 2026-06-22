@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.46] - 2026-06-22
+
+### Changed
+- Make WordPress agent contracts installable
+
 ## [3.12.45] - 2026-06-22
 
 ### Changed
