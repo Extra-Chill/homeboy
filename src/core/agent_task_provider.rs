@@ -2784,12 +2784,15 @@ fn normalize_provider_runtime_contract(
     }
 
     if let Some(status_path) = normalization.status_path.as_deref() {
-        if let Some(status) = dotted_value(outcome, status_path).and_then(Value::as_str) {
+        if let Some(status) = dotted_value(outcome, status_path)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
             if let Some(mapped_status) = provider
                 .runtime_contract
                 .lifecycle_states
                 .outcome_statuses
-                .get(status)
+                .get(&status)
                 .copied()
             {
                 outcome.status = mapped_status;
@@ -2798,7 +2801,7 @@ fn normalize_provider_runtime_contract(
                 .runtime_contract
                 .lifecycle_states
                 .failure_classifications
-                .get(status)
+                .get(&status)
                 .copied()
             {
                 outcome.failure_classification = Some(mapped_classification);
