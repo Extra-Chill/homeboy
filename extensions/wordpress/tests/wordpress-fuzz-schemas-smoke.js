@@ -169,6 +169,15 @@ assert.deepEqual(failingBudgetResult.findings.map((finding) => finding.code), [
 assert.equal(failingBudgetResult.diagnostics[0].severity, 'failure');
 assert.equal(failingBudgetResult.summary.performance_metrics.query_count, 5);
 
+const errorStatusResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	status: 'error',
+	cases: [{ id: 'error-case', status: 'error' }],
+});
+
+assert.equal(errorStatusResult.status, 'errored');
+assert.equal(errorStatusResult.cases[0].status, 'errored');
+
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ schema: 'other/v1' }), /Unsupported/);
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ surfaces: [{ type: 'woocommerce-product' }] }), /Unsupported WordPress surface type/);
 assert.throws(() => normalizeWordPressFuzzResult({ cases: [{ status: 'unknown' }] }), /Unsupported WordPress fuzz case status/);
