@@ -7,14 +7,15 @@ pub(crate) use std::process::Command;
 
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerFromSpecArgs,
-    AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerMaterializeArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
-    controller_run_action_with_executor, controller_run_next_with_executor,
+    controller_run_action_with_executor, controller_run_from_spec_with_test_executor,
+    controller_run_next_with_executor,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     retry, run_loaded_plan, run_next_with_executor, run_resume_with_executor, run_submitted, submit,

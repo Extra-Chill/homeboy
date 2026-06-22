@@ -19,15 +19,17 @@ use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
+use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopControllerState;
 use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
 use super::super::CmdResult;
 use super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
-    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs,
+    AgentTaskControllerPlanArgs, AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs,
+    AgentTaskControllerRunNextArgs, AgentTaskControllerValidateProofArgs, AgentTaskLoopArgs,
+    AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
+    AgentTaskLoopStatusArgs,
 };
 use super::command_json_value;
 
@@ -42,6 +44,7 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
             Ok((command_json_value(record)?, 0))
         }
         AgentTaskControllerCommand::FromSpec(spec_args) => controller_from_spec(spec_args),
+        AgentTaskControllerCommand::RunFromSpec(run_args) => controller_run_from_spec(run_args),
         AgentTaskControllerCommand::Materialize(materialize_args) => {
             controller_materialize(materialize_args)
         }
@@ -264,24 +267,123 @@ fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdR
 }
 
 pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
-    let source = agent_task_controller_service::load_materialize_spec_source(&args.spec)?;
+    let materialized =
+        materialize_controller_spec(&args.spec, args.inputs.as_deref(), &args.policy_results)?;
+    Ok((materialized.value, 0))
+}
+
+fn controller_run_from_spec(args: AgentTaskControllerRunFromSpecArgs) -> CmdResult<Value> {
+    controller_run_from_spec_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+#[cfg(test)]
+pub(super) fn controller_run_from_spec_with_test_executor<E>(
+    args: AgentTaskControllerRunFromSpecArgs,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    controller_run_from_spec_with_executor(args, executor)
+}
+
+fn controller_run_from_spec_with_executor<E>(
+    args: AgentTaskControllerRunFromSpecArgs,
+    executor: E,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    if args.max_actions == 0 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "max-actions",
+            "agent-task controller run-from-spec requires --max-actions greater than zero",
+            Some(args.spec),
+            None,
+        ));
+    }
+
+    let materialized =
+        materialize_controller_spec(&args.spec, args.inputs.as_deref(), &args.policy_results)?;
+    let from_spec = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest {
+        spec: materialized.spec.clone(),
+    })?;
+    let defaults = ControllerDispatchDefaults::from_run_from_spec_args(&args);
+    let dispatch = CliDispatchHook {
+        executor: executor.clone(),
+        defaults,
+    };
+    let mut results = Vec::new();
+    let mut exit_code = 0;
+    let mut stopped_reason = "idle".to_string();
+
+    for _ in 0..args.max_actions {
+        let result = agent_task_controller_service::run_next(
+            &from_spec.loop_id,
+            executor.clone(),
+            &dispatch,
+        )?;
+        exit_code = result.exit_code;
+        let claimed = result.value.claimed;
+        let controller_state = result.value.controller.state;
+        let value = serde_json::to_value(result.value)
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+        results.push(value);
+
+        if exit_code != 0 {
+            stopped_reason = "action_failed".to_string();
+            break;
+        }
+        if !claimed {
+            stopped_reason = "idle".to_string();
+            break;
+        }
+        if controller_state_is_terminal(controller_state) {
+            stopped_reason = "terminal_state".to_string();
+            break;
+        }
+        stopped_reason = "max_actions_reached".to_string();
+    }
+
+    let status =
+        homeboy::core::agent_tasks::loop_controller::controller_status_report(&from_spec.loop_id)?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
+            "loop_id": from_spec.loop_id.clone(),
+            "max_actions": args.max_actions,
+            "stopped_reason": stopped_reason,
+            "materialization": materialized.value,
+            "from_spec": from_spec,
+            "results": results,
+            "status": status,
+        }),
+        exit_code,
+    ))
+}
+
+fn materialize_controller_spec(
+    spec_source: &str,
+    inputs_source: Option<&str>,
+    policy_result_sources: &[String],
+) -> homeboy::core::Result<MaterializedControllerSpec> {
+    let source = agent_task_controller_service::load_materialize_spec_source(spec_source)?;
     let mut spec = source.spec;
-    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
-    let run_inputs = match args.inputs {
+    agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, spec_source);
+    let run_inputs = match inputs_source {
         Some(inputs) => {
-            serde_json::from_str(&config::read_json_spec_to_string(&inputs)?).map_err(|error| {
+            serde_json::from_str(&config::read_json_spec_to_string(inputs)?).map_err(|error| {
                 homeboy::core::Error::validation_invalid_argument(
                     "inputs",
                     error.to_string(),
-                    Some(inputs),
+                    Some(inputs.to_string()),
                     None,
                 )
             })?
         }
         None => Value::Null,
     };
-    let policy_results = args
-        .policy_results
+    let policy_results = policy_result_sources
         .iter()
         .map(|policy_result| parse_policy_result(policy_result))
         .collect::<homeboy::core::Result<Vec<_>>>()?;
@@ -290,13 +392,32 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
         run_inputs: &run_inputs,
         policy_results: &policy_results,
     })?;
-    let mut value = command_json_value(report)?;
+    let mut value = command_json_value(&report)?;
     if let Some(generator_evidence) = source.generator_evidence {
         if let Value::Object(map) = &mut value {
             map.insert("generator_evidence".to_string(), generator_evidence);
         }
     }
-    Ok((value, 0))
+    Ok(MaterializedControllerSpec {
+        spec: report.spec,
+        value,
+    })
+}
+
+struct MaterializedControllerSpec {
+    spec: AgentTaskRepoLoopSpec,
+    value: Value,
+}
+
+fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
+    matches!(
+        state,
+        AgentTaskLoopControllerState::HumanReady
+            | AgentTaskLoopControllerState::Completed
+            | AgentTaskLoopControllerState::Abandoned
+            | AgentTaskLoopControllerState::Escalated
+            | AgentTaskLoopControllerState::Failed
+    )
 }
 
 fn parse_policy_result(
@@ -621,6 +742,15 @@ struct ControllerDispatchDefaults {
 
 impl ControllerDispatchDefaults {
     fn from_from_spec_args(args: &AgentTaskControllerFromSpecArgs) -> Self {
+        Self {
+            backend: args.dispatch_backend.clone(),
+            selector: args.dispatch_selector.clone(),
+            model: args.dispatch_model.clone(),
+            provider_config: args.dispatch_provider_config.clone(),
+        }
+    }
+
+    fn from_run_from_spec_args(args: &AgentTaskControllerRunFromSpecArgs) -> Self {
         Self {
             backend: args.dispatch_backend.clone(),
             selector: args.dispatch_selector.clone(),

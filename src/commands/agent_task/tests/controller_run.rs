@@ -151,6 +151,94 @@ fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_requ
     });
 }
 
+#[test]
+fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status() {
+    with_temp_home(|| {
+        let (value, exit_code) = controller_run_from_spec_with_test_executor(
+            AgentTaskControllerRunFromSpecArgs {
+                spec: serde_json::to_string(&json!({
+                    "loop_id": "run-from-spec-loop",
+                    "workflows": [
+                        { "workflow_id": "brief", "prompt": "Draft the brief." },
+                        { "workflow_id": "review", "prompt": "Review the brief." }
+                    ]
+                }))
+                .expect("spec json"),
+                inputs: Some(
+                    serde_json::to_string(&json!({
+                        "inputs": { "topic": "deterministic loops" },
+                        "metadata": { "run_key": "run-from-spec-test" }
+                    }))
+                    .expect("inputs json"),
+                ),
+                policy_results: Vec::new(),
+                max_actions: 1,
+                dispatch_backend: Some("fixture".to_string()),
+                dispatch_selector: None,
+                dispatch_model: None,
+                dispatch_provider_config: None,
+            },
+            CapturingExecutor::default(),
+        )
+        .expect("run from spec");
+
+        assert_eq!(exit_code, 0, "{value:#}");
+        assert_eq!(
+            value["schema"],
+            "homeboy/agent-task-loop-controller-run-from-spec-result/v1"
+        );
+        assert_eq!(value["loop_id"], "run-from-spec-loop");
+        assert_eq!(value["max_actions"], 1);
+        assert_eq!(value["stopped_reason"], "max_actions_reached");
+        assert_eq!(
+            value["materialization"]["spec"]["workflows"][0]["inputs"]["topic"],
+            "deterministic loops"
+        );
+        assert_eq!(value["from_spec"]["initialized"], true);
+        assert_eq!(value["results"].as_array().expect("results").len(), 1);
+        assert_eq!(value["results"][0]["claimed"], true);
+        assert_eq!(
+            value["status"]["controller"]["next_actions"][0]["status"],
+            "completed"
+        );
+        assert_eq!(
+            value["status"]["controller"]["next_actions"][1]["status"],
+            "pending"
+        );
+        assert_eq!(
+            value["status"]["controller"]["metadata"]["run_key"],
+            "run-from-spec-test"
+        );
+    });
+}
+
+#[test]
+fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
+    with_temp_home(|| {
+        let error = controller_run_from_spec_with_test_executor(
+            AgentTaskControllerRunFromSpecArgs {
+                spec: serde_json::to_string(&json!({
+                    "loop_id": "run-from-spec-zero-loop",
+                    "workflows": [{ "workflow_id": "brief", "prompt": "Draft." }]
+                }))
+                .expect("spec json"),
+                inputs: None,
+                policy_results: Vec::new(),
+                max_actions: 0,
+                dispatch_backend: Some("fixture".to_string()),
+                dispatch_selector: None,
+                dispatch_model: None,
+                dispatch_provider_config: None,
+            },
+            CapturingExecutor::default(),
+        )
+        .expect_err("zero max-actions is rejected");
+
+        assert_eq!(error.details["field"], "max-actions");
+        assert!(error.message.contains("greater than zero"));
+    });
+}
+
 #[derive(Clone, Default)]
 struct ArtifactCapturingExecutor {
     observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
