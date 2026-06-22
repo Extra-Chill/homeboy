@@ -826,7 +826,7 @@
   },
   "fuzz": {
     "extension_script": "scripts/fuzz/fuzz-runner.cjs",
-    "capabilities": ["wordpress-fuzz-runner", "wp-codebox-fuzz-run", "wordpress-fuzz-coverage-aggregate"],
+    "capabilities": ["wordpress-fuzz-runner", "wp-codebox-fuzz-suite", "wp-codebox-fuzz-run", "wordpress-fuzz-coverage-aggregate"],
     "env": [
       "HOMEBOY_FUZZ_WORKLOAD_PATH",
       "HOMEBOY_FUZZ_WORKLOAD_ID",
