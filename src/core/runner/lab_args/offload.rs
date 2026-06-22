@@ -111,11 +111,11 @@ pub(in crate::core::runner) fn rewrite_lab_offload_args(
         if arg.starts_with("--runner=") {
             continue;
         }
-        if arg == "--output" {
+        if arg == "--output" || arg == "--artifact-root" {
             let _ = iter.next();
             continue;
         }
-        if arg.starts_with("--output=") {
+        if arg.starts_with("--output=") || arg.starts_with("--artifact-root=") {
             continue;
         }
         stripped.push(arg.clone());
@@ -159,11 +159,11 @@ pub(in crate::core::runner) fn rewrite_runner_resident_lab_offload_args(
         if arg.starts_with("--runner=") {
             continue;
         }
-        if arg == "--output" {
+        if arg == "--output" || arg == "--artifact-root" {
             let _ = iter.next();
             continue;
         }
-        if arg.starts_with("--output=") {
+        if arg.starts_with("--output=") || arg.starts_with("--artifact-root=") {
             continue;
         }
         if is_service_expose && arg == "--server" {

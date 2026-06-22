@@ -3317,12 +3317,6 @@ mod tests {
             .is_some_and(|hint| hint.contains("--runner <runner-id>"))));
     }
 
-    fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
-        let mut command = portable_lab_command(label);
-        command.routing_policy.release_gate = true;
-        command
-    }
-
     #[test]
     fn release_gate_force_hot_allow_local_hot_fails_closed_with_default_runner() {
         // #4605: --force-hot --allow-local-hot must not silently bypass Lab
