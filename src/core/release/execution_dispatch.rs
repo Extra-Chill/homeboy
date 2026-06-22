@@ -296,7 +296,15 @@ fn run_remote_sync_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
 ) -> ReleaseStepResult {
-    match super::planning_git::validate_remote_sync(context.component) {
+    let result = super::planning_git::validate_remote_sync(context.component).and_then(|()| {
+        if context.options.pipeline.head {
+            super::planning_git::validate_head_reachable_from_default_branch(context.component)
+        } else {
+            super::planning_git::validate_default_branch_ancestry(context.component)
+        }
+    });
+
+    match result {
         Ok(()) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),
@@ -771,7 +779,7 @@ mod tests {
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("non-default branch"));
+            .contains("branch 'feature' because the repo default branch is 'main'"));
     }
 
     #[test]
