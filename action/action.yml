@@ -80,6 +80,10 @@ inputs:
     description: 'On PRs, compare audit/lint/test failure counts against the base SHA and fail only when the PR is worse. Opt-in; PR autofix is skipped while enabled.'
     required: false
     default: 'false'
+  baseline-commands:
+    description: 'Commands to rerun at the PR base when differential-gating is true. Use auto to rerun requested audit/lint/test commands, a comma-separated subset such as audit,test, or none to skip baseline reruns.'
+    required: false
+    default: 'auto'
   observation-window:
     description: 'Duration window to export Homeboy observations after command execution (e.g. "24h", "7d", "30m"). Export is best-effort and non-fatal.'
     required: false
@@ -562,6 +566,7 @@ runs:
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         COMPONENT_NAME: ${{ inputs.component }}
         EXTRA_ARGS: ${{ inputs.args }}
+        BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy baseline
       run: bash ${{ github.action_path }}/scripts/core/run-baseline-commands.sh

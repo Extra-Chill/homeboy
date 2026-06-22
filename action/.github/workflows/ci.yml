@@ -101,6 +101,10 @@ on:
         description: 'Enable PR differential gating for audit/lint/test.'
         type: string
         default: 'false'
+      baseline-commands:
+        description: 'Commands to rerun at the PR base when differential-gating is true. Use auto, a comma-separated subset, or none.'
+        type: string
+        default: 'auto'
       observation-window:
         description: 'Duration window for best-effort observation export.'
         type: string
@@ -301,7 +305,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
@@ -376,6 +379,7 @@ jobs:
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
           differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: ${{ inputs.baseline-commands }}
           observation-window: ${{ inputs.observation-window }}
           autofix: ${{ inputs.autofix }}
           autofix-mode: ${{ inputs.autofix-mode }}

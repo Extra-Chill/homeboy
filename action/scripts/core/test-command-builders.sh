@@ -127,6 +127,26 @@ assert_equals \
   "$(build_review_report_command "${COMPONENT}" "${WORKSPACE}")" \
   "review report keeps path with changed-since"
 
+assert_equals \
+  "audit,lint,test" \
+  "$(resolve_baseline_commands "audit,lint,test" "auto")" \
+  "baseline auto keeps requested audit/lint/test commands"
+
+assert_equals \
+  "audit" \
+  "$(resolve_baseline_commands "audit,lint,test" "audit")" \
+  "baseline subset keeps only requested baseline command"
+
+assert_equals \
+  "" \
+  "$(resolve_baseline_commands "test" "audit")" \
+  "baseline subset intersects with matrix command"
+
+assert_equals \
+  "" \
+  "$(resolve_baseline_commands "audit,lint,test" "none")" \
+  "baseline none disables differential reruns"
+
 EXTRA_ARGS="--format json"
 assert_equals \
   "homeboy audit data-machine --path /tmp/workspace --changed-since origin/main --format json" \
