@@ -2,11 +2,13 @@ use clap::{Args, Subcommand};
 use serde::{Serialize, Serializer};
 
 use homeboy::core::git::{
-    self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
-    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
-    IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions,
-    PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrState,
-    PushOptions, RebaseOptions,
+    self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrFleetOutput,
+    GithubPrOutput, GithubPrReadinessOutput, IssueCloseOptions, IssueCloseReason,
+    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
+    PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions,
+    PrLandOptions, PrLandOutput, PrLandRefreshHelper, PrMergeabilityReconcileOptions,
+    PrMergeabilityReconcileOutput, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions,
+    PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -484,6 +486,19 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Explain PR merge readiness without attempting a merge
+    Readiness {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Post a comment on a PR. Three modes:
     ///
     /// 1. Plain: no marker flags — a fresh comment is appended.
@@ -563,8 +578,111 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Report and optionally land a fleet of pull requests.
+    Fleet {
+        /// Component ID
+        component_id: String,
+
+        /// PR numbers or URLs.
+        #[arg(value_name = "PR")]
+        refs: Vec<String>,
+
+        /// Update stale PR branches where GitHub can do so safely.
+        #[arg(long)]
+        update_branches: bool,
+
+        /// Merge green, clean PRs. Without this flag the command is read-only.
+        #[arg(long)]
+        apply: bool,
+
+        /// Merge method: merge, squash, or rebase.
+        #[arg(long, default_value = "squash")]
+        merge_method: String,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Compare GitHub mergeability with local git merge-tree evidence.
+    ReconcileMergeability {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Evaluate PR open/merge policy.
     Policy(PrPolicyArgs),
+    /// Refresh a PR branch from its current base and report conflicts/checks.
+    Refresh {
+        /// Component ID
+        component_id: String,
+
+        /// PR number or GitHub pull request URL.
+        pr: String,
+
+        /// Update strategy. `auto` uses branch/pull rebase git config, falling
+        /// back to rebase.
+        #[arg(long, default_value = "auto", value_parser = ["auto", "rebase", "merge", "ff-only"])]
+        strategy: String,
+
+        /// Push the refreshed PR branch when the worktree is clean and checks pass.
+        /// Uses --force-with-lease for rebase safety; plain force is not exposed.
+        #[arg(long)]
+        push: bool,
+
+        /// Lightweight check command to run after a clean refresh. Repeatable.
+        /// Defaults to `git diff --check` when omitted.
+        #[arg(long = "check", value_name = "COMMAND")]
+        checks: Vec<String>,
+
+        /// Workspace path to discover the component from a portable homeboy.json.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Land a train of ready PRs sequentially, pausing on the first blocker.
+    Land {
+        /// Repository as owner/repo or host/owner/repo.
+        repo: String,
+
+        /// PR numbers or URLs. URLs must point at the selected repo.
+        #[arg(value_name = "PR")]
+        prs: Vec<String>,
+
+        /// Merge method: merge, squash, or rebase.
+        #[arg(long, default_value = "squash", value_parser = ["merge", "squash", "rebase"])]
+        merge_method: String,
+
+        /// Delete the PR branch after merge.
+        #[arg(long)]
+        delete_branch: bool,
+
+        /// Inspect and report what would land without merging or refreshing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Safe helper program used to refresh a dirty dependent PR.
+        /// Not run through a shell. Combine with --refresh-helper-arg.
+        #[arg(long, value_name = "PROGRAM")]
+        refresh_helper: Option<String>,
+
+        /// Argument for --refresh-helper. Supports {repo}, {number}, {url}, {head_sha}.
+        #[arg(
+            long = "refresh-helper-arg",
+            value_name = "ARG",
+            requires = "refresh_helper"
+        )]
+        refresh_helper_args: Vec<String>,
+
+        /// Retry merge after this many base-branch-modified races.
+        #[arg(long, default_value_t = 1)]
+        max_base_retries: usize,
+    },
 }
 
 #[derive(Args)]
@@ -672,8 +790,13 @@ pub enum GitCommandOutput {
     Bulk(BulkResult<GitOutput>),
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
+    PrRefresh(PrRefreshOutput),
+    PrReadiness(GithubPrReadinessOutput),
     Find(GithubFindOutput),
+    ReconcileMergeability(PrMergeabilityReconcileOutput),
     Policy(PrPolicyDecision),
+    Fleet(GithubPrFleetOutput),
+    Land(PrLandOutput),
 }
 
 impl Serialize for GitCommandOutput {
@@ -686,8 +809,15 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Bulk(output) => ("bulk", serde_json::to_value(output)),
             GitCommandOutput::Issue(output) => ("issue", serde_json::to_value(output)),
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
+            GitCommandOutput::PrRefresh(output) => ("pr_refresh", serde_json::to_value(output)),
+            GitCommandOutput::PrReadiness(output) => ("pr_readiness", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
+            GitCommandOutput::ReconcileMergeability(output) => {
+                ("reconcile_mergeability", serde_json::to_value(output))
+            }
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
+            GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
+            GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;
@@ -1120,6 +1250,15 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Find(output), 0))
         }
+        PrCommand::Readiness {
+            component_id,
+            number,
+            path,
+        } => {
+            let output = git::pr_readiness(Some(&component_id), number, path)?;
+            let exit = if output.readiness.mergeable { 0 } else { 1 };
+            Ok((GitCommandOutput::PrReadiness(output), exit))
+        }
         PrCommand::Comment {
             component_id,
             number,
@@ -1180,7 +1319,106 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Pr(output), 0))
         }
+        PrCommand::Fleet {
+            component_id,
+            refs,
+            update_branches,
+            apply,
+            merge_method,
+            path,
+        } => {
+            if refs.is_empty() {
+                return Err(homeboy::core::Error::validation_missing_argument(vec![
+                    "at least one PR number or URL".to_string(),
+                ]));
+            }
+            let output = git::pr_fleet(
+                Some(&component_id),
+                PrFleetOptions {
+                    refs,
+                    update_branches,
+                    apply,
+                    merge_method,
+                    path,
+                },
+            )?;
+            let exit = if output.success { 0 } else { 1 };
+            Ok((GitCommandOutput::Fleet(output), exit))
+        }
+        PrCommand::ReconcileMergeability {
+            component_id,
+            number,
+            path,
+        } => {
+            let output = git::pr_reconcile_mergeability(
+                Some(&component_id),
+                PrMergeabilityReconcileOptions { number, path },
+            )?;
+            Ok((GitCommandOutput::ReconcileMergeability(output), 0))
+        }
         PrCommand::Policy(args) => run_pr_policy(args),
+        PrCommand::Refresh {
+            component_id,
+            pr,
+            strategy,
+            push,
+            checks,
+            path,
+        } => {
+            let strategy = parse_pr_refresh_strategy(&strategy)?;
+            let output = git::pr_refresh(
+                Some(&component_id),
+                PrRefreshOptions {
+                    pr,
+                    strategy,
+                    push,
+                    checks,
+                    path,
+                },
+            )?;
+            let exit = if output.success { 0 } else { 1 };
+            Ok((GitCommandOutput::PrRefresh(output), exit))
+        }
+        PrCommand::Land {
+            repo,
+            prs,
+            merge_method,
+            delete_branch,
+            dry_run,
+            refresh_helper,
+            refresh_helper_args,
+            max_base_retries,
+        } => {
+            let output = git::land_prs(PrLandOptions {
+                repo,
+                prs,
+                merge_method,
+                delete_branch,
+                dry_run,
+                refresh_helper: refresh_helper.map(|program| PrLandRefreshHelper {
+                    program,
+                    args: refresh_helper_args,
+                }),
+                max_base_retries,
+            })?;
+            let exit = if output.summary.blocked > 0 { 1 } else { 0 };
+            Ok((GitCommandOutput::Land(output), exit))
+        }
+    }
+}
+
+fn parse_pr_refresh_strategy(value: &str) -> homeboy::core::Result<PrRefreshStrategy> {
+    match value {
+        "auto" => Ok(PrRefreshStrategy::Auto),
+        "rebase" => Ok(PrRefreshStrategy::Rebase),
+        "merge" => Ok(PrRefreshStrategy::Merge),
+        "ff-only" => Ok(PrRefreshStrategy::FfOnly),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "strategy",
+            "strategy must be one of auto, rebase, merge, or ff-only",
+            Some(value.to_string()),
+            None,
+        )),
     }
 }
 
@@ -1421,5 +1659,36 @@ mod tests {
             };
 
         assert!(err.to_string().contains("--remote-url"));
+    }
+
+    #[test]
+    fn pr_readiness_flags_parse() {
+        let cli = TestCli::try_parse_from([
+            "git",
+            "pr",
+            "readiness",
+            "homeboy",
+            "--number",
+            "5805",
+            "--path",
+            "/tmp/homeboy",
+        ])
+        .expect("pr readiness flags parse");
+
+        match cli.command {
+            GitCommand::Pr(PrArgs {
+                command:
+                    PrCommand::Readiness {
+                        component_id,
+                        number,
+                        path,
+                    },
+            }) => {
+                assert_eq!(component_id, "homeboy");
+                assert_eq!(number, 5805);
+                assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
+            }
+            _ => panic!("expected pr readiness command"),
+        }
     }
 }

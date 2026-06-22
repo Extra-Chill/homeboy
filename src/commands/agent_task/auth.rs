@@ -4,21 +4,17 @@ use std::io::Read;
 
 use serde_json::Value;
 
+use homeboy::core::agent_tasks::provider as agent_task_provider;
+use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::secrets as agent_task_secrets;
 
 use super::super::CmdResult;
-use super::args::{AgentTaskAuthArgs, AgentTaskAuthCommand};
+use super::args::{AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskAuthStatusArgs};
 use crate::commands::utils::tty::prompt_password;
 
 pub(super) fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
     match args.command {
-        AgentTaskAuthCommand::Status(status_args) => Ok((
-            serde_json::json!({
-                "schema": "homeboy/agent-task-auth-status/v1",
-                "secret_env": agent_task_secrets::secret_env_status(&status_args.secret_env),
-            }),
-            0,
-        )),
+        AgentTaskAuthCommand::Status(status_args) => Ok((auth_status(status_args), 0)),
         AgentTaskAuthCommand::SetKeychain(set_args) => {
             let value = read_agent_task_secret_value(set_args.value, set_args.value_stdin)?;
             let status = agent_task_secrets::set_keychain_secret(
@@ -107,6 +103,61 @@ pub(super) fn auth(args: AgentTaskAuthArgs) -> CmdResult<Value> {
             ))
         }
     }
+}
+
+/// Report redacted secret-env readiness for the selected/default backend.
+///
+/// Resolves the same backend cook/dispatch would use (explicit `--backend`,
+/// else the extension/policy default), scopes the provider secret sources to
+/// that backend, and reports readiness for its required secrets. When the
+/// operator passes explicit `--secret-env` names those are used verbatim.
+/// Raw secret values are never emitted — only configured/source/value-present
+/// states. This replaces the previous behavior that returned an empty list
+/// whenever no `--secret-env` was passed, which made configured auth look
+/// absent.
+fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
+    let executor = ExtensionProviderAgentTaskExecutor::discover();
+    let providers = executor.providers();
+
+    // Backend the cook would use: explicit flag, else the policy/default backend.
+    let default_backend = agent_task_provider::default_backend().ok().flatten();
+    let selected_backend = status_args
+        .backend
+        .clone()
+        .or_else(|| default_backend.clone());
+
+    // Scope provider secret sources to the selected backend (and optional
+    // selector). Falling back to all-provider sources keeps status useful when
+    // no backend can be resolved.
+    let fallback_sources = match selected_backend.as_deref() {
+        Some(backend) => agent_task_provider::provider_secret_sources_for_backend(
+            providers,
+            backend,
+            status_args.selector.as_deref(),
+        ),
+        None => agent_task_provider::provider_secret_sources_for_providers(providers),
+    };
+
+    // Required secret env names: explicit operator-supplied names win; otherwise
+    // report every secret the selected backend declares.
+    let names: Vec<String> = if status_args.secret_env.is_empty() {
+        let mut names: Vec<String> = fallback_sources.keys().cloned().collect();
+        names.sort();
+        names
+    } else {
+        status_args.secret_env.clone()
+    };
+
+    let secret_env =
+        agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources);
+
+    serde_json::json!({
+        "schema": "homeboy/agent-task-auth-status/v1",
+        "selected_backend": selected_backend,
+        "default_backend": default_backend,
+        "selector": status_args.selector,
+        "secret_env": secret_env,
+    })
 }
 
 fn read_agent_task_secret_value(

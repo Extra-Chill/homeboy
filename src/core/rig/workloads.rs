@@ -20,6 +20,12 @@ pub struct RigWorkloadPathExpansion {
     pub expanded_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RigExtensionWorkloadInputs {
+    pub workload_paths: Vec<PathBuf>,
+    pub invocation_requirements: InvocationRequirements,
+}
+
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
     let mut ids: Vec<String> = match kind {
         RigWorkloadKind::Bench => rig_spec.bench_workloads.keys().cloned().collect(),
@@ -40,6 +46,22 @@ pub fn workloads_for_extension(
         .into_iter()
         .map(|expansion| expansion.expanded_path)
         .collect()
+}
+
+pub fn extension_workload_inputs(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    package_root: Option<&Path>,
+    extension_id: &str,
+) -> RigExtensionWorkloadInputs {
+    RigExtensionWorkloadInputs {
+        workload_paths: workloads_for_extension(rig_spec, kind, package_root, extension_id),
+        invocation_requirements: invocation_requirements_for_extension_workloads(
+            rig_spec,
+            kind,
+            extension_id,
+        ),
+    }
 }
 
 pub fn workload_path_expansions_for_extension(

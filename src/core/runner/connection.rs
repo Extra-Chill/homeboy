@@ -261,11 +261,17 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
-    let (active_jobs, active_job_state, active_job_error) = if connected {
+    let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
-            Some(session) => match active_runner_jobs(runner_id, session) {
-                Ok(jobs) => (jobs, RunnerActiveJobState::Available, None),
+            Some(session) => match runner_jobs(runner_id, session) {
+                Ok((active_jobs, stale_jobs)) => (
+                    active_jobs,
+                    stale_jobs,
+                    RunnerActiveJobState::Available,
+                    None,
+                ),
                 Err(err) => (
+                    Vec::new(),
                     Vec::new(),
                     RunnerActiveJobState::Unavailable,
                     Some(RunnerActiveJobError {
@@ -274,13 +280,25 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                     }),
                 ),
             },
-            None => (Vec::new(), RunnerActiveJobState::NotQueried, None),
+            None => (
+                Vec::new(),
+                Vec::new(),
+                RunnerActiveJobState::NotQueried,
+                None,
+            ),
         }
     } else {
-        (Vec::new(), RunnerActiveJobState::NotQueried, None)
+        (
+            Vec::new(),
+            Vec::new(),
+            RunnerActiveJobState::NotQueried,
+            None,
+        )
     };
     let active_job_count = active_jobs.len();
+    let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
+    let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,
@@ -289,7 +307,9 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         stale_daemon,
         active_jobs,
         active_runner_jobs,
+        stale_runner_jobs,
         active_job_count,
+        stale_runner_job_count,
         active_job_state,
         active_job_source,
         active_job_error,
@@ -307,10 +327,10 @@ fn active_runner_job_source(session: &RunnerSession) -> Option<RunnerActiveJobSo
     }
 }
 
-fn active_runner_jobs(
+fn runner_jobs(
     runner_id: &str,
     session: &RunnerSession,
-) -> Result<Vec<ActiveRunnerJobSummary>> {
+) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -344,7 +364,7 @@ fn active_runner_jobs(
             "runner `{runner_id}` is connected but has no active-job status endpoint"
         )));
     };
-    let jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
+    let active_jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
         body.get("active_runner_jobs")
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new())),
@@ -355,14 +375,32 @@ fn active_runner_jobs(
             Some("parse active runner jobs".to_string()),
         )
     })?;
-    Ok(jobs
-        .into_iter()
-        .filter(|job| job.runner_id == runner_id)
-        .map(|mut job| {
-            job.source = source;
-            job
-        })
-        .collect())
+    let stale_jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
+        body.get("stale_runner_jobs")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    )
+    .map_err(|err| {
+        Error::internal_json(err.to_string(), Some("parse stale runner jobs".to_string()))
+    })?;
+    Ok((
+        active_jobs
+            .into_iter()
+            .filter(|job| job.runner_id == runner_id)
+            .map(|mut job| {
+                job.source = source.to_string();
+                job
+            })
+            .collect(),
+        stale_jobs
+            .into_iter()
+            .filter(|job| job.runner_id == runner_id)
+            .map(|mut job| {
+                job.source = source.to_string();
+                job
+            })
+            .collect(),
+    ))
 }
 
 fn stale_daemon_warning(

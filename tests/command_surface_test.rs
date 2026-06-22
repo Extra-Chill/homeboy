@@ -18,6 +18,7 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     assert!(surface.contains_path(&["runner", "job"]));
     assert!(surface.contains_path(&["agent-task", "controller", "run-next"]));
     assert!(surface.contains_path(&["agent-task", "auth", "status"]));
+    assert!(surface.contains_path(&["agent-task", "prompts", "save"]));
     assert!(surface.contains_path(&["runner", "job", "logs"]));
     assert!(!surface.contains_path(&["init"]));
     assert!(!surface.contains_path(&["version", "bump"]));
@@ -25,6 +26,30 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     assert!(!surface.contains_path(&["stacks", "inspect"]));
     assert!(!surface.contains_path(&["audit", "code"]));
     assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
+}
+
+#[test]
+fn agent_task_prompt_store_commands_parse() {
+    Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "prompts",
+        "save",
+        "issue-123",
+        "--input",
+        "@prompt.md",
+    ])
+    .expect("agent-task prompts save should parse");
+    Cli::try_parse_from(["homeboy", "agent-task", "prompts", "list"])
+        .expect("agent-task prompts list should parse");
+    Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "dispatch",
+        "--prompt",
+        "prompt:issue-123",
+    ])
+    .expect("stored prompt refs should parse as prompt values");
 }
 
 #[test]

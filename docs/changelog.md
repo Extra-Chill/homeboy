@@ -4,6 +4,174 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.250.4] - 2026-06-22
+
+### Changed
+- move worktree process execution into core service (#5879)
+- move ecosystem literals out of dead_code detector (#5876)
+
+## [0.250.3] - 2026-06-22
+
+### Changed
+- dedupe branch_slug into core (#5867)
+- de-hardcode ecosystem validate/format fallbacks (#2240)
+
+## [0.250.2] - 2026-06-22
+
+### Fixed
+- remove dead code mark_failed in phase_timing (#5863)
+- unify parallel implementations (#5849)
+- resolve correctness findings in deploy/release (#5852)
+
+## [0.250.1] - 2026-06-22
+
+### Changed
+- Pass rig fuzz workload invocation context
+- Apply Enterprise proxy to release gh calls
+- Add fuzz replay metadata contract
+- Improve Lab registry drift diagnostics
+- Fail release packages missing frontend assets
+- Validate file dependencies before release package
+- Reuse release assets during deploy
+- Ignore generated release artifacts in deploy gate
+- Add CI failure triage digest
+- Add fuzz inventory artifact contract
+- Add dependent PR refresh helper
+- Explain PR merge readiness states
+- Add CI failure log triage helper
+- Improve PR CI status next actions
+- Support generated controller materialize specs
+- Add ordered PR landing rebase plans
+- Make changed-since Lab routing use git scope
+- Persist fuzz run evidence records
+- Add PR landing train command
+- Add baseline-red differential CI gate
+- Add PR CI readiness triage summary
+- Refine PR landing blocker summary
+- Add PR fleet landing helper
+- Surface rustfmt files in lint failures
+- Add PR mergeability reconcile command
+- Handle baseline-red differential CI results
+- Write structured lint test failure sidecars
+- Apply current Rust formatting
+- Add generic deterministic loop primitives
+
+### Fixed
+- resolve dead-code in phase_timing (#5844)
+- Fix Lab offload contract borrowing
+- Fix controller reconciliation import
+- actually replace active binary on --method source and fail loudly if swap fails (#5772)
+- Fix controller proof spec validation
+- Fix agent task prompt command results
+- Fix deterministic loop checkpoint borrows
+
+## [0.250.0] - 2026-06-22
+
+### Added
+- require declared proof artifacts
+- support manifest-only fuzz capability
+- extend fuzz data contracts
+- expose lifecycle contracts
+- add GitHub Actions scope resolver in core (#2915)
+- secure reverse runner broker authentication and pairing (#2990)
+- feat(agent-task): add core deterministic loop primitive
+- add core CI runner orchestration (slice, #2913)
+- feat(agent-task): expose public fanout primitive
+- execute extension fuzz runners
+- support rig-declared workloads
+- own the CI autofix transaction in core (#2916)
+- add generic fuzz command skeleton
+- record materialization proof metadata
+- summarize fuzz coverage artifacts
+- feat(agent-task): bind fanout child runs to artifacts
+- add generic outcome threshold presets
+- add product-neutral fuzz contracts
+
+### Changed
+- Make changed-since Lab offload use precomputed scope
+- Reconcile stale runner jobs after restart
+- Add PR landing triage dashboard
+- Add queue-friendly worktree fanout helper
+- Document architecture cleanup boundaries
+- Refine runner workspace artifact contracts
+- Add fuzz coverage completeness gates
+- Add agent task prompt store
+- Add runner workload contract metadata
+- Add fuzz primitive contract surfaces
+- Format Rust sources
+- Add review audit profile override
+- Prefer runner evidence lineage over timestamps
+- route fleet metadata through command adapter
+- Fail release planning when remote tag already exists
+- Restore checkout after failed releases
+- Fail project deploy readiness on missing component paths
+- Refactor agent task Lab handoff parsing
+- Make runner active-job status explicit
+- Prune duplicate CLI surfaces
+- Centralize GitHub CLI client handling
+- Guard scoped checks from self-check fallback
+- remove codebox-flavored provider fixtures
+- Add fuzz replay skeleton
+- neutralize product-specific fixtures
+- refactor(agent-task): catalog provider discovery
+- preserve reverse worker result artifacts
+- centralize command descriptor metadata
+- test(agent-task): align lab contract regression
+- centralize supported contract labels
+- skip redundant release quality work
+- hide lab shortcut from advertised surface
+- clear remaining structural findings (#5645)
+- split god-files to clear structural findings (partial, #5645)
+- Add controller dispatch provider config override
+- migrate whole-tree detectors onto shared snapshots
+- make test coverage and vacuity detectors language-agnostic (#2841)
+- finish artifact releases through homeboy action
+
+### Fixed
+- unify parallel implementations to clear findings (#5711)
+- resolve dead-code findings outside fleet files (#5665)
+- remove core agnostic-source leaks (partial, #5664)
+- Fix runner active job imports
+- Fix deploy default tagged source planning
+- require minor for release-train patch ranges
+- populate detached exec handoff fields
+- fix file edit dry-run contract
+- restore main test compile
+- fix(agent-task): update providers test args
+- fix(agent-task): export catalog dispatch helpers
+- repair compile drift after main updates
+- repair rebased runner compile drift
+- align exec fixtures with handoff options
+- restore PR compile compatibility
+- resolve compiler/dead-code findings
+- DRY duplication and near-duplication findings
+- clone exec artifacts before job move
+- avoid stored failure context field
+- pass results file contract to runners
+- satisfy contract label lint
+- surface Lab offload failure context
+- ingest runner results file
+- fix(agent-task): signal live run process trees
+- fix(agent-task): guard lab-only fanout handoff
+- fix(agent-task): honor loop git workspace contracts
+- fix(agent-task): preflight loop verify gates
+- fix(agent-task): fail fast on runner backend readiness
+- fix(agent-task): route queued lab runs on runner
+- fix(agent-task): reject empty required typed artifacts
+- fix(agent-task): restore main CI after loop fanout
+- centralize artifact viewer descriptors
+- surface generic coverage proof cues
+- Fix Lab changed-scope quality offload
+- resolve thin-adapter and field-pattern findings (#5647, #5642)
+- support lab runner routing
+- pass path for ad-hoc verification
+- strengthen vacuous tests to clear test_quality findings (partial, #5646)
+- resolve failing test (#5650)
+- fix(agent-task): update scheduler fuzz artifact fixture
+- fix(agent-task): update fanout artifact fixture
+- keep findings identical after shared-snapshot migration
+- update self-check lint args
+
 ## [0.249.0] - 2026-06-21
 
 ### Added

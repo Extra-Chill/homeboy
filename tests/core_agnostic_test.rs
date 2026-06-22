@@ -196,10 +196,6 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
         term: "php",
     },
     ViolationKey {
-        path: "src/core/code_audit/requirements.rs",
-        term: "composer",
-    },
-    ViolationKey {
         path: "src/core/code_audit/test_quality.rs",
         term: "cargo",
     },
@@ -305,7 +301,7 @@ const TEST_CONTENT_BASELINE: &[ViolationKey] = &[
     },
 ];
 
-const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 81;
+const TEST_CONTENT_BASELINE_OCCURRENCES: usize = 79;
 const CORE_AGNOSTIC_REPAIR_DIRECTIVE: &str = "This is a boundary violation, not a baseline chore. Do not add these findings to the baseline unless explicitly approved by a maintainer. Move platform-specific behavior into the owning extension or replace it with a generic core contract that extensions can populate.";
 
 #[test]

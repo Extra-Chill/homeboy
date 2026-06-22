@@ -528,12 +528,6 @@ fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSu
     }
 }
 
-fn ms_to_rfc3339(ms: u64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339()
-}
-
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;

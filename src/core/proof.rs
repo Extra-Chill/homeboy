@@ -29,6 +29,12 @@ pub struct HomeboyProof {
     pub gates: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<HomeboyProofArtifactRef>,
+    #[serde(
+        default,
+        alias = "required_artifacts",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub artifact_requirements: Vec<HomeboyProofArtifactRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<HomeboyProofEnvironmentVariable>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,11 +74,45 @@ pub enum HomeboyProofRunner {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HomeboyProofArtifactRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(
+        default = "default_proof_artifact_purpose",
+        skip_serializing_if = "is_default_proof_artifact_purpose"
+    )]
+    pub purpose: HomeboyProofArtifactPurpose,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyProofArtifactRequirement {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_key: Option<String>,
+    #[serde(
+        default = "default_proof_artifact_purpose",
+        skip_serializing_if = "is_default_proof_artifact_purpose"
+    )]
+    pub purpose: HomeboyProofArtifactPurpose,
+    #[serde(default = "default_required_proof_artifact")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeboyProofArtifactPurpose {
+    Proof,
+    Diagnostic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,8 +139,18 @@ pub struct HomeboyProofGap {
 pub struct HomeboyProofValidationReport {
     #[serde(default = "proof_validation_schema")]
     pub schema: String,
+    #[serde(default = "default_proof_validation_status")]
+    pub status: HomeboyProofValidationStatus,
     pub valid: bool,
     pub diagnostics: Vec<HomeboyProofValidationDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeboyProofValidationStatus {
+    Passed,
+    Incomplete,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +180,7 @@ impl HomeboyProof {
             provenance,
             gates: Vec::new(),
             artifacts: Vec::new(),
+            artifact_requirements: Vec::new(),
             environment: Vec::new(),
             gaps: Vec::new(),
         }
@@ -153,6 +204,14 @@ impl HomeboyProof {
         artifacts: impl IntoIterator<Item = HomeboyProofArtifactRef>,
     ) -> Self {
         self.artifacts = artifacts.into_iter().collect();
+        self
+    }
+
+    pub fn artifact_requirements(
+        mut self,
+        artifact_requirements: impl IntoIterator<Item = HomeboyProofArtifactRequirement>,
+    ) -> Self {
+        self.artifact_requirements = artifact_requirements.into_iter().collect();
         self
     }
 
@@ -209,11 +268,30 @@ impl HomeboyProofProvenance {
 impl HomeboyProofArtifactRef {
     pub fn uri(uri: impl Into<String>) -> Self {
         Self {
+            id: None,
             uri: uri.into(),
             kind: None,
             label: None,
+            semantic_key: None,
+            purpose: HomeboyProofArtifactPurpose::Proof,
         }
     }
+}
+
+fn default_proof_artifact_purpose() -> HomeboyProofArtifactPurpose {
+    HomeboyProofArtifactPurpose::Proof
+}
+
+fn is_default_proof_artifact_purpose(purpose: &HomeboyProofArtifactPurpose) -> bool {
+    *purpose == HomeboyProofArtifactPurpose::Proof
+}
+
+fn default_required_proof_artifact() -> bool {
+    true
+}
+
+fn default_proof_validation_status() -> HomeboyProofValidationStatus {
+    HomeboyProofValidationStatus::Passed
 }
 
 #[cfg(test)]
@@ -294,6 +372,82 @@ mod tests {
         }));
 
         assert!(report.valid, "{report:?}");
+        assert_eq!(report.status, HomeboyProofValidationStatus::Passed);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_marks_missing_required_proof_artifact_incomplete() {
+        let report = validate_proof_value(json!({
+            "schema": HOMEBOY_PROOF_SCHEMA,
+            "id": "proof-1",
+            "scope": "targeted",
+            "provenance": { "runner": "homeboy", "run_id": "run-1" },
+            "gates": [{
+                "schema": "homeboy/gate-result/v1",
+                "id": "quality-check",
+                "name": "quality check",
+                "kind": "command",
+                "status": "passed"
+            }],
+            "artifact_requirements": [{
+                "id": "coverage-summary",
+                "kind": "coverage",
+                "purpose": "proof",
+                "required": true
+            }],
+            "artifacts": [{
+                "id": "coverage-debug-log",
+                "uri": "runner-artifact://lab/run-1/debug.log",
+                "kind": "log",
+                "purpose": "diagnostic"
+            }]
+        }));
+
+        assert!(!report.valid);
+        assert_eq!(report.status, HomeboyProofValidationStatus::Incomplete);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(
+            report.diagnostics[0].code,
+            "required_proof_artifact_missing"
+        );
+    }
+
+    #[test]
+    fn proof_validation_accepts_missing_optional_diagnostic_artifact() {
+        let report = validate_proof_value(json!({
+            "schema": HOMEBOY_PROOF_SCHEMA,
+            "id": "proof-1",
+            "scope": "targeted",
+            "provenance": { "runner": "homeboy", "run_id": "run-1" },
+            "gates": [{
+                "schema": "homeboy/gate-result/v1",
+                "id": "quality-check",
+                "name": "quality check",
+                "kind": "command",
+                "status": "passed"
+            }],
+            "artifact_requirements": [{
+                "id": "coverage-summary",
+                "kind": "coverage",
+                "purpose": "proof",
+                "required": true
+            }, {
+                "id": "coverage-debug-log",
+                "kind": "log",
+                "purpose": "diagnostic",
+                "required": false
+            }],
+            "artifacts": [{
+                "id": "coverage-summary",
+                "uri": "runner-artifact://lab/run-1/coverage.json",
+                "kind": "coverage",
+                "purpose": "proof"
+            }]
+        }));
+
+        assert!(report.valid, "{report:?}");
+        assert_eq!(report.status, HomeboyProofValidationStatus::Passed);
         assert!(report.diagnostics.is_empty());
     }
 
@@ -318,6 +472,7 @@ mod tests {
         }));
 
         assert!(!report.valid);
+        assert_eq!(report.status, HomeboyProofValidationStatus::Failed);
         let codes: Vec<&str> = report
             .diagnostics
             .iter()
@@ -382,6 +537,8 @@ mod tests {
                 "loop_id": "example/join",
                 "config_version": "v1",
                 "artifacts": [{ "artifact_id": "page_blocks", "kind": "json" }],
+                "gates": [{ "gate_id": "review" }],
+                "metrics": [{ "metric_id": "fallback_blocks" }],
                 "workflows": [
                     {
                         "workflow_id": "build_page",
@@ -402,6 +559,26 @@ mod tests {
 
         assert!(report.valid, "{report:?}");
         assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_rejects_undeclared_materialized_controller_gate() {
+        let report = validate_proof_value(json!({
+            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+            "spec": {
+                "loop_id": "example/join",
+                "config_version": "v1",
+                "workflows": [{
+                    "workflow_id": "publish_site",
+                    "prompt": "publish site",
+                    "gates": ["review"]
+                }]
+            }
+        }));
+
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics[0].code, "invalid_controller_loop_spec");
+        assert!(report.diagnostics[0].message.contains("workflows[0].gates"));
     }
 
     #[test]

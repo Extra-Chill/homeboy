@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use crate::command_contract::{CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode};
+use crate::command_contract::{
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
+};
 
 use crate::cli_surface::Commands;
 
@@ -8,6 +10,7 @@ use super::{fleet, version, GlobalArgs};
 
 pub(crate) type JsonCommandRun = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonCommandRun;
+pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommandLabRunnerPolicy {
@@ -39,9 +42,17 @@ impl CommandAdapterContract {
     }
 }
 
+/// Adapter-owned metadata for a parsed command family.
+///
+/// New command migrations should keep output contract, JSON dispatch, raw
+/// dispatch hooks, and Lab policy together in the command module's adapter. The
+/// top-level dispatch modules should only bind the parsed enum variant to that
+/// adapter, so follow-up PRs can migrate one family at a time without changing
+/// public CLI behavior.
 pub(crate) struct TypedCommandAdapter<Args> {
     pub contract: CommandAdapterContract,
     pub execute_json: Option<JsonCommandExecutor<Args>>,
+    pub lab_contract: Option<LabContractResolver<Args>>,
 }
 
 pub(crate) struct BoundCommandAdapter {
@@ -80,7 +91,17 @@ impl<Args> TypedCommandAdapter<Args> {
                 lab_runner: CommandLabRunnerPolicy::LOCAL,
             },
             execute_json: Some(execute_json),
+            lab_contract: None,
         }
+    }
+
+    pub fn with_lab_contract(mut self, lab_contract: LabContractResolver<Args>) -> Self {
+        self.lab_contract = Some(lab_contract);
+        self
+    }
+
+    pub fn lab_contract(&self, args: &Args) -> Option<LabCommandContract> {
+        self.lab_contract.and_then(|resolver| resolver(args))
     }
 }
 
@@ -108,7 +129,9 @@ pub(crate) fn command_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::{CommandOutputContractKind, CommandResponseMode};
+    use crate::command_contract::{
+        CommandOutputContractKind, CommandResponseMode, LabCommandPortability,
+    };
     use clap::Parser;
 
     fn parsed_command(args: &[&str]) -> Commands {
@@ -150,5 +173,36 @@ mod tests {
         assert!(
             command_adapter(Commands::List { json: false }, CommandOutputFileMode::None).is_err()
         );
+    }
+
+    #[test]
+    fn fleet_adapter_owns_hot_exec_lab_contract() {
+        let Commands::Fleet(args) = parsed_command(&[
+            "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
+        ]) else {
+            panic!("expected parsed fleet command");
+        };
+
+        let contract = fleet::adapter(CommandOutputFileMode::None)
+            .lab_contract(&args)
+            .expect("hot fleet exec should declare a Lab contract");
+
+        assert_eq!(contract.hot_label, "fleet exec");
+        assert!(matches!(
+            contract.portability,
+            LabCommandPortability::LocalOnly(reason)
+                if reason.contains("runner-side config parity")
+        ));
+    }
+
+    #[test]
+    fn fleet_adapter_leaves_cold_commands_without_lab_contract() {
+        let Commands::Fleet(args) = parsed_command(&["homeboy", "fleet", "list"]) else {
+            panic!("expected parsed fleet command");
+        };
+
+        assert!(fleet::adapter(CommandOutputFileMode::None)
+            .lab_contract(&args)
+            .is_none());
     }
 }

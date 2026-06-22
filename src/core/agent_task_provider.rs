@@ -952,6 +952,31 @@ pub fn provider_secret_sources_for_providers(
     sources
 }
 
+/// Secret sources scoped to a single backend (and optional provider selector).
+///
+/// Mirrors the backend/selector resolution `agent-task doctor` uses so auth
+/// status reports readiness for the exact backend cook/dispatch would target.
+/// When `selector` is `None`, all providers for `backend` are included.
+pub fn provider_secret_sources_for_backend(
+    providers: &[AgentTaskExecutorProvider],
+    backend: &str,
+    selector: Option<&str>,
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let scoped: Vec<&AgentTaskExecutorProvider> = providers
+        .iter()
+        .filter(|provider| provider.backend == backend)
+        .filter(|provider| selector.is_none_or(|selector| provider.id == selector))
+        .collect();
+    let mut sources = HashMap::new();
+    for provider in scoped {
+        sources.extend(provider_secret_sources(provider, None));
+        for defaults in provider.provider_defaults.values() {
+            sources.extend(provider_config_secret_sources(defaults));
+        }
+    }
+    sources
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderCommandEnvError {
     Secret(AgentTaskSecretResolutionError),
@@ -3709,7 +3734,8 @@ mod tests {
         provider.backend = "synthetic-runtime".to_string();
 
         let providers = [provider];
-        let resolution = resolve_provider_for_backend(&providers, "synthetic-runtime", Some("fast"));
+        let resolution =
+            resolve_provider_for_backend(&providers, "synthetic-runtime", Some("fast"));
 
         assert_eq!(
             resolution,
@@ -4612,7 +4638,10 @@ process.stdout.write(JSON.stringify({
             .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
             .expect("provider default source discovered");
         assert_eq!(source.source, "json-file");
-        assert_eq!(source.path.as_deref(), Some("~/.example-provider/auth.json"));
+        assert_eq!(
+            source.path.as_deref(),
+            Some("~/.example-provider/auth.json")
+        );
         assert_eq!(source.field.as_deref(), Some("tokens.access_token"));
     }
 

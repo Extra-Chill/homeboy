@@ -24,7 +24,10 @@ pub use lab::{
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
     lab_runner_unsupported_message, LabCommandContract, LabCommandPortability,
     LabCommandRequiredTool, LabRoutingPolicy, LabRunnerSupportSummary, LabSourcePathMode,
-    LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
+    LabWorkspaceModePolicy, RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
+    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS, RUNNER_WORKLOAD_SCHEMA,
 };
 pub(crate) use lab::{
     AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,

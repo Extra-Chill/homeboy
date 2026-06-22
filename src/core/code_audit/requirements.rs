@@ -1,13 +1,19 @@
 //! Runtime requirement + bootstrap parser — collects symbols that are guaranteed
 //! to exist at runtime so downstream detectors (e.g. `dead_guard`) can skip
-//! `function_exists` / `class_exists` / `defined` guards on them.
+//! runtime-availability guards on them.
+//!
+//! Core stays ecosystem-agnostic: every file name, statement keyword, and guard
+//! marker used here is supplied by the owning language extension via
+//! `AuditConfig.known_symbols`. When an extension declares no source-scan or
+//! manifest-package contract, the corresponding step is skipped entirely.
 //!
 //! Sources of "guaranteed available" symbols:
 //! 1. Extension-provided header-version rules mapped against symbols.
-//! 2. `composer.json` `require` and `require-dev` entries mapped against
-//!    extension-provided package rules.
-//! 3. Unconditional `require` / `require_once` calls from entry files mapped
-//!    against extension-provided bootstrap-path rules.
+//! 2. Extension-declared dependency manifests (file + package keys) mapped
+//!    against extension-provided package rules.
+//! 3. Unconditional include/require statements (keywords + guard markers
+//!    provided by the extension) from entry files mapped against
+//!    extension-provided bootstrap-path rules.
 //!
 //! The parser is lenient: every source is optional and a missing / malformed
 //! file yields an empty contribution rather than an error.
@@ -15,6 +21,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::core::component::audit::KnownSymbolSourceScanConfig;
 use crate::core::component::{
     AuditConfig, KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind,
     KnownSymbolVersionedEntry,
@@ -35,7 +42,8 @@ impl KnownSymbols {
     }
 
     pub fn has_class(&self, name: &str) -> bool {
-        // Case-insensitive lookup: PHP class names are case-insensitive.
+        // Case-insensitive lookup: type/class identifiers in several ecosystems
+        // are case-insensitive, so normalize before comparing.
         let lower = name.to_ascii_lowercase();
         self.classes.iter().any(|c| c.to_ascii_lowercase() == lower)
     }
@@ -49,29 +57,51 @@ impl KnownSymbols {
 pub fn known_available_symbols(root: &Path, audit_config: &AuditConfig) -> KnownSymbols {
     let mut symbols = KnownSymbols::default();
     let providers = &audit_config.known_symbols;
+    let entry_file_extensions = entry_file_extensions(audit_config);
 
     for provider in &providers.header_versions {
-        if let Some(main_file) = find_file_with_marker(root, &provider.file_marker) {
+        if let Some(main_file) =
+            find_file_with_marker(root, &provider.file_marker, &entry_file_extensions)
+        {
             seed_header_version_symbols(&mut symbols, &main_file, provider);
         }
     }
 
-    for main in find_bootstrap_files(root, audit_config) {
-        let required_paths = parse_bootstrap_requires(&main, root);
-        for path in &required_paths {
-            seed_symbols_from_bootstrap_path(&mut symbols, path, audit_config);
+    if let Some(scan) = providers.source_scan.as_ref() {
+        for main in find_bootstrap_files(root, audit_config, &entry_file_extensions) {
+            let required_paths = parse_bootstrap_requires(&main, root, scan);
+            for path in &required_paths {
+                seed_symbols_from_bootstrap_path(&mut symbols, path, audit_config);
+            }
         }
     }
 
-    apply_composer_requires(&mut symbols, root, audit_config);
+    apply_manifest_requires(&mut symbols, root, audit_config);
 
     symbols
 }
 
-fn find_bootstrap_files(root: &Path, audit_config: &AuditConfig) -> Vec<PathBuf> {
+/// Entry-file extensions declared by the owning extension's source-scan
+/// contract. Empty when no extension configures source scanning.
+fn entry_file_extensions(audit_config: &AuditConfig) -> Vec<String> {
+    audit_config
+        .known_symbols
+        .source_scan
+        .as_ref()
+        .map(|scan| scan.entry_file_extensions.clone())
+        .unwrap_or_default()
+}
+
+fn find_bootstrap_files(
+    root: &Path,
+    audit_config: &AuditConfig,
+    entry_file_extensions: &[String],
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for provider in &audit_config.known_symbols.header_versions {
-        if let Some(path) = find_file_with_marker(root, &provider.file_marker) {
+        if let Some(path) =
+            find_file_with_marker(root, &provider.file_marker, entry_file_extensions)
+        {
             if !files.contains(&path) {
                 files.push(path);
             }
@@ -80,12 +110,22 @@ fn find_bootstrap_files(root: &Path, audit_config: &AuditConfig) -> Vec<PathBuf>
     files
 }
 
-/// Locate a root-level PHP entry file whose header contains an extension-owned marker.
-pub fn find_file_with_marker(root: &Path, marker: &str) -> Option<PathBuf> {
+/// Locate a root-level entry file whose header contains an extension-owned
+/// marker. Only files matching an extension-declared entry-file extension are
+/// considered; with no declared extensions, nothing matches.
+pub fn find_file_with_marker(
+    root: &Path,
+    marker: &str,
+    entry_file_extensions: &[String],
+) -> Option<PathBuf> {
+    if entry_file_extensions.is_empty() {
+        return None;
+    }
     let entries = std::fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("php") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if !ext.is_some_and(|ext| entry_file_extensions.iter().any(|allowed| allowed == ext)) {
             continue;
         }
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -152,15 +192,23 @@ fn insert_symbol(symbols: &mut KnownSymbols, name: &str, kind: &KnownSymbolKind)
     }
 }
 
-/// Parse unconditional `require` / `require_once` / `include` / `include_once`
-/// calls from the plugin main file and return resolved absolute paths that
-/// live under `root`.
+/// Parse unconditional include/require statements from an entry file and return
+/// resolved absolute paths that live under `root`.
 ///
-/// "Unconditional" means: not inside an `if (!class_exists(...))` or similar
-/// guard. We use a simple heuristic: the `require` is skipped if the previous
-/// non-blank line opens a guard block (`if (...) {` mentioning `class_exists`,
-/// `function_exists`, or `defined`).
-pub fn parse_bootstrap_requires(main_file: &Path, root: &Path) -> Vec<PathBuf> {
+/// The statement keywords (`scan.require_keywords`) and guard markers
+/// (`scan.guard_markers`) are supplied by the owning extension so core does not
+/// hardcode any single language's syntax. "Unconditional" means: not inside an
+/// `if (...) {` block whose opening line mentions one of the configured guard
+/// markers.
+pub fn parse_bootstrap_requires(
+    main_file: &Path,
+    root: &Path,
+    scan: &KnownSymbolSourceScanConfig,
+) -> Vec<PathBuf> {
+    if scan.require_keywords.is_empty() {
+        return Vec::new();
+    }
+
     let Ok(content) = std::fs::read_to_string(main_file) else {
         return Vec::new();
     };
@@ -171,7 +219,8 @@ pub fn parse_bootstrap_requires(main_file: &Path, root: &Path) -> Vec<PathBuf> {
     let lines: Vec<&str> = content.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        let requires_kind = ["require_once", "require", "include_once", "include"]
+        let requires_kind = scan
+            .require_keywords
             .iter()
             .find(|k| trimmed.starts_with(*k) && !is_identifier_continuation(trimmed, k.len()));
         if requires_kind.is_none() {
@@ -187,9 +236,10 @@ pub fn parse_bootstrap_requires(main_file: &Path, root: &Path) -> Vec<PathBuf> {
             }
             if prev.ends_with('{')
                 && (prev.contains("if ") || prev.contains("if("))
-                && (prev.contains("class_exists")
-                    || prev.contains("function_exists")
-                    || prev.contains("defined"))
+                && scan
+                    .guard_markers
+                    .iter()
+                    .any(|marker| prev.contains(marker.as_str()))
             {
                 guarded = true;
             }
@@ -262,30 +312,52 @@ fn seed_entries(symbols: &mut KnownSymbols, entries: &[KnownSymbolEntry]) {
     }
 }
 
-/// Inspect `composer.json` and seed symbols for extension-provided packages.
-fn apply_composer_requires(symbols: &mut KnownSymbols, root: &Path, config: &AuditConfig) {
-    let composer = root.join("composer.json");
-    let Ok(content) = std::fs::read_to_string(&composer) else {
-        return;
+/// Inspect extension-declared dependency manifests and seed symbols for
+/// extension-provided packages. The manifest file name and the package-holding
+/// keys both come from the provider, so core does not assume any one ecosystem.
+fn apply_manifest_requires(symbols: &mut KnownSymbols, root: &Path, config: &AuditConfig) {
+    use std::collections::HashMap;
+
+    // Cache parsed manifests so multiple providers naming the same file only
+    // read/parse it once.
+    let mut manifest_packages: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for provider in &config.known_symbols.manifest_packages {
+        let packages = manifest_packages
+            .entry(provider.manifest_file.clone())
+            .or_insert_with(|| {
+                read_manifest_packages(root, &provider.manifest_file, &provider.package_keys)
+            });
+        if packages.contains(&provider.package) {
+            seed_entries(symbols, &provider.symbols);
+        }
+    }
+}
+
+/// Read a JSON dependency manifest and collect every declared package name found
+/// under the provided package-holding keys.
+fn read_manifest_packages(
+    root: &Path,
+    manifest_file: &str,
+    package_keys: &[String],
+) -> HashSet<String> {
+    let mut packages: HashSet<String> = HashSet::new();
+    let Ok(content) = std::fs::read_to_string(root.join(manifest_file)) else {
+        return packages;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
+        return packages;
     };
 
-    let mut packages: HashSet<String> = HashSet::new();
-    for key in &["require", "require-dev"] {
-        if let Some(obj) = json.get(*key).and_then(|v| v.as_object()) {
+    for key in package_keys {
+        if let Some(obj) = json.get(key).and_then(|v| v.as_object()) {
             for name in obj.keys() {
                 packages.insert(name.to_string());
             }
         }
     }
 
-    for provider in &config.known_symbols.composer_packages {
-        if packages.contains(&provider.package) {
-            seed_entries(symbols, &provider.symbols);
-        }
-    }
+    packages
 }
 
 #[cfg(test)]
@@ -307,8 +379,10 @@ mod tests {
                         ]
                     }
                 ],
-                "composer_packages": [
+                "manifest_packages": [
                     {
+                        "manifest_file": "deps.json",
+                        "package_keys": ["require", "require-dev"],
                         "package": "vendor/runtime-queue",
                         "symbols": [
                             {"name": "runtime_schedule_once", "kind": "function"},
@@ -318,16 +392,28 @@ mod tests {
                 ],
                 "bootstrap_paths": [
                     {
-                        "path_contains": "runtime-queue/runtime-queue.php",
+                        "path_contains": "runtime-queue/runtime-queue.inc",
                         "symbols": [
                             {"name": "runtime_schedule_once", "kind": "function"},
                             {"name": "RuntimeScheduler", "kind": "class"}
                         ]
                     }
-                ]
+                ],
+                "source_scan": {
+                    "entry_file_extensions": ["inc"],
+                    "require_keywords": ["require_once", "require", "include_once", "include"],
+                    "guard_markers": ["class_exists", "function_exists", "defined"]
+                }
             }
         }))
         .unwrap()
+    }
+
+    fn test_scan() -> KnownSymbolSourceScanConfig {
+        test_config()
+            .known_symbols
+            .source_scan
+            .expect("test config declares source_scan")
     }
 
     fn write_runtime_main(dir: &Path, requires_at_least: Option<&str>, body: &str) -> PathBuf {
@@ -335,10 +421,10 @@ mod tests {
             .map(|v| format!(" * Runtime Requires: {}\n", v))
             .unwrap_or_default();
         let content = format!(
-            "<?php\n/**\n * Runtime Plugin: Test Plugin\n{} */\n\n{}",
+            "<?\n/**\n * Runtime Plugin: Test Plugin\n{} */\n\n{}",
             header_line, body
         );
-        let path = dir.join("plugin.php");
+        let path = dir.join("plugin.inc");
         fs::write(&path, content).unwrap();
         path
     }
@@ -383,17 +469,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("vendor/runtime-queue")).unwrap();
         fs::write(
-            tmp.path().join("vendor/runtime-queue/runtime-queue.php"),
-            "<?php\n",
+            tmp.path().join("vendor/runtime-queue/runtime-queue.inc"),
+            "<?\n",
         )
         .unwrap();
 
         let main = write_runtime_main(
             tmp.path(),
             Some("2.0"),
-            "require_once __DIR__ . '/vendor/runtime-queue/runtime-queue.php';\n",
+            "require_once __DIR__ . '/vendor/runtime-queue/runtime-queue.inc';\n",
         );
-        let requires = parse_bootstrap_requires(&main, tmp.path());
+        let requires = parse_bootstrap_requires(&main, tmp.path(), &test_scan());
         assert_eq!(requires.len(), 1);
 
         let syms = known_available_symbols(tmp.path(), &test_config());
@@ -402,16 +488,29 @@ mod tests {
     }
 
     #[test]
-    fn composer_require_seeds_configured_package() {
+    fn manifest_require_seeds_configured_package() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
-            tmp.path().join("composer.json"),
+            tmp.path().join("deps.json"),
             r#"{"require":{"vendor/runtime-queue":"^3.0"}}"#,
         )
         .unwrap();
         let mut syms = KnownSymbols::default();
-        apply_composer_requires(&mut syms, tmp.path(), &test_config());
+        apply_manifest_requires(&mut syms, tmp.path(), &test_config());
         assert!(syms.has_function("runtime_schedule_once"));
+    }
+
+    #[test]
+    fn skips_source_scan_when_unconfigured() {
+        // With no source_scan contract, core performs no entry-file scanning.
+        let tmp = tempfile::tempdir().unwrap();
+        let main = write_runtime_main(
+            tmp.path(),
+            Some("2.0"),
+            "require_once __DIR__ . '/vendor/runtime-queue/runtime-queue.inc';\n",
+        );
+        let empty = KnownSymbolSourceScanConfig::default();
+        assert!(parse_bootstrap_requires(&main, tmp.path(), &empty).is_empty());
     }
 
     #[test]
@@ -420,9 +519,9 @@ mod tests {
         let main = write_runtime_main(
             tmp.path(),
             Some("2.0"),
-            "if ( ! class_exists( 'RuntimeScheduler' ) ) {\n    require_once __DIR__ . '/vendor/runtime-queue/runtime-queue.php';\n}\n",
+            "if ( ! class_exists( 'RuntimeScheduler' ) ) {\n    require_once __DIR__ . '/vendor/runtime-queue/runtime-queue.inc';\n}\n",
         );
-        let requires = parse_bootstrap_requires(&main, tmp.path());
+        let requires = parse_bootstrap_requires(&main, tmp.path(), &test_scan());
         assert!(
             requires.is_empty(),
             "guarded require should be skipped, got: {:?}",

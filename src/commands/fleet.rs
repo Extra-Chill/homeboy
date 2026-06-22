@@ -19,12 +19,6 @@ pub struct FleetArgs {
 }
 
 impl FleetArgs {
-    pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
-        self.is_hot_resource_command().then(|| {
-            LabCommandContract::local_only("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON)
-        })
-    }
-
     pub fn is_hot_resource_command(&self) -> bool {
         matches!(
             self.command,
@@ -202,10 +196,16 @@ pub(crate) fn adapter(
     output_file_mode: CommandOutputFileMode,
 ) -> adapter::TypedCommandAdapter<FleetArgs> {
     adapter::TypedCommandAdapter::json_only(CommandJsonFamily::Ops, output_file_mode, run_json)
+        .with_lab_contract(lab_contract)
 }
 
 fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonCommandRun {
     crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+}
+
+fn lab_contract(args: &FleetArgs) -> Option<LabCommandContract> {
+    args.is_hot_resource_command()
+        .then(|| LabCommandContract::local_only("fleet exec", FLEET_EXEC_LAB_UNSUPPORTED_REASON))
 }
 
 fn create(

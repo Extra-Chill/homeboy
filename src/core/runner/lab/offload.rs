@@ -19,9 +19,16 @@
 use std::path::Path;
 
 use crate::command_contract::lab_runner_support_summary;
+use crate::command_contract::{
+    RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCapability,
+    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
+};
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
 
@@ -33,9 +40,10 @@ use super::super::execution::{
 use super::super::lab_apply::apply_lab_offload_patch;
 use super::super::lab_args::{
     inject_agent_task_default_provider_config_in_args, inline_agent_task_prompt_files_in_args,
-    lab_offload_source_path, remap_agent_task_plan_in_args, remap_path_settings_in_args,
-    remap_provider_config_in_args, rewrite_lab_offload_args,
-    rewrite_runner_resident_lab_offload_args, LabPathRemap,
+    lab_at_file_specs, lab_offload_source_path, remap_agent_task_plan_in_args,
+    remap_lab_at_file_args, remap_path_settings_in_args, remap_provider_config_in_args,
+    rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args, LabAtFileSpec,
+    LabPathRemap,
 };
 use super::super::lab_capabilities::lab_runner_capability_contract;
 use super::super::lab_command::lab_offload_command_prefix;
@@ -61,11 +69,12 @@ use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-    RunnerWorkspaceSyncOutput,
+    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
+#[cfg(test)]
+use super::super::{RunnerActiveJobSource, RunnerActiveJobState};
 
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
@@ -320,6 +329,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         return Ok(skipped_automatic_run_local(plan, reason));
     };
 
+    let release_gate_local_hot_allowed =
+        crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed();
     let mut messages = Vec::new();
     if matches!(selection.source, LabRunnerSelectionSource::Default) {
         // Make the auto-offload visible up front (#3815): the operator did not
@@ -328,8 +339,15 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         // to keep it local. Without this the first sign of remote execution is
         // a confusing remote-specific failure (e.g. a local `@file` that does
         // not exist on the runner).
+        let local_hot_hint = if contract.routing_policy.release_gate
+            && !release_gate_local_hot_allowed
+        {
+            " Release-gate local-hot fallback is disabled by `/release_gate/local_hot: fail_closed`; repair the runner instead of bypassing Lab routing."
+        } else {
+            " Pass `--force-hot --allow-local-hot` to run it locally instead."
+        };
         let auto_offload_signal = format!(
-            "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine. Pass `--force-hot --allow-local-hot` to run it locally instead.",
+            "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine.{local_hot_hint}",
             selection.mode.label(),
             selection.runner_id
         );
@@ -377,7 +395,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             // The operator-only override is `/release_gate/local_hot: allowed`.
             if contract.routing_policy.release_gate
                 && matches!(selection.source, LabRunnerSelectionSource::Default)
-                && !crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed()
+                && !release_gate_local_hot_allowed
             {
                 return Err(release_gate_local_hot_denied_error(
                     format!(
@@ -638,7 +656,7 @@ fn run_runner_resident_lab_offload(
             raw_exec: false,
             source_snapshot: None,
             capability_preflight: None,
-            required_extensions: contract.required_extensions,
+            required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             detach_after_handoff: false,
         },
@@ -671,6 +689,14 @@ fn run_runner_resident_lab_offload(
     }
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &contract,
+            runner_id,
+            runner_workspace_root,
+            &exec_output.stdout,
+            &exec_output.stderr,
+        );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
     }
 
@@ -807,6 +833,31 @@ fn prepare_lab_offload_workspace_stage(
             .build(),
     );
 
+    let at_file_specs =
+        lab_at_file_specs(&offload_args, Path::new(&synced.local_path), &remote_cwd)?;
+    materialize_lab_at_files_on_runner(runner_id, &at_file_specs)?;
+    if !at_file_specs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.materialize_at_files", "lab.materialize_at_files")
+                .inputs(
+                    PlanValues::new().json("count", at_file_specs.len()).json(
+                        "files",
+                        &at_file_specs
+                            .iter()
+                            .map(|spec| {
+                                serde_json::json!({
+                                    "local_path": spec.local_path.display().to_string(),
+                                    "remote_path": spec.remote_path.as_str(),
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .build(),
+        );
+    }
+
     let synced_extra_workspaces = sync_extra_lab_workspaces(
         runner_id,
         &synced.local_path,
@@ -920,6 +971,7 @@ fn prepare_lab_offload_workspace_stage(
     let remapped_args =
         inline_agent_task_prompt_files_in_args(&remapped_args, Path::new(&synced.local_path))?;
     let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
+    let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
     let (remapped_args, synced_remapped_tasks) =
         materialize_inline_agent_task_tasks_arg(runner_id, &remapped_args)?;
     plan = record_synced_remapped_workspace_entry(
@@ -971,6 +1023,77 @@ fn prepare_lab_offload_workspace_stage(
     })
 }
 
+fn materialize_lab_at_files_on_runner(runner_id: &str, specs: &[LabAtFileSpec]) -> Result<()> {
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    let client = ssh_client_for_lab_runner(runner_id)?;
+    for spec in specs {
+        let parent = spec
+            .remote_path
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .unwrap_or(".");
+        let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(parent)));
+        if !mkdir.success {
+            return Err(lab_at_file_materialization_error(
+                runner_id,
+                spec,
+                format!("failed to create remote parent directory: {}", mkdir.stderr),
+            ));
+        }
+        let upload = client.upload_file(&spec.local_path.display().to_string(), &spec.remote_path);
+        if !upload.success {
+            return Err(lab_at_file_materialization_error(
+                runner_id,
+                spec,
+                format!("failed to upload file: {}", upload.stderr),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn ssh_client_for_lab_runner(runner_id: &str) -> Result<SshClient> {
+    let runner = load(runner_id)?;
+    let server_id = runner.server_id.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "Lab offload @file materialization requires an SSH runner with server_id",
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Register a direct SSH runner or configure a reverse-connected runner before Lab offload.".to_string(),
+            ]),
+        )
+    })?;
+    let server = server::load(server_id)?;
+    let mut client = SshClient::from_server(&server, server_id)?;
+    client.env.extend(runner.env);
+    Ok(client)
+}
+
+fn lab_at_file_materialization_error(
+    runner_id: &str,
+    spec: &LabAtFileSpec,
+    reason: String,
+) -> Error {
+    Error::validation_invalid_argument(
+        "at_file",
+        format!(
+            "Lab offload cannot materialize @file argument `{}` on runner `{}`: {}",
+            spec.original_spec, runner_id, reason
+        ),
+        Some(spec.local_path.display().to_string()),
+        Some(vec![
+            format!("Controller-side file: {}", spec.local_path.display()),
+            format!("Runner-side file: {}", spec.remote_path),
+            "Ensure the selected runner is reachable and its workspace root is writable, then retry Lab offload.".to_string(),
+        ]),
+    )
+}
+
 fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -1005,22 +1128,6 @@ fn run_lab_offload_inner(
                 "Connect runner `{runner_id}` before using --runner."
             )]),
         ));
-    }
-
-    if request.capture_patch && status_tunnel_mode(&runner_status) == RunnerTunnelMode::Reverse {
-        let reason =
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string();
-        plan = with_step(
-            plan,
-            PlanStep::builder(
-                "lab.mutation_return",
-                "lab.mutation_return",
-                PlanStepStatus::Missing,
-            )
-            .skip_reason(reason.clone())
-            .build(),
-        );
-        return mutation_return_unavailable_outcome(plan, &selection, &runner_status, reason);
     }
 
     let runner_workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
@@ -1302,6 +1409,17 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
+    lab_metadata["runner_workload"] = serde_json::to_value(runner_workload_metadata(
+        &plan,
+        &contract,
+        &request,
+        runner_id,
+        status_tunnel_mode(&runner_status).metadata_value(),
+        selection.source.metadata_value(),
+        &remote_cwd,
+        &lab_metadata,
+    ))
+    .unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -1393,7 +1511,7 @@ fn run_lab_offload_inner(
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
             capability_preflight,
-            required_extensions: contract.required_extensions,
+            required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
             detach_after_handoff: request.detach_after_handoff,
         },
@@ -1513,6 +1631,14 @@ fn run_lab_offload_inner(
         stderr.push_str(&format!(
             "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
         ));
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &contract,
+            runner_id,
+            &remote_cwd,
+            &exec_output.stdout,
+            &exec_output.stderr,
+        );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = agent_task_run_id.as_deref() {
             if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
@@ -1706,6 +1832,116 @@ fn lab_materialization_proof_metadata(
         "workspace_mapping": workspace_mapping,
         "rigs": synced_rigs,
     })
+}
+
+fn runner_workload_metadata(
+    plan: &HomeboyPlan,
+    contract: &LabOffloadCommand,
+    request: &LabOffloadRequest<'_>,
+    runner_id: &str,
+    runner_mode: &str,
+    assignment_source: &str,
+    remote_workspace: &str,
+    lab_metadata: &serde_json::Value,
+) -> RunnerWorkload {
+    RunnerWorkload {
+        schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+        workload_id: format!("{}.runner_workload", plan.id),
+        kind: RunnerWorkloadKind {
+            command_label: contract.hot_label.to_string(),
+            command_family: RunnerWorkloadCommandFamily::from_command_label(contract.hot_label),
+        },
+        workspace_mappings: RunnerWorkloadWorkspaceMappings {
+            source_path_mode: contract.source_path_mode.label().to_string(),
+            workspace_mode_policy: contract.workspace_mode_policy.label().to_string(),
+            mapping_ref: Some("workspace_mapping".to_string()),
+        },
+        required_capabilities: runner_workload_required_capabilities(contract),
+        required_secrets: RunnerWorkloadSecrets {
+            categories: runner_workload_required_secret_categories(contract.hot_label),
+        },
+        mutation_policy: RunnerWorkloadMutationPolicy {
+            capture_patch: request.capture_patch,
+            mutation_flag: request.mutation_flag.map(str::to_string),
+            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        },
+        assignment: RunnerWorkloadAssignment {
+            runner_id: Some(runner_id.to_string()),
+            runner_mode: Some(runner_mode.to_string()),
+            source: Some(assignment_source.to_string()),
+        },
+        state: RunnerWorkloadState {
+            status: "offloaded".to_string(),
+            remote_workspace: Some(remote_workspace.to_string()),
+            fallback_reason: None,
+        },
+        result_refs: RunnerWorkloadResultRefs {
+            plan_id: plan.id.clone(),
+            proof_id: lab_metadata
+                .get("proof")
+                .and_then(|proof| proof.get("id"))
+                .and_then(|id| id.as_str())
+                .map(str::to_string),
+            workspace_mapping_ref: Some("workspace_mapping".to_string()),
+        },
+    }
+}
+
+fn runner_workload_required_capabilities(
+    contract: &LabOffloadCommand,
+) -> Vec<RunnerWorkloadCapability> {
+    let mut capabilities = Vec::new();
+    if contract.routing_policy.requires_extension_parity || !contract.required_extensions.is_empty()
+    {
+        capabilities.push(RunnerWorkloadCapability {
+            name: "extension_parity".to_string(),
+            required: true,
+        });
+    }
+    if contract.requires_playwright {
+        capabilities.push(RunnerWorkloadCapability {
+            name: "playwright".to_string(),
+            required: true,
+        });
+    }
+    capabilities
+}
+
+fn runner_workload_required_secret_categories(hot_label: &str) -> Vec<String> {
+    match hot_label {
+        label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
+        "trace" => vec!["trace".to_string()],
+        label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+impl LabOffloadSourcePathMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CwdOrPathFlag => "cwd_or_path_flag",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+impl LabOffloadWorkspaceModePolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
+            Self::Git => "git",
+            Self::GitCheckoutRequired => "git_checkout_required",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+fn passive_wp_codebox_version() -> Option<String> {
+    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
@@ -2100,29 +2336,28 @@ fn append_runner_failure_context_summary(
     ));
 }
 
-fn mutation_return_unavailable_outcome(
-    plan: HomeboyPlan,
-    selection: &LabRunnerSelection,
-    runner_status: &RunnerStatusReport,
-    reason: String,
-) -> Result<LabOffloadOutcome> {
-    match selection.source {
-        LabRunnerSelectionSource::Default => Ok(automatic_capability_fallback(
-            plan,
-            &selection.runner_id,
-            runner_status,
-            reason,
-        )),
-        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-            "runner",
-            reason,
-            Some(selection.runner_id.clone()),
-            Some(vec![
-                "Use --force-hot to run the command locally until reverse Lab mutation return is supported."
-                    .to_string(),
-            ]),
-        )),
+fn append_runner_component_registry_repair_hint(
+    stderr: &mut String,
+    contract: &LabOffloadCommand,
+    runner_id: &str,
+    remote_cwd: &str,
+    stdout: &str,
+    command_stderr: &str,
+) {
+    if !contract.routing_policy.release_gate
+        || !contains_component_not_found(stdout) && !contains_component_not_found(command_stderr)
+    {
+        return;
     }
+
+    stderr.push_str(&format!(
+        "Lab runner registry repair: runner `{runner_id}` did not know the component metadata required by this release gate. Register the synced runner checkout, then retry the original gate: `homeboy runner exec {runner_id} -- homeboy component create --local-path {}`. Inspect runner-side registry state with `homeboy runner exec {runner_id} -- homeboy component list`.\n",
+        shell_arg(remote_cwd)
+    ));
+}
+
+fn contains_component_not_found(output: &str) -> bool {
+    output.contains("component.not_found") || output.contains("Component not found")
 }
 
 #[cfg(test)]
@@ -2139,8 +2374,9 @@ mod tests {
     use crate::core::observation::LAB_OFFLOAD_METADATA_ENV;
     use crate::core::plan::PlanKind;
     use crate::core::runner::{
-        RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-        RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceSyncOutput,
+        RunnerActiveJobSource, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput,
+        RunnerRequiredTool, RunnerSession, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerTunnelMode, RunnerWorkspaceSyncOutput,
     };
 
     pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
@@ -2172,6 +2408,48 @@ mod tests {
             requires_playwright: false,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
+    }
+
+    fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
+        let mut command = portable_lab_command(label);
+        command.routing_policy.release_gate = true;
+        command
+    }
+
+    #[test]
+    fn release_gate_component_not_found_adds_runner_registry_repair_hint() {
+        let mut stderr = String::new();
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &release_gate_lab_command("lint"),
+            "homeboy-lab",
+            "/home/lab/Developer/frontend-agent-chat",
+            "",
+            r#"{"success":false,"error":{"code":"component.not_found"}}"#,
+        );
+
+        assert!(stderr.contains("Lab runner registry repair"));
+        assert!(stderr.contains(
+            "homeboy runner exec homeboy-lab -- homeboy component create --local-path /home/lab/Developer/frontend-agent-chat"
+        ));
+        assert!(stderr.contains("homeboy runner exec homeboy-lab -- homeboy component list"));
+        assert!(!stderr.contains("--force-hot"));
+        assert!(!stderr.contains("--allow-local-hot"));
+    }
+
+    #[test]
+    fn non_release_gate_component_not_found_does_not_add_registry_repair_hint() {
+        let mut stderr = String::new();
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &portable_lab_command("bench"),
+            "homeboy-lab",
+            "/home/lab/Developer/frontend-agent-chat",
+            "component.not_found",
+            "",
+        );
+
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -2523,6 +2801,8 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            stale_runner_jobs: Vec::new(),
+            stale_runner_job_count: 0,
             active_job_state: RunnerActiveJobState::Available,
             active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
             active_job_error: None,
@@ -3136,12 +3416,6 @@ mod tests {
             .is_some_and(|hint| hint.contains("--runner <runner-id>"))));
     }
 
-    fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
-        let mut command = portable_lab_command(label);
-        command.routing_policy.release_gate = true;
-        command
-    }
-
     #[test]
     fn release_gate_force_hot_allow_local_hot_fails_closed_with_default_runner() {
         // #4605: --force-hot --allow-local-hot must not silently bypass Lab
@@ -3225,61 +3499,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_return_gap_falls_back_for_default_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let outcome = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        )
-        .expect("default runner falls back");
-
-        let LabOffloadOutcome::RunLocal {
-            messages, metadata, ..
-        } = outcome
-        else {
-            panic!("expected local fallback");
-        };
-        assert!(messages[0].contains("running locally"));
-        assert_eq!(metadata.expect("metadata")["status"], "fallback");
-    }
-
-    #[test]
-    fn mutation_return_gap_rejects_explicit_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let result = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        );
-        let Err(err) = result else {
-            panic!("expected explicit runner rejection");
-        };
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("cannot yet return source-tree mutations"));
-        assert_eq!(err.details["id"], "lab");
-    }
-
-    #[test]
     fn apply_patch_step_accepts_noop_mutation_return() {
         let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
 
@@ -3318,6 +3537,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: Some(CommandCaptureMetadata {
@@ -3364,6 +3584,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
@@ -3409,6 +3630,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,

@@ -249,6 +249,48 @@ mod parsing {
         assert_eq!(parsed, vec![1531, 1538, 1501]);
         assert!(parse_issue_numbers("1531\nabc\n").is_err());
     }
+
+    #[test]
+    fn parse_pr_target_accepts_url_or_number_with_repo() {
+        let from_url =
+            parse_pr_target("https://github.com/Extra-Chill/homeboy/pull/5808", None).unwrap();
+        assert_eq!(from_url.repo.owner, "Extra-Chill");
+        assert_eq!(from_url.repo.repo, "homeboy");
+        assert_eq!(from_url.number, 5808);
+
+        let from_number = parse_pr_target("5808", Some("Extra-Chill/homeboy")).unwrap();
+        assert_eq!(from_number.repo.owner, "Extra-Chill");
+        assert_eq!(from_number.repo.repo, "homeboy");
+        assert_eq!(from_number.number, 5808);
+
+        assert!(parse_pr_target("5808", None).is_err());
+    }
+
+    #[test]
+    fn ci_failure_helpers_classify_and_extract_concise_snippets() {
+        let log = "running cargo test\nthread 'core' panicked\nassertion failed\ntest result: FAILED\nnext line";
+
+        let snippets = extract_failure_snippets(log, 3);
+        assert_eq!(snippets.len(), 2);
+        assert!(snippets[0].text.contains("panicked"));
+        assert_eq!(
+            classify_failure(&["unit", snippets[0].text.as_str()]),
+            "unit-test"
+        );
+
+        assert_eq!(
+            classify_failure(&["cargo fmt --check", "Diff in src/main.rs"]),
+            "fmt"
+        );
+        assert_eq!(
+            detect_baseline_vs_head(&["baseline red but head green"]).as_deref(),
+            Some("baseline-vs-head")
+        );
+        assert_eq!(
+            extract_actions_job_id("https://github.com/o/r/actions/runs/10/job/20"),
+            Some(20)
+        );
+    }
 }
 
 mod pull_requests {
@@ -381,6 +423,103 @@ mod pull_requests {
     }
 
     #[test]
+    fn summarize_ci_readiness_groups_requirement_states_and_actions() {
+        let checks: Vec<Value> = serde_json::from_str(
+            r#"[
+                {
+                  "name": "required queued",
+                  "required": true,
+                  "status": "QUEUED",
+                  "conclusion": null,
+                  "startedAt": "2026-04-26T10:00:00Z"
+                },
+                {
+                  "name": "required running",
+                  "isRequired": true,
+                  "status": "IN_PROGRESS",
+                  "conclusion": null,
+                  "startedAt": "2026-04-26T10:10:00Z"
+                },
+                {
+                  "name": "required passed",
+                  "required": true,
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS"
+                },
+                {
+                  "name": "optional failed",
+                  "required": false,
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"
+                },
+                {
+                  "name": "unknown skipped",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED"
+                }
+            ]"#,
+        )
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-04-26T10:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let readiness = summarize_ci_readiness(&checks, now).unwrap();
+
+        assert_eq!(readiness.checks.required.queued, 1);
+        assert_eq!(readiness.checks.required.running, 1);
+        assert_eq!(readiness.checks.required.passed, 1);
+        assert_eq!(readiness.checks.optional.failed, 1);
+        assert_eq!(readiness.checks.unknown_requirement.skipped, 1);
+        assert_eq!(
+            readiness.oldest_pending_started_at.as_deref(),
+            Some("2026-04-26T10:00:00+00:00")
+        );
+        assert_eq!(readiness.oldest_pending_duration_seconds, Some(2700));
+        assert_eq!(
+            readiness.failure_urls,
+            vec!["https://github.com/o/r/actions/runs/1/job/2"]
+        );
+        assert!(readiness.next_steps.iter().any(|step| step.contains(
+            "Wait for required checks to finish; oldest pending check has been active for 45m."
+        )));
+    }
+
+    #[test]
+    fn parse_prs_marks_pending_required_checks_as_next_action() {
+        let raw = r#"[
+            {
+              "number": 11,
+              "title": "Waiting on required CI",
+              "url": "https://github.com/o/r/pull/11",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "APPROVED",
+              "mergeStateStatus": "CLEAN",
+              "statusCheckRollup": [
+                {"name":"required", "required": true, "status":"IN_PROGRESS", "conclusion":null},
+                {"name":"optional", "required": false, "status":"COMPLETED", "conclusion":"SUCCESS"}
+              ],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"example-org"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            }
+        ]"#;
+
+        let items = parse_prs(raw, None, false).unwrap();
+
+        assert_eq!(
+            items[0].signals.next_action.as_deref(),
+            Some("required_checks_pending")
+        );
+        let readiness = items[0].ci_readiness.as_ref().unwrap();
+        assert_eq!(readiness.checks.required.running, 1);
+        assert_eq!(readiness.checks.optional.passed, 1);
+    }
+
+    #[test]
     fn parse_prs_derives_next_action_labels() {
         let raw = r#"[
             {
@@ -470,6 +609,239 @@ mod pull_requests {
                 "approved_but_pending_checks",
             ]
         );
+    }
+
+    #[test]
+    fn landing_classifier_covers_ready_and_blocked_states() {
+        assert_eq!(
+            classify_landing_pr("MERGED", Some("2026-06-01T00:00:00Z"), None, None),
+            TriageLandingClassification::Merged
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("SUCCESS"), Some("CLEAN")),
+            TriageLandingClassification::CleanMergeable
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("SUCCESS"), Some("DIRTY")),
+            TriageLandingClassification::ConflictRepairNeeded
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("PENDING"), Some("CLEAN")),
+            TriageLandingClassification::ChecksPending
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("FAILURE"), Some("CLEAN")),
+            TriageLandingClassification::CandidateRed
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, None, Some("UNKNOWN")),
+            TriageLandingClassification::BaselineRedInconclusive
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("CLEAN")),
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("DIRTY")),
+            TriageLandingMergeabilityState::Conflicting
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNKNOWN")),
+            TriageLandingMergeabilityState::Unknown
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNSTABLE")),
+            TriageLandingMergeabilityState::Unstable
+        );
+        assert_eq!(
+            landing_check_state(Some("PENDING")),
+            TriageLandingCheckState::Pending
+        );
+        assert_eq!(
+            landing_check_state(Some("FAILURE")),
+            TriageLandingCheckState::Failed
+        );
+    }
+
+    #[test]
+    fn parse_landing_pr_adds_classification_and_command() {
+        let repo = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "homeboy".to_string(),
+        };
+        let raw = r#"{
+          "number": 42,
+          "title": "Ready",
+          "url": "https://github.com/Extra-Chill/homeboy/pull/42",
+          "state": "OPEN",
+          "isDraft": false,
+          "reviewDecision": "APPROVED",
+          "mergeStateStatus": "CLEAN",
+          "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+          "baseRefName": "main",
+          "headRefName": "cook/ready",
+          "headRepository": {"name":"homeboy"},
+          "headRepositoryOwner": {"login":"Extra-Chill"},
+          "mergedAt": null,
+          "comments": [],
+          "reviews": [],
+          "updatedAt": "2026-06-01T00:00:00Z"
+        }"#;
+
+        let item = parse_landing_pr(raw, &repo, false).unwrap();
+
+        assert_eq!(
+            item.classification,
+            TriageLandingClassification::CleanMergeable
+        );
+        assert_eq!(
+            item.mergeability_state,
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(item.check_state, TriageLandingCheckState::Clean);
+        assert_eq!(item.head_branch.as_deref(), Some("cook/ready"));
+        assert_eq!(item.base_branch.as_deref(), Some("main"));
+        assert_eq!(item.head_repo.as_deref(), Some("Extra-Chill/homeboy"));
+        assert_eq!(
+            item.suggested_next_command,
+            "homeboy triage --watch Extra-Chill/homeboy#42 --until green-mergeable"
+        );
+        assert!(item.dependent_rebase.is_none());
+    }
+
+    #[test]
+    fn ordered_landing_preserves_input_order_and_dedupes() {
+        let mut items = vec![
+            landing_pr(
+                2,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/two",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                1,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/one",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                2,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/two",
+                "Extra-Chill/homeboy",
+            ),
+        ];
+
+        dedupe_landing_prs_preserving_order(&mut items);
+
+        assert_eq!(
+            items.iter().map(|item| item.number).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn ordered_landing_generates_same_repo_dependent_rebase_command() {
+        let mut items = vec![
+            landing_pr(
+                10,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/base",
+                "Extra-Chill/homeboy",
+            ),
+            landing_pr(
+                11,
+                "Extra-Chill/homeboy",
+                "main",
+                "feature/dependent",
+                "Extra-Chill/homeboy",
+            ),
+        ];
+
+        annotate_ordered_dependent_rebases(&mut items);
+
+        assert!(items[0].dependent_rebase.is_none());
+        let plan = items[1].dependent_rebase.as_ref().unwrap();
+        assert_eq!(plan.after_pr, 10);
+        assert!(plan.safe_to_update);
+        assert_eq!(plan.reason, "same_repo_head_branch");
+        assert_eq!(
+            plan.command.as_deref(),
+            Some("gh pr checkout 11 -R Extra-Chill/homeboy && git fetch origin main && git rebase origin/main && git push --force-with-lease origin HEAD:feature/dependent")
+        );
+    }
+
+    #[test]
+    fn ordered_landing_marks_forked_heads_manual() {
+        let item = landing_pr(
+            11,
+            "Extra-Chill/homeboy",
+            "main",
+            "feature/dependent",
+            "someone/homeboy",
+        );
+
+        let plan = dependent_rebase_plan(&item, 10);
+
+        assert!(!plan.safe_to_update);
+        assert_eq!(plan.reason, "head_branch_not_in_base_repo");
+        assert!(plan.command.is_none());
+    }
+
+    #[test]
+    fn landing_pr_ref_accepts_number_repo_ref_and_url() {
+        let repo = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "homeboy".to_string(),
+        };
+
+        assert_eq!(
+            parse_landing_pr_ref("42", &repo).unwrap().unwrap(),
+            LandingPrRef {
+                owner: "Extra-Chill".to_string(),
+                repo: "homeboy".to_string(),
+                number: 42,
+            }
+        );
+        assert_eq!(
+            parse_landing_pr_ref("Extra-Chill/homeboy#43", &repo)
+                .unwrap()
+                .unwrap()
+                .number,
+            43
+        );
+        assert_eq!(
+            parse_landing_pr_ref("https://github.com/Extra-Chill/homeboy/pull/44", &repo)
+                .unwrap()
+                .unwrap()
+                .number,
+            44
+        );
+    }
+
+    #[test]
+    fn bare_pr_number_detection_only_matches_numbers() {
+        assert!(is_bare_pr_number("42"));
+        assert!(is_bare_pr_number("#42"));
+        assert!(!is_bare_pr_number("Extra-Chill/homeboy#42"));
+        assert!(!is_bare_pr_number(
+            "https://github.com/Extra-Chill/homeboy/pull/42"
+        ));
+    }
+
+    #[test]
+    fn branch_matcher_supports_simple_globs_and_contains() {
+        assert!(branch_matches("cook/*", "cook/landing"));
+        assert!(branch_matches("*landing", "cook/landing"));
+        assert!(branch_matches("*land*", "cook/landing"));
+        assert!(branch_matches("land", "cook/landing"));
+        assert!(!branch_matches("fix/*", "cook/landing"));
     }
 
     #[test]
@@ -597,6 +969,34 @@ mod pull_requests {
         assert_eq!(actions[0].label, "2 PRs have failed checks");
         assert_eq!(actions[1].kind, "review_required");
         assert_eq!(actions[2].kind, "clean_and_ready");
+    }
+
+    fn landing_pr(
+        number: u64,
+        repo: &str,
+        base_branch: &str,
+        head_branch: &str,
+        head_repo: &str,
+    ) -> TriageLandingPr {
+        TriageLandingPr {
+            repo: repo.to_string(),
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            state: "OPEN".to_string(),
+            base_branch: Some(base_branch.to_string()),
+            head_branch: Some(head_branch.to_string()),
+            head_repo: Some(head_repo.to_string()),
+            mergeability_state: TriageLandingMergeabilityState::Clean,
+            check_state: TriageLandingCheckState::Clean,
+            classification: TriageLandingClassification::CleanMergeable,
+            suggested_next_command: format!(
+                "homeboy triage --watch {repo}#{number} --until green-mergeable"
+            ),
+            dependent_rebase: None,
+            signals: TriagePullRequestSignals::default(),
+            check_failures: Vec::new(),
+        }
     }
 }
 
@@ -768,6 +1168,7 @@ mod priority_and_summary {
                         next_action: Some("checks_failed".to_string()),
                         ..TriagePullRequestSignals::default()
                     },
+                    ci_readiness: None,
                     check_failures: Vec::new(),
                     labels: vec![],
                     assignees: vec![],
@@ -867,6 +1268,7 @@ fn triage_pr_with_action(action: &str) -> TriagePrItem {
             next_action: Some(action.to_string()),
             ..TriagePullRequestSignals::default()
         },
+        ci_readiness: None,
         check_failures: Vec::new(),
         labels: vec![],
         assignees: vec![],

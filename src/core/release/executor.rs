@@ -408,9 +408,8 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 /// forward so the default payload is unchanged.
 #[cfg(test)]
 mod tests {
-    use super::git_push::is_non_fast_forward_rejection;
     use super::package::store_artifacts_from_output;
-    use super::{github_release, run_cleanup, run_git_push, run_package};
+    use super::{github_release, run_cleanup, run_package};
     use crate::core::component::Component;
     use crate::core::deploy::release_download::GitHubRepo;
     use crate::core::extension::ExtensionManifest;
@@ -660,6 +659,29 @@ mod tests {
             .expect_err("nonzero exit without success field should fail");
 
         assert!(err.message.contains("some build error"));
+    }
+
+    #[test]
+    fn package_success_output_fails_when_frontend_assets_are_missing() {
+        let response = serde_json::json!({
+            "success": true,
+            "exitCode": 0,
+            "stdout": "[{\"path\":\"build/studio-native.zip\",\"type\":\"archive\"}]",
+            "stderr": concat!(
+                "[SUCCESS] All nested packages built successfully\n",
+                "[WARNING] Build completed with frontend warnings\n",
+                "[WARNING] Frontend assets were NOT included.\n",
+                "[WARNING] Fix the frontend build to include JS/CSS.\n"
+            ),
+        });
+        let mut state = crate::core::release::types::ReleaseState::default();
+
+        let err = store_artifacts_from_output(&mut state, &response)
+            .expect_err("missing required frontend assets should fail package validation");
+
+        assert!(err.message.contains("required frontend assets"));
+        assert!(err.message.contains("Frontend assets were NOT included"));
+        assert!(state.artifacts.is_empty());
     }
 
     #[test]

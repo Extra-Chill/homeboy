@@ -196,6 +196,12 @@ pub struct RunnerJob {
     pub claim_expires_in_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerArtifactRef>,
 }
@@ -209,8 +215,12 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             status: job.status,
             command: job.command.clone(),
             cwd: job.cwd.clone(),
-            source: job.source.to_string(),
-            lifecycle_owner: match job.source.lifecycle_owner() {
+            source: job.source.clone(),
+            lifecycle_owner: match crate::core::api_jobs::RunnerJobSource::from_metadata(
+                &job.source,
+            )
+            .lifecycle_owner()
+            {
                 crate::core::api_jobs::RunnerJobLifecycleOwner::Broker => {
                     RunnerLifecycleOwner::Broker
                 }
@@ -228,6 +238,9 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             claim_expires_at_ms: job.claim_expires_at_ms,
             claim_expires_in_ms: job.claim_expires_in_ms,
             durable_run_id: job.durable_run_id.clone(),
+            stale_reason: job.stale_reason.clone(),
+            lifecycle_state: job.lifecycle_state.clone(),
+            retryable: job.retryable,
             artifact_refs: Vec::new(),
         }
     }
@@ -264,6 +277,9 @@ impl RunnerJob {
             claim_expires_at_ms: job.claim_expires_at_ms,
             claim_expires_in_ms: None,
             durable_run_id: None,
+            stale_reason: job.stale_reason.clone(),
+            lifecycle_state: job.stale_reason.as_ref().map(|_| "stale".to_string()),
+            retryable: job.stale_reason.as_ref().map(|_| true),
             artifact_refs: job.artifacts.iter().map(RunnerArtifactRef::from).collect(),
         }
     }
@@ -286,6 +302,37 @@ pub struct RunnerWorkspaceLease {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerNamedWorkspaceLease {
+    pub name: String,
+    pub lease: RunnerWorkspaceLease,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerWorkspaceLeaseSet {
+    pub primary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leases: Vec<RunnerNamedWorkspaceLease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerMutationArtifacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_bundle_ref: Option<RunnerArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_log_ref: Option<RunnerArtifactRef>,
+}
+
+impl RunnerMutationArtifacts {
+    pub fn is_empty(&self) -> bool {
+        self.patch_ref.is_none()
+            && self.file_bundle_ref.is_none()
+            && self.operation_log_ref.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerResult {
     pub exit_code: i32,
     pub status: JobStatus,
@@ -295,6 +342,8 @@ pub struct RunnerResult {
     pub stderr_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_artifacts: Option<RunnerMutationArtifacts>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerArtifactRef>,
 }
@@ -308,6 +357,8 @@ pub struct RunnerHandoff {
     pub job: Option<RunnerJob>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_lease: Option<RunnerWorkspaceLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_leases: Option<RunnerWorkspaceLeaseSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RunnerResult>,
 }
@@ -368,8 +419,12 @@ pub struct RunnerStatusReport {
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_runner_jobs: Vec<RunnerJob>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_runner_jobs: Vec<RunnerJob>,
     #[serde(default)]
     pub active_job_count: usize,
+    #[serde(default)]
+    pub stale_runner_job_count: usize,
     pub active_job_state: RunnerActiveJobState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_source: Option<RunnerActiveJobSource>,

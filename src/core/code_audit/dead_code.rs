@@ -111,19 +111,15 @@ pub(crate) fn analyze_dead_code_with_config(
         // Skip test files — test methods are invoked by the test runner via
         // reflection/convention, not by direct calls from other source files.
         if !is_test_path(&fp.relative_path) {
-            // For languages without finer-grained visibility than "public" (PHP
-            // top-level functions, for example), a public function called from
+            // For languages without finer-grained visibility than "public" (no
+            // module-scoped visibility narrowing), a public function called from
             // anywhere in its own file IS referenced — the "make it private"
-            // suggestion doesn't apply, because PHP top-level functions are
-            // always globally accessible. Rust, by contrast, supports
-            // `pub(crate)` / `pub(super)` narrowing, so a self-only public
-            // function IS actionably dead code.
-            let language_allows_self_reference = matches!(
-                fp.language,
-                super::conventions::Language::Php
-                    | super::conventions::Language::JavaScript
-                    | super::conventions::Language::TypeScript
-            );
+            // suggestion doesn't apply, because such top-level functions are
+            // always globally accessible. Languages that support visibility
+            // narrowing, by contrast, can scope a self-only public function, so
+            // it IS actionably dead code. The classification is owned by the
+            // agnostic conventions layer.
+            let language_allows_self_reference = fp.language.lacks_visibility_narrowing();
 
             for export in &fp.public_api {
                 // Skip if this function is registered as a hook/callback target
@@ -281,10 +277,11 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint, audit_config: &Aud
         return true;
     }
 
-    // Rust-specific: trait implementations are called by the type system
-    if matches!(fp.language, super::conventions::Language::Rust) {
+    // Type-system-dispatched languages: trait/interface implementations are
+    // invoked by the compiler rather than by explicit call sites.
+    if fp.language.has_typesystem_trait_dispatch() {
         // Methods inside impl blocks for standard traits
-        let rust_trait_methods = [
+        let trait_dispatch_methods = [
             "serialize",
             "deserialize",
             "from_str",
@@ -307,18 +304,19 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint, audit_config: &Aud
             "command",
             "value_variants",
         ];
-        if rust_trait_methods.contains(&name) {
+        if trait_dispatch_methods.contains(&name) {
             return true;
         }
     }
 
-    // PHP/framework-specific: hook callbacks, lifecycle methods
-    if matches!(fp.language, super::conventions::Language::Php) {
+    // Framework-lifecycle-dispatched languages: hook callbacks and lifecycle /
+    // magic methods are invoked by the runtime by convention.
+    if fp.language.has_framework_lifecycle_dispatch() {
         if is_runtime_entrypoint_file(fp, audit_config) {
             return true;
         }
 
-        let php_entry_points = [
+        let lifecycle_entry_points = [
             "__construct",
             "__destruct",
             "__get",
@@ -340,7 +338,7 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint, audit_config: &Aud
             "handle",
             "process",
         ];
-        if php_entry_points.contains(&name) {
+        if lifecycle_entry_points.contains(&name) {
             return true;
         }
     }
@@ -349,12 +347,15 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint, audit_config: &Aud
 }
 
 fn is_runtime_entrypoint_file(fp: &FileFingerprint, audit_config: &AuditConfig) -> bool {
+    // Runtime entry-point base types and markers are extension-provided so core
+    // stays ecosystem-agnostic. A language extension declares the base classes
+    // (`runtime_entrypoint_extends`) and content markers
+    // (`runtime_entrypoint_markers`) that designate runtime-dispatched files.
     let extends = fp.extends.as_deref().unwrap_or("");
-    extends.ends_with("WP_CLI_Command")
-        || audit_config
-            .runtime_entrypoint_extends
-            .iter()
-            .any(|expected| extends.ends_with(expected))
+    audit_config
+        .runtime_entrypoint_extends
+        .iter()
+        .any(|expected| extends.ends_with(expected))
         || audit_config
             .runtime_entrypoint_markers
             .iter()
@@ -413,7 +414,7 @@ fn classify_unused_param(
         None => {
             // No call site data for this function — fall back to legacy behavior.
             // This happens when: the function is never called, or call_sites
-            // aren't available yet (e.g., Rust grammar doesn't emit them).
+            // aren't available yet (e.g., the language grammar doesn't emit them).
             (
                 AuditFinding::UnusedParameter,
                 format!(
@@ -1140,7 +1141,11 @@ class EmailCommand {
     }
 
     #[test]
-    fn wp_cli_command_base_suppresses_public_subcommand_methods() {
+    fn configured_command_base_class_suppresses_public_subcommand_methods() {
+        // A runtime command base class (e.g. a CLI framework's command base)
+        // is recognized only when the owning extension declares it via
+        // `runtime_entrypoint_extends` — core no longer hardcodes any specific
+        // ecosystem's base class.
         let mut command_fp = make_fingerprint(
             "inc/Cli/Commands/EmailCommand.php",
             vec!["test_connection"],
@@ -1149,13 +1154,13 @@ class EmailCommand {
             vec![],
         );
         command_fp.language = Language::Php;
-        command_fp.extends = Some("WP_CLI_Command".to_string());
-        command_fp.content = r#"<?php
-class EmailCommand extends WP_CLI_Command {
+        command_fp.extends = Some("RuntimeCliCommand".to_string());
+        command_fp.content = r#"<?
+class EmailCommand extends RuntimeCliCommand {
     /**
      * ## EXAMPLES
      *
-     *     wp sampleplugin email test-connection
+     *     app sampleplugin email test-connection
      *
      * @subcommand test-connection
      */
@@ -1164,14 +1169,19 @@ class EmailCommand extends WP_CLI_Command {
 "#
         .to_string();
 
-        let findings = analyze_dead_code(&[&command_fp], &[]);
+        let config = AuditConfig {
+            runtime_entrypoint_extends: vec!["RuntimeCliCommand".to_string()],
+            ..Default::default()
+        };
+
+        let findings = analyze_dead_code_with_config(&[&command_fp], &[], &config);
         let unreferenced: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         assert!(
             unreferenced.is_empty(),
-            "WP-CLI command methods are runtime subcommands, got: {:?}",
+            "configured command base subcommands are runtime entry points, got: {:?}",
             unreferenced
                 .iter()
                 .map(|f| &f.description)

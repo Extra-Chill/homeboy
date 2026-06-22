@@ -401,8 +401,7 @@ fn injected_default_provider_config_is_remappable() {
             &injected,
             &[LabPathRemap {
                 local: "/Users/user/Developer/example-provider@oauth".to_string(),
-                remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth"
-                    .to_string(),
+                remote: "/home/user/Developer/_lab_workspaces/example-provider@oauth".to_string(),
             }],
         );
         let cfg_idx = remapped
@@ -1042,4 +1041,54 @@ fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
             "--path=/runner/repo/packages/component".to_string(),
         ]
     );
+}
+
+#[test]
+fn lab_args_materializes_relative_at_file_specs_under_remote_workspace() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join(".ci")).expect("create .ci");
+    std::fs::write(dir.path().join(".ci/spec.json"), "{}").expect("write spec");
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "controller".to_string(),
+        "from-spec".to_string(),
+        "@.ci/spec.json".to_string(),
+        "--config=@.ci/spec.json".to_string(),
+    ];
+
+    let specs = lab_at_file_specs(&args, dir.path(), "/runner/workspace").expect("specs");
+
+    assert_eq!(specs.len(), 1);
+    assert!(specs[0]
+        .remote_spec
+        .starts_with("@/runner/workspace/.homeboy/lab-at-files/"));
+    assert!(specs[0].remote_spec.ends_with("-spec.json"));
+    assert_eq!(
+        remap_lab_at_file_args(&args, &specs),
+        vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "controller".to_string(),
+            "from-spec".to_string(),
+            specs[0].remote_spec.clone(),
+            format!("--config={}", specs[0].remote_spec),
+        ]
+    );
+}
+
+#[test]
+fn lab_args_at_file_preflight_reports_missing_controller_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let args = vec![
+        "homeboy".to_string(),
+        "cmd".to_string(),
+        "@.ci/missing.json".to_string(),
+    ];
+
+    let err = lab_at_file_specs(&args, dir.path(), "/runner/workspace").expect_err("missing");
+
+    assert!(err
+        .to_string()
+        .contains("controller-side file does not exist"));
 }

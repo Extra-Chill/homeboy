@@ -102,14 +102,16 @@ pub use offload_changed_since::{
 pub use offload_metadata::{
     capture_lab_offload_subprocess_metadata, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping,
+    lab_offload_metadata_with_workspace_mapping_and_runner_workload,
 };
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerArtifactRef, RunnerConnectReport, RunnerDisconnectReport,
-    RunnerFailureKind, RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerArtifactRef, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerHandoff, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerNamedWorkspaceLease, RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceLease,
+    RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerTransport};

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
-use crate::core::runner::RunnerResourceMetrics;
+use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
 use crate::core::source_snapshot::SourceSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,9 +71,15 @@ pub struct RemoteRunnerJobResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_artifacts: Option<RunnerMutationArtifacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observation_run_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

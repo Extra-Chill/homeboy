@@ -79,7 +79,9 @@ impl AgentTaskRunRecord {
             return;
         }
 
-        let reason = if self.owner_pid().is_some() {
+        let reason = if self.runner_job_id().is_some() {
+            "runner_job_unverified_after_daemon_restart"
+        } else if self.owner_pid().is_some() {
             "owner_process_not_running"
         } else {
             "missing_runner_pid"
@@ -87,6 +89,7 @@ impl AgentTaskRunRecord {
         let metadata = self.ensure_metadata_object();
         metadata.insert("stale_running".to_string(), json!(true));
         metadata.insert("stale_running_reason".to_string(), json!(reason));
+        metadata.insert("retryable".to_string(), json!(true));
     }
 
     fn owner_process_is_running(&self) -> bool {
@@ -99,6 +102,14 @@ impl AgentTaskRunRecord {
             .get("runner_pid")
             .and_then(Value::as_u64)
             .and_then(|pid| u32::try_from(pid).ok())
+    }
+
+    fn runner_job_id(&self) -> Option<&str> {
+        self.metadata
+            .get("runner_job_id")
+            .or_else(|| self.metadata.get("job_id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
     }
 
     fn ensure_metadata_object(&mut self) -> &mut serde_json::Map<String, Value> {

@@ -12,6 +12,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 
 use super::super::agent_task_dispatch::DispatchArgs;
+use super::prompts::AgentTaskPromptsArgs;
 use super::review;
 use super::tool::AgentTaskToolArgs;
 
@@ -164,6 +165,8 @@ pub enum AgentTaskCommand {
     GateFeedback(GateFeedbackArgs),
     /// Provider: list extension-declared agent-task executor providers and optional secret readiness.
     Providers(ProvidersArgs),
+    /// Prompt store: save, list, show, and remove markdown prompts in Homeboy-owned storage.
+    Prompts(AgentTaskPromptsArgs),
     /// Provider: export Homeboy's machine-readable agent-task core contract metadata.
     Contract(ContractArgs),
     /// Controller: compile a declarative loop definition into an agent-task plan.
