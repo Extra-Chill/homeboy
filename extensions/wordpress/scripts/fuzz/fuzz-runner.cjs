@@ -51,7 +51,7 @@ async function buildRunnerResult(env) {
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const env = wpCodeboxRuntimeEnv(process.env);
-	const command = env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+	const command = env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || discoverWpCodeboxBin(env) || 'wp-codebox';
 	const manifest = await discoverRuntimeContractManifest(env);
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
@@ -210,6 +210,21 @@ function discoverWpCodeboxCoreModule(env) {
 	return '';
 }
 
+function discoverWpCodeboxBin(env) {
+	const installRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+	for (const candidate of [
+		path.join(installRoot, 'source', 'packages', 'cli', 'dist', 'index.js'),
+		path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-cli', 'dist', 'index.js'),
+		path.join(installRoot, 'release', 'wp-codebox-cli', 'dist', 'index.js'),
+		path.join(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-cli', 'dist', 'index.js'),
+	]) {
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+	}
+	return '';
+}
+
 function parseJsonObject(value) {
 	if (!value) {
 		return null;
@@ -338,4 +353,5 @@ function findFuzzSuiteResult(value) {
 module.exports = {
 	resolveWpCodeboxRuntimePath,
 	wpCodeboxRuntimeEnv,
+	discoverWpCodeboxBin,
 };

@@ -162,7 +162,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'))
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
-const { wpCodeboxRuntimeEnv } = require(runnerPath);
+const { discoverWpCodeboxBin, wpCodeboxRuntimeEnv } = require(runnerPath);
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload)}\n`);
 
 assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
@@ -172,6 +172,16 @@ assert.equal(
 	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
 	'/runner/wp-codebox/packages/runtime-core/dist/contracts.js',
 	'Lab-exported per-setting env should provide the WP Codebox core module path'
+);
+
+const codeboxInstallRoot = path.join(tempDir, 'wp-codebox-install');
+const cachedCodeboxBin = path.join(codeboxInstallRoot, 'source', 'packages', 'cli', 'dist', 'index.js');
+fs.mkdirSync(path.dirname(cachedCodeboxBin), { recursive: true });
+fs.writeFileSync(cachedCodeboxBin, '#!/usr/bin/env node\n');
+assert.equal(
+	discoverWpCodeboxBin({ HOMEBOY_WP_CODEBOX_INSTALL_DIR: codeboxInstallRoot }),
+	cachedCodeboxBin,
+	'Fuzz runner should prefer the cached WP Codebox CLI over stale binaries on PATH'
 );
 
 const cli = spawnSync(runnerPath, [], {
