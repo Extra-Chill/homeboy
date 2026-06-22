@@ -260,18 +260,27 @@ generic contracts:
   command, status, durable run linkage, and artifact refs.
 - `RunnerWorkspaceLease`: controller-owned local-to-runner workspace materialization
   with source ref/commit/dirty metadata.
+- `RunnerWorkspaceLeaseSet`: named workspace leases for jobs that materialize more
+  than one tree. `primary` names the default execution workspace; entries in
+  `leases` bind names such as `source`, `rig`, or `runtime` to their own
+  `RunnerWorkspaceLease`. Existing single-workspace output keeps
+  `workspace_lease` while migrations add `workspace_leases`.
 - `RunnerResult`: terminal command result with exit status, stream sizes, mirrored
   run linkage, and artifact refs.
 - `RunnerArtifactRef`: stable artifact identity plus path/URL/hash/transport
   metadata for later retrieval.
+- `RunnerMutationArtifacts`: transport-independent mutation return shape. When a
+  runner command captures source changes, `mutation_artifacts.patch_ref` points
+  at the patch artifact; future file-bundle and operation-log returns use
+  `file_bundle_ref` and `operation_log_ref` without changing caller logic.
 - `RunnerHandoff`: the controller-to-runner handoff envelope tying transport,
   owner, job, workspace lease, and result together.
 
-Compatibility fields such as `active_jobs`, `job`, `job_id`, and `job_events`
-remain present for existing callers. New integrations should read
-`active_runner_jobs`, `runner_job`, `workspace_lease`, `runner_result`,
-`artifact_ref`, and `handoff` so direct SSH and reverse broker implementations
-stay hidden behind the same lifecycle vocabulary.
+Compatibility fields such as `active_jobs`, `job`, `job_id`, `job_events`, and
+`workspace_lease` remain present for existing callers. New integrations should
+read `active_runner_jobs`, `runner_job`, `workspace_leases`, `runner_result`,
+`mutation_artifacts`, `artifact_ref`, and `handoff` so direct SSH and reverse
+broker implementations stay hidden behind the same lifecycle vocabulary.
 
 ```json
 {
@@ -500,6 +509,10 @@ Path rules:
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
 - Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
+- Mutation-capable executions expose returned source changes through
+  `mutation_artifacts.patch_ref` when a patch artifact is available. Direct
+  daemon and reverse broker results use the same field; callers should not branch
+  on transport mode to find returned mutations.
 
 Runner job environment:
 

@@ -75,7 +75,7 @@ pub struct HierarchyEntry {
 pub struct HookSummary {
     pub total_actions: usize,
     pub total_filters: usize,
-    /// Top hook prefixes (e.g., "woocommerce_" → 847).
+    /// Top hook prefixes (e.g., "store_" → 847).
     pub top_prefixes: Vec<(String, usize)>,
 }
 

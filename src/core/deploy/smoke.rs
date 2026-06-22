@@ -7,9 +7,9 @@
 //! of sitting live.
 //!
 //! This is deliberately stack-agnostic: core only knows "fetch a URL, assert a
-//! status/content substring". The concrete front-end URL (e.g. a WordPress
+//! status/content substring". The concrete front-end URL (e.g. a site
 //! home page) is supplied by the project config, keeping core free of any
-//! WordPress/PHP specifics. See homeboy#5471.
+//! runtime-specific details. See homeboy#5471.
 
 use std::time::Duration;
 

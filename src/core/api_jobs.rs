@@ -131,6 +131,12 @@ pub struct ActiveRunnerJobSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_child_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_cell_count: Option<u64>,
@@ -303,6 +309,24 @@ impl JobStore {
             })
             .collect();
         jobs.sort_by_key(|job| (job.started_at_ms, job.job_id.clone()));
+        jobs
+    }
+
+    pub(crate) fn stale_runner_jobs(&self) -> Vec<ActiveRunnerJobSummary> {
+        let now = timestamp_ms();
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut jobs: Vec<ActiveRunnerJobSummary> = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
+            })
+            .filter_map(|stored| {
+                let request = stored.remote_runner.as_ref()?.request.clone();
+                Some(active_runner_job_summary(&stored.job, &request, now))
+            })
+            .collect();
+        jobs.sort_by_key(|job| (job.updated_at_ms, job.job_id.clone()));
         jobs
     }
 
@@ -533,6 +557,9 @@ fn active_runner_job_summary(
         durable_run_id: request_metadata_string(request, "durable_run_id")
             .or_else(|| request_metadata_string(request, "run_id"))
             .or_else(|| request_metadata_string(request, "record_run_id")),
+        stale_reason: job.stale_reason.clone(),
+        lifecycle_state: Some(runner_job_lifecycle_state(job).to_string()),
+        retryable: Some(runner_job_retryable(job)),
         active_child_count: request
             .metadata
             .as_ref()
@@ -544,6 +571,28 @@ fn active_runner_job_summary(
             .and_then(|metadata| metadata.get("active_cell_count"))
             .and_then(Value::as_u64),
     }
+}
+
+fn runner_job_lifecycle_state(job: &Job) -> &'static str {
+    if job.status == JobStatus::Failed
+        && job.stale_reason.as_deref()
+            == Some("daemon restarted before the job reached a terminal status")
+    {
+        "abandoned_after_daemon_restart"
+    } else if job.stale_reason.is_some() {
+        "stale"
+    } else if matches!(job.status, JobStatus::Queued | JobStatus::Running) {
+        "active"
+    } else {
+        "terminal"
+    }
+}
+
+fn runner_job_retryable(job: &Job) -> bool {
+    matches!(
+        runner_job_lifecycle_state(job),
+        "abandoned_after_daemon_restart" | "stale"
+    )
 }
 
 fn request_metadata_string(
@@ -1450,6 +1499,41 @@ mod tests {
     }
 
     #[test]
+    fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("jobs.json");
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store
+            .submit_remote_runner_job(remote_runner_request("homeboy-lab", Some("extrachill")))
+            .expect("remote runner job queues");
+        store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("claim succeeds")
+            .expect("job claimed");
+
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+
+        assert!(
+            reopened.active_runner_jobs().is_empty(),
+            "abandoned jobs must not remain active after daemon restart"
+        );
+        let stale_jobs = reopened.stale_runner_jobs();
+        assert_eq!(stale_jobs.len(), 1);
+        assert_eq!(stale_jobs[0].job_id, job.id.to_string());
+        assert_eq!(stale_jobs[0].runner_id, "homeboy-lab");
+        assert_eq!(stale_jobs[0].status, JobStatus::Failed);
+        assert_eq!(
+            stale_jobs[0].lifecycle_state.as_deref(),
+            Some("abandoned_after_daemon_restart")
+        );
+        assert_eq!(stale_jobs[0].retryable, Some(true));
+        assert_eq!(
+            stale_jobs[0].stale_reason.as_deref(),
+            Some("daemon restarted before the job reached a terminal status")
+        );
+    }
+
+    #[test]
     fn remote_runner_job_claim_respects_concurrency_limit() {
         let store = JobStore::default();
         let first = store
@@ -1485,6 +1569,7 @@ mod tests {
                     stdout: None,
                     stderr: None,
                     patch: None,
+                    mutation_artifacts: None,
                     data: None,
                     observation_run_ids: Vec::new(),
                     artifacts: Vec::new(),
@@ -1556,6 +1641,7 @@ mod tests {
                     stdout: Some("ok".to_string()),
                     stderr: None,
                     patch: None,
+                    mutation_artifacts: None,
                     data: Some(json!({ "summary": "passed" })),
                     observation_run_ids: Vec::new(),
                     artifacts: vec![JobArtifactMetadata {
@@ -1614,6 +1700,7 @@ mod tests {
                     stdout: None,
                     stderr: Some("nope".to_string()),
                     patch: None,
+                    mutation_artifacts: None,
                     data: None,
                     observation_run_ids: Vec::new(),
                     artifacts: Vec::new(),
