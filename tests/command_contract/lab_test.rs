@@ -976,3 +976,18 @@ fn test_lab_offload_mutation_flag() {
         Some("--baseline/--ratchet")
     );
 }
+
+#[test]
+fn lab_mutation_patch_capture_is_descriptor_owned() {
+    let mutating_lint = parsed_command(&["homeboy", "lint", "--fix"]);
+    let mutating_descriptor = mutating_lint.descriptor(false);
+    assert!(mutating_lint.lab_offload_captures_mutation_patch());
+    assert!(mutating_descriptor.lab_offload_captures_mutation_patch);
+    assert_eq!(mutating_descriptor.lab_offload_mutation_flag, Some("--fix"));
+
+    let read_only_lint = parsed_command(&["homeboy", "lint"]);
+    let read_only_descriptor = read_only_lint.descriptor(false);
+    assert!(!read_only_lint.lab_offload_captures_mutation_patch());
+    assert!(!read_only_descriptor.lab_offload_captures_mutation_patch);
+    assert_eq!(read_only_descriptor.lab_offload_mutation_flag, None);
+}

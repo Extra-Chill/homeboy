@@ -55,6 +55,7 @@ pub struct LabCommandContract {
     pub portability: LabCommandPortability,
     pub source_path_mode: LabSourcePathMode,
     pub workspace_mode_policy: LabWorkspaceModePolicy,
+    pub capture_mutation_patch: bool,
     pub mutation_flag: Option<&'static str>,
     pub extra_required_tools: &'static [LabCommandRequiredTool],
     /// Routing-policy flags shared across the Lab command layers.
@@ -664,6 +665,8 @@ pub(super) fn apply_lab_contract_to_descriptor(
             LabCommandPortability::Portable => None,
             LabCommandPortability::LocalOnly(reason) => Some(reason),
         });
+    descriptor.lab_offload_captures_mutation_patch = contract
+        .is_some_and(|contract| contract.capture_mutation_patch);
     descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
 }
 
@@ -748,6 +751,7 @@ impl LabCommandContract {
             portability: LabCommandPortability::Portable,
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            capture_mutation_patch: mutation_flag.is_some(),
             mutation_flag,
             extra_required_tools,
             routing_policy: LabRoutingPolicy {
@@ -829,6 +833,7 @@ impl LabCommandContract {
             portability: LabCommandPortability::LocalOnly(reason),
             source_path_mode: LabSourcePathMode::CwdOrPathFlag,
             workspace_mode_policy: LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            capture_mutation_patch: false,
             mutation_flag: None,
             extra_required_tools: LAB_NO_EXTRA_TOOLS,
             routing_policy: LabRoutingPolicy {
@@ -915,6 +920,11 @@ impl Commands {
     pub fn lab_offload_mutation_flag(&self) -> Option<&'static str> {
         self.lab_contract()
             .and_then(|contract| contract.mutation_flag)
+    }
+
+    pub fn lab_offload_captures_mutation_patch(&self) -> bool {
+        self.lab_contract()
+            .is_some_and(|contract| contract.capture_mutation_patch)
     }
 
     pub fn lab_required_extensions(&self) -> crate::core::Result<Vec<String>> {
