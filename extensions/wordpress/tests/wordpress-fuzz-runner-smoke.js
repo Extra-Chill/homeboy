@@ -6,6 +6,16 @@ const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+
+process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(
+	__dirname,
+	'..',
+	'..',
+	'tests',
+	'fixtures',
+	'wp-codebox-core-runtime-contract.cjs'
+);
+
 const { runtimeContractSchemas } = require('../../agent-runtimes/wp-codebox');
 
 const originalLoad = Module._load;
@@ -152,9 +162,17 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'))
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
+const { wpCodeboxRuntimeEnv } = require(runnerPath);
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload)}\n`);
 
 assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
+assert.equal(
+	wpCodeboxRuntimeEnv({
+		HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE: '/runner/wp-codebox/packages/runtime-core/dist/contracts.js',
+	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
+	'/runner/wp-codebox/packages/runtime-core/dist/contracts.js',
+	'Lab-exported per-setting env should provide the WP Codebox core module path'
+);
 
 const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',

@@ -183,6 +183,9 @@ function wpCodeboxRuntimeEnv(env) {
 			nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(settings.wp_codebox_core_module);
 		}
 	}
+	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE && nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE) {
+		nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(nextEnv.HOMEBOY_SETTINGS_WP_CODEBOX_CORE_MODULE);
+	}
 	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
 		const discoveredCoreModule = discoverWpCodeboxCoreModule(nextEnv);
 		if (discoveredCoreModule) {
