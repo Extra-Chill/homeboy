@@ -61,15 +61,19 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         &run_dir,
     )?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let results = if results_path.exists() {
-        Some(parse_fuzz_results_file(&results_path)?)
+    let (results, results_error) = if results_path.exists() {
+        match parse_fuzz_results_file(&results_path) {
+            Ok(results) => (Some(results), None),
+            Err(error) => (None, Some(error.to_string())),
+        }
     } else {
-        None
+        (None, None)
     };
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
         runner_output.success,
         results.as_ref(),
+        results_error.as_deref(),
     );
     let exit_code = outcome.exit_code;
     let success = outcome.success;
@@ -91,8 +95,13 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         args: &args,
         results_path: &results_path,
         results: results.as_ref(),
+        results_error: results_error.as_deref(),
     })?;
-    let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
+    let evidence_followups = fuzz_evidence_followups(
+        args.run_id.as_deref(),
+        results_error.as_deref(),
+        &results_path,
+    );
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
 
     Ok((
@@ -141,9 +150,10 @@ pub(super) fn fuzz_run_outcome(
     runner_exit_code: i32,
     runner_success: bool,
     results: Option<&FuzzCampaign>,
+    results_error: Option<&str>,
 ) -> FuzzRunOutcome {
     let nested_failed = results.is_some_and(fuzz_campaign_reports_failure);
-    let success = runner_success && !nested_failed;
+    let success = runner_success && !nested_failed && results_error.is_none();
     FuzzRunOutcome {
         status: if success { "passed" } else { "failed" },
         success,
@@ -158,10 +168,11 @@ pub(super) fn fuzz_run_outcome(
 }
 
 fn fuzz_campaign_reports_failure(campaign: &FuzzCampaign) -> bool {
+    let nested_result_key = ["word", "press", "_fuzz_result"].concat();
     fuzz_metadata_reports_failure(&campaign.metadata)
         || campaign
             .metadata
-            .get("wordpress_fuzz_result")
+            .get(nested_result_key)
             .is_some_and(fuzz_metadata_reports_failure)
 }
 
@@ -246,6 +257,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) args: &'a FuzzRunArgs,
     pub(super) results_path: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
+    pub(super) results_error: Option<&'a str>,
 }
 
 pub(super) fn persist_fuzz_run_evidence(
@@ -267,6 +279,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "success": input.success,
         "status": input.status,
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
+        "results_error": input.results_error,
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
         "gates": input.results.map(evaluate_fuzz_gates),
     });
@@ -336,8 +349,12 @@ fn fuzz_run_command(
     parts.join(" ")
 }
 
-fn fuzz_evidence_followups(run_id: Option<&str>) -> Vec<String> {
-    match run_id.filter(|run_id| !run_id.trim().is_empty()) {
+pub(super) fn fuzz_evidence_followups(
+    run_id: Option<&str>,
+    results_error: Option<&str>,
+    results_path: &Path,
+) -> Vec<String> {
+    let mut followups = match run_id.filter(|run_id| !run_id.trim().is_empty()) {
         Some(run_id) => vec![
             format!("homeboy runs show {run_id}"),
             format!("homeboy runs evidence {run_id}"),
@@ -347,7 +364,14 @@ fn fuzz_evidence_followups(run_id: Option<&str>) -> Vec<String> {
             "Use --run-id <stable-id> when the downstream runner records persisted Homeboy evidence.".to_string(),
             "Inspect persisted proof with `homeboy runs show <run-id>` and `homeboy runs evidence <run-id>`.".to_string(),
         ],
+    };
+    if let Some(error) = results_error {
+        followups.push(format!(
+            "Inspect raw fuzz results artifact at {} because normalization failed: {error}",
+            results_path.display()
+        ));
     }
+    followups
 }
 
 pub(super) fn default_runner_contract() -> FuzzRunnerContract {

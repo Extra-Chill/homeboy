@@ -22,20 +22,19 @@ mod public_variants;
 pub use lab::{
     lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
     lab_runner_supports_contract_label, lab_runner_unsupported_hint,
-    lab_runner_unsupported_message, LabCommandContract, LabCommandPortability,
-    LabCommandRequiredTool, LabCommandRouteContract, LabLocalExecutionPolicy, LabLocalHotPolicy,
-    LabRoutingPolicy, LabRunnerSupportSummary, LabSelectedRunnerFallbackPolicy, LabSourcePathMode,
-    LabWorkspaceModePolicy, RunnerWorkload, RunnerWorkloadArtifactRef, RunnerWorkloadAssignment,
-    RunnerWorkloadCapability, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
-    RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
-    RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS,
-    RUNNER_WORKLOAD_SCHEMA,
+    lab_runner_unsupported_message, CommandPortabilityContract, LabCommandContract,
+    LabCommandPortability, LabCommandRequiredTool, LabCommandRouteContract,
+    LabLocalExecutionPolicy, LabLocalHotPolicy, LabRoutingPolicy, LabRunnerSupportSummary,
+    LabSelectedRunnerFallbackPolicy, LabSourcePathMode, LabWorkspaceModePolicy, RunnerWorkload,
+    RunnerWorkloadArtifactRef, RunnerWorkloadAssignment, RunnerWorkloadCapability,
+    RunnerWorkloadCommandFamily, RunnerWorkloadKind, RunnerWorkloadMutationPolicy,
+    RunnerWorkloadResultRefs, RunnerWorkloadSecrets, RunnerWorkloadState,
+    RunnerWorkloadWorkspaceMappings, LAB_TRACE_EXTRA_TOOLS, RUNNER_WORKLOAD_SCHEMA,
 };
 pub(crate) use lab::{
-    CommandPortabilityContract, AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL,
-    LAB_NO_EXTRA_TOOLS, LINT_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL,
-    RIG_UP_LAB_UNSUPPORTED_REASON, TEST_LAB_LABEL, TRACE_LAB_LABEL,
-    TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL, TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
+    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_LAB_LABEL, LAB_NO_EXTRA_TOOLS, LINT_LAB_LABEL,
+    REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_UP_LAB_UNSUPPORTED_REASON, TEST_LAB_LABEL,
+    TRACE_LAB_LABEL, TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL, TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
     TUNNEL_SERVICE_START_LAB_LABEL,
 };
 pub use output::{

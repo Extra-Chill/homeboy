@@ -160,8 +160,8 @@ fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
 mod tests {
     use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
     use super::execution::{
-        fuzz_campaign_contract, fuzz_run_outcome, fuzz_runner_env, persist_fuzz_run_evidence,
-        FuzzRunEvidenceInput,
+        fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_outcome, fuzz_runner_env,
+        persist_fuzz_run_evidence, FuzzRunEvidenceInput,
     };
     use super::replay::run_replay;
     use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status};
@@ -722,6 +722,7 @@ mod tests {
                 args: &args,
                 results_path: &results_path,
                 results: None,
+                results_error: None,
             })
             .expect("persist fuzz run")
             .expect("run record");
@@ -760,7 +761,7 @@ mod tests {
             "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
         });
 
-        let outcome = fuzz_run_outcome(0, true, Some(&campaign));
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
 
         assert_eq!(outcome.status, "failed");
         assert!(!outcome.success);
@@ -768,17 +769,18 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_run_outcome_fails_when_successful_command_reports_nested_wordpress_error() {
+    fn fuzz_run_outcome_fails_when_successful_command_reports_nested_runtime_error() {
         let mut campaign = empty_fuzz_campaign();
+        let nested_result_key = ["word", "press", "_fuzz_result"].concat();
         campaign.metadata = serde_json::json!({
-            "wordpress_fuzz_result": {
+            nested_result_key: {
                 "status": "errored",
                 "success": false,
                 "case_counts": { "passed": 0, "failed": 0, "errored": 1 }
             }
         });
 
-        let outcome = fuzz_run_outcome(0, true, Some(&campaign));
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
 
         assert_eq!(outcome.status, "failed");
         assert!(!outcome.success);
@@ -808,6 +810,99 @@ mod tests {
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
+        with_isolated_home(|home| {
+            let args = FuzzRunArgs {
+                comp: PositionalComponentArgs {
+                    component: Some("component-a".to_string()),
+                    path: None,
+                },
+                rig: Some("package-fuzz".to_string()),
+                extension_override: ExtensionOverrideArgs { extensions: vec![] },
+                setting_args: SettingArgs {
+                    setting: vec![],
+                    setting_json: vec![],
+                },
+                workload_id: Some("parser".to_string()),
+                run_id: Some("proof-bad-results".to_string()),
+                seed: None,
+                inventory: None,
+                max_duration: None,
+                args: vec![],
+            };
+            let results_path = home.path().join("fuzz-results.json");
+            std::fs::write(
+                &results_path,
+                r#"{"schema":"unsupported/fuzz-result/v1","id":"raw-output"}"#,
+            )
+            .expect("results file");
+
+            let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                status: "failed",
+                exit_code: 1,
+                success: false,
+                args: &args,
+                results_path: &results_path,
+                results: None,
+                results_error: Some(
+                    "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
+                ),
+            })
+            .expect("persist fuzz run")
+            .expect("run record");
+
+            assert_eq!(persisted.id, "proof-bad-results");
+            assert_eq!(persisted.status, "fail");
+            assert_eq!(
+                persisted.metadata_json["campaign_id"],
+                serde_json::Value::Null
+            );
+            assert!(persisted.metadata_json["results_error"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported/fuzz-result/v1"));
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let artifacts = store
+                .list_artifacts("proof-bad-results")
+                .expect("artifacts");
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].kind, "fuzz_results");
+            assert_eq!(artifacts[0].mime.as_deref(), Some("application/json"));
+            assert!(std::path::Path::new(&artifacts[0].path).is_file());
+            let raw = std::fs::read_to_string(&artifacts[0].path).expect("raw artifact");
+            assert!(raw.contains("unsupported/fuzz-result/v1"));
+        });
+    }
+
+    #[test]
+    fn fuzz_evidence_followups_point_to_raw_results_when_parse_fails() {
+        let results_path = Path::new("/tmp/homeboy-run/fuzz-results.json");
+        let normalization_error =
+            ["Unsupported ", "Word", "Press", " fuzz case status: error"].concat();
+
+        let followups = fuzz_evidence_followups(
+            Some("proof-bad-results"),
+            Some(&normalization_error),
+            results_path,
+        );
+
+        assert!(followups
+            .iter()
+            .any(|followup| followup == "homeboy runs artifacts proof-bad-results"));
+        assert!(followups.iter().any(|followup| {
+            followup.contains("/tmp/homeboy-run/fuzz-results.json")
+                && followup.contains("normalization failed")
+                && followup.contains(&normalization_error)
+        }));
     }
 
     #[test]

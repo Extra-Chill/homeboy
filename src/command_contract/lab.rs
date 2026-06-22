@@ -296,7 +296,7 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
-    "agent-task controller from-spec --resume/materialize";
+    "agent-task controller from-spec --resume/run-from-spec/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
 const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
@@ -341,8 +341,8 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
             AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
             AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
         ],
-        message_label: "agent-task controller from-spec --resume/materialize/resume",
-        hint_label: "agent-task controller from-spec --resume/materialize/resume",
+        message_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
+        hint_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
     },
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
@@ -562,6 +562,7 @@ impl Commands {
                                     resume: true, ..
                                 },
                             )
+                            | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
                             | agent_task::AgentTaskControllerCommand::Materialize(_),
                     }),
             }) => LabCommandContract::explicit_runner_simple(
@@ -664,6 +665,13 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
                 agent_task::AgentTaskControllerCommand::FromSpec(
                     agent_task::AgentTaskControllerFromSpecArgs {
                         resume: true,
+                        dispatch_backend,
+                        dispatch_selector,
+                        ..
+                    },
+                )
+                | agent_task::AgentTaskControllerCommand::RunFromSpec(
+                    agent_task::AgentTaskControllerRunFromSpecArgs {
                         dispatch_backend,
                         dispatch_selector,
                         ..
