@@ -225,13 +225,13 @@ jobs:
 
 ## External Bundle And Tool Recording
 
-Consumers such as `docs-agent` can keep the agent bundle in one repository while
+Consumers can keep an agent bundle in one repository while
 running it against another repository. The reusable workflow handles the bundle
 checkout and passes tool recorder config to the WordPress runner.
 
 ```yaml
 jobs:
-  run-docs-agent:
+  run-external-agent:
     uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
     with:
       runtime_provider: wp-codebox
@@ -240,14 +240,14 @@ jobs:
       runtime_profiles: >-
         {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
       runtime_dependencies: '["Example/runtime-plugin@main"]'
-      runtime_execution: '{"kind":"bundle","source":".ci/docs-agent/bundles/docs-agent"}'
-      workload_id: docs-agent-flow
-      workload_label: Run docs-agent runtime bundle
+      runtime_execution: '{"kind":"bundle","source":".ci/example-agent/bundles/example-agent"}'
+      workload_id: example-agent-flow
+      workload_label: Run example agent runtime bundle
       target_repo: Automattic/agents-api
-      validation_dependencies: Automattic/docs-agent@main
-      app_token_repos: Automattic/agents-api,Automattic/docs-agent
+      validation_dependencies: ExampleOrg/example-agent@main
+      app_token_repos: ExampleOrg/target-repo,ExampleOrg/example-agent
       require_homeboy_app_token: true
-      allowed_repos: '["Automattic/agents-api", "Automattic/docs-agent"]'
+      allowed_repos: '["ExampleOrg/target-repo", "ExampleOrg/example-agent"]'
       tool_results_key: github_tool_results
       evidence_projections: |
         [
@@ -260,7 +260,7 @@ jobs:
           }
         ]
       success_requires_pr: false
-      transcript_artifact_name: docs-agent-transcript-${{ github.run_id }}
+      transcript_artifact_name: example-agent-transcript-${{ github.run_id }}
     secrets: inherit
 ```
 
