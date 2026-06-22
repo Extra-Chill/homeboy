@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.21] - 2026-06-22
+
+### Changed
+- Add Codebox fuzz sandbox tool policy
+
 ## [3.12.20] - 2026-06-22
 
 ### Fixed
