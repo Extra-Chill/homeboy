@@ -312,7 +312,7 @@ function isRecordSuccessful(record, config = {}) {
 }
 
 function taskId(value) {
-  return text(value.id) || text(value.task_id) || text(value.sandbox_session_id) || text(value.group_key);
+  return text(value.task_id) || text(value.id) || text(value.group_key);
 }
 
 function stableTaskId(group, orchestrator) {

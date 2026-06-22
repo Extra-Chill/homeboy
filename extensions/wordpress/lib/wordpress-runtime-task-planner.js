@@ -18,10 +18,10 @@ const {
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
 const WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
-const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = 'codebox';
-const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME = 'wp-codebox';
-const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND;
-const WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME;
+const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND = undefined;
+const WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME = undefined;
+const WORDPRESS_RUNTIME_TASK_DEFAULT_BACKEND = undefined;
+const WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME = undefined;
 const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 	read: 'sandbox',
 	write: 'sandbox',
@@ -30,14 +30,15 @@ const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 
 function wordpressRuntimeTaskPlan(options = {}) {
 	const planId = requiredString(options.planId || options.plan_id, 'planId');
-	const backend = wordpressRuntimeTaskBackend(options);
-	const runtime = wordpressRuntimeTaskRuntime(options);
+	const runtimeProfile = wordpressRuntimeTaskProfile(options);
+	const backend = wordpressRuntimeTaskBackend(options, undefined, runtimeProfile);
+	const runtime = wordpressRuntimeTaskRuntime(options, undefined, runtimeProfile);
 	const taskOptions = normalizeTaskOptions(options);
 	const tasks = taskOptions.map((taskOption, index) => wordpressRuntimeTaskRequest({
 		...options,
 		...taskOption,
-		backend: wordpressRuntimeTaskBackend({ ...options, ...taskOption }, backend),
-		runtime: wordpressRuntimeTaskRuntime({ ...options, ...taskOption }, runtime),
+		backend: wordpressRuntimeTaskBackend({ ...options, ...taskOption }, backend, runtimeProfile),
+		runtime: wordpressRuntimeTaskRuntime({ ...options, ...taskOption }, runtime, runtimeProfile),
 		planId,
 		parentPlanId: planId,
 		taskId: taskOption.taskId || taskOption.task_id || taskIdForPlan(planId, index, taskOption),
@@ -55,6 +56,7 @@ function wordpressRuntimeTaskPlan(options = {}) {
 		metadata: stripUndefined({
 			...(options.metadata || {}),
 			planner: 'homeboy-extension-wordpress/wordpress-runtime-task-planner',
+			runtime_profile: runtimeProfile.id,
 			runtime,
 			backend,
 		}),
@@ -100,9 +102,10 @@ function wordpressRuntimeTaskRequest(options = {}) {
 
 function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	const config = wordpressRuntimeTaskExecutorConfig(options);
+	const runtimeProfile = wordpressRuntimeTaskProfile(options);
 	return genericAgentTaskRunnerSpec({
-		backend: wordpressRuntimeTaskBackend(options),
-		runtime: wordpressRuntimeTaskRuntime(options),
+		backend: wordpressRuntimeTaskBackend(options, undefined, runtimeProfile),
+		runtime: wordpressRuntimeTaskRuntime(options, undefined, runtimeProfile),
 		config,
 		secret_env: normalizeArray(options.secretEnv || options.secret_env),
 		task_timeout_seconds: numberOrUndefined(options.taskTimeoutSeconds || options.task_timeout_seconds || options.timeoutSeconds || options.timeout_seconds),
@@ -112,22 +115,42 @@ function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	});
 }
 
-function wordpressRuntimeTaskBackend(options = {}, fallback = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_BACKEND) {
-	return options.backend || options.runtimeBackend || options.runtime_backend || options.agentRuntimeBackend || options.agent_runtime_backend || fallback;
+function wordpressRuntimeTaskBackend(options = {}, fallback, runtimeProfile = wordpressRuntimeTaskProfile(options)) {
+	return options.backend
+		|| options.runtimeBackend
+		|| options.runtime_backend
+		|| options.agentRuntimeBackend
+		|| options.agent_runtime_backend
+		|| runtimeProfile.backend
+		|| runtimeProfile.runtime_backend
+		|| runtimeProfile.executor_backend
+		|| runtimeProfile.executor?.backend
+		|| fallback;
 }
 
-function wordpressRuntimeTaskRuntime(options = {}, fallback = WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME) {
-	return options.runtime || options.runtimeId || options.runtime_id || options.agentRuntime || options.agent_runtime || fallback;
+function wordpressRuntimeTaskRuntime(options = {}, fallback, runtimeProfile = wordpressRuntimeTaskProfile(options)) {
+	return options.runtime
+		|| options.runtimeId
+		|| options.runtime_id
+		|| options.agentRuntime
+		|| options.agent_runtime
+		|| runtimeProfile.runtime
+		|| runtimeProfile.runtime_id
+		|| runtimeProfile.id
+		|| fallback;
 }
 
 function wordpressRuntimeTaskExecutorConfig(options = {}) {
-	const runtime = wordpressRuntimeTaskRuntime(options);
+	const runtimeProfile = wordpressRuntimeTaskProfile(options);
+	const runtime = wordpressRuntimeTaskRuntime(options, undefined, runtimeProfile);
 	return stripUndefined({
 		...(options.config || {}),
 		provider: options.provider,
 		model: options.model,
 		runtime,
 		runtime_id: options.runtimeId || options.runtime_id || runtime,
+		runtime_profile: runtimeProfile.id,
+		runtime_profiles: options.runtimeProfiles || options.runtime_profiles,
 		runtime_bin: options.runtimeBin || options.runtime_bin,
 		provider_plugin_paths: options.providerPluginPaths || options.provider_plugin_paths,
 		homeboy_extensions: options.homeboyExtensions || options.homeboy_extensions,
@@ -145,6 +168,21 @@ function wordpressRuntimeTaskExecutorConfig(options = {}) {
 			input: options.abilityInput || options.ability_input || {},
 		},
 	});
+}
+
+function wordpressRuntimeTaskProfile(options = {}) {
+	const profile = options.runtimeProfile || options.runtime_profile || options.profile;
+	if (profile && typeof profile === 'object' && !Array.isArray(profile)) {
+		return profile;
+	}
+	const profileId = typeof profile === 'string' && profile.trim()
+		? profile.trim()
+		: options.runtimeProfileId || options.runtime_profile_id;
+	const profiles = options.runtimeProfiles || options.runtime_profiles || options.config?.runtime_profiles || options.config?.runtimeProfiles || {};
+	if (profileId && profiles[profileId] && typeof profiles[profileId] === 'object' && !Array.isArray(profiles[profileId])) {
+		return { id: profileId, ...profiles[profileId] };
+	}
+	return profileId ? { id: profileId } : {};
 }
 
 function runtimeAbilityInput(options = {}) {
@@ -231,6 +269,7 @@ module.exports = {
 	WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME,
 	WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
 	WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA,
+	wordpressRuntimeTaskProfile,
 	wordpressRuntimeTaskBackend,
 	wordpressRuntimeTaskExecutorConfig,
 	wordpressRuntimeTaskPlan,
