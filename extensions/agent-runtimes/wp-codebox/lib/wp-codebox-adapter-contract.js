@@ -156,6 +156,13 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     adapter_behavior: 'local_git_apply_until_primitive_exists',
     requirement: 'Expose approved artifact patch application as a Codebox-owned primitive. Homeboy Extensions already delegates preflight and apply request creation when runtime-core exports are available; the remaining local code maps Homeboy worktree, commit, and publish policy around git apply.',
   },
+  {
+    id: 'preview-materialization',
+    schema: RUNTIME_CONTRACT_SCHEMAS.runtimeBoundary.browserContainedSiteOpen,
+    owner: 'wp-codebox',
+    adapter_behavior: 'delegate_contained_site_open_without_constructing_playground_urls',
+    requirement: 'Materialize or open a browser contained-site preview from caller domain inputs and return typed preview evidence including URL, lease, boot, and status metadata when available. Homeboy must not construct Playground URLs downstream.',
+  },
 ];
 
 function wpCodeboxProviderRuntimeInvocationContract() {
