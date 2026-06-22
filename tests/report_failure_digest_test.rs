@@ -354,7 +354,7 @@ fn classifies_failures_as_baseline_present_when_all_head_failures_match_baseline
 }
 
 #[test]
-fn reports_indeterminate_when_baseline_artifact_cannot_be_parsed() {
+fn reports_inconclusive_when_baseline_artifact_cannot_be_parsed() {
     let guard = tmp_dir("origin-baseline-parse-failed");
     let dir = guard.path();
     write_file(dir, "test.json", TEST_JSON);
@@ -362,8 +362,43 @@ fn reports_indeterminate_when_baseline_artifact_cannot_be_parsed() {
 
     let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
 
-    assert!(markdown.contains("- `test`: **indeterminate** (baseline artifact `"));
+    assert!(markdown.contains("- `test`: **inconclusive** (baseline artifact `"));
     assert!(markdown.contains("failed to parse"));
+}
+
+#[test]
+fn reports_baseline_red_with_command_and_artifact_evidence() {
+    let guard = tmp_dir("origin-baseline-red");
+    let dir = guard.path();
+    write_file(dir, "lint.json", LINT_JSON);
+    write_file(
+        dir,
+        "baseline-lint.json",
+        r#"{
+            "success": false,
+            "error": {
+                "code": "process.failed",
+                "message": "FMT SUMMARY: 7 files need formatting",
+                "details": {
+                    "baseline_command": "cargo fmt --check",
+                    "stderr_path": "baseline/lint.stderr.log"
+                }
+            },
+            "data": {
+                "artifacts": [
+                    {"label":"format summary","path":"baseline/fmt-summary.txt"}
+                ]
+            }
+        }"#,
+    );
+
+    let markdown = render(dir, r#"{"lint":"fail"}"#, false, false);
+
+    assert!(markdown.contains("- `lint`: **baseline-red** (head: 3, baseline: 0, shared: 0)"));
+    assert!(markdown.contains("  - Baseline command: `cargo fmt --check`"));
+    assert!(markdown.contains("  - Baseline artifact: `"));
+    assert!(markdown.contains("format summary `baseline/fmt-summary.txt`"));
+    assert!(markdown.contains("stderr_path `baseline/lint.stderr.log`"));
 }
 
 #[test]
