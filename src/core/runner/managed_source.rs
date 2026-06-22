@@ -156,12 +156,22 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
         }
         None => {
             // No ref declared: fast-forward the current branch to its upstream
-            // when one exists; otherwise leave the checkout untouched.
+            // when one exists. Detached or untracked managed checkouts have no
+            // upstream, so reset them to the remote default branch instead.
             script.push_str(
                 "upstream=$(git -C \"$dir\" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)\n",
             );
             script.push_str("if [ -n \"$upstream\" ]; then\n");
             script.push_str("  git -C \"$dir\" merge --ff-only \"@{u}\"\n");
+            script.push_str("else\n");
+            script.push_str("  target=$(git -C \"$dir\" rev-parse --verify --quiet origin/HEAD || git -C \"$dir\" rev-parse --verify --quiet origin/main)\n");
+            script.push_str("  if [ -z \"$target\" ]; then\n");
+            script
+                .push_str("    echo \"managed runner source remote default ref not found\" >&2\n");
+            script.push_str("    exit 1\n");
+            script.push_str("  fi\n");
+            script.push_str("  git -C \"$dir\" checkout --quiet --force --detach \"$target\"\n");
+            script.push_str("  git -C \"$dir\" reset --hard \"$target\"\n");
             script.push_str("fi\n");
         }
     }
@@ -290,7 +300,26 @@ mod tests {
         let plan = plan_managed_runner_source_sync(&decl).expect("plan");
 
         assert!(plan.script.contains("merge --ff-only \"@{u}\""));
-        assert!(!plan.script.contains("reset --hard"));
+        assert!(plan
+            .script
+            .contains("rev-parse --verify --quiet origin/HEAD"));
+        assert!(plan.script.contains("checkout --quiet --force --detach"));
+        assert!(plan.script.contains("reset --hard \"$target\""));
+    }
+
+    #[test]
+    fn script_repairs_detached_dirty_checkout_when_no_ref_declared() {
+        let mut decl = source("src", "/home/r/.cache/src");
+        decl.remote_url = Some("https://example.test/repo.git".to_string());
+        let plan = plan_managed_runner_source_sync(&decl).expect("plan");
+
+        assert!(plan.script.contains("if [ -n \"$upstream\" ]; then"));
+        assert!(plan.script.contains("else"));
+        assert!(plan.script.contains("origin/HEAD"));
+        assert!(plan.script.contains("origin/main"));
+        assert!(plan
+            .script
+            .contains("git -C \"$dir\" reset --hard \"$target\""));
     }
 
     #[test]
