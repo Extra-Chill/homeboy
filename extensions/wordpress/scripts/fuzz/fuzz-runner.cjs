@@ -183,7 +183,26 @@ function wpCodeboxRuntimeEnv(env) {
 			nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(settings.wp_codebox_core_module);
 		}
 	}
+	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
+		const discoveredCoreModule = discoverWpCodeboxCoreModule(nextEnv);
+		if (discoveredCoreModule) {
+			nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = discoveredCoreModule;
+		}
+	}
 	return nextEnv;
+}
+
+function discoverWpCodeboxCoreModule(env) {
+	const installRoot = env.HOMEBOY_WP_CODEBOX_INSTALL_DIR || path.join(os.homedir(), '.cache', 'homeboy', 'wp-codebox');
+	for (const candidate of [
+		path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
+		path.join(installRoot, 'release', 'wp-codebox-cli', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js'),
+	]) {
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+	}
+	return '';
 }
 
 function parseJsonObject(value) {
