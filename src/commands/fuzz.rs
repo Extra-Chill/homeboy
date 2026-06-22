@@ -884,6 +884,7 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
     let runner_output = run_fuzz_extension_script(
         &ctx,
         &args,
+        rig_context.as_ref(),
         selected_workload,
         invocation_requirements,
         &run_dir,
@@ -1389,6 +1390,7 @@ fn threshold_passes(
 fn run_fuzz_extension_script(
     ctx: &execution_context::ExecutionContext,
     args: &FuzzRunArgs,
+    rig_context: Option<&FuzzRigContext>,
     workload: Option<&FuzzWorkloadOutput>,
     invocation_requirements: InvocationRequirements,
     run_dir: &RunDir,
@@ -1419,7 +1421,7 @@ fn run_fuzz_extension_script(
         .script_args(&args.args);
 
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let env = fuzz_runner_env(args, workload, &results_path);
+    let env = fuzz_runner_env(args, rig_context, workload, &results_path, run_dir)?;
     for (key, value) in env {
         runner = runner.env(&key, &value);
     }
@@ -1429,16 +1431,18 @@ fn run_fuzz_extension_script(
 
 fn fuzz_runner_env(
     args: &FuzzRunArgs,
+    rig_context: Option<&FuzzRigContext>,
     workload: Option<&FuzzWorkloadOutput>,
     results_path: &Path,
-) -> Vec<(String, String)> {
+    run_dir: &RunDir,
+) -> homeboy::core::Result<Vec<(String, String)>> {
     let mut env = vec![(
         "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
         results_path.to_string_lossy().to_string(),
     )];
     if let Some(workload) = workload {
         env.push(("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), workload.id.clone()));
-        if let Some(path) = workload.manifest_path.as_ref() {
+        if let Some(path) = fuzz_runner_workload_path(workload, rig_context, run_dir)? {
             env.push(("HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(), path.clone()));
         }
     }
@@ -1455,7 +1459,146 @@ fn fuzz_runner_env(
         "HOMEBOY_FUZZ_MAX_DURATION",
         args.max_duration.as_ref(),
     );
-    env
+    Ok(env)
+}
+
+fn fuzz_runner_workload_path(
+    workload: &FuzzWorkloadOutput,
+    rig_context: Option<&FuzzRigContext>,
+    run_dir: &RunDir,
+) -> homeboy::core::Result<Option<String>> {
+    let Some(manifest_path) = workload.manifest_path.as_ref() else {
+        return Ok(None);
+    };
+    let Some(rig_context) = rig_context else {
+        return Ok(Some(manifest_path.clone()));
+    };
+
+    let source_path = Path::new(manifest_path);
+    let raw = std::fs::read_to_string(source_path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(manifest_path.clone()))
+    })?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "fuzz_workload",
+            format!("Failed to parse fuzz workload JSON '{}': {error}", source_path.display()),
+            Some(manifest_path.clone()),
+            None,
+        )
+    })?;
+
+    expand_fuzz_workload_strings(&mut value, rig_context);
+    inject_fuzz_runtime_context(&mut value, rig_context);
+
+    let output_path = run_dir.step_file(format!(
+        "fuzz-workload-{}.json",
+        sanitize_workload_file_segment(&workload.id)
+    ));
+    let json = serde_json::to_string_pretty(&value).map_err(|error| {
+        homeboy::core::Error::internal_unexpected(format!(
+            "failed to encode expanded fuzz workload: {error}"
+        ))
+    })?;
+    std::fs::write(&output_path, format!("{json}\n")).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(output_path.display().to_string()))
+    })?;
+
+    Ok(Some(output_path.to_string_lossy().to_string()))
+}
+
+fn expand_fuzz_workload_strings(value: &mut serde_json::Value, rig_context: &FuzzRigContext) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = expand_fuzz_rig_string(rig_context, text);
+        }
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                expand_fuzz_workload_strings(entry, rig_context);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for entry in map.values_mut() {
+                expand_fuzz_workload_strings(entry, rig_context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expand_fuzz_rig_string(rig_context: &FuzzRigContext, input: &str) -> String {
+    let spec = fuzz_expansion_rig_spec(rig_context);
+    let input = match rig_context.package_root.as_ref() {
+        Some(package_root) => input.replace("${package.root}", &package_root.to_string_lossy()),
+        None => input.to_string(),
+    };
+    rig::expand::expand_vars(&spec, &input)
+}
+
+fn fuzz_expansion_rig_spec(rig_context: &FuzzRigContext) -> RigSpec {
+    let mut spec = rig_context.spec.clone();
+    let Some(package_root) = rig_context.package_root.as_ref() else {
+        return spec;
+    };
+    let package_root = package_root.to_string_lossy();
+    for component in spec.components.values_mut() {
+        component.path = component.path.replace("${package.root}", &package_root);
+        if let Some(checkout_root) = component.checkout_root.as_mut() {
+            *checkout_root = checkout_root.replace("${package.root}", &package_root);
+        }
+    }
+    spec
+}
+
+fn inject_fuzz_runtime_context(value: &mut serde_json::Value, rig_context: &FuzzRigContext) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let metadata = root
+        .entry("metadata")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(metadata) = metadata.as_object_mut() else {
+        return;
+    };
+
+    let components = rig_context
+        .spec
+        .components
+        .iter()
+        .map(|(id, component)| {
+            let mut component_value = serde_json::to_value(component)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(component_object) = component_value.as_object_mut() {
+                component_object.insert(
+                    "path".to_string(),
+                    serde_json::Value::String(expand_fuzz_rig_string(rig_context, &component.path)),
+                );
+            }
+            (id.clone(), component_value)
+        })
+        .collect::<serde_json::Map<_, _>>();
+
+    metadata.insert(
+        "homeboy_runtime_context".to_string(),
+        serde_json::json!({
+            "schema": "homeboy/fuzz-workload-runtime-context/v1",
+            "rig_id": rig_context.spec.id.clone(),
+            "package_root": rig_context.package_root.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "components": components,
+        }),
+    );
+}
+
+fn sanitize_workload_file_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "workload".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn push_opt_env(env: &mut Vec<(String, String)>, key: &str, value: Option<&String>) {
@@ -2132,13 +2275,15 @@ mod tests {
             manifest_path: Some("/tmp/fuzz/parser.json".to_string()),
         };
 
-        let results_path = Path::new("/tmp/homeboy-run/fuzz-results.json");
+        let run_dir = RunDir::create().expect("run dir");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
 
-        let env = fuzz_runner_env(&args, Some(&workload), results_path);
+        let env = fuzz_runner_env(&args, None, Some(&workload), &results_path, &run_dir)
+            .expect("fuzz runner env");
 
         assert!(env.contains(&(
             "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
-            "/tmp/homeboy-run/fuzz-results.json".to_string()
+            results_path.to_string_lossy().to_string()
         )));
         assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
         assert!(env.contains(&(
@@ -2152,6 +2297,84 @@ mod tests {
             "/tmp/fuzz-inventory.json".to_string()
         )));
         assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
+    }
+
+    #[test]
+    fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workload_path = temp.path().join("parser.json");
+        std::fs::write(
+            &workload_path,
+            r#"{
+              "schema": "homeboy/fuzz-workload/v1",
+              "id": "parser",
+              "target": { "component": "package" },
+              "workload": { "path": "${package.root}/bench/parser.php" },
+              "metadata": { "fixture": { "component": "package" } }
+            }"#,
+        )
+        .expect("write workload");
+        let spec: RigSpec = serde_json::from_value(serde_json::json!({
+            "id": "package-fuzz",
+            "components": {
+                "package": {
+                    "path": "${package.root}/plugins/package",
+                    "branch": "main"
+                }
+            }
+        }))
+        .expect("parse rig spec");
+        let context = FuzzRigContext {
+            spec,
+            package_root: Some(temp.path().to_path_buf()),
+        };
+        let args = FuzzRunArgs {
+            comp: PositionalComponentArgs {
+                component: Some("package".to_string()),
+                path: None,
+            },
+            rig: Some("package-fuzz".to_string()),
+            extension_override: ExtensionOverrideArgs { extensions: vec![] },
+            setting_args: SettingArgs {
+                setting: vec![],
+                setting_json: vec![],
+            },
+            workload_id: Some("parser".to_string()),
+            run_id: Some("proof-1".to_string()),
+            seed: None,
+            inventory: None,
+            max_duration: None,
+            args: vec![],
+        };
+        let workload = FuzzWorkloadOutput {
+            id: "parser".to_string(),
+            label: None,
+            description: None,
+            source: format!("rig_workloads:generic:{}", workload_path.display()),
+            manifest_path: Some(workload_path.to_string_lossy().to_string()),
+        };
+        let run_dir = RunDir::create().expect("run dir");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+
+        let env = fuzz_runner_env(&args, Some(&context), Some(&workload), &results_path, &run_dir)
+            .expect("fuzz runner env");
+        let expanded_path = env
+            .iter()
+            .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
+            .expect("expanded workload path");
+        let expanded: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
+        )
+        .expect("parse expanded workload");
+
+        assert_eq!(
+            expanded["workload"]["path"].as_str(),
+            Some(format!("{}/bench/parser.php", temp.path().display()).as_str())
+        );
+        assert_eq!(
+            expanded["metadata"]["homeboy_runtime_context"]["components"]["package"]["path"].as_str(),
+            Some(format!("{}/plugins/package", temp.path().display()).as_str())
+        );
     }
 
     #[test]
