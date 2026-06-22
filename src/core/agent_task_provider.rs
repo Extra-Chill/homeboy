@@ -2130,7 +2130,8 @@ fn run_provider_command_once(
         );
     };
 
-    if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
+    if let Some(preflight) =
+        provider_preflight_failure(request, provider, &program, &args, &cwd, &command)
     {
         return preflight;
     }
@@ -2300,10 +2301,11 @@ fn provider_preflight_failure(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
     program: &str,
+    args: &[String],
     cwd: &Option<PathBuf>,
     command: &str,
 ) -> Option<AgentTaskOutcome> {
-    let digest = provider_preflight_digest(request, provider, program, cwd, command);
+    let digest = provider_preflight_digest(request, provider, program, args, cwd, command);
     if digest.failures.is_empty() {
         return None;
     }
@@ -2330,6 +2332,7 @@ fn provider_preflight_digest(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
     program: &str,
+    args: &[String],
     cwd: &Option<PathBuf>,
     command: &str,
 ) -> ProviderPreflightDigest {
@@ -2341,8 +2344,22 @@ fn provider_preflight_digest(
         diagnostic_class = "agent_task.provider_command_unavailable";
         failures.push(json!({
             "field": "command",
-            "message": format!("provider command executable '{program}' is not available"),
-            "remediation": format!("Install '{program}' on the runner or configure the provider invocation with an absolute executable path available to the runner PATH."),
+            "message": format!("provider command executable '{program}' is not available on PATH"),
+            "remediation": format!("Install '{program}' on the runner or configure the provider invocation with an absolute executable path available to the runner PATH (PATH-resolved executors such as `node` must be present under raw SSH, not only an interactive login shell)."),
+        }));
+    }
+
+    // Validate file-path arguments (e.g. `node /path/to/executor.cjs`) up front.
+    // The interpreter (`program`) can resolve cleanly while a script argument it
+    // is asked to run does not exist — that historically surfaced only as a late,
+    // opaque `provider_spawn_failed: No such file or directory` from the spawned
+    // process. Catch the missing executor/script path here instead.
+    for missing in missing_command_path_arguments(args) {
+        diagnostic_class = "agent_task.provider_command_unavailable";
+        failures.push(json!({
+            "field": "command",
+            "message": format!("provider command argument path '{missing}' does not exist"),
+            "remediation": format!("Ensure '{missing}' exists on the runner. This is usually the provider runtime/executor script resolved from runtime_path/extension_path; sync or re-deploy the runtime component so the path is present."),
         }));
     }
 
@@ -2354,6 +2371,17 @@ fn provider_preflight_digest(
                 "remediation": "Fix the provider runtime path or invocation.cwd template so it resolves to an existing directory on the runner.",
             }));
         }
+    }
+
+    // Codebox-style providers carry their runtime/provider-plugin paths in the
+    // executor config (`runtime_component_paths`, `provider_plugin_paths`). An
+    // EMPTY or missing map produces a late, hard-to-trace "AI provider is
+    // required" sandbox failure because the runtime overlays/provider plugins are
+    // never mounted. Catch that here as a focused config preflight failure.
+    if let Some(component_paths_failure) = runtime_component_paths_failure(request) {
+        diagnostic_class = "agent_task.provider_runtime_paths_missing";
+        classification = AgentTaskFailureClassification::InvalidInput;
+        failures.push(component_paths_failure);
     }
 
     let secret_status = provider_secret_env_plan_with_status(provider, request).status;
@@ -2391,8 +2419,10 @@ fn provider_preflight_digest(
         "backend": provider.backend,
         "command": command,
         "program": program,
+        "program_resolved": resolve_executable_candidate(program),
         "path": std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
         "runtime_path_provenance": runtime_path_provenance(provider),
+        "runtime_component_paths_provenance": runtime_component_paths_provenance(request),
         "missing_secret_env": missing_secret_env,
         "secret_env_status": secret_status,
         "failures": failures,
@@ -2434,6 +2464,112 @@ fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
         "extension_id": provider.extension_id.as_deref(),
         "extension_path": provider.extension_path.as_deref(),
     })
+}
+
+/// File-path arguments in the provider argv that do not exist on disk.
+///
+/// Only arguments that look like filesystem paths are checked: absolute paths
+/// or relative paths containing a separator (e.g. `./bin/exec.cjs`). Bare flags
+/// (`--json`), values (`primary`), and option pairs are left alone. This is what
+/// turns the opaque `provider_spawn_failed: No such file or directory` (raised
+/// when an interpreter is asked to run a script path that isn't present) into a
+/// precise, up-front preflight failure naming the missing path.
+fn missing_command_path_arguments(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| argument_looks_like_path(arg))
+        .filter(|arg| !Path::new(arg.as_str()).exists())
+        .cloned()
+        .collect()
+}
+
+fn argument_looks_like_path(arg: &str) -> bool {
+    let arg = arg.trim();
+    if arg.is_empty() || arg.starts_with('-') {
+        return false;
+    }
+    let path = Path::new(arg);
+    path.is_absolute() || arg.contains('/') || arg.contains(std::path::MAIN_SEPARATOR)
+}
+
+/// The executor-config keys (Codebox-style) that carry the runtime overlay /
+/// provider-plugin mount paths. Core is runtime-agnostic: these are the generic
+/// field names the request transport populates; an empty or absent map means the
+/// runner has nothing to mount, which surfaces downstream as the opaque "AI
+/// provider is required" sandbox failure.
+const RUNTIME_COMPONENT_PATH_KEYS: [&str; 2] = ["runtime_component_paths", "provider_plugin_paths"];
+
+/// A config object value is "populated" when it is a non-empty object/array, or
+/// a non-empty string. `null`, `{}`, `[]`, and `""` are all treated as empty.
+fn config_value_is_populated(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::String(text) => !text.trim().is_empty(),
+        _ => true,
+    }
+}
+
+/// Detect empty/missing `runtime_component_paths` (and friends) in the executor
+/// config and return a focused, actionable preflight failure entry. Returns
+/// `None` when at least one runtime component path map is populated, or when the
+/// executor config does not declare any such key at all (providers that do not
+/// require runtime-component mounts must not be penalized).
+fn runtime_component_paths_failure(request: &AgentTaskRequest) -> Option<Value> {
+    let config = request.executor.config.as_object()?;
+
+    // Only providers that DECLARE one of these keys are subject to the check.
+    // If none of the keys are present the provider does not opt into runtime
+    // component mounts and there is nothing to validate.
+    let declared: Vec<&str> = RUNTIME_COMPONENT_PATH_KEYS
+        .iter()
+        .copied()
+        .filter(|key| config.contains_key(*key))
+        .collect();
+    if declared.is_empty() {
+        return None;
+    }
+
+    // If any declared key is populated the runtime has something to mount.
+    let any_populated = declared
+        .iter()
+        .any(|key| config.get(*key).is_some_and(config_value_is_populated));
+    if any_populated {
+        return None;
+    }
+
+    let fields = declared.join(", ");
+    Some(json!({
+        "field": format!("executor.config.{fields}"),
+        "message": format!(
+            "executor config declares runtime component path field(s) ({fields}) but they are empty; no runtime overlays or provider plugins will be mounted"
+        ),
+        "remediation": "Populate runtime_component_paths/provider_plugin_paths in the executor config (the request builder must resolve them from the runner's runtime component layout) before dispatch. An empty map is what later surfaces as the opaque 'AI provider is required' sandbox failure.",
+    }))
+}
+
+/// Provenance summary for runtime-component / provider-plugin paths so request
+/// and debug output makes clear WHERE these paths came from (or that they were
+/// empty / never declared).
+fn runtime_component_paths_provenance(request: &AgentTaskRequest) -> Value {
+    let config = request.executor.config.as_object();
+    let mut entries = serde_json::Map::new();
+    for key in RUNTIME_COMPONENT_PATH_KEYS {
+        let value = config.and_then(|map| map.get(key));
+        let state = match value {
+            None => "absent",
+            Some(value) if config_value_is_populated(value) => "populated",
+            Some(_) => "empty",
+        };
+        entries.insert(
+            key.to_string(),
+            json!({
+                "state": state,
+                "value": value.cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    Value::Object(entries)
 }
 
 fn parse_provider_outcome_from_mixed_output(output: &str) -> Option<AgentTaskOutcome> {
@@ -3764,6 +3900,128 @@ mod tests {
             outcome.diagnostics[0].data["secret_env_status"][0]["configured"],
             false
         );
+    }
+
+    #[test]
+    fn provider_preflight_reports_missing_executor_script_path_before_spawn() {
+        // `node` resolves on PATH but the script argument does not exist — the
+        // classic Codebox `node .../executor.cjs` "No such file or directory"
+        // failure. The interpreter program is available; the path argument is
+        // what is missing and must be caught up front.
+        let missing_script = std::env::temp_dir()
+            .join("homeboy-5561-definitely-missing-executor.cjs")
+            .to_string_lossy()
+            .to_string();
+        let (request, provider) = request(
+            "missing-script",
+            format!(
+                "{} {missing_script}",
+                std::env::current_exe().expect("current exe").display()
+            ),
+        );
+
+        let digest = provider_preflight_digest(
+            &request,
+            &provider,
+            &std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+            &[missing_script.clone()],
+            &None,
+            "command",
+        );
+
+        assert_eq!(
+            digest.diagnostic_class,
+            "agent_task.provider_command_unavailable"
+        );
+        assert!(digest
+            .failures
+            .iter()
+            .any(|failure| failure["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&missing_script)
+                    && message.contains("does not exist"))));
+        assert!(digest.data["runtime_component_paths_provenance"].is_object());
+    }
+
+    #[test]
+    fn provider_preflight_reports_empty_runtime_component_paths() {
+        let (mut request, provider) = request(
+            "empty-runtime-paths",
+            std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+        );
+        request.executor.config = json!({
+            "runtime_component_paths": {},
+            "provider_plugin_paths": [],
+        });
+
+        let digest = provider_preflight_digest(
+            &request,
+            &provider,
+            &std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+            &[],
+            &None,
+            "command",
+        );
+
+        assert_eq!(
+            digest.diagnostic_class,
+            "agent_task.provider_runtime_paths_missing"
+        );
+        assert_eq!(
+            digest.classification,
+            AgentTaskFailureClassification::InvalidInput
+        );
+        assert!(digest.failures.iter().any(|failure| failure["field"]
+            .as_str()
+            .is_some_and(|field| field.contains("runtime_component_paths"))));
+        assert_eq!(
+            digest.data["runtime_component_paths_provenance"]["runtime_component_paths"]["state"],
+            "empty"
+        );
+    }
+
+    #[test]
+    fn provider_preflight_accepts_populated_runtime_component_paths() {
+        let (mut request, provider) = request(
+            "populated-runtime-paths",
+            std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+        );
+        request.executor.config = json!({
+            "runtime_component_paths": { "agent_runtime_tools": "/opt/runtime/tools" },
+        });
+
+        assert!(runtime_component_paths_failure(&request).is_none());
+        assert_eq!(
+            runtime_component_paths_provenance(&request)["runtime_component_paths"]["state"],
+            "populated"
+        );
+    }
+
+    #[test]
+    fn provider_preflight_ignores_undeclared_runtime_component_paths() {
+        // A provider that never opts into runtime-component mounts (no such key
+        // in executor config) must not be flagged.
+        let (request, _provider) = request(
+            "no-runtime-paths",
+            std::env::current_exe()
+                .expect("current exe")
+                .display()
+                .to_string(),
+        );
+
+        assert!(runtime_component_paths_failure(&request).is_none());
     }
 
     #[test]
