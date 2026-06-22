@@ -13,20 +13,26 @@ use crate::core::artifact_contract::ArtifactContract;
 use crate::core::{Error, Result};
 
 pub const FUZZ_CORE_CONTRACT_SCHEMA: &str = "homeboy/fuzz-core-contract/v1";
+pub const FUZZ_CONTRACT_VERSION: u32 = 1;
 pub const FUZZ_SURFACE_SCHEMA: &str = "homeboy/fuzz-surface/v1";
+pub const FUZZ_TARGET_SCHEMA: &str = "homeboy/fuzz-target/v1";
 pub const FUZZ_WORKLOAD_SCHEMA: &str = "homeboy/fuzz-workload/v1";
 pub const FUZZ_CAMPAIGN_SCHEMA: &str = "homeboy/fuzz-campaign/v1";
+pub const FUZZ_CASE_SCHEMA: &str = "homeboy/fuzz-case/v1";
 pub const FUZZ_SEED_SCHEMA: &str = "homeboy/fuzz-seed/v1";
 pub const FUZZ_COVERAGE_SCHEMA: &str = "homeboy/fuzz-coverage/v1";
 pub const FUZZ_FINDING_SCHEMA: &str = "homeboy/fuzz-finding/v1";
 pub const FUZZ_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-artifact/v1";
 pub const FUZZ_THRESHOLD_SCHEMA: &str = "homeboy/fuzz-threshold/v1";
 pub const FUZZ_PROVENANCE_SCHEMA: &str = "homeboy/fuzz-provenance/v1";
+pub const FUZZ_REPLAY_SCHEMA: &str = "homeboy/fuzz-replay/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuzzCoreContract {
     #[serde(default = "fuzz_core_contract_schema")]
     pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
     pub schemas: FuzzContractSchemas,
     pub safety_classes: Vec<FuzzSafetyClass>,
     pub finding_statuses: Vec<FuzzFindingStatus>,
@@ -35,14 +41,17 @@ pub struct FuzzCoreContract {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuzzContractSchemas {
     pub surface: String,
+    pub target: String,
     pub workload: String,
     pub campaign: String,
+    pub case: String,
     pub seed: String,
     pub coverage: String,
     pub finding: String,
     pub artifact: String,
     pub threshold: String,
     pub provenance: String,
+    pub replay: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +113,8 @@ pub struct FuzzOperation {
     pub id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -113,10 +124,29 @@ impl FuzzOperation {
     fn normalize(&mut self) -> std::result::Result<(), String> {
         self.id = required_trimmed("operation.id", &self.id)?;
         self.kind = required_trimmed("operation.kind", &self.kind)?;
+        self.target_id = normalize_optional_string(self.target_id.take());
         self.label = normalize_optional_string(self.label.take());
         self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzTarget {
+    #[serde(default = "fuzz_target_schema")]
+    pub schema: String,
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<FuzzOperation>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +201,8 @@ pub struct FuzzWorkload {
 pub struct FuzzCampaign {
     #[serde(default = "fuzz_campaign_schema")]
     pub schema: String,
+    #[serde(default = "fuzz_contract_version")]
+    pub version: u32,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -178,7 +210,11 @@ pub struct FuzzCampaign {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<FuzzSurface>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<FuzzTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<FuzzWorkload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cases: Vec<FuzzCase>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seeds: Vec<FuzzSeed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -191,6 +227,35 @@ pub struct FuzzCampaign {
     pub thresholds: Vec<FuzzThreshold>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<FuzzProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<FuzzReplayMetadata>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCase {
+    #[serde(default = "fuzz_case_schema")]
+    pub schema: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub input: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub expected: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub observed: Value,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -243,7 +308,11 @@ pub struct FuzzCoverageGap {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -256,6 +325,12 @@ pub struct FuzzFinding {
     pub status: FuzzFindingStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,19 +417,44 @@ pub struct FuzzProvenance {
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzReplayMetadata {
+    #[serde(default = "fuzz_replay_schema")]
+    pub schema: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
 pub fn fuzz_core_contract() -> FuzzCoreContract {
     FuzzCoreContract {
         schema: FUZZ_CORE_CONTRACT_SCHEMA.to_string(),
+        version: FUZZ_CONTRACT_VERSION,
         schemas: FuzzContractSchemas {
             surface: FUZZ_SURFACE_SCHEMA.to_string(),
+            target: FUZZ_TARGET_SCHEMA.to_string(),
             workload: FUZZ_WORKLOAD_SCHEMA.to_string(),
             campaign: FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            case: FUZZ_CASE_SCHEMA.to_string(),
             seed: FUZZ_SEED_SCHEMA.to_string(),
             coverage: FUZZ_COVERAGE_SCHEMA.to_string(),
             finding: FUZZ_FINDING_SCHEMA.to_string(),
             artifact: FUZZ_ARTIFACT_SCHEMA.to_string(),
             threshold: FUZZ_THRESHOLD_SCHEMA.to_string(),
             provenance: FUZZ_PROVENANCE_SCHEMA.to_string(),
+            replay: FUZZ_REPLAY_SCHEMA.to_string(),
         },
         safety_classes: vec![
             FuzzSafetyClass::ReadOnly,
@@ -399,8 +499,16 @@ fn fuzz_core_contract_schema() -> String {
     FUZZ_CORE_CONTRACT_SCHEMA.to_string()
 }
 
+fn fuzz_contract_version() -> u32 {
+    FUZZ_CONTRACT_VERSION
+}
+
 fn fuzz_surface_schema() -> String {
     FUZZ_SURFACE_SCHEMA.to_string()
+}
+
+fn fuzz_target_schema() -> String {
+    FUZZ_TARGET_SCHEMA.to_string()
 }
 
 fn fuzz_workload_schema() -> String {
@@ -409,6 +517,10 @@ fn fuzz_workload_schema() -> String {
 
 fn fuzz_campaign_schema() -> String {
     FUZZ_CAMPAIGN_SCHEMA.to_string()
+}
+
+fn fuzz_case_schema() -> String {
+    FUZZ_CASE_SCHEMA.to_string()
 }
 
 fn fuzz_seed_schema() -> String {
@@ -433,6 +545,10 @@ fn fuzz_threshold_schema() -> String {
 
 fn fuzz_provenance_schema() -> String {
     FUZZ_PROVENANCE_SCHEMA.to_string()
+}
+
+fn fuzz_replay_schema() -> String {
+    FUZZ_REPLAY_SCHEMA.to_string()
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -489,8 +605,12 @@ mod tests {
         let contract = fuzz_core_contract();
 
         assert_eq!(contract.schema, FUZZ_CORE_CONTRACT_SCHEMA);
+        assert_eq!(contract.version, FUZZ_CONTRACT_VERSION);
         assert_eq!(contract.schemas.surface, FUZZ_SURFACE_SCHEMA);
+        assert_eq!(contract.schemas.target, FUZZ_TARGET_SCHEMA);
         assert_eq!(contract.schemas.campaign, FUZZ_CAMPAIGN_SCHEMA);
+        assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
+        assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
         assert!(contract
             .safety_classes
             .contains(&FuzzSafetyClass::IsolatedMutation));
@@ -532,10 +652,27 @@ mod tests {
     fn campaign_serializes_seeds_coverage_findings_artifacts_thresholds_and_provenance() {
         let campaign = FuzzCampaign {
             schema: FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: FUZZ_CONTRACT_VERSION,
             id: "campaign-1".to_string(),
             title: Some("generic campaign".to_string()),
             safety_class: FuzzSafetyClass::ReadOnly,
             surfaces: Vec::new(),
+            targets: vec![FuzzTarget {
+                schema: FUZZ_TARGET_SCHEMA.to_string(),
+                id: "target-1".to_string(),
+                kind: "api".to_string(),
+                label: None,
+                locator: Some("https://example.test/orders".to_string()),
+                operations: vec![FuzzOperation {
+                    id: "operation-1".to_string(),
+                    kind: "read".to_string(),
+                    target_id: Some("target-1".to_string()),
+                    label: None,
+                    tags: Vec::new(),
+                }],
+                metadata: Value::Null,
+                extra: BTreeMap::new(),
+            }],
             workloads: vec![FuzzWorkload {
                 schema: FUZZ_WORKLOAD_SCHEMA.to_string(),
                 id: "workload-1".to_string(),
@@ -547,6 +684,20 @@ mod tests {
                 case_budget: Some(100),
                 duration_budget_seconds: Some(60),
                 thresholds: Vec::new(),
+                metadata: Value::Null,
+                extra: BTreeMap::new(),
+            }],
+            cases: vec![FuzzCase {
+                schema: FUZZ_CASE_SCHEMA.to_string(),
+                id: "case-1".to_string(),
+                target_id: Some("target-1".to_string()),
+                operation_id: Some("operation-1".to_string()),
+                workload_id: Some("workload-1".to_string()),
+                seed_id: Some("seed-1".to_string()),
+                replay_id: Some("replay-1".to_string()),
+                input: serde_json::json!({ "path": "/orders" }),
+                expected: Value::Null,
+                observed: Value::Null,
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }],
@@ -572,7 +723,9 @@ mod tests {
                     id: "gap-1".to_string(),
                     label: None,
                     surface_id: Some("surface-1".to_string()),
+                    target_id: Some("target-1".to_string()),
                     operation: Some("write".to_string()),
+                    operation_id: Some("operation-1".to_string()),
                 }],
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
@@ -584,6 +737,9 @@ mod tests {
                 severity: "high".to_string(),
                 status: FuzzFindingStatus::Open,
                 surface_id: Some("surface-1".to_string()),
+                target_id: Some("target-1".to_string()),
+                operation_id: Some("operation-1".to_string()),
+                case_id: Some("case-1".to_string()),
                 workload_id: Some("workload-1".to_string()),
                 seed_id: Some("seed-1".to_string()),
                 fingerprint: Some("abc123".to_string()),
@@ -621,6 +777,17 @@ mod tests {
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }),
+            replay: Some(FuzzReplayMetadata {
+                schema: FUZZ_REPLAY_SCHEMA.to_string(),
+                id: "replay-1".to_string(),
+                command: Some("homeboy fuzz run component --workload workload-1".to_string()),
+                args: Vec::new(),
+                env: vec!["HOMEBOY_FUZZ_SEED=sample".to_string()],
+                seed: Some("sample".to_string()),
+                artifact_id: Some("artifact-1".to_string()),
+                metadata: Value::Null,
+                extra: BTreeMap::new(),
+            }),
             metadata: Value::Null,
             extra: BTreeMap::new(),
         };
@@ -628,13 +795,17 @@ mod tests {
         let value = serde_json::to_value(campaign).expect("campaign json");
 
         assert_eq!(value["schema"], FUZZ_CAMPAIGN_SCHEMA);
+        assert_eq!(value["version"], FUZZ_CONTRACT_VERSION);
+        assert_eq!(value["targets"][0]["schema"], FUZZ_TARGET_SCHEMA);
         assert_eq!(value["workloads"][0]["schema"], FUZZ_WORKLOAD_SCHEMA);
+        assert_eq!(value["cases"][0]["schema"], FUZZ_CASE_SCHEMA);
         assert_eq!(value["seeds"][0]["schema"], FUZZ_SEED_SCHEMA);
         assert_eq!(value["coverage"][0]["schema"], FUZZ_COVERAGE_SCHEMA);
         assert_eq!(value["findings"][0]["schema"], FUZZ_FINDING_SCHEMA);
         assert_eq!(value["artifacts"][0]["schema"], FUZZ_ARTIFACT_SCHEMA);
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);
         assert_eq!(value["provenance"]["schema"], FUZZ_PROVENANCE_SCHEMA);
+        assert_eq!(value["replay"]["schema"], FUZZ_REPLAY_SCHEMA);
     }
 
     #[test]

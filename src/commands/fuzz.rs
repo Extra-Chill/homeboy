@@ -806,17 +806,21 @@ mod tests {
     fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
         let results = FuzzCampaign {
             schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
             id: "campaign-1".to_string(),
             title: None,
             safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
             surfaces: Vec::new(),
+            targets: Vec::new(),
             workloads: Vec::new(),
+            cases: Vec::new(),
             seeds: Vec::new(),
             coverage: Vec::new(),
             findings: Vec::new(),
             artifacts: Vec::new(),
             thresholds: Vec::new(),
             provenance: None,
+            replay: None,
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
         };
