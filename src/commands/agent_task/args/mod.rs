@@ -251,6 +251,10 @@ pub struct ProvidersArgs {
     /// Fail non-zero when the selected provider is registered but not executable here.
     #[arg(long = "validate-readiness")]
     pub validate_readiness: bool,
+
+    /// Re-discover provider runtime manifests before printing the catalog.
+    #[arg(long = "refresh")]
+    pub refresh: bool,
 }
 
 /// Arguments for `agent-task doctor`: the single preflight/repair path for cook

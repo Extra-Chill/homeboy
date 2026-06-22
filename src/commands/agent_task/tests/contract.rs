@@ -10,6 +10,7 @@ fn providers_output_includes_core_capability_contract() {
             selector: None,
             secret_env: Vec::new(),
             validate_readiness: false,
+            refresh: false,
         })
         .expect("providers output");
 
