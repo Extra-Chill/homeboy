@@ -4,6 +4,46 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.0] - 2026-06-22
+
+### Added
+- mirror reverse worker artifact content
+
+### Changed
+- split rename/mod.rs god-file into submodules
+- split grammar.rs god-file into modules
+- split triage.rs god-file into modules
+- refactor(code_audit): split mod.rs god-file into submodules
+- Prepare detached source checkouts during upgrade
+- add deploy config view
+- trim stale suite coverage
+- Protect remote runner secret env
+- Make runs readers canonical for benchmarks
+- expose delegated portability contracts
+- Expose extension command manifests
+- Add runner workload dispatch contract
+- split run.rs god-file into modules
+- split fuzz.rs command god-file into modules
+
+### Fixed
+- report effective WP Codebox binary
+- update workload test fixtures
+- refresh extensions during parity sync
+- route controller run-from-spec
+- surface related lab fuzz result artifacts
+- preserve raw results on parse failure
+- prepare detached runner source checkouts
+- fail closed on release asset misses
+- route agent-task fanout batches
+- fix(agent-task): record pre-execution failures after claim
+- use shared target source path resolution
+- fail closed for coupled component groups
+- redact command displays
+- guide lab flag users to runner commands
+- include actionable read list failures
+- make command registry authoritative
+- remap absolute file argv before dispatch
+
 ## [0.254.0] - 2026-06-22
 
 ### Added
