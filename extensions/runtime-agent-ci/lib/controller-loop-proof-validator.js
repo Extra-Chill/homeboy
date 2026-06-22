@@ -1,5 +1,7 @@
 'use strict';
 
+const { evaluateGatePlan } = require('./gate-plan-evaluator');
+
 function validateControllerLoopProof(input = {}) {
   const spec = optionalObject(input.spec || input.controller || input.loop_spec);
   const proof = optionalObject(input.proof || input.run || input.result);
@@ -18,9 +20,11 @@ function validateControllerLoopProof(input = {}) {
 
   const status = proof.status || proof.result?.status || proof.outcome?.status || '';
   const allowedStatuses = normalizeArray(policy.allowed_statuses || spec.allowed_statuses || spec.statuses);
-  if (allowedStatuses.length > 0 && !allowedStatuses.includes(status)) {
-    failures.push(failure('proof.status_rejected', `Proof status is not allowed: ${status || '(missing)'}`, { status, allowed_statuses: allowedStatuses }));
-  }
+  appendGateFailures(failures, evaluateGatePlan({
+    id: 'proof_status_allowed',
+    enabled: allowedStatuses.length > 0,
+    pass_when: [{ field: 'status', op: 'in', values: allowedStatuses, failure_class: 'proof.status_rejected', message: `Proof status is not allowed: ${status || '(missing)'}` }],
+  }, { status }), { status, allowed_statuses: allowedStatuses });
 
   for (const declaration of artifactDeclarations) {
     const match = findArtifact(artifacts, declaration.id);
@@ -101,17 +105,24 @@ function validateControllerLoopProof(input = {}) {
 
   const iterationCount = explicitIterationCount(proof, iterations);
   const maxIterations = positiveInteger(policy.max_iterations || spec.max_iterations || spec.loop?.max_iterations);
-  if (maxIterations && iterationCount > maxIterations) {
-    failures.push(failure('loop.max_iterations_exceeded', `Iteration count ${iterationCount} exceeds maximum ${maxIterations}.`, { iteration_count: iterationCount, max_iterations: maxIterations }));
-  }
+  appendGateFailures(failures, evaluateGatePlan({
+    id: 'loop_max_iterations',
+    enabled: Boolean(maxIterations),
+    pass_when: [{ field: 'iteration_count', op: 'lte', value: maxIterations, failure_class: 'loop.max_iterations_exceeded', message: `Iteration count ${iterationCount} exceeds maximum ${maxIterations}.` }],
+  }, { iteration_count: iterationCount }), { iteration_count: iterationCount, max_iterations: maxIterations });
 
   const stopReason = stopReasonFromProof(proof, iterations);
   const allowedStopReasons = normalizeArray(policy.allowed_stop_reasons || spec.allowed_stop_reasons || spec.stop_reasons);
-  if ((policy.stop_reason_required === true || allowedStopReasons.length > 0) && !stopReason) {
-    failures.push(failure('loop.stop_reason_missing', 'Stop reason evidence is required.', {}));
-  } else if (stopReason && allowedStopReasons.length > 0 && !allowedStopReasons.includes(stopReason)) {
-    failures.push(failure('loop.stop_reason_rejected', `Stop reason is not allowed: ${stopReason}`, { stop_reason: stopReason, allowed_stop_reasons: allowedStopReasons }));
-  }
+  appendGateFailures(failures, evaluateGatePlan({
+    id: 'loop_stop_reason_required',
+    enabled: policy.stop_reason_required === true || allowedStopReasons.length > 0,
+    pass_when: [{ field: 'stop_reason', op: 'present', failure_class: 'loop.stop_reason_missing', message: 'Stop reason evidence is required.' }],
+  }, { stop_reason: stopReason }), {});
+  appendGateFailures(failures, evaluateGatePlan({
+    id: 'loop_stop_reason_allowed',
+    enabled: Boolean(stopReason) && allowedStopReasons.length > 0,
+    pass_when: [{ field: 'stop_reason', op: 'in', values: allowedStopReasons, failure_class: 'loop.stop_reason_rejected', message: `Stop reason is not allowed: ${stopReason}` }],
+  }, { stop_reason: stopReason }), { stop_reason: stopReason, allowed_stop_reasons: allowedStopReasons });
 
   if (policy.event_lineage_required === true || policy.require_event_lineage === true || spec.event_lineage_required === true) {
     validateEventLineage({ proof, iterations, events, failures, warnings });
@@ -133,6 +144,15 @@ function validateControllerLoopProof(input = {}) {
     },
     artifact_results: artifactResults,
   };
+}
+
+function appendGateFailures(failures, gateResult, data = {}) {
+  if (gateResult.success) {
+    return;
+  }
+  for (const item of gateResult.failures) {
+    failures.push(failure(item.class, item.message, { ...item.data, ...data }));
+  }
 }
 
 function assertControllerLoopProof(input = {}) {

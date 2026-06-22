@@ -8,6 +8,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { evaluateGatePlan, evaluateGateResults } = require('./gate-plan-evaluator');
 
 function plainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
@@ -93,21 +94,34 @@ function runCommandChecks(config, workspace, key, hooks = {}) {
     const check = runShellCommand(commandConfig, workspace, key, hooks);
     checks.push(check);
     if (!check.success) {
-      return {
+      const failed = {
         enabled: true,
         success: false,
         workspace,
         checks,
         error: check.error || `${key} failed: ${commandConfig.command}`,
       };
+      return withLifecycleGateResult(key, failed);
     }
   }
 
-  return { enabled: true, success: true, workspace, checks };
+  return withLifecycleGateResult(key, { enabled: true, success: true, workspace, checks });
 }
 
 function hasCommandChecks(config, key) {
   return commandList(config, key).length > 0;
+}
+
+function withLifecycleGateResult(id, result) {
+  const enabled = result.enabled !== false;
+  return {
+    ...result,
+    gate_result: evaluateGatePlan({
+      id,
+      enabled,
+      pass_when: [{ field: 'success', op: 'truthy', reason: id, message: result.error || `${id} failed` }],
+    }, { success: !enabled || result.success !== false }),
+  };
 }
 
 function git(workspace, args, options = {}) {
@@ -188,7 +202,7 @@ function globPatternToRegExp(pattern) {
 function validateWritablePaths(config, files) {
   const patterns = writablePathPatterns(config);
   if (patterns.length === 0) {
-    return { enabled: false, patterns: [], rejected_files: [] };
+    return withLifecycleGateResult('writable_paths', { enabled: false, patterns: [], rejected_files: [] });
   }
 
   const matchers = patterns.map(globPatternToRegExp);
@@ -196,13 +210,13 @@ function validateWritablePaths(config, files) {
     .map((file) => normalizePathPattern(file))
     .filter((file) => file && !matchers.some((matcher) => matcher.test(file)));
   const success = rejected.length === 0;
-  return {
+  return withLifecycleGateResult('writable_paths', {
     enabled: true,
     success,
     patterns,
     rejected_files: rejected,
     error: success ? '' : `Changed files outside writable_paths: ${rejected.join(', ')}`,
-  };
+  });
 }
 
 function declaredSideEffectPatterns(config) {
@@ -223,14 +237,14 @@ function evaluateSideEffectPolicy(config, files) {
   const patterns = declaredSideEffectPatterns(config);
   const normalizedFiles = files.map(normalizePathPattern).filter(Boolean);
   if (normalizedFiles.length === 0) {
-    return { enabled: patterns.length > 0, success: true, patterns, files: [], accepted_files: [], rejected_files: [] };
+    return withLifecycleGateResult('side_effect_policy', { enabled: patterns.length > 0, success: true, patterns, files: [], accepted_files: [], rejected_files: [] });
   }
 
   const matchers = patterns.map(globPatternToRegExp);
   const accepted = normalizedFiles.filter((file) => matchers.some((matcher) => matcher.test(file)));
   const rejected = normalizedFiles.filter((file) => !accepted.includes(file));
   const success = rejected.length === 0;
-  return {
+  return withLifecycleGateResult('side_effect_policy', {
     enabled: true,
     success,
     patterns,
@@ -238,7 +252,7 @@ function evaluateSideEffectPolicy(config, files) {
     accepted_files: accepted,
     rejected_files: rejected,
     error: success ? '' : `Verification side-effect files outside declared policy: ${rejected.join(', ')}`,
-  };
+  });
 }
 
 function calculatePublishSet(agentFiles, sideEffectPolicy) {
@@ -465,7 +479,7 @@ function evaluateWorkspaceContract(config, workspace) {
   const entryChecks = contractEntryPointEntries(contract);
   const forbiddenPhraseChecks = contractForbiddenPhraseEntries(contract);
   if (pathChecks.length === 0 && globChecks.length === 0 && entryChecks.length === 0 && forbiddenPhraseChecks.length === 0) {
-    return { enabled: false, success: true, paths_exist: [], glob_min_count: [], entry_points: [], forbidden_phrases: [] };
+    return withLifecycleGateResult('workspace_contract_checks', { enabled: false, success: true, paths_exist: [], glob_min_count: [], entry_points: [], forbidden_phrases: [] });
   }
 
   const pathsExist = pathChecks.map((entry) => {
@@ -497,7 +511,7 @@ function evaluateWorkspaceContract(config, workspace) {
     ...forbiddenPhrases.filter((entry) => !entry.success).map((entry) => `forbidden phrase ${JSON.stringify(entry.phrase)} found in ${entry.matching_files.join(', ')}`),
   ];
   const success = failures.length === 0;
-  return {
+  return withLifecycleGateResult('workspace_contract_checks', {
     enabled: true,
     success,
     paths_exist: pathsExist,
@@ -506,7 +520,7 @@ function evaluateWorkspaceContract(config, workspace) {
     forbidden_phrases: forbiddenPhrases,
     forbidden_phrase_files: forbiddenPhraseFiles,
     error: success ? '' : `workspace_contract_checks failed: ${failures.join('; ')}`,
-  };
+  });
 }
 
 function differenceFiles(files, baseline) {
@@ -845,7 +859,7 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     git(workspace, ['add', '--', ...agentFiles], { hooks });
   }
   const drift = verification.enabled && !verification.success
-    ? { enabled: false, checks: [], skipped_reason: 'verification_commands_failed' }
+    ? withLifecycleGateResult('drift_checks', { enabled: false, success: true, checks: [], skipped_reason: 'verification_commands_failed' })
     : runCommandChecks(config, workspace, 'drift_checks', hooks);
   const workspaceFiles = changedFiles(workspace, config, hooks);
   const verificationSideEffectFiles = differenceFiles(workspaceFiles, agentFiles);
@@ -863,12 +877,15 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     verification_side_effect_files: verificationSideEffectFiles,
   };
   let publication = { opened: false };
-  let success = (!verification.enabled || verification.success)
-    && (!drift.enabled || drift.success)
-    && (!sideEffectPolicy.enabled || sideEffectPolicy.success)
-    && (!writablePaths.enabled || writablePaths.success)
-    && (!workspaceContract.enabled || workspaceContract.success);
-  let error = '';
+  let gateSummary = evaluateGateResults([
+    verification.gate_result,
+    drift.gate_result,
+    sideEffectPolicy.gate_result,
+    writablePaths.gate_result,
+    workspaceContract.gate_result,
+  ]);
+  let success = gateSummary.success;
+  let error = gateSummary.error;
 
   if (!success) {
     if (verification.enabled && !verification.success) {
@@ -899,7 +916,15 @@ function runDeterministicWorkspaceLifecycle(config, results, scenario, workspace
     }
   }
 
-  return { verification, drift, sideEffectPolicy, writablePaths, workspaceContract, capture, publication, success, error };
+  gateSummary = evaluateGateResults([
+    verification.gate_result,
+    drift.gate_result,
+    sideEffectPolicy.gate_result,
+    writablePaths.gate_result,
+    workspaceContract.gate_result,
+  ]);
+
+  return { verification, drift, sideEffectPolicy, writablePaths, workspaceContract, gateSummary, capture, publication, success, error };
 }
 
 module.exports = {

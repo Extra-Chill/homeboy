@@ -7,6 +7,7 @@ const { runDeterministicLoop } = require('./deterministic-loop-runner');
 const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
 const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
+const { evaluateGatePlan } = require('./gate-plan-evaluator');
 
 function buildGenericAgentLoopRequest(options = {}) {
   const plan = requiredObject(options.plan, 'plan');
@@ -188,35 +189,15 @@ function runGenericDeterministicLoop(options = {}) {
         evidence,
       };
     },
-    stopCriteria: (context) => {
-      const stop = stopPolicy({
-        ...context,
-        task: context.input,
-        result: results[results.length - 1],
-        tasks,
-        results,
-        evidence,
-        max_iterations: maxIterations,
-        maxIterations,
-      });
-      if (isPlainObject(stop) ? stop.stop : Boolean(stop)) {
-        return stop;
-      }
-      const continueDecision = shouldContinue({
-        ...context,
-        task: context.input,
-        result: results[results.length - 1],
-        tasks,
-        results,
-        evidence,
-        max_iterations: maxIterations,
-        maxIterations,
-      });
-      if (continueDecision === false || (isPlainObject(continueDecision) && continueDecision.continue === false)) {
-        return { stop: true, reason: isPlainObject(continueDecision) ? continueDecision.reason || 'continuation_declined' : 'continuation_declined' };
-      }
-      return { stop: false };
-    },
+    stopCriteria: (context) => evaluateGenericLoopGateDecision({
+      context,
+      stopPolicy,
+      shouldContinue,
+      tasks,
+      results,
+      evidence,
+      maxIterations,
+    }),
   });
   const finalOutcome = results[results.length - 1] || null;
   return {
@@ -237,6 +218,37 @@ function runGenericDeterministicLoop(options = {}) {
       evidence,
     },
   };
+}
+
+function evaluateGenericLoopGateDecision(options = {}) {
+  const gateContext = {
+    ...options.context,
+    task: options.context.input,
+    result: options.results[options.results.length - 1],
+    tasks: options.tasks,
+    results: options.results,
+    evidence: options.evidence,
+    max_iterations: options.maxIterations,
+    maxIterations: options.maxIterations,
+  };
+  const stop = options.stopPolicy(gateContext);
+  const stopGate = evaluateGatePlan({
+    id: 'generic_loop_stop_policy',
+    stop_when: [{ field: 'stop_requested', op: 'truthy', reason: isPlainObject(stop) ? stop.reason || 'stop_criteria_satisfied' : 'stop_criteria_satisfied' }],
+  }, { stop_requested: isPlainObject(stop) ? stop.stop : Boolean(stop) });
+  if (stopGate.action === 'stop') {
+    return { stop: true, reason: stopGate.reason, data: { gate_result: stopGate } };
+  }
+
+  const continueDecision = options.shouldContinue(gateContext);
+  const continueGate = evaluateGatePlan({
+    id: 'generic_loop_continue_policy',
+    continue_when: [{ field: 'continue_requested', op: 'truthy', reason: isPlainObject(continueDecision) ? continueDecision.reason || 'continuation_declined' : 'continuation_declined' }],
+  }, { continue_requested: !(continueDecision === false || (isPlainObject(continueDecision) && continueDecision.continue === false)) });
+  if (continueGate.action === 'stop') {
+    return { stop: true, reason: continueGate.reason, data: { gate_result: continueGate } };
+  }
+  return { stop: false, data: { gate_result: continueGate } };
 }
 
 function executeRuntimeProvider(options = {}) {

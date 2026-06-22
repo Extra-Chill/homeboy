@@ -9,6 +9,7 @@
     "./agent-task-outcome-normalizer": "./lib/agent-task-outcome-normalizer.js",
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
+    "./gate-plan-evaluator": "./lib/gate-plan-evaluator.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js",
     "./workspace-publication-lifecycle": "./lib/workspace-publication-lifecycle.cjs"
   },
@@ -20,7 +21,8 @@
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
     "test:workspace-publication-lifecycle": "node tests/workspace-publication-lifecycle.test.js",
-    "test:agent-task-outcome-normalizer": "node tests/agent-task-outcome-normalizer.test.js"
+    "test:agent-task-outcome-normalizer": "node tests/agent-task-outcome-normalizer.test.js",
+    "test:gate-plan-evaluator": "node tests/gate-plan-evaluator.test.js"
   },
   "engines": {
     "node": ">=18.12.0"
