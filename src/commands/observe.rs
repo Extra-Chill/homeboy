@@ -10,17 +10,19 @@ use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 
+use crate::command_contract::{CommandJsonFamily, CommandOutputFileMode};
+
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::run_dir::{self, RunDir};
 use homeboy::core::extension::trace::{
     ActiveTraceProbes, TraceArtifact, TraceEvent, TraceProbeConfig, TraceResults, TraceStatus,
 };
 use homeboy::core::git::short_head_revision_at;
-use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::core::Error;
 
 use super::utils::args::PositionalComponentArgs;
-use super::{CmdResult, GlobalArgs};
+use super::{adapter, CmdResult, GlobalArgs};
 
 const DEFAULT_DURATION: &str = "30s";
 const DEFAULT_PROCESS_WATCH_INTERVAL: &str = "1s";
@@ -74,6 +76,16 @@ pub struct ObserveOutput {
     pub hints: Vec<String>,
 }
 
+pub(crate) fn adapter(
+    output_file_mode: CommandOutputFileMode,
+) -> adapter::TypedCommandAdapter<ObserveArgs> {
+    adapter::TypedCommandAdapter::json_only(CommandJsonFamily::Quality, output_file_mode, run_json)
+}
+
+fn run_json(args: ObserveArgs, global: &GlobalArgs) -> adapter::JsonCommandRun {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+}
+
 struct TailLogState {
     path: PathBuf,
     offset: u64,
@@ -110,7 +122,6 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
     let component_path = ctx.source_path.clone();
     let run_dir = RunDir::create()?;
     let trace_path = run_dir.step_file(run_dir::files::TRACE_RESULTS);
-    let store = ObservationStore::open_initialized()?;
     let command = observe_command(&args);
     let initial_metadata = serde_json::json!({
         "duration_ms": duration_millis(args.duration),
@@ -122,7 +133,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
         "run_dir": run_dir.path(),
     });
 
-    let run = store.start_run(
+    let observation = ActiveObservation::start(
         NewRunRecord::builder("observe")
             .component_id(component_id.clone())
             .command(command)
@@ -177,11 +188,14 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
     };
 
     write_trace_results(&trace_path, &results)?;
-    let artifact = store.record_artifact(&run.id, "trace-results", &trace_path)?;
+    let artifact =
+        observation
+            .store()
+            .record_artifact(observation.run_id(), "trace-results", &trace_path)?;
     let artifact_id = artifact.id.clone();
     let artifact_path = artifact.path.clone();
-    let finished = store.finish_run(
-        &run.id,
+    let finished = observation.store().finish_run(
+        observation.run_id(),
         status,
         Some(serde_json::json!({
             "duration_ms": duration_millis(args.duration),
@@ -196,7 +210,7 @@ pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> 
     Ok((
         ObserveOutput {
             command: "observe",
-            run_id: finished.id.clone(),
+            run_id: observation.run_id().to_string(),
             component_id,
             status: finished.status,
             duration_ms: duration_millis(args.duration),

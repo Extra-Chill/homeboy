@@ -12,7 +12,9 @@
 //! returned from [`Commands::descriptor`].
 
 use crate::cli_surface::Commands;
-use crate::commands::{changelog, file, fleet, logs, report, review, runtime, trace, version};
+use crate::commands::{
+    changelog, file, fleet, logs, observe, report, review, runtime, trace, version,
+};
 
 use super::lab::apply_lab_contract_to_descriptor;
 
@@ -329,7 +331,8 @@ impl Commands {
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
             Commands::Lint(args) => args.output_descriptor(output_file_mode),
             Commands::Audit(args) => args.output_descriptor(output_file_mode),
-            Commands::Observe(_) | Commands::AuditBaseline(_) | Commands::Refactor(_) => {
+            Commands::Observe(_) => observe::adapter(output_file_mode).output_descriptor(),
+            Commands::AuditBaseline(_) | Commands::Refactor(_) => {
                 registered_json_envelope_descriptor(self, output_file_mode)
             }
             Commands::Refs(_) => workspace_descriptor(

@@ -14,7 +14,7 @@ use homeboy::core::extension::trace::{
     TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::observation::{NewRunRecord, ObservationStore};
+use homeboy::core::observation::{ActiveObservation, NewRunRecord};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
@@ -585,51 +585,44 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
     let component_path_for_observation = path_override
         .clone()
         .unwrap_or_else(|| ctx.component.local_path.clone());
-    let observation = ObservationStore::open_initialized().ok().and_then(|store| {
-        let cwd = std::env::current_dir().ok();
-        store
-            .start_run(
-                NewRunRecord::builder("trace")
-                    .component_id(ctx.component_id.clone())
-                    .command(std::env::args().collect::<Vec<_>>().join(" "))
-                    .optional_cwd_path(cwd.as_deref())
-                    .current_homeboy_version()
-                    .git_sha(homeboy::core::git::short_head_revision_at(Path::new(
-                        &component_path_for_observation,
-                    )))
-                    .optional_rig_id(rig_id.clone())
-                    .metadata(serde_json::json!({
-                        "scenario_id": scenario_id,
-                        "component_path": component_path_for_observation,
-                        "requested_overlays": requested_overlays,
-                        "requested_variants": requested_variants,
-                        "span_definitions": span_definitions.clone(),
-                        "phase_preset": args.phase_preset.clone(),
-                        "secret_env": trace_secret_env_status.clone(),
-                        "phase_milestones": args.phases.clone().into_iter().map(|phase| {
-                            serde_json::json!({ "label": phase.label, "key": phase.key })
-                        }).collect::<Vec<_>>(),
-                        "baseline": {
-                            "baseline": args.baseline_args.baseline,
-                            "ignore_baseline": args.baseline_args.ignore_baseline,
-                            "ratchet": args.baseline_args.ratchet,
-                            "regression_threshold_percent": args.regression_threshold,
-                            "regression_min_delta_ms": args.regression_min_delta_ms
-                        }
-                    }))
-                    .build(),
-            )
-            .ok()
-            .map(|run| {
-                std::env::set_var(homeboy::core::observation::ACTIVE_RUN_ID_ENV, &run.id);
-                ActiveTraceObservation {
-                    store,
-                    run_id: run.id,
-                    component_id: ctx.component_id.clone(),
-                    rig_id: rig_id.clone(),
-                    scenario_id: scenario_id.clone(),
+    let observation = ActiveObservation::start_best_effort({
+        let mut builder = NewRunRecord::builder("trace")
+            .component_id(ctx.component_id.clone())
+            .command(std::env::args().collect::<Vec<_>>().join(" "))
+            .current_homeboy_version()
+            .git_sha(homeboy::core::git::short_head_revision_at(Path::new(
+                &component_path_for_observation,
+            )))
+            .optional_rig_id(rig_id.clone())
+            .metadata(serde_json::json!({
+                "scenario_id": scenario_id,
+                "component_path": component_path_for_observation,
+                "requested_overlays": requested_overlays,
+                "requested_variants": requested_variants,
+                "span_definitions": span_definitions.clone(),
+                "phase_preset": args.phase_preset.clone(),
+                "secret_env": trace_secret_env_status.clone(),
+                "phase_milestones": args.phases.clone().into_iter().map(|phase| {
+                    serde_json::json!({ "label": phase.label, "key": phase.key })
+                }).collect::<Vec<_>>(),
+                "baseline": {
+                    "baseline": args.baseline_args.baseline,
+                    "ignore_baseline": args.baseline_args.ignore_baseline,
+                    "ratchet": args.baseline_args.ratchet,
+                    "regression_threshold_percent": args.regression_threshold,
+                    "regression_min_delta_ms": args.regression_min_delta_ms
                 }
-            })
+            }));
+        if let Ok(cwd) = std::env::current_dir() {
+            builder = builder.cwd_path(cwd);
+        }
+        builder.build()
+    })
+    .map(|observation| ActiveTraceObservation {
+        active: observation,
+        component_id: ctx.component_id.clone(),
+        rig_id: rig_id.clone(),
+        scenario_id: scenario_id.clone(),
     });
     let (extra_workloads, trace_dependencies, runner_capabilities, invocation_requirements) =
         trace_workload_inputs(rig_context.as_ref(), ctx.extension_id.as_deref());
@@ -714,7 +707,7 @@ fn execute_trace_run_impl(args: TraceArgs) -> homeboy::core::Result<TraceRunExec
 
     let run_id = observation
         .as_ref()
-        .map(|observation| observation.run_id.clone());
+        .map(|observation| observation.active.run_id().to_string());
 
     Ok(TraceRunExecution {
         workflow,

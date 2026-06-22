@@ -13,7 +13,8 @@ use std::path::Path;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::trace as extension_trace;
 use homeboy::core::observation::{
-    NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore, RunStatus,
+    ActiveObservation, NewRunRecord, NewTraceRunRecord, NewTraceSpanRecord, ObservationStore,
+    RunStatus,
 };
 use homeboy::core::rig;
 
@@ -24,8 +25,7 @@ use super::{
 };
 
 pub(super) struct ActiveTraceObservation {
-    pub(super) store: ObservationStore,
-    pub(super) run_id: String,
+    pub(super) active: ActiveObservation,
     pub(super) component_id: String,
     pub(super) rig_id: Option<String>,
     pub(super) scenario_id: String,
@@ -164,9 +164,9 @@ pub(super) fn persist_trace_workflow_result(
     let trace_scenario_id = results
         .map(|results| results.scenario_id.clone())
         .unwrap_or_else(|| observation.scenario_id.clone());
-    let _ = observation.store.record_trace_run(
+    let _ = observation.active.store().record_trace_run(
         NewTraceRunRecord::builder(
-            &observation.run_id,
+            observation.active.run_id(),
             &observation.component_id,
             trace_scenario_id,
             run_status.as_str(),
@@ -192,9 +192,9 @@ pub(super) fn persist_trace_workflow_result(
 
     if let Some(results) = results {
         for span in &results.span_results {
-            let _ = observation.store.record_trace_span(
+            let _ = observation.active.store().record_trace_span(
                 NewTraceSpanRecord::builder(
-                    &observation.run_id,
+                    observation.active.run_id(),
                     &span.id,
                     format!("{:?}", span.status).to_ascii_lowercase(),
                 )
@@ -212,16 +212,20 @@ pub(super) fn persist_trace_workflow_result(
         }
     }
 
-    let artifact_observation =
-        record_trace_artifacts(&observation.store, &observation.run_id, run_dir, results);
+    let artifact_observation = record_trace_artifacts(
+        observation.active.store(),
+        observation.active.run_id(),
+        run_dir,
+        results,
+    );
     let finish_status =
         if run_status == RunStatus::Pass && artifact_observation.has_declared_artifact_failures() {
             RunStatus::Fail
         } else {
             run_status
         };
-    let _ = observation.store.finish_run(
-        &observation.run_id,
+    let _ = observation.active.store().finish_run(
+        observation.active.run_id(),
         finish_status,
         Some(trace_run_finish_metadata(
             workflow,
@@ -242,9 +246,9 @@ pub(super) fn persist_trace_workflow_error(
             "details": &error.details,
         }
     });
-    let _ = observation.store.record_trace_run(
+    let _ = observation.active.store().record_trace_run(
         NewTraceRunRecord::builder(
-            &observation.run_id,
+            observation.active.run_id(),
             &observation.component_id,
             &observation.scenario_id,
             RunStatus::Error.as_str(),
@@ -253,10 +257,14 @@ pub(super) fn persist_trace_workflow_error(
         .metadata(error_metadata.clone())
         .build(),
     );
-    let artifact_observation =
-        record_trace_artifacts(&observation.store, &observation.run_id, run_dir, None);
-    let _ = observation.store.finish_run(
-        &observation.run_id,
+    let artifact_observation = record_trace_artifacts(
+        observation.active.store(),
+        observation.active.run_id(),
+        run_dir,
+        None,
+    );
+    let _ = observation.active.store().finish_run(
+        observation.active.run_id(),
         RunStatus::Error,
         Some(merge_trace_artifact_metadata(
             error_metadata,
