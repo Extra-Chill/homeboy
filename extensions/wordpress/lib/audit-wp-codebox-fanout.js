@@ -22,7 +22,7 @@ const {
 } = require('./codebox-provider-adapter');
 const {
   executeFanoutReconcileRun,
-} = require('./fanout-reconcile-runner');
+} = require('../../runtime-agent-ci/lib/fanout-reconcile-runner');
 const {
   DEFAULT_TASK_TIMEOUT_SECONDS,
   RUN_SCHEMA,

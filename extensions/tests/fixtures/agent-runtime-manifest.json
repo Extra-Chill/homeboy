@@ -41,8 +41,20 @@
       "capabilities": [
         "workspace_materialization",
         "structured_outcome",
-        "diagnostic_artifacts"
+        "diagnostic_artifacts",
+        "ability_execution",
+        "agent_bundle_execution"
       ],
+      "runtime_execution_contracts": {
+        "ability": {
+          "ability_field": "runtime_task_ability",
+          "required_capabilities": ["ability_execution"]
+        },
+        "bundle": {
+          "ability_field": "runtime_bundle_ability",
+          "required_capabilities": ["agent_bundle_execution"]
+        }
+      },
       "runner_readiness": [],
       "role_aliases": {
         "artifact_kinds": {

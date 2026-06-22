@@ -35,6 +35,7 @@ const requiredProviderFields = [
 	'failure_classifications',
 	'redacted_metadata_keys',
 	'capabilities',
+	'runtime_execution_contracts',
 	'runner_readiness',
 	'role_aliases',
 	'tool_presets',
@@ -62,6 +63,12 @@ assert.ok(provider.outcome_statuses.includes('succeeded'));
 assert.ok(provider.failure_classifications.includes('request_validation'));
 assert.ok(provider.redacted_metadata_keys.includes('secrets'));
 assert.ok(provider.capabilities.includes('structured_outcome'));
+assert.ok(provider.capabilities.includes('ability_execution'));
+assert.ok(provider.capabilities.includes('agent_bundle_execution'));
+assert.deepEqual(provider.runtime_execution_contracts.bundle, {
+	ability_field: 'runtime_bundle_ability',
+	required_capabilities: ['agent_bundle_execution'],
+});
 assert.deepEqual(provider.runner_readiness, []);
 assert.deepEqual(provider.role_aliases.artifact_kinds.patch, ['fixture-runtime-patch']);
 assert.deepEqual(provider.tool_presets, ['runner_workspace', 'publication']);

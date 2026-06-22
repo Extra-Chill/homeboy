@@ -162,6 +162,7 @@
         "wordpress_sandbox",
         "workspace_mounts",
         "workspace_tools",
+        "ability_execution",
         "artifact_materialization",
         "patch_artifacts",
         "verification_artifacts",
@@ -170,10 +171,25 @@
         "screenshots",
         "structured_outcome",
         "agent_bundle_execution",
+        "workflow_execution",
         "typed_bundle_outputs",
         "external_recipe_packs",
         "recipe_probe_artifacts"
       ],
+      "runtime_execution_contracts": {
+        "ability": {
+          "ability_field": "runtime_task_ability",
+          "required_capabilities": ["ability_execution"]
+        },
+        "bundle": {
+          "ability_field": "runtime_bundle_ability",
+          "required_capabilities": ["agent_bundle_execution"]
+        },
+        "workflow": {
+          "ability_field": "runtime_workflow_ability",
+          "required_capabilities": ["workflow_execution"]
+        }
+      },
       "workspace_materialization": {
         "cwd": "git_checkout"
       },

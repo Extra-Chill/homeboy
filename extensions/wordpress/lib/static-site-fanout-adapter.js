@@ -9,7 +9,7 @@ const {
   createFanoutReconcilePlan,
   executeFanoutReconcileRun,
   groupFanoutItems,
-} = require('./fanout-reconcile-runner');
+} = require('../../runtime-agent-ci/lib/fanout-reconcile-runner');
 
 const PLAN_SCHEMA = 'homeboy/static-site-fanout-plan/v1';
 const RUN_SCHEMA = 'homeboy/static-site-fanout-run/v1';

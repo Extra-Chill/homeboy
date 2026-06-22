@@ -42,6 +42,11 @@ assert.equal(runtime.paths.runtime_component, '');
 assert.equal(runtime.executor.id, 'wordpress.codebox-agent-task-executor');
 assert.equal(runtime.executor.backend, 'codebox');
 assert.equal(runtime.executor.path, path.join(rootDir, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
+assert.equal(runtime.executor.capabilities.includes('agent_bundle_execution'), true);
+assert.deepEqual(runtime.executor.runtime_execution_contracts.bundle, {
+	ability_field: 'runtime_bundle_ability',
+	required_capabilities: ['agent_bundle_execution'],
+});
 
 const envRuntime = resolveRuntimeProvider('wp-codebox', {
 	repoRoot: rootDir,

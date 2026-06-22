@@ -154,7 +154,7 @@ jobs:
       runtime_ref: main
       runtime_profile: example-agent-ci
       runtime_profiles: >-
-        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-agent-bundle","runtime_bundle_ability":"example/run-agent-bundle","ability_requirements":["example/run-agent-bundle"]}}
+        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
       runtime_dependencies: '["Example/runtime-plugin@main"]'
       workload_id: example-agent-flow
       workload_label: Run example agent
@@ -196,7 +196,7 @@ jobs:
 - `runtime_task` forwards a generic `{ "ability", "input" }` object to the runtime task executor.
 - `ability_request` and `ability_input` are a shorthand for direct ability execution. `ability_input` is merged into `ability_request.input`.
 - `runtime_output_projections` maps named outputs to dotted paths in the provider runtime result.
-- Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle/package descriptors derive the runtime task ability from the selected runtime profile, so callers do not need to provide `runtime_task.ability` for generic package runs.
+- Generic `runtime-agent-full-run.yml` callers can use `runtime_execution` for ability, bundle, or workflow descriptors and pass `runtime_output_projections` / `evidence_projections` through to the selected runtime config. Bundle and workflow descriptors derive the provider operation from the selected runtime profile's `runtime_execution_contracts`, so callers do not need to provide `runtime_task.ability` for generic package runs.
 - `component_contracts` forwards explicit runtime component/plugin contracts to the selected runtime adapter. WP Codebox maps them through its `wp-codebox/runtime-profile/v1` payload.
 - WP Codebox executor paths accept caller-supplied component contracts, runtime overlays, mounts, task payload, provider defaults, tool profiles, and declarative runtime requirements through the generic runtime workflow input renderer. Domain policy belongs in caller inputs and runtime profiles, not in the generic WP Codebox provider manifest.
 - `runtime_dependencies` checks out the explicit runtime component stack and forwards those paths to the selected runtime adapter.
@@ -238,7 +238,7 @@ jobs:
       runtime_ref: main
       runtime_profile: example-agent-ci
       runtime_profiles: >-
-        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-agent-bundle","runtime_bundle_ability":"example/run-agent-bundle","ability_requirements":["example/run-agent-bundle"]}}
+        {"example-agent-ci":{"id":"example-agent-ci","runtime_task_ability":"example/run-task","runtime_bundle_ability":"example/run-agent-bundle","capabilities":["ability_execution","agent_bundle_execution"],"runtime_execution_contracts":{"bundle":{"ability_field":"runtime_bundle_ability","required_capabilities":["agent_bundle_execution"]}},"ability_requirements":["example/run-agent-bundle"]}}
       runtime_dependencies: '["Example/runtime-plugin@main"]'
       runtime_execution: '{"kind":"bundle","source":".ci/docs-agent/bundles/docs-agent"}'
       workload_id: docs-agent-flow
