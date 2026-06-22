@@ -28,10 +28,10 @@ use crate::core::error::{Error, Result};
 
 use super::gh_client::GhClient;
 pub use super::github_types::{
-    GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
-    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
-    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
-    PrState,
+    GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrReadinessOutput,
+    GithubPrView, IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions,
+    IssueEditOptions, IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions,
+    PrMergeOptions, PrMergeReadiness, PrReadinessBlocker, PrState,
 };
 use super::resolve_target;
 
@@ -508,7 +508,7 @@ pub fn pr_view(
         "-R".into(),
         repo_flag,
         "--json".into(),
-        "author,baseRefName,headRefName,headRepository,state,mergedAt,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup".into(),
+        "author,baseRefName,headRefName,headRepository,title,url,state,isDraft,mergedAt,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup".into(),
     ];
     let raw = run_gh(&args)?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
@@ -537,6 +537,12 @@ pub fn pr_view(
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
     let state = string_value(&parsed, "state").unwrap_or_default();
+    let url = string_value(&parsed, "url").unwrap_or_default();
+    let title = string_value(&parsed, "title");
+    let draft = parsed
+        .get("isDraft")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let head_sha = string_value(&parsed, "headRefOid");
     let merged_at = string_value(&parsed, "mergedAt");
     let review_decision = string_value(&parsed, "reviewDecision");
@@ -553,7 +559,10 @@ pub fn pr_view(
         owner: repo.owner,
         repo: repo.repo,
         number,
+        url,
+        title,
         state,
+        draft,
         author,
         base,
         head,
@@ -564,6 +573,39 @@ pub fn pr_view(
         merge_state,
         ci_state,
         ci_summary,
+    })
+}
+
+/// Explain whether a PR is ready to merge without attempting a merge.
+pub fn pr_readiness(
+    component_id: Option<&str>,
+    number: u64,
+    path: Option<String>,
+) -> Result<GithubPrReadinessOutput> {
+    let pr = pr_view(component_id, number, path)?;
+    let readiness = interpret_pr_merge_readiness(
+        pr.merge_state.as_deref(),
+        &pr.ci_state,
+        &pr.ci_summary,
+        pr.review_decision.as_deref(),
+        pr.draft,
+    );
+
+    Ok(GithubPrReadinessOutput {
+        component_id: pr.component_id,
+        owner: pr.owner,
+        repo: pr.repo,
+        action: "pr.readiness".to_string(),
+        success: true,
+        number: pr.number,
+        url: pr.url,
+        title: pr.title,
+        state: pr.state,
+        draft: pr.draft,
+        review_decision: pr.review_decision,
+        ci_state: pr.ci_state,
+        ci_summary: pr.ci_summary,
+        readiness,
     })
 }
 
@@ -845,6 +887,229 @@ fn classify_pr_ci(
     (state.to_string(), summary)
 }
 
+fn interpret_pr_merge_readiness(
+    raw_merge_state: Option<&str>,
+    ci_state: &str,
+    ci_summary: &str,
+    review_decision: Option<&str>,
+    draft: bool,
+) -> PrMergeReadiness {
+    let normalized_merge_state = raw_merge_state
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase);
+    let raw = normalized_merge_state.as_deref();
+    let mut blockers = Vec::new();
+
+    if draft {
+        blockers.push(readiness_blocker(
+            "draft",
+            "PR is still a draft.",
+            "Mark the PR ready for review before merging.",
+        ));
+    }
+
+    if review_decision == Some("REVIEW_REQUIRED") {
+        blockers.push(readiness_blocker(
+            "review_required",
+            "GitHub reports that review is required.",
+            "Request or wait for the required approving review.",
+        ));
+    }
+
+    let (interpreted_state, check_guidance, conflict_guidance) = match raw {
+        Some("CLEAN") if ci_state == "terminal_green" => (
+            "mergeable_now",
+            "Required checks reported success for the current PR head.",
+            "No conflict guidance; GitHub reports the PR branch is clean.",
+        ),
+        Some("CLEAN") if ci_state == "no_checks" => {
+            blockers.push(readiness_blocker(
+                "checks_not_reported",
+                "GitHub reports CLEAN but statusCheckRollup is empty.",
+                "Wait for checks to appear on the current head before treating the PR as mergeable.",
+            ));
+            (
+                "waiting_on_required_checks",
+                "GitHub has not reported checks for this head yet; this can happen immediately after a push or rebase.",
+                "No conflict guidance; GitHub reports the PR branch is clean.",
+            )
+        }
+        Some("CLEAN") | Some("BLOCKED") if ci_state == "pending" => {
+            blockers.push(readiness_blocker(
+                "required_checks_pending",
+                "Required checks are still pending or GitHub has not finished branch-protection evaluation.",
+                "Wait for required checks to complete, then re-run readiness.",
+            ));
+            (
+                "waiting_on_required_checks",
+                "Wait for pending required checks to complete.",
+                "No conflict guidance unless GitHub later reports DIRTY or BEHIND.",
+            )
+        }
+        Some("BLOCKED") if ci_state == "terminal_failed" => {
+            blockers.push(readiness_blocker(
+                "required_checks_failed",
+                "Required checks failed or branch protection blocks merge.",
+                "Open the PR checks view, fix failing required checks, then re-run readiness.",
+            ));
+            (
+                "failing_required_checks",
+                "Fix failing required checks before merging.",
+                "No conflict guidance unless GitHub also reports DIRTY or BEHIND.",
+            )
+        }
+        Some("UNSTABLE") if ci_state == "pending" => {
+            blockers.push(readiness_blocker(
+                "optional_checks_pending",
+                "GitHub reports UNSTABLE while checks are pending.",
+                "Wait for optional or non-blocking checks to finish if your workflow requires them.",
+            ));
+            (
+                "waiting_on_optional_checks",
+                "The PR may be mergeable by GitHub policy, but optional checks have not settled.",
+                "No conflict guidance; UNSTABLE is a check signal, not a conflict signal.",
+            )
+        }
+        Some("UNSTABLE") => {
+            blockers.push(readiness_blocker(
+                "optional_checks_unstable",
+                "GitHub reports UNSTABLE; non-required checks are failing or inconclusive.",
+                "Inspect the check run details and decide whether optional failures are acceptable.",
+            ));
+            (
+                "failing_optional_checks",
+                "Optional or non-required checks are failing or inconclusive.",
+                "No conflict guidance; UNSTABLE is a check signal, not a conflict signal.",
+            )
+        }
+        Some("DIRTY") => {
+            blockers.push(readiness_blocker(
+                "merge_conflicts",
+                "GitHub reports merge conflicts with the base branch.",
+                "Rebase or merge the base branch locally, resolve conflicts, push, then re-run readiness.",
+            ));
+            (
+                "conflicted",
+                "Check status is secondary until conflicts are resolved.",
+                "Resolve merge conflicts against the base branch before merging.",
+            )
+        }
+        Some("BEHIND") => {
+            blockers.push(readiness_blocker(
+                "branch_behind",
+                "The PR branch is behind the base branch and must be updated.",
+                "Update the branch from the base branch, push, then re-run readiness.",
+            ));
+            (
+                "conflicted",
+                "Checks may need to run again after the branch is updated.",
+                "Update the PR branch with the base branch before merging.",
+            )
+        }
+        Some("UNKNOWN") | None => {
+            blockers.push(readiness_blocker(
+                "mergeability_unknown",
+                "GitHub has not computed mergeability for the current PR head yet.",
+                "Wait briefly and re-run readiness; do not attempt a merge just to discover state.",
+            ));
+            (
+                "unknown",
+                "Check state alone is insufficient while mergeability is UNKNOWN.",
+                "Conflict state is unknown until GitHub recomputes mergeability.",
+            )
+        }
+        Some("HAS_HOOKS") => {
+            blockers.push(readiness_blocker(
+                "merge_hooks",
+                "GitHub reports merge hooks must run before mergeability is final.",
+                "Wait for repository hooks or branch rules to settle, then re-run readiness.",
+            ));
+            (
+                "unknown",
+                "Check state is not enough while merge hooks are pending.",
+                "Conflict state is not final until hooks complete.",
+            )
+        }
+        Some("BLOCKED") => {
+            blockers.push(readiness_blocker(
+                "branch_protection_blocked",
+                "GitHub branch protection blocks merge.",
+                "Inspect required reviews, required checks, conversations, and branch rules in GitHub.",
+            ));
+            (
+                "failing_required_checks",
+                "Branch protection is blocking merge; inspect required checks and rules.",
+                "No conflict guidance unless GitHub also reports DIRTY or BEHIND.",
+            )
+        }
+        Some(_) if ci_state == "terminal_failed" => {
+            blockers.push(readiness_blocker(
+                "checks_failed",
+                "One or more checks failed or reported an unknown conclusion.",
+                "Open the PR checks view, fix failures, then re-run readiness.",
+            ));
+            (
+                "failing_required_checks",
+                "Fix failing checks before merging.",
+                "No conflict guidance unless GitHub reports DIRTY or BEHIND.",
+            )
+        }
+        Some(_) if ci_state == "pending" => {
+            blockers.push(readiness_blocker(
+                "checks_pending",
+                "One or more checks are still pending.",
+                "Wait for checks to finish, then re-run readiness.",
+            ));
+            (
+                "waiting_on_required_checks",
+                "Wait for pending checks to complete.",
+                "No conflict guidance unless GitHub reports DIRTY or BEHIND.",
+            )
+        }
+        _ => (
+            "unknown",
+            "Homeboy does not recognize this merge/check combination yet.",
+            "Inspect GitHub's PR merge box and raw mergeStateStatus.",
+        ),
+    };
+
+    if ci_state == "stale" {
+        blockers.push(readiness_blocker(
+            "stale_check_rollup",
+            "GitHub check rollup appears stale for a merged or recently changed PR.",
+            "Refresh GitHub state and re-run readiness before using this as merge evidence.",
+        ));
+    }
+
+    let interpreted_state = if interpreted_state == "mergeable_now" && !blockers.is_empty() {
+        "failing_required_checks"
+    } else {
+        interpreted_state
+    };
+    let mergeable = interpreted_state == "mergeable_now" && blockers.is_empty();
+    let check_guidance = format!("{} {}", check_guidance, ci_summary)
+        .trim()
+        .to_string();
+
+    PrMergeReadiness {
+        raw_merge_state: normalized_merge_state,
+        interpreted_state: interpreted_state.to_string(),
+        mergeable,
+        blockers,
+        check_guidance,
+        conflict_guidance: conflict_guidance.to_string(),
+    }
+}
+
+fn readiness_blocker(kind: &str, message: &str, guidance: &str) -> PrReadinessBlocker {
+    PrReadinessBlocker {
+        kind: kind.to_string(),
+        message: message.to_string(),
+        guidance: guidance.to_string(),
+    }
+}
+
 fn parse_issue_list_json(raw: &str, options: &IssueFindOptions) -> Result<Vec<GithubFindItem>> {
     #[derive(serde::Deserialize)]
     struct RawIssue {
@@ -1038,6 +1303,73 @@ mod tests {
 
         assert_eq!(state, "stale");
         assert!(summary.contains("1 pending"));
+    }
+
+    #[test]
+    fn readiness_explains_unknown_without_merge_probe() {
+        let readiness = interpret_pr_merge_readiness(
+            Some("UNKNOWN"),
+            "terminal_green",
+            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+            Some("APPROVED"),
+            false,
+        );
+
+        assert_eq!(readiness.raw_merge_state.as_deref(), Some("UNKNOWN"));
+        assert_eq!(readiness.interpreted_state, "unknown");
+        assert!(!readiness.mergeable);
+        assert_eq!(readiness.blockers[0].kind, "mergeability_unknown");
+        assert!(readiness.blockers[0]
+            .guidance
+            .contains("do not attempt a merge"));
+    }
+
+    #[test]
+    fn readiness_explains_unstable_as_optional_checks() {
+        let readiness = interpret_pr_merge_readiness(
+            Some("UNSTABLE"),
+            "terminal_failed",
+            "2 check(s): 1 terminal-green, 1 failed/unknown, 0 pending",
+            Some("APPROVED"),
+            false,
+        );
+
+        assert_eq!(readiness.interpreted_state, "failing_optional_checks");
+        assert!(!readiness.mergeable);
+        assert_eq!(readiness.blockers[0].kind, "optional_checks_unstable");
+        assert!(readiness
+            .conflict_guidance
+            .contains("not a conflict signal"));
+    }
+
+    #[test]
+    fn readiness_treats_clean_without_checks_as_required_wait() {
+        let readiness = interpret_pr_merge_readiness(
+            Some("CLEAN"),
+            "no_checks",
+            "GitHub reported no status checks for this PR head.",
+            Some("APPROVED"),
+            false,
+        );
+
+        assert_eq!(readiness.interpreted_state, "waiting_on_required_checks");
+        assert!(!readiness.mergeable);
+        assert_eq!(readiness.blockers[0].kind, "checks_not_reported");
+    }
+
+    #[test]
+    fn readiness_allows_clean_green_non_draft_pr() {
+        let readiness = interpret_pr_merge_readiness(
+            Some("CLEAN"),
+            "terminal_green",
+            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+            Some("APPROVED"),
+            false,
+        );
+
+        assert_eq!(readiness.interpreted_state, "mergeable_now");
+        assert!(readiness.mergeable);
+        assert!(readiness.blockers.is_empty());
     }
 
     #[test]
