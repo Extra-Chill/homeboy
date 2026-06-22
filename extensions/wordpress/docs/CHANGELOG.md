@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.7] - 2026-06-22
+
+### Changed
+- Add WordPress REST route discovery helper
+
 ## [3.12.6] - 2026-06-22
 
 ### Changed
