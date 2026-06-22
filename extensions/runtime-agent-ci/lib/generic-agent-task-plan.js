@@ -40,6 +40,7 @@ function genericAgentTaskRequest(options = {}) {
     repo: options.repo,
     workspace: options.workspace,
     executor: runnerRequest.executor,
+    goal: options.goal,
     instructions: options.instructions,
     inputs: options.inputs,
     source_refs: sourceRefs === undefined ? undefined : normalizeArray(sourceRefs),

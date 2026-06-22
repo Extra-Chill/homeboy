@@ -100,6 +100,7 @@ assert.deepEqual(
 		schema: contract.schemas.request,
 		taskId: 'single-runtime-task-smoke',
 		parentPlanId: undefined,
+		goal: 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.',
 		instructions: 'Run WordPress runtime ability example/materialize-artifact and return the declared artifacts.',
 		inputs: {
 			ability: 'example/materialize-artifact',
