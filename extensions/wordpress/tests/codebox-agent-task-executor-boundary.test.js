@@ -18,6 +18,7 @@ const {
   runtimeContractSchemas,
   typedArtifactsFromCodeboxResult,
 } = require('../../agent-runtimes/wp-codebox');
+const runtimeAgentCi = require('../../runtime-agent-ci');
 
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wordpress-agent-boundary-'));
 const codexSecretEnv = [
@@ -463,6 +464,46 @@ assert.deepEqual(runtimeInvocationTaskInput.provider_runtime_invocation.operatio
 assert.equal(runtimeInvocationTaskInput.provider_runtime_invocation.operations.artifactHandoff.ability, 'wp-codebox/handoff-artifacts');
 assert.equal(runtimeInvocationTaskInput.provider_runtime_invocation.operations.workspaceCapture.task, 'wp-codebox.runner-workspace.capture');
 assert.doesNotMatch(JSON.stringify(runtimeInvocationTaskInput.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
+
+const capabilityBundleExecutorConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: 'codebox-capability-bundle-runtime',
+  runtimeProfiles: {
+    'codebox-capability-bundle-runtime': {
+      schema: 'homeboy/runtime-profile/v1',
+      id: 'codebox-capability-bundle-runtime',
+      runtime_task_ability: 'example/run-task',
+      capabilities: ['ability_execution'],
+    },
+  },
+  provider: 'codex',
+  ability: 'example/run-task',
+  capabilityBundles: ['worktree_pr_iteration'],
+  runtimeInvocation: { operations: { workspaceCommand: { config: { timeout_ms: 30000 } } } },
+});
+assert.doesNotMatch(JSON.stringify(capabilityBundleExecutorConfig), /wp-codebox\/runner-workspace-command/);
+const capabilityBundleTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'capability-bundle-provider-runtime-invocation-task-1',
+  executor: {
+    backend: 'codebox',
+    config: capabilityBundleExecutorConfig,
+  },
+  instructions: 'Run with generic capability bundles for worktree PR iteration.',
+  workspace: { root: workspaceRoot, mode: 'readwrite' },
+});
+assert.deepEqual(capabilityBundleTaskInput.provider_runtime_invocation.operations.workspaceCommand, runtimeInvocationTaskInput.provider_runtime_invocation.operations.workspaceCommand);
+assert.deepEqual(capabilityBundleTaskInput.provider_runtime_invocation.operations.workspaceCapture, {
+  task: 'wp-codebox.runner-workspace.capture',
+  ability: 'wp-codebox/runner-workspace-capture',
+  result_schema: 'wp-codebox/runner-workspace-capture-result/v1',
+});
+assert.deepEqual(capabilityBundleTaskInput.provider_runtime_invocation.operations.workspacePublish, {
+  task: 'wp-codebox.runner-workspace.publish',
+  ability: 'wp-codebox/runner-workspace-publish',
+  result_schema: 'wp-codebox/runner-workspace-publication-result/v1',
+});
+assert.equal(capabilityBundleTaskInput.provider_runtime_invocation.operations.artifactHandoff.ability, 'wp-codebox/handoff-artifacts');
+assert.equal(capabilityBundleTaskInput.provider_runtime_invocation.operations.toolCallTranscriptRecord.ability, 'wp-codebox/record-tool-call-transcript');
 
 const customRuntimeProfileTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

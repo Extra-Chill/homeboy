@@ -97,6 +97,32 @@ assert.deepEqual(genericConfig.artifact_declarations, [{ schema: 'wp-codebox/art
 assert.deepEqual(genericConfig.transcript_slots, [{ name: 'main', required: true }]);
 assert.deepEqual(genericConfig.provider_runtime_invocation, { operations: ['workspaceCommand'] });
 
+const capabilityBundleConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  ability: 'example/run-task',
+  capabilityBundles: ['worktree_pr_iteration'],
+  runtimeInvocation: { operations: { workspaceCommand: { config: { timeout_ms: 30000 } } } },
+});
+
+assert.deepEqual(capabilityBundleConfig.capability_bundles, ['worktree_pr_iteration']);
+assert.deepEqual(capabilityBundleConfig.tool_presets, ['runner_workspace', 'publication']);
+assert.deepEqual(capabilityBundleConfig.workspace_tools, {
+  readonly: ['workspace_ls', 'workspace_read', 'workspace_git_status'],
+  readwrite: ['workspace_run', 'workspace_write', 'workspace_edit', 'workspace_apply_patch', 'workspace_delete', 'workspace_git_add'],
+});
+assert.deepEqual(capabilityBundleConfig.publication_tools, ['publication_prepare', 'publication_publish', 'publication_status']);
+assert.deepEqual(capabilityBundleConfig.provider_runtime_invocation, {
+  operations: {
+    workspaceCommand: { config: { timeout_ms: 30000 } },
+    workspaceCapture: true,
+    workspacePublish: true,
+    artifactHandoff: true,
+    toolCallTranscriptRecord: true,
+  },
+});
+assert.doesNotMatch(JSON.stringify(capabilityBundleConfig.provider_runtime_invocation), /wp-codebox\/runner-workspace-command/);
+
 assert.deepEqual(
   runtimeAgentCi.runtimeAgentCiTaskFromRequest(
     {},
