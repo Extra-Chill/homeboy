@@ -53,6 +53,7 @@ mod validation_dependencies;
 pub(crate) use validation_dependencies::validation_dependency_ids;
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 mod worker;
+mod workload;
 mod workspace;
 pub(crate) use workspace::copy_snapshot_to_directory;
 
