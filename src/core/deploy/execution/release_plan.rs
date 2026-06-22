@@ -75,9 +75,9 @@ pub(super) fn should_try_download_release_artifact(
 
 /// Try to download a release artifact from GitHub for the selected deploy tag.
 ///
-/// Returns `Ok(Some(path))` if successful and `Ok(None)` for normal download misses
-/// that should fall back to local build. Validation failures are returned as deploy
-/// errors so invalid artifacts never reach remote install.
+/// Returns `Ok(Some(path))` only when the planned release asset was downloaded.
+/// Once deploy has selected the release asset path, any download miss fails closed
+/// instead of silently rebuilding from the local checkout.
 pub(super) fn try_download_release_artifact(
     component: &Component,
     tag: &str,
@@ -99,22 +99,21 @@ pub(super) fn try_download_release_artifact(
         tag
     );
 
-    match release_download::download_release_artifact(&github, tag, &artifact_name) {
-        Ok(path) => Ok(Some(path)),
-        Err(e) => {
-            if e.code == crate::core::error::ErrorCode::ValidationInvalidArgument {
-                return Err(e.to_string());
-            }
+    release_download::download_release_artifact(&github, tag, &artifact_name)
+        .map(Some)
+        .map_err(|error| release_asset_download_error(component, tag, &artifact_name, error))
+}
 
-            log_status!(
-                "deploy",
-                "Release download failed for '{}': {} — falling back to local build",
-                component.id,
-                e
-            );
-            Ok(None)
-        }
-    }
+fn release_asset_download_error(
+    component: &Component,
+    tag: &str,
+    artifact_name: &str,
+    error: crate::core::error::Error,
+) -> String {
+    format!(
+        "artifact source release_asset failed for '{}' tag {} artifact '{}': {}. Refusing to fall back to local_build; use --tagged to request an explicit local tag build.",
+        component.id, tag, artifact_name, error
+    )
 }
 
 fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<String> {
@@ -123,4 +122,33 @@ fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<St
     }
 
     git::get_latest_tag(&component.local_path).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_asset_download_error;
+    use crate::core::component::Component;
+    use crate::core::error::Error;
+
+    #[test]
+    fn release_asset_download_error_fails_closed_without_local_build_fallback() {
+        let component = Component {
+            id: "example".to_string(),
+            ..Component::default()
+        };
+
+        let message = release_asset_download_error(
+            &component,
+            "v1.2.3",
+            "example.zip",
+            Error::internal_io(
+                "HTTP 404".to_string(),
+                Some("download release artifact".to_string()),
+            ),
+        );
+
+        assert!(message.contains("artifact source release_asset failed"));
+        assert!(message.contains("Refusing to fall back to local_build"));
+        assert!(message.contains("use --tagged"));
+    }
 }

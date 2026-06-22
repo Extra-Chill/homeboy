@@ -21,7 +21,8 @@ use super::planning::{
     plan_components, ExtensionSkippedComponent, GitProbeCache,
 };
 use super::types::{
-    ComponentDeployResult, ComponentStatus, DeployConfig, DeployOrchestrationResult, DeploySummary,
+    ComponentDeployResult, ComponentStatus, DeployArtifactSource, DeployConfig,
+    DeployOrchestrationResult, DeploySummary,
 };
 use super::version_overrides::fetch_remote_versions_for_project;
 
@@ -520,13 +521,15 @@ fn with_dry_run_artifact_plan(
             result.warnings.push(format!(
                 "artifact source: release asset for tag {tag}; build phase: skipped if asset is available; deploy phase: would upload downloaded asset"
             ));
-            result.with_artifact_path(Some(url))
+            result
+                .with_artifact_path(Some(url))
+                .with_artifact_source(DeployArtifactSource::ReleaseAsset)
         }
         ReleaseArtifactPlan::LocalBuild { reason } => {
             result.warnings.push(format!(
                 "artifact source: local rebuild; reason: {reason}; build phase: would run before deploy; deploy phase: would upload local build_artifact"
             ));
-            result
+            result.with_artifact_source(DeployArtifactSource::LocalBuild)
         }
     }
 }
