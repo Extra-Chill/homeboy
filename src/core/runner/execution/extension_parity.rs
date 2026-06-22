@@ -200,7 +200,7 @@ fn sync_runner_extension_revision(
         Some(extension_id.to_string()),
         Some(vec![
             format!("Local extension source_revision: {local_revision}"),
-            format!("Runner sync command failed: {homeboy_path} extension install <source> --id {extension_id} --ref {local_revision} --replace"),
+            format!("Runner sync command failed: {homeboy_path} extension refresh <source> --id {extension_id} --ref {local_revision}"),
             extension_parity_diagnostic_tail(&output.stderr, &output.stdout),
         ]),
     ))
@@ -230,7 +230,7 @@ fn local_source_runner_sync_error(
             ),
             "Controller-local extension sources are not runner-resolvable by source URL/ref during automatic parity sync.".to_string(),
             format!(
-                "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension install <source> --id {extension_id} --ref {local_revision} --replace"
+                "Install, relink, or explicitly sync the extension from a runner-resolvable source before dispatch: {homeboy_path} extension refresh <source> --id {extension_id} --ref {local_revision}"
             ),
             format!("Original parity error: {}", parity_error.message),
         ]),
@@ -272,7 +272,7 @@ fn runner_extension_sync_command(
     local_revision: &str,
 ) -> String {
     format!(
-        "cd {} && {} extension install {} --id {} --ref {} --replace",
+        "cd {} && {} extension refresh {} --id {} --ref {}",
         shell::quote_path(cwd),
         shell::quote_path(homeboy_path),
         shell::quote_arg(source_url),
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_extension_sync_command_installs_exact_local_revision() {
+    fn runner_extension_sync_command_refreshes_exact_local_revision() {
         let command = runner_extension_sync_command(
             "/tmp/project path",
             "/usr/local/bin/homeboy",
@@ -555,7 +555,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension install https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234 --replace"
+            "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension refresh https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234"
         );
     }
 
@@ -585,6 +585,7 @@ mod tests {
         assert!(tried.contains(tempdir.path().to_str().unwrap()));
         assert!(tried.contains("not runner-resolvable"));
         assert!(tried.contains("abc1234"));
+        assert!(tried.contains("extension refresh <source> --id rust --ref abc1234"));
     }
 
     #[test]
