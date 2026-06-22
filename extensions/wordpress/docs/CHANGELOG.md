@@ -2,6 +2,13 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.58] - 2026-06-22
+
+### Changed
+- Accept embedded runtime success results
+- Preserve Codebox workspace mount refs
+- Keep Codebox runtime substrate internal
+
 ## [3.12.57] - 2026-06-22
 
 ### Changed
