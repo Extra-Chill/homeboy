@@ -779,7 +779,6 @@
         "structural::src/core/component/inventory.rs::HighItemCount",
         "structural::src/core/component/mod.rs::GodFile",
         "structural::src/core/deploy/execution.rs::GodFile",
-        "structural::src/core/deploy/orchestration.rs::GodFile",
         "structural::src/core/deterministic_loop.rs::HighItemCount",
         "structural::src/core/extension/bench/run.rs::GodFile",
         "structural::src/core/extension/bench/run.rs::HighItemCount",
