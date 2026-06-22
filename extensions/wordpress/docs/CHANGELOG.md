@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.43] - 2026-06-22
+
+### Changed
+- Project fuzz manifests into Codebox cases
+
 ## [3.12.42] - 2026-06-22
 
 ### Changed
