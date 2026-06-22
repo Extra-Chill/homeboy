@@ -237,6 +237,8 @@ pub struct CommandSafetyEntry {
     pub output: CommandOutputMetadata,
     pub lab: CommandLabMetadata,
     pub docs: CommandDocsMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension: Option<ExtensionCommandManifest>,
     pub dangerous_flags: Vec<String>,
     pub subcommands: Vec<CommandSafetyEntry>,
 }
@@ -275,6 +277,46 @@ pub struct CommandLabMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandDocsMetadata {
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandManifest {
+    pub extension_id: String,
+    pub extension_name: String,
+    pub extension_version: String,
+    pub tool_name: String,
+    pub display_name: String,
+    pub args_contract: ExtensionCommandArgsContract,
+    pub health: ExtensionCommandHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandArgsContract {
+    pub project_id: ExtensionCommandArgContract,
+    pub args: ExtensionCommandArgContract,
+    pub trailing_var_arg: bool,
+    pub allow_hyphen_values: bool,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandArgContract {
+    pub name: String,
+    pub help: String,
+    pub required: bool,
+    pub multiple: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionCommandHealth {
+    pub status: String,
+    pub ready: bool,
+    pub compatible: bool,
+    pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl CommandSurfaceEntry {
@@ -359,6 +401,8 @@ pub struct DynamicCommandDescriptor {
     pub name: String,
     pub about: String,
     pub docs_path: Option<String>,
+    pub extension: Option<ExtensionCommandManifest>,
+    pub safety: Option<DynamicCommandSafety>,
 }
 
 impl DynamicCommandDescriptor {
@@ -367,6 +411,44 @@ impl DynamicCommandDescriptor {
             docs_path: Some(format!("docs/commands/{name}.md")),
             name,
             about,
+            extension: None,
+            safety: None,
+        }
+    }
+
+    pub fn installed_extension_command(
+        name: String,
+        about: String,
+        docs_path: Option<String>,
+        extension: ExtensionCommandManifest,
+    ) -> Self {
+        Self {
+            name,
+            about,
+            docs_path,
+            extension: Some(extension),
+            safety: Some(DynamicCommandSafety::extension_cli_passthrough()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCommandSafety {
+    pub mutates: bool,
+    pub operator: bool,
+    pub output_notes: &'static str,
+    pub lab_notes: &'static str,
+    pub dangerous_flags: Vec<&'static str>,
+}
+
+impl DynamicCommandSafety {
+    fn extension_cli_passthrough() -> Self {
+        Self {
+            mutates: true,
+            operator: true,
+            output_notes: "extension-provided CLI passthrough; forwarded arguments may mutate the target system",
+            lab_notes: "not declared as Lab-routable in the safety manifest",
+            dangerous_flags: vec!["passthrough args"],
         }
     }
 }
@@ -413,7 +495,16 @@ fn command_safety_entry(
 ) -> CommandSafetyEntry {
     let mut path = parent_path.to_vec();
     path.push(entry.name.clone());
-    let safety = command_safety_metadata(&path);
+    let mut safety = command_safety_metadata(&path);
+    let dynamic_command = dynamic_command_for_path(&path, dynamic_commands);
+
+    if let Some(dynamic_safety) = dynamic_command.and_then(|command| command.safety.as_ref()) {
+        safety.mutates = dynamic_safety.mutates;
+        safety.operator = dynamic_safety.operator;
+        safety.output_notes = dynamic_safety.output_notes;
+        safety.lab_notes = dynamic_safety.lab_notes;
+        safety.dangerous_flags = dynamic_safety.dangerous_flags.clone();
+    }
 
     CommandSafetyEntry {
         name: entry.name.clone(),
@@ -437,6 +528,7 @@ fn command_safety_entry(
         docs: CommandDocsMetadata {
             path: docs_path(&path, dynamic_commands),
         },
+        extension: dynamic_command.and_then(|command| command.extension.clone()),
         dangerous_flags: safety
             .dangerous_flags
             .into_iter()
@@ -676,15 +768,26 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 }
 
 fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> Option<String> {
+    if let Some(dynamic) = dynamic_command_for_path(path, dynamic_commands) {
+        return dynamic.docs_path.clone();
+    }
+
+    let command = path.first()?;
+
+    registered_command(command).and_then(|entry| entry.docs_path())
+}
+
+fn dynamic_command_for_path<'a>(
+    path: &[String],
+    dynamic_commands: &'a [DynamicCommandDescriptor],
+) -> Option<&'a DynamicCommandDescriptor> {
     let command = path.first()?;
 
     if path.len() == 1 {
-        if let Some(dynamic) = dynamic_commands.iter().find(|entry| entry.name == *command) {
-            return dynamic.docs_path.clone();
-        }
+        dynamic_commands.iter().find(|entry| entry.name == *command)
+    } else {
+        None
     }
-
-    registered_command(command).and_then(|entry| entry.docs_path())
 }
 
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {

@@ -1,7 +1,8 @@
 use clap::Args;
 use serde::Serialize;
 
-use crate::cli_surface::{current_command_safety_manifest, CommandSafetyManifest};
+use crate::cli_runtime::current_augmented_command_safety_manifest;
+use crate::cli_surface::CommandSafetyManifest;
 
 use super::{CmdResult, GlobalArgs};
 
@@ -19,7 +20,7 @@ pub fn run(_args: ManifestArgs, _global: &GlobalArgs) -> CmdResult<ManifestOutpu
     Ok((
         ManifestOutput {
             command: "manifest".to_string(),
-            manifest: current_command_safety_manifest(),
+            manifest: current_augmented_command_safety_manifest(),
         },
         0,
     ))

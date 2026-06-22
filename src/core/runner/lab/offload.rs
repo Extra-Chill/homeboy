@@ -3716,18 +3716,20 @@ mod tests {
             panic!("build --runner should fail before local execution");
         };
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("homeboy build is not Lab-portable yet"));
+        assert!(err
+            .message
+            .contains("homeboy build is not Lab-portable yet"));
         let tried = err.details["tried"].as_array().expect("tried hints");
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains(
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
                 "homeboy runner workspace sync homeboy-lab --path <local-worktree> --mode snapshot"
-            )
-        )));
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains(
+            ))));
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
                 "homeboy runner exec homeboy-lab --cwd <runner_path> -- homeboy build <component>"
-            )
-        )));
+            ))));
     }
 
     #[test]
@@ -3752,18 +3754,20 @@ mod tests {
             panic!("build --lab-only should fail before local execution");
         };
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("homeboy build is not Lab-portable yet"));
+        assert!(err
+            .message
+            .contains("homeboy build is not Lab-portable yet"));
         let tried = err.details["tried"].as_array().expect("tried hints");
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains(
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
                 "homeboy runner workspace sync <runner-id> --path <local-worktree> --mode snapshot"
-            )
-        )));
-        assert!(tried.iter().any(|hint| hint.as_str().is_some_and(
-            |hint| hint.contains(
+            ))));
+        assert!(tried
+            .iter()
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(
                 "homeboy runner exec <runner-id> --cwd <runner_path> -- homeboy build <component>"
-            )
-        )));
+            ))));
     }
 
     #[test]
