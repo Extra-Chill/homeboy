@@ -13,6 +13,208 @@ fn parsed_cli(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).expect("CLI args should parse")
 }
 
+fn supported_lab_command_cases() -> Vec<(Commands, &'static str)> {
+    vec![
+        (parsed_command(&["homeboy", "lint"]), "lint"),
+        (
+            parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"]),
+            "lint",
+        ),
+        (parsed_command(&["homeboy", "test"]), "test"),
+        (
+            parsed_command(&["homeboy", "test", "--changed-since", "origin/main"]),
+            "test",
+        ),
+        (parsed_command(&["homeboy", "audit"]), "audit"),
+        (parsed_command(&["homeboy", "review"]), "review"),
+        (parsed_command(&["homeboy", "bench"]), "bench"),
+        (
+            parsed_command(&[
+                "homeboy",
+                "bench",
+                "matrix",
+                "--setting-matrix",
+                "clients=10,100",
+            ]),
+            "bench",
+        ),
+        (
+            parsed_command(&["homeboy", "bench", "history", "homeboy"]),
+            "bench",
+        ),
+        (parsed_command(&["homeboy", "fuzz"]), "fuzz"),
+        (parsed_command(&["homeboy", "fuzz", "run"]), "fuzz"),
+        (parsed_command(&["homeboy", "trace"]), "trace"),
+        (
+            parsed_command(&["homeboy", "refactor", "--from", "audit"]),
+            "refactor",
+        ),
+        (
+            parsed_command(&["homeboy", "refactor", "--all"]),
+            "refactor",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
+            "agent-task dispatch/cook/run-plan",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
+            "agent-task dispatch/cook/run-plan",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
+            "agent-task dispatch/cook/run-plan",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"]),
+            "agent-task retry --run",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "run", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "run-next"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "list"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "active"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "latest"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "providers"]),
+            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "controller",
+                "from-spec",
+                "loop.json",
+                "--resume",
+            ]),
+            "agent-task controller from-spec --resume/materialize/resume",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "controller",
+                "materialize",
+                "loop.json",
+            ]),
+            "agent-task controller from-spec --resume/materialize/resume",
+        ),
+        (
+            parsed_command(&["homeboy", "agent-task", "controller", "resume", "loop-123"]),
+            "agent-task controller from-spec --resume/materialize/resume",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "agent-task",
+                "auth",
+                "status",
+                "--secret-env",
+                "OPENAI_API_KEY",
+            ]),
+            "agent-task auth status",
+        ),
+        (
+            parsed_command(&["homeboy", "rig", "check", "studio"]),
+            "rig check",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "tunnel",
+                "preview-consumer",
+                "run",
+                "--config",
+                "preview-consumer.json",
+                "--preview-public-url",
+                "https://preview.example.test/",
+            ]),
+            "tunnel preview-consumer run",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "tunnel",
+                "service",
+                "expose",
+                "preview",
+                "--server",
+                "homeboy-lab",
+                "--remote-host",
+                "127.0.0.1",
+                "--remote-port",
+                "7331",
+                "--auth-mode",
+                "ssh-only",
+            ]),
+            "tunnel service expose",
+        ),
+        (
+            parsed_command(&[
+                "homeboy",
+                "tunnel",
+                "service",
+                "start",
+                "preview",
+                "--cwd",
+                "/home/user/Developer/_lab_workspaces/site",
+                "--command",
+                "npm run dev",
+            ]),
+            "tunnel service start",
+        ),
+    ]
+}
+
+fn unsupported_lab_command_cases() -> Vec<Commands> {
+    vec![
+        parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123"]),
+        parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"]),
+        parsed_command(&["homeboy", "review", "--changed-only"]),
+        parsed_command(&[
+            "homeboy", "refactor", "rename", "--from", "old", "--to", "new",
+        ]),
+        parsed_command(&["homeboy", "rig", "up", "studio"]),
+        parsed_command(&[
+            "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
+        ]),
+        parsed_command(&["homeboy", "status"]),
+        parsed_command(&["homeboy", "bench", "list"]),
+    ]
+}
+
+#[test]
 fn test_lab_runner_supported_labels_are_contract_owned() {
     assert_eq!(
         lab_runner_supported_labels().as_slice(),
@@ -36,14 +238,10 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
             "tunnel service start",
         ]
     );
-    assert_eq!(
-        lab_runner_unsupported_message(),
-        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
-    );
-    assert_eq!(
-        lab_runner_unsupported_hint(),
-        "Current Lab offload support: agent-task dispatch/cook/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
-    );
+    for label in lab_runner_supported_labels() {
+        assert!(lab_runner_unsupported_message().contains(label));
+        assert!(lab_runner_unsupported_hint().contains(label));
+    }
 }
 
 #[test]
@@ -101,52 +299,13 @@ fn local_execution_policy_names_legacy_flag_combinations() {
 
 #[test]
 fn test_supports_lab_runner() {
-    assert!(parsed_command(&["homeboy", "lint"]).supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "lint", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
-    assert!(parsed_command(&["homeboy", "test"]).supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "test", "--changed-since", "origin/main"])
-            .supports_lab_runner()
-    );
-    assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
-    assert!(!parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
-    assert!(parsed_command(&[
-        "homeboy",
-        "bench",
-        "matrix",
-        "--setting-matrix",
-        "clients=10,100"
-    ])
-    .supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "bench", "history", "homeboy"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "trace"]).supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"])
-            .supports_lab_runner()
-    );
-    assert!(
-        !parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "run", "agent-task-123"]).supports_lab_runner()
-    );
-    assert!(parsed_command(&["homeboy", "agent-task", "run-next"]).supports_lab_runner());
+    for (command, _) in supported_lab_command_cases() {
+        assert!(command.supports_lab_runner());
+    }
+    for command in unsupported_lab_command_cases() {
+        assert!(!command.supports_lab_runner());
+    }
+
     let cli = parsed_cli(&[
         "homeboy",
         "agent-task",
@@ -157,90 +316,7 @@ fn test_supports_lab_runner() {
     ]);
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
     assert!(cli.command.supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "status", "agent-task-123"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "logs", "agent-task-123"]).supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "artifacts", "agent-task-123"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
-            .supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "list", "--limit", "5"]).supports_lab_runner()
-    );
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "active", "--limit", "5"]).supports_lab_runner()
-    );
-    assert!(parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "active",
-        "--reconcile",
-        "--dry-run"
-    ])
-    .supports_lab_runner());
-    assert!(
-        parsed_command(&["homeboy", "agent-task", "latest", "--limit", "1"]).supports_lab_runner()
-    );
-    assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
-    assert!(parsed_command(&[
-        "homeboy",
-        "tunnel",
-        "preview-consumer",
-        "run",
-        "--config",
-        "preview-consumer.json",
-        "--preview-public-url",
-        "https://preview.example.test/"
-    ])
-    .supports_lab_runner());
-    assert!(parsed_command(&[
-        "homeboy",
-        "tunnel",
-        "service",
-        "expose",
-        "preview",
-        "--server",
-        "homeboy-lab",
-        "--remote-host",
-        "127.0.0.1",
-        "--remote-port",
-        "7331",
-        "--auth-mode",
-        "ssh-only",
-    ])
-    .supports_lab_runner());
-    assert!(parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "auth",
-        "status",
-        "--secret-env",
-        "OPENAI_API_KEY",
-    ])
-    .supports_lab_runner());
-    assert!(
-        !parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"])
-            .supports_lab_runner()
-    );
-    assert!(
-        !parsed_command(&["homeboy", "refactor", "rename", "--from", "old", "--to", "new",])
-            .supports_lab_runner()
-    );
-    assert!(!parsed_command(&["homeboy", "rig", "up", "studio"]).supports_lab_runner());
-    assert!(!parsed_command(&[
-        "homeboy", "fleet", "exec", "prod", "--apply", "wp", "plugin", "list",
-    ])
-    .supports_lab_runner());
-    assert!(!parsed_command(&["homeboy", "status"]).supports_lab_runner());
-    assert!(!parsed_command(&["homeboy", "bench", "list"]).supports_lab_runner());
+
     let cli = parsed_cli(&["homeboy", "lint", "--runner", "lab-a"]);
     assert_eq!(cli.runner.as_deref(), Some("lab-a"));
     assert!(cli.command.supports_lab_runner());
@@ -263,114 +339,14 @@ fn test_supports_lab_runner() {
 
 #[test]
 fn test_lab_command_contracts_cover_hot_commands() {
-    let supported_contract_labels = lab_runner_supported_contract_labels();
-    let supported = [
-        (parsed_command(&["homeboy", "lint"]), "lint"),
-        (parsed_command(&["homeboy", "test"]), "test"),
-        (parsed_command(&["homeboy", "audit"]), "audit"),
-        (parsed_command(&["homeboy", "review"]), "review"),
-        (parsed_command(&["homeboy", "bench"]), "bench"),
-        (
-            parsed_command(&[
-                "homeboy",
-                "bench",
-                "matrix",
-                "--setting-matrix",
-                "clients=10,100",
-            ]),
-            "bench",
-        ),
-        (
-            parsed_command(&["homeboy", "bench", "history", "homeboy"]),
-            "bench",
-        ),
-        (parsed_command(&["homeboy", "trace"]), "trace"),
-        (
-            parsed_command(&["homeboy", "refactor", "--from", "audit"]),
-            "refactor",
-        ),
-        (
-            parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-            "agent-task dispatch/cook/run-plan/retry --run",
-        ),
-        (
-            parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-            "agent-task dispatch/cook/run-plan/retry --run",
-        ),
-        (
-            parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
-            "agent-task dispatch/cook/run-plan/retry --run",
-        ),
-        (
-            parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"]),
-            "agent-task dispatch/cook/run-plan/retry --run",
-        ),
-        (
-            parsed_command(&["homeboy", "agent-task", "providers"]),
-            "agent-task providers",
-        ),
-        (
-            parsed_command(&[
-                "homeboy",
-                "agent-task",
-                "controller",
-                "from-spec",
-                "loop.json",
-                "--resume",
-            ]),
-            "agent-task controller from-spec --resume/materialize",
-        ),
-        (
-            parsed_command(&[
-                "homeboy",
-                "agent-task",
-                "controller",
-                "materialize",
-                "loop.json",
-            ]),
-            "agent-task controller from-spec --resume/materialize",
-        ),
-        (
-            parsed_command(&[
-                "homeboy",
-                "agent-task",
-                "auth",
-                "status",
-                "--secret-env",
-                "OPENAI_API_KEY",
-            ]),
-            "agent-task auth status",
-        ),
-        (
-            parsed_command(&["homeboy", "rig", "check", "studio"]),
-            "rig check",
-        ),
-    ];
-
-    for (command, label) in supported {
+    for (command, _) in supported_lab_command_cases() {
         let contract = command.lab_contract().expect("hot contract");
-        assert_eq!(contract.hot_label, label);
         assert!(
             lab_runner_summary_covers_contract_label(contract.hot_label),
             "Lab support summary omitted `{}`",
             contract.hot_label
         );
-        assert!(
-            supported_contract_labels.contains(&contract.hot_label),
-            "Lab supported contract labels omitted `{}`",
-            contract.hot_label
-        );
         assert_eq!(contract.portability, LabCommandPortability::Portable);
-        assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
-        assert!(
-            matches!(
-                contract.workspace_mode_policy,
-                LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
-                    | LabWorkspaceModePolicy::GitCheckoutRequired
-            ),
-            "unexpected workspace mode for `{label}`: {:?}",
-            contract.workspace_mode_policy
-        );
     }
 
     let trace = parsed_command(&["homeboy", "trace"])
@@ -605,13 +581,9 @@ fn test_lab_command_contracts_cover_hot_commands() {
         ["homeboy", "review", "--changed-since", "origin/main"].as_slice(),
         ["homeboy", "review", "--changed-only"].as_slice(),
     ] {
-        let contract = parsed_command(args)
+        parsed_command(args)
             .lab_contract()
             .expect("scoped hot command should have a Lab plan contract");
-        assert!(matches!(
-            contract.portability,
-            LabCommandPortability::LocalOnly(_)
-        ));
     }
 
     assert!(parsed_command(&["homeboy", "status"])

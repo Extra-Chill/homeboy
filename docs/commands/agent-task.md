@@ -36,7 +36,6 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
-| `fanout plan\|submit\|submit-batch\|status\|artifacts\|run-plan` | Batch many provider-neutral tasks through fanout inputs. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
@@ -68,6 +67,8 @@ ordering and output bindings belong in the existing single-run `fanout submit` /
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
+| `fanout plan\|submit\|run-plan` | Normalize, inspect, or run a batch of independent cooks, each with its own worktree/branch/PR. |
+| `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
@@ -313,45 +314,56 @@ accepted as `--selector`) selects a specific provider id for that backend, and
 
 ## Fanout/Reconcile
 
-`agent-task fanout` is the public provider-neutral seam for batch cooking: many
-independent tasks, each with its own durable cook lifecycle and review handoff,
-without calling Homeboy Extensions internal scripts.
+`agent-task fanout` means batch cook: many independent one-shot cooks launched
+from one plan. Each cook declares its own target worktree and optional head
+branch, runs through the same cook-loop path as a single PR cook, and finalizes
+its own pull request when deterministic gates pass.
 
-It accepts these generic input shapes:
+The public input shape is `homeboy/agent-task-batch-cook-fanout-plan/v1`:
 
-- `homeboy/agent-task-plan/v1`: an existing durable task plan, stamped with fanout lineage metadata when needed.
-- `homeboy/agent-task-fanout-plan/v1`: Homeboy's explicit fanout plan wrapper.
-- A JSON array of task packets, or an object with `tasks`/`packets`.
-- A single task packet object with `task_id`/`key` and `instructions`/`prompt`/`title`.
+```json
+{
+  "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
+  "fanout_id": "audit-batch-2026-06-21",
+  "cooks": [
+    {
+      "cook_id": "finding-a",
+      "prompt": "Fix finding A",
+      "repo": "homeboy",
+      "to_worktree": "homeboy@fix-finding-a",
+      "head": "fix/finding-a",
+      "verify": ["homeboy test homeboy"]
+    }
+  ]
+}
+```
 
-Packet inputs can carry full `AgentTaskRequest` fields including `executor`,
-`workspace`, `policy`, `source_refs`, `inputs`, `expected_artifacts`, and
-`metadata`. When a packet omits `executor`, pass `--backend` and optionally
-`--selector`/`--model`, or configure a default agent-task backend.
+Generic task fanout is not a public operator contract. Existing
+`homeboy/agent-task-plan/v1`, `homeboy/agent-task-fanout-plan/v1`, packet arrays,
+and `tasks`/`packets` objects are rejected by `agent-task fanout`; internal
+schedulers may still use provider-neutral fanout machinery behind a clearer
+batch-cook surface.
+
+Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
+`workspace`, `task_url`, `backend`, `selector`, `model`, `secret_env`,
+`provider_config`, and `client_context`. Review fields include `to_worktree`,
+`provider_command`, `verify`, `private_verify`, `max_attempts`, `base`, `head`,
+`title`, `commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
+Each cook must declare at least one deterministic `verify` or `private_verify`
+gate so PR finalization is reviewer-ready.
 
 ```bash
 homeboy agent-task fanout submit \
-  --input @findings.json \
+  --input @batch-cooks.json \
   --fanout-id audit-batch-2026-06-21 \
   --backend codex \
   --selector openai-codex
 ```
 
-The submit response includes the durable run record plus stable follow-up
-commands:
-
-```bash
-homeboy agent-task status <run-id>
-homeboy agent-task logs <run-id>
-homeboy agent-task artifacts <run-id>
-homeboy agent-task review <run-id>
-homeboy agent-task retry <run-id> --run
-```
-
-Use `fanout plan` when a downstream repository needs a reviewable plan artifact
-before queueing it, and `fanout run-plan --record-run-id <run-id>` when an
-operator wants to execute immediately while preserving durable lineage and
-aggregate outcomes.
+`fanout submit` prints the exact per-cook commands for runner or operator
+execution. `fanout run-plan` executes each cook through the cook-loop service and
+returns a batch summary with each child cook result; successful child cooks open
+or update their own PRs.
 
 ## Headless Fleet-Cooking Review
 

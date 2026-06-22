@@ -34,9 +34,9 @@ pub struct AgentTaskFanoutArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskFanoutCommand {
-    /// Compile generic task/finding packets or an existing plan into an AgentTaskPlan.
+    /// Normalize a batch-cook fanout plan with independent cooks, worktrees, and PR targets.
     Plan(AgentTaskFanoutPlanArgs),
-    /// Persist a compiled fanout plan and return durable status/log/artifact commands.
+    /// Return the independent cook commands for a batch-cook fanout plan.
     Submit(AgentTaskFanoutSubmitArgs),
     /// Submit each independent fanout task as its own durable child run.
     SubmitBatch(AgentTaskFanoutSubmitBatchArgs),
@@ -44,29 +44,25 @@ pub enum AgentTaskFanoutCommand {
     Status(AgentTaskFanoutBatchStatusArgs),
     /// Collate artifacts from every child run in a durable fanout batch.
     Artifacts(AgentTaskFanoutBatchStatusArgs),
-    /// Run a fanout plan immediately through extension-declared executor providers.
+    /// Run each independent cook and let each cook open/update its own PR.
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct AgentTaskFanoutInputArgs {
-    /// Fanout spec JSON file, @file, inline JSON, or - for stdin.
+    /// Batch-cook fanout spec JSON file, @file, inline JSON, or - for stdin.
     #[arg(long = "input", value_name = "SPEC")]
     pub input: String,
 
-    /// Fanout id to use when the input is a packet list. Defaults to a generated id.
+    /// Batch fanout id. Overrides the spec fanout_id when supplied.
     #[arg(long = "fanout-id", value_name = "ID")]
     pub fanout_id: Option<String>,
 
-    /// Fanout plane for packet inputs.
-    #[arg(long = "plane", default_value = "isolated-tasks", value_enum)]
-    pub plane: AgentTaskFanoutPlaneArg,
-
-    /// Default executor backend for packet inputs without an executor object.
+    /// Default executor backend for cooks without a backend.
     #[arg(long = "backend", value_name = "BACKEND")]
     pub backend: Option<String>,
 
-    /// Default executor provider selector for packet inputs without one.
+    /// Default executor provider selector for cooks without one.
     #[arg(
         long = "selector",
         visible_alias = "provider-id",
@@ -74,7 +70,7 @@ pub struct AgentTaskFanoutInputArgs {
     )]
     pub selector: Option<String>,
 
-    /// Default model override for packet inputs without one.
+    /// Default model override for cooks without one.
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
 }
@@ -121,11 +117,6 @@ pub struct AgentTaskFanoutRunPlanArgs {
     pub record_run_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum AgentTaskFanoutPlaneArg {
-    IsolatedTasks,
-    Workflow,
-}
 pub use controller::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
@@ -176,7 +167,7 @@ pub enum AgentTaskCommand {
     Resume(StatusArgs),
     /// Lifecycle: submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
-    /// Lifecycle: compile, submit, or run generic provider-neutral fanout inputs.
+    /// Cook/review: run many independent cooks, each with its own worktree/branch/PR.
     Fanout(AgentTaskFanoutArgs),
     /// Review: build a durable aggregate envelope from run state, logs, artifacts, and promotion hints.
     Review(ReviewArgs),

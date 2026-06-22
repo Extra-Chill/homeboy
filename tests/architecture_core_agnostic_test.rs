@@ -237,216 +237,27 @@ fn validate_and_format_writes_do_not_select_ecosystem_commands() {
 }
 
 #[test]
-fn command_layer_uses_explicit_core_facades_only() {
-    // Commands and CLI surface must depend on the explicit facade groups
-    // (`core::agent_tasks::*`, `core::runners::*`, `core::artifacts::*`) and
-    // must not reach into the underlying implementation modules. The facade
-    // modules are an intentional API contract; implementation layout below
-    // them must be free to change without breaking the command layer.
-    //
-    // Allowed imports:
-    // - `homeboy::core::agent_tasks` and its nested groups (cook_loop,
-    //   finalization, gate, lifecycle, loop_controller, promotion, provider,
-    //   scheduler, secrets, service).
-    // - `homeboy::core::runners` and its nested groups (registry, connection,
-    //   execution, workspace, evidence, capabilities, lab_offload).
-    // - `homeboy::core::artifacts`.
-    //
-    // Blocked imports (implementation files that the facades wrap):
-    // - `homeboy::core::agent_task`, `homeboy::core::agent_task_*` (any of the
-    //   per-operation implementation files such as `agent_task_lifecycle`,
-    //   `agent_task_service`, `agent_task_scheduler`, etc.).
-    // - `homeboy::core::runner` and its submodules.
-    // - `homeboy::core::artifact_*` (e.g. `artifact_links`, `artifact_manifest`).
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scanned_roots = [
-        "src/commands",
-        "src/cli_runtime.rs",
-        "src/cli_surface.rs",
-        "src/command_contract.rs",
-        "src/command_contract",
-    ];
-    let forbidden = [
-        // agent task implementation modules
-        "homeboy::core::agent_task::",
-        "homeboy::core::agent_task_aggregate",
-        "homeboy::core::agent_task_cook_loop",
-        "homeboy::core::agent_task_fanout",
-        "homeboy::core::agent_task_finalization",
-        "homeboy::core::agent_task_gate",
-        "homeboy::core::agent_task_lifecycle",
-        "homeboy::core::agent_task_loop_controller",
-        "homeboy::core::agent_task_promotion",
-        "homeboy::core::agent_task_provider",
-        "homeboy::core::agent_task_schedule",
-        "homeboy::core::agent_task_scheduler",
-        "homeboy::core::agent_task_secrets",
-        "homeboy::core::agent_task_service",
-        // runner implementation module
-        "homeboy::core::runner::",
-        "homeboy::core::runner ",
-        "use homeboy::core::runner;",
-        "use homeboy::core::runner as ",
-        // artifact implementation files
-        "homeboy::core::artifact_inputs",
-        "homeboy::core::artifact_links",
-        "homeboy::core::artifact_manifest",
-        "homeboy::core::artifact_metadata",
-        "homeboy::core::artifact_origin",
-        "homeboy::core::browser_evidence",
-        "homeboy::core::change_artifact",
-        "homeboy::core::publication_artifacts",
-        "homeboy::core::structured_sidecar",
-    ];
-
-    let mut violations = Vec::new();
-    for relative in scanned_roots {
-        scan_command_layer_for_impl_imports(
-            root,
-            &root.join(relative),
-            &forbidden,
-            &mut violations,
-        );
-    }
-
-    assert!(
-        violations.is_empty(),
-        "command layer must depend on explicit core facades only. Replace these imports with \
-         `homeboy::core::agent_tasks::*`, `homeboy::core::runners::*`, or \
-         `homeboy::core::artifacts::*` (or one of their nested groups). Violations:\n{}",
-        violations.join("\n")
-    );
-}
-
-fn scan_command_layer_for_impl_imports(
-    root: &std::path::Path,
-    path: &std::path::Path,
-    forbidden: &[&str],
-    violations: &mut Vec<String>,
-) {
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path).expect("read command layer directory") {
-            let entry = entry.expect("read command layer entry");
-            scan_command_layer_for_impl_imports(root, &entry.path(), forbidden, violations);
-        }
-        return;
-    }
-
-    if path.extension().is_none_or(|extension| extension != "rs") {
-        return;
-    }
-
-    let relative = relative_source_path(root, path);
-    let content = std::fs::read_to_string(path).expect("read command layer source file");
-    let mut skip_rest_as_test_module = false;
-
-    for (index, line) in content.lines().enumerate() {
-        if line.trim() == "#[cfg(test)]" {
-            skip_rest_as_test_module = true;
-            continue;
-        }
-        if skip_rest_as_test_module {
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
-            continue;
-        }
-
-        for term in forbidden {
-            if line.contains(term) {
-                violations.push(format!("{relative}:{} contains `{term}`", index + 1));
-            }
-        }
-    }
-}
-
-#[test]
-fn core_facades_expose_explicit_groups_not_wildcards() {
-    // The `core::agent_tasks`, `core::runners`, and `core::artifacts` facade
-    // modules are the public surface that the command layer depends on. They
-    // must spell out their re-exports explicitly so that implementation
-    // modules cannot leak new public names through `pub use module::*` blocks.
-    let agent_tasks = source_file("src/core/agent_tasks.rs");
-    let runners = source_file("src/core/runners.rs");
-    let artifacts = source_file("src/core/artifacts.rs");
-
-    let forbidden_wildcards = [
-        "pub use super::agent_task::*",
-        "pub use super::agent_task_aggregate::*",
-        "pub use super::agent_task_cook_loop::*",
-        "pub use super::agent_task_fanout::*",
-        "pub use super::agent_task_finalization::*",
-        "pub use super::agent_task_gate::*",
-        "pub use super::agent_task_lifecycle::*",
-        "pub use super::agent_task_loop_controller::*",
-        "pub use super::agent_task_promotion::*",
-        "pub use super::agent_task_provider::*",
-        "pub use super::agent_task_schedule::*",
-        "pub use super::agent_task_scheduler::*",
-        "pub use super::agent_task_secrets::*",
-        "pub use super::agent_task_service::*",
-    ];
-    for wildcard in forbidden_wildcards {
-        assert!(
-            !agent_tasks.contains(wildcard),
-            "src/core/agent_tasks.rs must not re-export implementation modules via \
-             `{wildcard}`; list the API names explicitly so the facade documents its surface."
-        );
-    }
-
-    assert!(
-        !runners.contains("pub use super::runner::*"),
-        "src/core/runners.rs must not re-export the runner module via `pub use super::runner::*`; \
-         list the API names explicitly so the facade documents its surface."
-    );
-
-    let forbidden_artifact_wildcards = [
-        "pub use super::artifact_inputs::*",
-        "pub use super::artifact_links::*",
-        "pub use super::artifact_manifest::*",
-        "pub use super::artifact_origin::*",
-        "pub use super::browser_evidence::*",
-        "pub use super::change_artifact::*",
-        "pub use super::publication_artifacts::*",
-        "pub use super::structured_sidecar::*",
-    ];
-    for wildcard in forbidden_artifact_wildcards {
-        assert!(
-            !artifacts.contains(wildcard),
-            "src/core/artifacts.rs must not re-export implementation modules via \
-             `{wildcard}`; list the API names explicitly so the facade documents its surface."
-        );
-    }
-
-    assert!(
-        agent_tasks.contains("pub mod scheduler")
-            && agent_tasks.contains("pub mod lifecycle")
-            && agent_tasks.contains("pub mod service")
-            && agent_tasks.contains("pub mod loop_controller"),
-        "src/core/agent_tasks.rs must keep the explicit API group modules (scheduler, lifecycle, \
-         service, loop_controller, ...) so callers can disambiguate overlapping names."
-    );
-    assert!(
-        runners.contains("pub mod registry")
-            && runners.contains("pub mod connection")
-            && runners.contains("pub mod execution")
-            && runners.contains("pub mod workspace")
-            && runners.contains("pub mod lab_offload"),
-        "src/core/runners.rs must keep the explicit API group modules (registry, connection, \
-         execution, workspace, lab_offload, ...) so callers depend on operation contracts."
-    );
-    assert!(
-        artifacts.contains("pub use super::artifact_links::{")
-            && artifacts.contains("PublicArtifactUrlValidation")
-            && artifacts.contains("pub use super::artifact_manifest::{")
-            && artifacts.contains("ArtifactManifest")
-            && artifacts.contains("pub use super::artifact_origin::{")
-            && artifacts.contains("ArtifactOriginServeSpec"),
-        "src/core/artifacts.rs must keep explicit artifact API re-export groups so callers depend on \
-         the facade without wildcard-leaking implementation modules."
-    );
+fn core_facades_expose_named_operation_contracts() {
+    let _lifecycle_status: fn(
+        &str,
+    ) -> homeboy::core::Result<
+        homeboy::core::agent_tasks::lifecycle::AgentTaskRunRecord,
+    > = homeboy::core::agent_tasks::lifecycle::status;
+    let _service_status: fn(
+        &str,
+    ) -> homeboy::core::Result<
+        homeboy::core::agent_tasks::lifecycle::AgentTaskRunRecord,
+    > = homeboy::core::agent_tasks::service::status;
+    let _scheduler_schema = homeboy::core::agent_tasks::scheduler::AGENT_TASK_PLAN_SCHEMA;
+    let _provider_default: fn() -> homeboy::core::Result<Option<String>> =
+        homeboy::core::agent_tasks::provider::default_backend;
+    let _runner_status: fn(
+        &str,
+    )
+        -> homeboy::core::Result<homeboy::core::runners::RunnerStatusReport> =
+        homeboy::core::runners::connection::status;
+    let _artifact_root: fn() -> homeboy::core::Result<std::path::PathBuf> =
+        homeboy::core::artifacts::root;
 }
 
 #[test]

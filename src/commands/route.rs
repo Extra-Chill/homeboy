@@ -25,6 +25,10 @@ pub fn route_after_parse(
         return Ok(None);
     }
 
+    if is_command_local_runner_option(&cli.command) {
+        return Ok(None);
+    }
+
     if let (Some(runner_id), Commands::Rig(args)) = (cli.runner.as_deref(), &cli.command) {
         if args.is_runner_source_management_command() {
             let (stdout, stderr, exit_code) =
@@ -349,6 +353,15 @@ fn is_runs_list_runner_option(args: &[String]) -> bool {
         && args.iter().enumerate().any(|(index, arg)| {
             index > list_index && (arg == "--runner" || arg.starts_with("--runner="))
         })
+}
+
+fn is_command_local_runner_option(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Doctor(_),
+        })
+    )
 }
 
 fn write_offloaded_stdout(path: &str, stdout: &str) -> homeboy::core::Result<()> {
@@ -693,6 +706,28 @@ mod tests {
         let outcome = route_after_parse(&cli, &normalized, None).unwrap();
 
         assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn agent_task_doctor_runner_option_routes_locally() {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "doctor".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--repair".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+
+        let outcome = route_after_parse(&cli, &normalized, None)
+            .expect("agent-task doctor owns --runner and should not be Lab-routed");
+
+        assert_eq!(outcome, None);
+        assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
     }
 
     #[test]

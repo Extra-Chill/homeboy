@@ -60,7 +60,9 @@ pub use super::agent_task_aggregate::{
 pub use super::agent_task_contract::{
     agent_task_core_contract, AgentTaskCoreContract, AgentTaskCoreContractEnums,
     AgentTaskCoreContractSchemas, AgentTaskCoreProviderCapabilityContract,
-    AgentTaskCoreRedactionDefaults, AGENT_TASK_CORE_CONTRACT_SCHEMA,
+    AgentTaskCoreRedactionDefaults, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+    AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
+    AGENT_TASK_CORE_CONTRACT_SCHEMA,
 };
 
 pub use super::agent_task_batch::{
