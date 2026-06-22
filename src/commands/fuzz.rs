@@ -54,6 +54,8 @@ enum FuzzCommand {
     List(FuzzListArgs),
     /// Resolve the selected fuzz workload contract without executing it
     Run(FuzzRunArgs),
+    /// Reserved replay surface for persisted fuzz cases
+    Replay(FuzzReplayArgs),
 }
 
 #[derive(Args, Clone)]
@@ -110,11 +112,27 @@ pub struct FuzzRunArgs {
     args: Vec<String>,
 }
 
+#[derive(Args, Clone)]
+struct FuzzReplayArgs {
+    /// Persisted fuzz case path or case identifier to replay in a future runner.
+    #[arg(value_name = "CASE")]
+    case: Option<String>,
+
+    /// Stable Homeboy run id associated with the persisted fuzz evidence.
+    #[arg(long = "run-id", value_name = "ID")]
+    run_id: Option<String>,
+
+    /// Additional runner arguments reserved for future fuzz replay support.
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "variant", rename_all = "snake_case")]
 pub enum FuzzOutput {
     List(FuzzListOutput),
     Run(FuzzRunOutput),
+    Replay(FuzzReplayOutput),
 }
 
 #[derive(Serialize)]
@@ -144,6 +162,17 @@ pub struct FuzzRunOutput {
     pub results: Option<FuzzCampaign>,
     pub runner_contract: FuzzRunnerContract,
     pub evidence_followups: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzReplayOutput {
+    pub command: String,
+    pub status: String,
+    pub message: String,
+    pub case: Option<String>,
+    pub run_id: Option<String>,
+    pub passthrough_args: Vec<String>,
+    pub next_steps: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -181,10 +210,30 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
             let (output, exit) = run_run(run_args)?;
             Ok((FuzzOutput::Run(output), exit))
         }
+        Some(FuzzCommand::Replay(replay_args)) => {
+            Ok((FuzzOutput::Replay(run_replay(replay_args)), 0))
+        }
         None => {
             let (output, exit) = run_run(args.run)?;
             Ok((FuzzOutput::Run(output), exit))
         }
+    }
+}
+
+fn run_replay(args: FuzzReplayArgs) -> FuzzReplayOutput {
+    FuzzReplayOutput {
+        command: "fuzz.replay".to_string(),
+        status: "not_implemented".to_string(),
+        message: "Generic fuzz replay is reserved but not implemented yet; use the originating fuzz runner's replay command for now."
+            .to_string(),
+        case: args.case,
+        run_id: args.run_id,
+        passthrough_args: args.args,
+        next_steps: vec![
+            "Use `homeboy fuzz list <component>` to inspect configured fuzz workloads.".to_string(),
+            "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it."
+                .to_string(),
+        ],
     }
 }
 
