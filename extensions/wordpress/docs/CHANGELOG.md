@@ -2,6 +2,32 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.30] - 2026-06-22
+
+### Changed
+- Add WP Codebox fuzz suite contract canary
+- Remove docs-agent-specific runner fixtures
+- Delegate to WP Codebox normalizers
+- Extract workspace publication lifecycle
+- Centralize agent task outcome normalization
+- Prefer public Codebox fuzz workload APIs
+- Normalize WordPress fuzz budgets
+- Add DB fuzz planning primitives
+- Move WooCommerce defaults behind product adapters
+- Use semantic full-surface coverage matching
+- Centralize WordPress surface vocabulary
+- Route fuzz runner through Codebox adapter
+- Canonicalize WP Codebox fuzz suite vocabulary
+- Use focused WP Codebox entrypoints
+- Add generic block fuzz cases
+- Plan admin page fuzz interactions
+- Expand WordPress CRUD fuzz planning
+- Plan REST fuzz cases by method
+- Normalize WordPress fuzz surface types
+
+### Fixed
+- Fix Codebox typed artifact expectations
+
 ## [3.12.28] - 2026-06-22
 
 ### Changed
