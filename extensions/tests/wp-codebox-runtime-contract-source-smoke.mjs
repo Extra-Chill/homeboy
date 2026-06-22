@@ -9,9 +9,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
+	DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
 	loadCanonicalRuntimeContractSource,
 	loadRuntimeContractSource,
 	providerRuntimeInvocationContract,
+	runtimeContractFallbackDiagnostic,
 	runtimeContractManifest,
 	runtimeContractSchemas,
 	validateCanonicalRuntimeContractManifest,
@@ -46,6 +48,31 @@ assert.deepEqual(wpCodeboxProviderRuntimeInvocationContract(), {
 
 validateCanonicalRuntimeContractManifest(fallbackManifest);
 
+assert.equal(DEPRECATED_RUNTIME_CONTRACT_FALLBACK.status, 'deprecated');
+assert.match(DEPRECATED_RUNTIME_CONTRACT_FALLBACK.replacement, /@automattic\/wp-codebox-core/);
+assert.deepEqual(runtimeContractFallbackDiagnostic({ reason: 'test' }), {
+	...DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
+	source: 'homeboy-extensions-fallback',
+	schema: 'wp-codebox/runtime-contract-manifest/v1',
+	canonical_required_option: 'required',
+	details: { reason: 'test' },
+});
+
+const runtimeContractSource = fs.readFileSync(
+	path.join(rootDir, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-runtime-contract-source.js'),
+	'utf8'
+);
+const fallbackConstantNames = [...runtimeContractSource.matchAll(/const\s+(FALLBACK_[A-Z0-9_]+)/g)].map((match) => match[1]);
+assert.deepEqual(
+	fallbackConstantNames,
+	[
+		'FALLBACK_RUNTIME_CONTRACT_SCHEMAS',
+		'FALLBACK_PROVIDER_RUNTIME_INVOCATION_CONTRACT',
+		'FALLBACK_RUNTIME_CONTRACT_MANIFEST',
+	],
+	'Do not add new hardcoded WP Codebox fallback contract constants; consume the public Codebox runtime contract manifest instead.'
+);
+
 assert.throws(
 	() => validateCanonicalRuntimeContractManifest({
 		...fallbackManifest,
@@ -79,6 +106,11 @@ assert.equal(typeof canonical.normalizers.runtimeProfile, 'function');
 
 const loaded = await loadRuntimeContractSource({ wpCodeboxCoreModule: canonicalModule });
 assert.equal(loaded.canonical, true);
+
+const fallbackLoaded = await loadRuntimeContractSource({ wpCodeboxCoreModule: path.join(tempRoot, 'missing-runtime-core.mjs') });
+assert.equal(fallbackLoaded.canonical, false);
+assert.equal(fallbackLoaded.diagnostics[0].status, 'deprecated');
+assert.match(fallbackLoaded.diagnostics[0].replacement, /@automattic\/wp-codebox-core/);
 
 const mismatchedModule = path.join(tempRoot, 'mismatched-runtime-core.mjs');
 fs.writeFileSync(mismatchedModule, `
