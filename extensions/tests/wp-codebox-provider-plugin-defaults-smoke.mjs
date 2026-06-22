@@ -20,6 +20,7 @@ const {
 
 const providerDir = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-provider-'));
 const explicitProviderDir = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-explicit-provider-'));
+const chatHandlerDir = mkdtempSync(path.join(tmpdir(), 'homeboy-wp-codebox-chat-handler-'));
 
 try {
 	const taskRequest = {
@@ -58,6 +59,26 @@ try {
 	}, options);
 
 	assert.deepEqual(explicitTaskInput.provider_plugin_paths, [explicitProviderDir]);
+
+	const chatHandlerTaskInput = codeboxTaskRequestFromAgentTaskRequest(taskRequest, {
+		settings: {
+			provider_plugin_paths: [providerDir],
+			wp_codebox_agents_api_path: providerDir,
+			wp_codebox_chat_handler_plugin_paths: [chatHandlerDir],
+		},
+	});
+	const chatHandlerContract = chatHandlerTaskInput.runtime_requirements.component_contracts.find(
+		(contract) => contract.slug === path.basename(chatHandlerDir)
+	);
+	assert.equal(chatHandlerContract.path, chatHandlerDir);
+	assert.equal(chatHandlerContract.loadAs, 'plugin');
+	assert.equal(chatHandlerContract.activate, true);
+	assert.deepEqual(chatHandlerContract.metadata.registers, ['wp_agent_chat_handler']);
+	assert.deepEqual(chatHandlerTaskInput.runtime_requirements.ability_requirements, ['agents/chat']);
+	assert.equal(
+		chatHandlerTaskInput.component_contracts.some((contract) => contract.slug === path.basename(chatHandlerDir)),
+		true
+	);
 	assert.deepEqual(providerCredentialSecretEnvNames({ secret_env: ['OPENAI_API_KEY'] }, { recipe: { secret_env: ['GITHUB_TOKEN'] } }), [
 		'OPENAI_API_KEY',
 		'GITHUB_TOKEN',
@@ -70,4 +91,5 @@ try {
 } finally {
 	rmSync(providerDir, { recursive: true, force: true });
 	rmSync(explicitProviderDir, { recursive: true, force: true });
+	rmSync(chatHandlerDir, { recursive: true, force: true });
 }

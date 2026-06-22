@@ -1227,6 +1227,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
   const agentsApiPath = defaultAgentsApiPath(settings, options, agentRuntimePath);
+  const chatHandlerPluginContracts = defaultChatHandlerPluginContracts(settings, options, providerConfig);
 
   return {
     agentRuntime: agentRuntimePath,
@@ -1240,7 +1241,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
-    runtimeRequirements: defaultRuntimeRequirements(agentsApiPath),
+    runtimeRequirements: defaultRuntimeRequirements(agentsApiPath, chatHandlerPluginContracts),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -1284,21 +1285,87 @@ function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
   }] : [];
 }
 
-function defaultRuntimeRequirements(agentsApiPath = '') {
-  if (!agentsApiPath) {
-    return {};
-  }
-  return {
-    ability_requirements: ['agents/chat'],
-    component_contracts: [{
+function defaultRuntimeRequirements(agentsApiPath = '', chatHandlerPluginContracts = []) {
+  const componentContracts = [
+    ...(agentsApiPath ? [{
       slug: 'agents-api',
       path: agentsApiPath,
       pluginFile: 'agents-api/agents-api.php',
       loadAs: 'mu-plugin',
       activate: false,
       metadata: { source: 'homeboy-extensions-codebox-runtime-default' },
-    }],
+    }] : []),
+    ...normalizeArray(chatHandlerPluginContracts),
+  ];
+  if (componentContracts.length === 0) {
+    return {};
+  }
+  return {
+    ability_requirements: ['agents/chat'],
+    component_contracts: componentContracts,
   };
+}
+
+function defaultChatHandlerPluginContracts(settings = {}, options = {}, providerConfig = {}) {
+  return uniqueRuntimeRequirementObjects([
+    ...chatHandlerPluginEntries(options.chatHandlerPluginPaths || options.chat_handler_plugin_paths),
+    ...chatHandlerPluginEntries(settings.wp_codebox_chat_handler_plugin_paths || settings.chat_handler_plugin_paths),
+    ...chatHandlerPluginEntries(providerConfig.chat_handler_plugin_paths),
+    ...chatHandlerPluginEntries(envPathList(process.env.HOMEBOY_WP_CODEBOX_CHAT_HANDLER_PLUGIN_PATHS)),
+    ...chatHandlerPluginEntries(envPathList(process.env.WP_CODEBOX_CHAT_HANDLER_PLUGIN_PATHS)),
+  ]);
+}
+
+function chatHandlerPluginEntries(value) {
+  return normalizeArray(value).map((entry) => chatHandlerPluginContract(entry)).filter(Boolean);
+}
+
+function chatHandlerPluginContract(entry) {
+  const source = typeof entry === 'string'
+    ? entry
+    : entry?.path || entry?.source || entry?.target || '';
+  const slug = typeof entry === 'object' && entry
+    ? entry.slug || entry.id || slugFromRuntimePath(source)
+    : slugFromRuntimePath(source);
+  if (!source || !slug) {
+    return null;
+  }
+  const explicit = typeof entry === 'object' && entry ? entry : {};
+  return {
+    ...explicit,
+    slug,
+    path: explicit.path || explicit.source || source,
+    pluginFile: explicit.pluginFile || explicit.plugin_file || `${slug}/${slug}.php`,
+    loadAs: explicit.loadAs || explicit.load_as || 'plugin',
+    activate: explicit.activate === undefined ? true : explicit.activate,
+    metadata: {
+      ...(explicit.metadata || {}),
+      source: explicit.metadata?.source || 'homeboy-extensions-codebox-chat-handler-default',
+      registers: uniquePaths([
+        ...normalizeArray(explicit.metadata?.registers),
+        'wp_agent_chat_handler',
+      ]),
+    },
+  };
+}
+
+function slugFromRuntimePath(source = '') {
+  return source ? path.basename(String(source).replace(/\/+$/, '')) : '';
+}
+
+function envPathList(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to PATH-style lists for simple environment configuration.
+  }
+  return String(value).split(path.delimiter).map((entry) => entry.trim()).filter(Boolean);
 }
 
 function defaultAgentsApiPath(settings, options = {}, agentRuntimePath = '') {
