@@ -81,15 +81,6 @@ impl PhaseTimingReport {
         self.spans.is_empty()
     }
 
-    /// Total wall-clock recorded across phases that ran (`ok` + `failed`).
-    ///
-    /// Phases nest in many workflows, so this is an upper-bound sum rather than
-    /// a strict end-to-end duration; callers that need a true total should
-    /// record an explicit top-level phase.
-    pub fn total_ms(&self) -> f64 {
-        self.spans.iter().filter_map(|span| span.duration_ms).sum()
-    }
-
     /// Look up a recorded span by id.
     pub fn span(&self, id: &str) -> Option<&PhaseSpan> {
         self.spans.iter().find(|span| span.id == id)
@@ -331,14 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn report_total_and_lookup() {
+    fn report_span_lookup() {
         let mut timer = PhaseTimer::new();
         timer.record_ok("resolve", Duration::from_millis(2));
         timer.record_ok("execute", Duration::from_millis(3));
         timer.record_skipped("report");
         let report = timer.into_report();
 
-        assert!((report.total_ms() - 5.0).abs() < 1.0);
         assert!(report.span("resolve").is_some());
         assert!(report.span("missing").is_none());
         assert_eq!(report.span("report").unwrap().status, PhaseStatus::Skipped);

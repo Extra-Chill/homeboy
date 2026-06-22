@@ -547,6 +547,11 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dangerous_flags =
                 vec!["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
         }
+        ["worktree", "queue-create"] => {
+            metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "default output creates DMC worktrees one-at-a-time; pass --dry-run to plan without creating";
+        }
         _ => {}
     }
 

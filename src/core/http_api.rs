@@ -258,11 +258,14 @@ where
         }),
         HttpEndpoint::Jobs => {
             let active_runner_jobs = job_store.active_runner_jobs();
+            let stale_runner_jobs = job_store.stale_runner_jobs();
             json!({
                 "command": "api.jobs.list",
                 "jobs": job_store.list(),
                 "active_runner_job_count": active_runner_jobs.len(),
                 "active_runner_jobs": active_runner_jobs,
+                "stale_runner_job_count": stale_runner_jobs.len(),
+                "stale_runner_jobs": stale_runner_jobs,
             })
         }
         HttpEndpoint::Job { id } => json!({

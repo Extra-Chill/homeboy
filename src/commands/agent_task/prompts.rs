@@ -85,39 +85,51 @@ pub fn prompts(args: AgentTaskPromptsArgs) -> CmdResult<Value> {
 fn save(args: AgentTaskPromptSaveArgs) -> CmdResult<Value> {
     let content = agent_task_prompts::read_prompt_input(&args.input)?;
     let record = agent_task_prompts::save_prompt(&args.name, &content)?;
-    command_json_value(PromptSaveReport {
-        schema: "homeboy/agent-task-prompt/v1",
-        id: record.id.clone(),
-        path: record.path,
-        reference: format!("{}{}", agent_task_prompts::PROMPT_REF_PREFIX, record.id),
-        size_bytes: record.size_bytes,
-    })
+    Ok((
+        command_json_value(PromptSaveReport {
+            schema: "homeboy/agent-task-prompt/v1",
+            id: record.id.clone(),
+            path: record.path,
+            reference: format!("{}{}", agent_task_prompts::PROMPT_REF_PREFIX, record.id),
+            size_bytes: record.size_bytes,
+        })?,
+        0,
+    ))
 }
 
 fn list() -> CmdResult<Value> {
-    command_json_value(PromptListReport {
-        schema: "homeboy/agent-task-prompts/v1",
-        prompt_dir: agent_task_prompts::prompts_dir()?.display().to_string(),
-        prompts: agent_task_prompts::list_prompts()?,
-    })
+    Ok((
+        command_json_value(PromptListReport {
+            schema: "homeboy/agent-task-prompts/v1",
+            prompt_dir: agent_task_prompts::prompts_dir()?.display().to_string(),
+            prompts: agent_task_prompts::list_prompts()?,
+        })?,
+        0,
+    ))
 }
 
 fn show(args: AgentTaskPromptNameArgs) -> CmdResult<Value> {
     let record = agent_task_prompts::prompt_path(&args.name)?;
-    command_json_value(PromptShowReport {
-        schema: "homeboy/agent-task-prompt-content/v1",
-        id: agent_task_prompts::prompt_id(&args.name)?,
-        path: record.display().to_string(),
-        content: agent_task_prompts::read_prompt(&args.name)?,
-    })
+    Ok((
+        command_json_value(PromptShowReport {
+            schema: "homeboy/agent-task-prompt-content/v1",
+            id: agent_task_prompts::prompt_id(&args.name)?,
+            path: record.display().to_string(),
+            content: agent_task_prompts::read_prompt(&args.name)?,
+        })?,
+        0,
+    ))
 }
 
 fn remove(args: AgentTaskPromptNameArgs) -> CmdResult<Value> {
     let record = agent_task_prompts::remove_prompt(&args.name)?;
-    command_json_value(PromptRemoveReport {
-        schema: "homeboy/agent-task-prompt-remove/v1",
-        removed: true,
-        id: record.id,
-        path: record.path,
-    })
+    Ok((
+        command_json_value(PromptRemoveReport {
+            schema: "homeboy/agent-task-prompt-remove/v1",
+            removed: true,
+            id: record.id,
+            path: record.path,
+        })?,
+        0,
+    ))
 }
