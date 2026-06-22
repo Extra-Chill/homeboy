@@ -88,13 +88,16 @@ Extensions declare fuzz support with a product-agnostic capability block:
 ```json
 {
   "fuzz": {
-    "extension_script": "scripts/fuzz.sh",
     "workloads": [
       { "id": "parser", "label": "Parser fuzz" }
     ]
   }
 }
 ```
+
+The `fuzz` block is valid manifest support with only workload metadata. Add
+`"extension_script": "scripts/fuzz.sh"` when the extension is ready to execute
+workloads through `homeboy fuzz run`.
 
 Rigs can add private fuzz workloads keyed by extension id:
 
