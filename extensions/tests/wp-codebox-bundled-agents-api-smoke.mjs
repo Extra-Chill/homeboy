@@ -65,14 +65,11 @@ process.stdout.write(JSON.stringify({
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 
 	const captured = JSON.parse(readFileSync(capturePath, 'utf8'));
-	const agentsApiContract = captured.component_contracts.find((contract) => contract.slug === 'agents-api');
-	const agentsApiPlugin = captured.extra_plugins.find((plugin) => plugin.slug === 'agents-api');
+	const agentsApiContract = (captured.component_contracts || []).find((contract) => contract.slug === 'agents-api');
+	const agentsApiPlugin = (captured.extra_plugins || []).find((plugin) => plugin.slug === 'agents-api');
 
-	assert.ok(agentsApiContract, 'agents-api component contract is emitted from runtime component paths');
-	assert.ok(agentsApiPlugin, 'agents-api extra plugin is emitted for WP Codebox recipe mounting');
-	assert.equal(agentsApiPlugin.loadAs, 'mu-plugin');
-	assert.equal(agentsApiPlugin.activate, false);
-	assert.ok(agentsApiPlugin.source.endsWith(`${path.sep}prepared-plugins${path.sep}agents-api`), `agents-api source is prepared for recipe mounting: ${agentsApiPlugin.source}`);
+	assert.equal(agentsApiContract, undefined, 'agents-api component contract is not inferred from runtime component paths');
+	assert.equal(agentsApiPlugin, undefined, 'agents-api extra plugin is not inferred from runtime component paths');
 
 	const runtimeRequirementsCapturePath = path.join(fixtureRoot, 'captured-runtime-requirements-input.json');
 	const runtimeRequirementsRequest = {
@@ -82,6 +79,9 @@ process.stdout.write(JSON.stringify({
 		runtime_requirements: {
 			component_contracts: [
 				{ slug: 'agents-api', path: agentsApi, loadAs: 'mu-plugin', activate: false },
+			],
+			extra_plugins: [
+				{ slug: 'agents-api', source: agentsApi, loadAs: 'mu-plugin', activate: false },
 			],
 		},
 	};
@@ -99,12 +99,13 @@ process.stdout.write(JSON.stringify({
 		runtimeRequirementsCaptured.component_contracts.some((contract) => contract.slug === 'agents-api'),
 		'agents-api component contract is preserved from runtime_requirements when top-level contracts are empty'
 	);
-	assert.ok(
-		runtimeRequirementsCaptured.extra_plugins.some((plugin) => plugin.slug === 'agents-api'),
-		'agents-api extra plugin is emitted from runtime_requirements when top-level contracts are empty'
+	assert.equal(
+		(runtimeRequirementsCaptured.extra_plugins || []).some((plugin) => plugin.slug === 'agents-api'),
+		false,
+		'agents-api extra plugin is not inferred by the generic task runner'
 	);
 
-	console.log('wp-codebox bundled agents-api smoke passed');
+	console.log('wp-codebox agents-api boundary smoke passed');
 } finally {
 	rmSync(fixtureRoot, { recursive: true, force: true });
 }

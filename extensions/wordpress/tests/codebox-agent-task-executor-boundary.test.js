@@ -703,34 +703,29 @@ assert.deepEqual(
   repoLoopWorkspaceTaskInput.workspace_materialization
 );
 
-const legacyRuntimeAliasPrefix = ['data', 'machine'].join('_');
-const legacyRuntimeAliasTaskInput = codeboxTaskRequestFromAgentTaskRequest({
+const genericRuntimeAliasTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',
-  task_id: 'legacy-runtime-alias-task-1',
+  task_id: 'generic-runtime-alias-task-1',
   executor: {
     backend: 'codebox',
     config: {
       provider: 'openai',
-      [legacyRuntimeAliasPrefix]: '/tmp/legacy-runtime',
-      [`${legacyRuntimeAliasPrefix}_code_path`]: '/tmp/legacy-runtime-tools',
+      runtime_components: {
+        example_runtime: '/tmp/example-runtime',
+      },
+      component_path_aliases: {
+        agent_runtime: ['runtime_component:example_runtime'],
+      },
     },
   },
-  instructions: 'Accept legacy runtime component aliases with diagnostics.',
+  instructions: 'Accept explicit runtime component aliases.',
   inputs: {
     ability_request: { name: 'example/run-agent-bundle' },
   },
 });
 
-assert.equal(legacyRuntimeAliasTaskInput.runtime_component_paths.agent_runtime, '/tmp/legacy-runtime');
-assert.equal(legacyRuntimeAliasTaskInput.runtime_component_paths.agent_runtime_tools, '/tmp/legacy-runtime-tools');
-assert.deepEqual(
-  legacyRuntimeAliasTaskInput.compatibility_diagnostics.map((diagnostic) => diagnostic.class),
-  ['codebox.compat.deprecated_runtime_component_alias', 'codebox.compat.deprecated_runtime_component_alias']
-);
-assert.deepEqual(
-  legacyRuntimeAliasTaskInput.compatibility_diagnostics.map((diagnostic) => diagnostic.data.replacement),
-  ['agent_runtime', 'agent_runtime_tools']
-);
+assert.equal(genericRuntimeAliasTaskInput.runtime_component_paths.agent_runtime, '/tmp/example-runtime');
+assert.deepEqual(genericRuntimeAliasTaskInput.compatibility_diagnostics, undefined);
 
 const repoLoopTypedOutputsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
   schema: 'homeboy/agent-task-request/v1',

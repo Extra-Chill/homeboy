@@ -1136,9 +1136,7 @@ function runtimeComponentPathsFromContracts(contracts) {
   if (!Array.isArray(contracts)) {
     return {};
   }
-  const slugToKey = new Map([
-    ['agents-api', 'agents_api'],
-  ]);
+  const slugToKey = new Map();
   return Object.fromEntries(contracts
     .map((contract) => [slugToKey.get(contract?.slug), contract?.path || contract?.source])
     .filter(([key, value]) => key && value));
@@ -1203,14 +1201,8 @@ function runnerInput(request, artifacts) {
   }).filter(([, value]) => value !== '' && value !== undefined && !(Array.isArray(value) && value.length === 0)));
 }
 
-function runtimeComponentExtraPlugins(input) {
-  const components = input.runtime_component_paths || {};
-  return [
-    { key: 'agents_api', slug: 'agents-api' },
-  ].flatMap(({ key, slug }) => {
-    const source = components[key];
-    return source ? [{ source, slug, loadAs: 'mu-plugin', activate: false }] : [];
-  });
+function runtimeComponentExtraPlugins() {
+  return [];
 }
 
 function pluginSlugFromPath(pluginPath) {
@@ -1241,10 +1233,6 @@ function providerPluginEntries(input) {
 }
 
 function componentContracts(input) {
-  // Translate normalized runtime component paths into the WP Codebox 0.8.0
-  // `component_contracts` shape:
-  // `{ slug, path, loadAs, activate }`. WP Codebox mounts these as mu-plugins so
-  // the runtime stack can register its tools and agent/chat surfaces.
   const runtimeContracts = runtimeComponentExtraPlugins(input).map((plugin) => ({
     slug: plugin.slug,
     path: plugin.source,

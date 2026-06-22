@@ -1,5 +1,7 @@
 'use strict';
 
+// Data Machine-only WP Codebox compatibility aliases. Delete this quarantine once
+// Data Machine callers pass neutral agent_bundle and runtime_component_paths keys.
 const DATAMACHINE_AGENT_BUNDLE_KEYS = [
   'data_machine_bundle',
   'dataMachineBundle',

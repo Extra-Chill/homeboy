@@ -871,7 +871,7 @@ try {
   const labRuntimeInput = readJson(labRuntimeCapturePath).input;
   const preparedLabRuntime = path.join(labRuntimeArtifacts, 'prepared-plugins', 'example-runtime');
   assert.equal(labRuntimeInput.runtime_component_paths.agent_runtime, preparedLabRuntime);
-  assert.equal(labRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, '.ci/agents-api');
+  assert.equal(labRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
   assert.equal(labRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, path.join(labRuntimeArtifacts, 'prepared-plugins', 'agents-api'));
   assert.equal(fs.existsSync(path.join(preparedLabRuntime, 'example-runtime.php')), true);
 
@@ -931,8 +931,8 @@ try {
   const preparedAgentsApi = path.join(preparedRuntime, 'vendor', 'wordpress', 'agents-api');
   assert.equal(nestedRuntimeInput.runtime_component_paths.agent_runtime, preparedRuntime);
   assert.equal(nestedRuntimeInput.runtime_component_paths.agents_api, preparedAgentsApi);
-  assert.equal(nestedRuntimeInput.extra_plugins.find((plugin) => plugin.slug === 'agents-api').source, preparedAgentsApi);
-  assert.equal(nestedRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, preparedAgentsApi);
+  assert.equal(nestedRuntimeInput.extra_plugins.some((plugin) => plugin.slug === 'agents-api'), false);
+  assert.equal(nestedRuntimeInput.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
   assert.equal(fs.existsSync(path.join(preparedAgentsApi, 'agents-api.php')), true);
 
   const implicitAgentsApiRuntime = path.join(root, 'data-machine');
@@ -979,7 +979,7 @@ try {
   assert.equal(legacyRuntimeResult.status, 0, legacyRuntimeResult.stderr || legacyRuntimeResult.stdout);
   const legacyRuntimeInput = readJson(legacyRuntimeCapturePath).input;
   assert.equal(legacyRuntimeInput.runtime_component_paths.agents_api, '/explicit/agents-api');
-  assert.equal(legacyRuntimeInput.component_contracts.find((contract) => contract.slug === 'agents-api').path, '/explicit/agents-api');
+  assert.equal(legacyRuntimeInput.component_contracts.some((contract) => contract.slug === 'agents-api'), false);
 
   const sourceRoot = path.join(root, 'source-plugin');
   fs.mkdirSync(sourceRoot, { recursive: true });
