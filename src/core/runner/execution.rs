@@ -915,6 +915,14 @@ fn detached_handoff_output(
         }
     }))
     .unwrap_or_else(|_| "{}".to_string());
+    let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
+    let runner_result = runner_result(Some(&job), 0, &stdout, "", None);
+    let handoff = runner_handoff(
+        runner,
+        "daemon",
+        Some(runner_job.clone()),
+        Some(runner_result.clone()),
+    );
 
     (
         RunnerExecOutput {
@@ -937,6 +945,9 @@ fn detached_handoff_output(
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
+            runner_job: Some(runner_job),
+            runner_result: Some(runner_result),
+            handoff: Some(handoff),
             diagnostics: runner_exec_diagnostics(runner, Some(&source_snapshot), &require_paths),
         },
         0,
