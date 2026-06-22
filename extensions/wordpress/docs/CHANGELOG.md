@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.16] - 2026-06-22
+
+### Changed
+- Dispatch WordPress fuzz runs through WP Codebox
+
 ## [3.12.15] - 2026-06-22
 
 ### Changed
