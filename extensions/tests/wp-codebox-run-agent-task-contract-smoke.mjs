@@ -15,7 +15,9 @@ const {
 	WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA,
 	codeboxRunAgentTaskInvocation,
 	codeboxRunAgentTaskRequestFromTaskInput,
+	isProductionRuntimeProfile,
 	isCodeboxLegacyAgentTaskRunResult,
+	legacyAgentTaskRunCompatibilityEnabled,
 	legacyAgentTaskRunEvidenceRefs,
 	legacyAgentTaskRunSessionArtifacts,
 } = require(path.join(rootDir, 'agent-runtimes', 'wp-codebox'));
@@ -37,29 +39,45 @@ assert.deepEqual(request.compatibility, {
 	legacy_cli_command: WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
 });
 
-const legacyInvocation = codeboxRunAgentTaskInvocation({
+const stableInvocation = codeboxRunAgentTaskInvocation({
 	taskInput,
 	previewHold: '30',
 	previewPublicUrl: 'https://preview.example.test',
 });
-assert.equal(legacyInvocation.contract, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
-assert.equal(legacyInvocation.implementation, 'legacy-agent-task-run-compat');
-assert.equal(legacyInvocation.input, taskInput);
-assert.deepEqual(legacyInvocation.args, [
-	WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
+assert.equal(stableInvocation.contract, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
+assert.equal(stableInvocation.implementation, 'stable-run-agent-task');
+assert.equal(stableInvocation.input.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
+assert.deepEqual(stableInvocation.args, [
+	WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
 	'--input-file={{input_file}}',
 	'--json',
 	'--preview-hold-seconds=30',
 	'--preview-public-url=https://preview.example.test',
 ]);
-
-const stableInvocation = codeboxRunAgentTaskInvocation({ taskInput, useStableRunAgentTask: true });
-assert.equal(stableInvocation.implementation, 'stable-run-agent-task');
-assert.equal(stableInvocation.input.schema, WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA);
-assert.equal(stableInvocation.args[0], WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND);
 assert.equal(stableInvocation.result_schema, WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA);
 assert.equal(stableInvocation.result_schema, WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA);
 assert.equal(stableInvocation.result_key, 'agent_task_run_result');
+
+assert.equal(legacyAgentTaskRunCompatibilityEnabled({}), false);
+assert.equal(legacyAgentTaskRunCompatibilityEnabled({ allowLegacyAgentTaskRunCompatibility: true }), true);
+const legacyInvocation = codeboxRunAgentTaskInvocation({
+	taskInput,
+	allowLegacyAgentTaskRunCompatibility: true,
+});
+assert.equal(legacyInvocation.implementation, 'legacy-agent-task-run-compat');
+assert.equal(legacyInvocation.input, taskInput);
+assert.equal(legacyInvocation.args[0], WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND);
+assert.equal(legacyInvocation.result_schema, WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA);
+
+assert.equal(isProductionRuntimeProfile({ runtimeProfile: { id: 'production' } }), true);
+assert.throws(
+	() => codeboxRunAgentTaskInvocation({
+		taskInput,
+		allowLegacyAgentTaskRunCompatibility: true,
+		runtimeProfile: { id: 'production' },
+	}),
+	/Production WP Codebox profiles require stable run-agent-task/
+);
 
 assert.throws(
 	() => codeboxRunAgentTaskRequestFromTaskInput({ schema: 'wp-codebox/not-task-input/v1' }),

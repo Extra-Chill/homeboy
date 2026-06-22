@@ -309,13 +309,15 @@ function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
   const candidates = [
     result,
     result?.artifact_result,
+  ];
+  const legacyCandidates = allowLegacyCodeboxResultCompatibility(options) ? [
     result?.artifactResult,
     result?.metadata?.artifact_result,
     result?.metadata?.artifactResult,
-    ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
-    ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
-  ];
-  const legacyCandidates = allowLegacyCodeboxResultCompatibility(options) ? legacyArtifactResultEnvelopeCandidates(result) : [];
+    ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
+    ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
+    ...legacyArtifactResultEnvelopeCandidates(result),
+  ] : [];
   return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
 }
 
@@ -624,9 +626,21 @@ function artifactRoleFromCodeboxArtifact(artifact = {}, roleAliases = {}) {
   if (explicitRole) {
     return explicitRole;
   }
+  if (!allowArtifactRoleFallbackCompatibility(roleAliases)) {
+    return 'artifact';
+  }
   const fallbackLabel = labels.join(' ');
   const fallback = ARTIFACT_ROLE_FALLBACK_PATTERNS.find(([, pattern]) => pattern.test(fallbackLabel));
   return fallback?.[0] || 'artifact';
+}
+
+function allowArtifactRoleFallbackCompatibility(options = {}) {
+  return Boolean(
+    options.allowArtifactRoleFallbackCompatibility
+      || options.allow_artifact_role_fallback_compatibility
+      || options.allowLegacyCodeboxResultCompatibility
+      || options.allow_legacy_codebox_result_compatibility
+  );
 }
 
 function roleFromAliases(labels, roleAliases = {}) {
@@ -688,6 +702,7 @@ module.exports = {
   WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
   artifactResultEnvelopeFromCodeboxResult,
+  allowArtifactRoleFallbackCompatibility,
   artifactRoleFromCodeboxArtifact,
   artifactNameFromDeclaration,
   artifactPath,

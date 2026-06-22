@@ -41,7 +41,10 @@ function codeboxRunAgentTaskRequestFromTaskInput(taskInput, options = {}) {
 }
 
 function codeboxRunAgentTaskInvocation(options = {}) {
-  const useLegacyAgentTaskRunCompatibility = Boolean(options.useLegacyAgentTaskRunCompatibility || options.use_legacy_agent_task_run_compatibility);
+  const useLegacyAgentTaskRunCompatibility = legacyAgentTaskRunCompatibilityEnabled(options);
+  if (useLegacyAgentTaskRunCompatibility && isProductionRuntimeProfile(options)) {
+    throw new Error('Production WP Codebox profiles require stable run-agent-task; legacy agent-task-run compatibility is limited to explicit legacy fixture profiles.');
+  }
   const input = useLegacyAgentTaskRunCompatibility
     ? options.taskInput
     : codeboxRunAgentTaskRequestFromTaskInput(options.taskInput, options);
@@ -73,6 +76,31 @@ function codeboxRunAgentTaskInvocation(options = {}) {
   };
 }
 
+function legacyAgentTaskRunCompatibilityEnabled(options = {}) {
+  return Boolean(
+    options.useLegacyAgentTaskRunCompatibility
+      || options.use_legacy_agent_task_run_compatibility
+      || options.allowLegacyAgentTaskRunCompatibility
+      || options.allow_legacy_agent_task_run_compatibility
+  );
+}
+
+function isProductionRuntimeProfile(options = {}) {
+  const profile = firstObject(options.runtimeProfile, options.runtime_profile, options.profile) || {};
+  const profileId = String(profile.id || options.profileId || options.profile_id || '').toLowerCase();
+  const profileKind = String(profile.kind || profile.type || profile.profile || profile.environment || options.profileKind || options.profile_kind || '').toLowerCase();
+  return profile.production === true
+    || profile.is_production === true
+    || profile.isProduction === true
+    || profileId === 'production'
+    || profileId.endsWith('-production')
+    || profileKind === 'production';
+}
+
+function firstObject(...values) {
+  return values.find((value) => value && typeof value === 'object' && !Array.isArray(value));
+}
+
 function firstValue(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
@@ -90,6 +118,8 @@ module.exports = {
   WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA,
   codeboxRunAgentTaskInvocation,
   codeboxRunAgentTaskRequestFromTaskInput,
+  isProductionRuntimeProfile,
+  legacyAgentTaskRunCompatibilityEnabled,
   allowLegacyCodeboxResultCompatibility,
   isCodeboxLegacyAgentTaskRunResult,
   legacyAgentTaskRunEvidenceRefs,

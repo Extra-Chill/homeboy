@@ -9,6 +9,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const {
   artifactResultEnvelopeFromCodeboxResult,
   artifactRoleFromCodeboxArtifact,
+  allowArtifactRoleFallbackCompatibility,
   artifactNameFromDeclaration,
   artifactPath,
   caseArtifactIndexFromCodeboxResult,
@@ -24,7 +25,10 @@ assert.equal(artifactPath('/tmp/artifacts/', '/files/transcript.json'), '/tmp/ar
 assert.equal(artifactPath('', 'files/transcript.json'), '');
 assert.equal(artifactNameFromDeclaration({ id: 'transcript' }), 'transcript');
 assert.equal(artifactRoleFromCodeboxArtifact({ kind: 'codebox-patch' }, { artifact_roles: { patch: ['codebox-patch'] } }), 'patch');
-assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }), 'changed_files');
+assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }), 'artifact');
+assert.equal(artifactRoleFromCodeboxArtifact({ path: '/tmp/files/changed-files.json' }, { allowArtifactRoleFallbackCompatibility: true }), 'changed_files');
+assert.equal(allowArtifactRoleFallbackCompatibility({}), false);
+assert.equal(allowArtifactRoleFallbackCompatibility({ allowLegacyCodeboxResultCompatibility: true }), true);
 
 assert.deepEqual(typedArtifactFileRefs({ fileRefs: [{ path: 'artifact.json' }] }), [{ path: 'artifact.json' }]);
 
@@ -77,14 +81,28 @@ assert.equal(artifactResultEnvelope.success, true);
 assert.equal(artifactResultEnvelope.artifactRefs.length, 2);
 assert.equal(artifactResultEnvelope.artifactRefs[0].sha256, 'abc123');
 
-const projectedEnvelope = artifactResultEnvelopeFromCodeboxResult({
+const canonicalEnvelope = artifactResultEnvelopeFromCodeboxResult({
+  artifact_result: artifactResultEnvelope,
+});
+assert.equal(canonicalEnvelope.operation, 'import-artifact-bundle');
+assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(canonicalEnvelope)), ['review']);
+
+const projectedResult = {
   projections: [
     { kind: 'noop', schema: 'example/noop/v1' },
     { kind: 'artifact-result', schema: 'wp-codebox/artifact-result-envelope/v1', envelope: artifactResultEnvelope },
   ],
-});
+};
+assert.equal(artifactResultEnvelopeFromCodeboxResult(projectedResult), null);
+const projectedEnvelope = artifactResultEnvelopeFromCodeboxResult(projectedResult, { allowLegacyCodeboxResultCompatibility: true });
 assert.equal(projectedEnvelope.operation, 'import-artifact-bundle');
-assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedEnvelope)), ['review']);
+assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedResult)), []);
+assert.deepEqual(Object.keys(typedArtifactsFromCodeboxResult(projectedResult, { allowLegacyCodeboxResultCompatibility: true })), ['review']);
+assert.equal(artifactResultEnvelopeFromCodeboxResult({ artifactResult: artifactResultEnvelope }), null);
+assert.equal(
+  artifactResultEnvelopeFromCodeboxResult({ artifactResult: artifactResultEnvelope }, { allowLegacyCodeboxResultCompatibility: true }).operation,
+  'import-artifact-bundle'
+);
 assert.deepEqual(typedArtifactsFromCodeboxResult({
   artifact_result: artifactResultEnvelope,
   metadata: {
@@ -113,7 +131,7 @@ assert.equal(Object.hasOwn(typedArtifactsFromCodeboxResult({
     },
   },
 }), 'legacy'), false);
-assert.equal(typedArtifactsFromCodeboxResult({
+assert.deepEqual(typedArtifactsFromCodeboxResult({
   metadata: {
     agent_runtime: {
       result: {
@@ -125,7 +143,21 @@ assert.equal(typedArtifactsFromCodeboxResult({
       },
     },
   },
-}).legacy.payload.old, true);
+}), {});
+assert.equal(typedArtifactsFromCodeboxResult({
+  metadata: {
+    agent_runtime: {
+      result: {
+        schema: 'wp-codebox/artifact-result-envelope/v1',
+        outputs: {
+          typed_artifacts: {
+            legacy: { type: 'json', payload: { old: true } },
+          },
+        },
+      },
+    },
+  },
+}, { allowLegacyCodeboxResultCompatibility: true }).legacy.payload.old, true);
 
 assert.deepEqual(normalizeCaseArtifactIndex({
   case_refs: [{
