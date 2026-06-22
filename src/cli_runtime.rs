@@ -2,10 +2,7 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-use crate::cli_surface::{
-    command_safety_manifest_from_dynamic, command_surface_from, Cli, Commands,
-    DynamicCommandDescriptor,
-};
+use crate::cli_surface::{Cli, Commands, DynamicCommandDescriptor};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -192,17 +189,6 @@ impl CliRuntime {
 
         run_startup_update_checks(&cli.command);
 
-        if let Commands::List { json } = &cli.command {
-            if *json {
-                self.print_command_safety_manifest_json();
-            } else {
-                let mut cmd = self.build_augmented_command();
-                cmd.print_help().expect("Failed to print help");
-                println!();
-            }
-            return std::process::ExitCode::SUCCESS;
-        }
-
         // Show help for changelog when neither subcommand nor --self is provided.
         if let Commands::Changelog(ref args) = cli.command {
             if args.command.is_none() && !args.show_self {
@@ -238,19 +224,6 @@ impl CliRuntime {
             .get_or_init(collect_extension_cli_info)
     }
 
-    fn print_command_safety_manifest_json(&self) {
-        let discovery = self.extension_discovery();
-        let dynamic_commands = discovery
-            .info
-            .iter()
-            .map(|info| info.descriptor.clone())
-            .collect::<Vec<_>>();
-        let surface = command_surface_from(self.build_augmented_command());
-        let manifest = command_safety_manifest_from_dynamic(surface, &dynamic_commands);
-        let json =
-            serde_json::to_string_pretty(&manifest).expect("command safety manifest serializes");
-        println!("{json}");
-    }
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {

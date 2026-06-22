@@ -96,16 +96,16 @@ servers, fleets, rigs, stacks, and extensions.
 | **Attention** | `deps`, `triage`, `issues` | Find dependency drift, failing work, and tracked findings. |
 | **Remote ops** | `deploy`, `ssh`, `file`, `db`, `logs`, `server`, `project`, `component`, `fleet` | Operate configured projects, servers, and fleets. |
 | **Platforms** | `extension`, extension-provided verbs such as `wp` and `cargo` | Route platform-specific behavior through extensions. |
-| **Meta** | `config`, `docs`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade` | Manage Homeboy itself and its API surfaces. |
+| **Meta** | `config`, `docs`, `manifest`, `daemon`, `self`, `undo`, `auth`, `api`, `upgrade` | Manage Homeboy itself and its API surfaces. |
 
 For exhaustive command docs, see
 [docs/commands/commands-index.md](docs/commands/commands-index.md) or run
 `homeboy docs list`.
 
-Agents can inspect the recursive command safety manifest with `homeboy list --json`.
+Agents can inspect the recursive command safety manifest with `homeboy manifest`.
 The manifest includes command paths, mutation/operator classification, dry-run
 flags, dangerous flags, structured-output notes, Lab routing metadata, and docs
-paths while `homeboy list` continues to print the raw top-level help.
+paths in Homeboy's standard JSON envelope.
 
 ## Quick Start
 

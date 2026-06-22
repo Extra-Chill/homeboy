@@ -347,10 +347,11 @@ pub fn mirror_daemon_evidence(
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
     let local_job_run = mirror_job_run(&store, runner, cwd, command, job, events, result)?;
-    mirror_remote_observation_runs(&store, runner, job, result)?;
+    let remote_runs = mirror_remote_observation_runs(&store, runner, job, result)?;
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
+    let primary_run = primary_mirrored_run(&remote_runs).unwrap_or(local_job_run);
     Ok(Some(MirroredDaemonEvidence {
-        run: local_job_run,
+        run: primary_run,
         patch,
     }))
 }
@@ -655,6 +656,10 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
     store.import_artifact(artifact)
 }
 
+fn primary_mirrored_run(remote_runs: &[RunRecord]) -> Option<RunRecord> {
+    remote_runs.iter().find(|run| run.kind == "fuzz").cloned()
+}
+
 fn mirror_reverse_broker_artifacts(
     store: &ObservationStore,
     runner: &Runner,
@@ -760,11 +765,13 @@ fn remote_detail_to_run_record(
     runner: &Runner,
     job: Option<&Job>,
 ) -> Result<RunRecord> {
-    let id = required_str(detail, "id")?.to_string();
+    let remote_run_id = required_str(detail, "id")?;
+    let kind = required_str(detail, "kind")?;
+    let local_run_id = requested_fuzz_run_id(detail).unwrap_or(remote_run_id);
     let metadata = detail.get("metadata").cloned().unwrap_or_else(|| json!({}));
     Ok(RunRecord {
-        id,
-        kind: required_str(detail, "kind")?.to_string(),
+        id: local_run_id.to_string(),
+        kind: kind.to_string(),
         component_id: detail
             .get("component_id")
             .and_then(Value::as_str)
@@ -795,7 +802,16 @@ fn remote_detail_to_run_record(
             .get("rig_id")
             .and_then(Value::as_str)
             .map(str::to_string),
-        metadata_json: merge_lab_metadata(metadata, runner, job, detail.get("artifacts").cloned()),
+        metadata_json: merge_lab_metadata(
+            metadata,
+            runner,
+            job,
+            detail.get("artifacts").cloned(),
+            remote_run_id,
+            local_run_id,
+            kind,
+            detail.get("cwd").cloned(),
+        ),
     })
 }
 
@@ -807,6 +823,7 @@ fn remote_detail_artifacts(
     let Some(artifacts) = detail.get("artifacts").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
+    let remote_run_id = required_str(detail, "id")?;
     let mut imported = Vec::new();
     for artifact in artifacts {
         let id = required_str(artifact, "id")?.to_string();
@@ -818,7 +835,7 @@ fn remote_detail_artifacts(
         let mut mirrored_type = artifact_type.to_string();
         let path = if artifact_type == "file" {
             mirrored_type = "remote_file".to_string();
-            runner_artifact_token(&runner.id, run_id, &id)
+            runner_artifact_token(&runner.id, remote_run_id, &id)
         } else {
             artifact
                 .get("url")
@@ -853,10 +870,15 @@ fn remote_detail_artifacts(
                 .get("mime")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            metadata_json: artifact
-                .get("metadata_json")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
+            metadata_json: lab_artifact_metadata(
+                artifact
+                    .get("metadata_json")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                runner,
+                remote_run_id,
+                run_id,
+            ),
             created_at: artifact
                 .get("created_at")
                 .and_then(Value::as_str)
@@ -881,19 +903,78 @@ fn merge_lab_metadata(
     runner: &Runner,
     job: Option<&Job>,
     artifact_manifest: Option<Value>,
+    remote_run_id: &str,
+    local_run_id: &str,
+    kind: &str,
+    remote_workspace: Option<Value>,
 ) -> Value {
     let mut object = metadata.as_object().cloned().unwrap_or_default();
     let mut lab = json!({
         "runner": runner_metadata(runner),
         "source_snapshot": source_snapshot_from_result(&metadata),
         "remote_artifact_manifest": artifact_manifest,
+        "remote_run_id": remote_run_id,
+        "local_run_id": local_run_id,
+        "remote_workspace": remote_workspace,
     });
     if let Some(job) = job {
         lab["remote_job_id"] = Value::String(job.id.to_string());
         lab["remote_job_status"] = json!(job.status);
+        lab["artifact_refs"] = json!(job
+            .artifacts
+            .iter()
+            .map(RunnerArtifactRef::from)
+            .collect::<Vec<_>>());
+    }
+    if kind == "fuzz" {
+        lab["fuzz"] = json!({
+            "local_run_id": local_run_id,
+            "remote_run_id": remote_run_id,
+            "campaign_id": metadata.get("campaign_id").cloned().unwrap_or(Value::Null),
+        });
     }
     object.insert("lab".to_string(), lab);
     Value::Object(object)
+}
+
+fn lab_artifact_metadata(
+    metadata: Value,
+    runner: &Runner,
+    remote_run_id: &str,
+    local_run_id: &str,
+) -> Value {
+    let mut object = metadata.as_object().cloned().unwrap_or_default();
+    object.insert("runner_id".to_string(), json!(runner.id));
+    object.insert("remote_run_id".to_string(), json!(remote_run_id));
+    object.insert("local_run_id".to_string(), json!(local_run_id));
+    Value::Object(object)
+}
+
+fn requested_fuzz_run_id(detail: &Value) -> Option<&str> {
+    if detail.get("kind").and_then(Value::as_str) != Some("fuzz") {
+        return None;
+    }
+    detail
+        .get("command")
+        .and_then(Value::as_str)
+        .and_then(fuzz_run_id_from_command)
+}
+
+fn fuzz_run_id_from_command(command: &str) -> Option<&str> {
+    let mut previous_was_run_id = false;
+    for token in command.split_whitespace() {
+        if previous_was_run_id {
+            return (!token.is_empty()).then_some(token);
+        }
+        if token == "--run-id" {
+            previous_was_run_id = true;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("--run-id=") {
+            return (!value.is_empty()).then_some(value);
+        }
+    }
+    None
 }
 
 fn runner_metadata(runner: &Runner) -> Value {
@@ -1287,6 +1368,7 @@ mod tests {
     #[test]
     fn test_remote_file_artifacts_are_indexed_as_runner_tokens() {
         let detail = json!({
+            "id": "run-1",
             "artifacts": [{
                 "id": "artifact-1",
                 "kind": "trace",
@@ -1304,6 +1386,141 @@ mod tests {
         assert_eq!(artifacts[0].id, "artifact-1");
         assert_eq!(artifacts[0].artifact_type, "remote_file");
         assert_eq!(artifacts[0].path, "runner-artifact://lab/run-1/artifact-1");
+    }
+
+    #[test]
+    fn test_remote_fuzz_run_mirrors_under_requested_run_id_with_lab_links() {
+        let job_id = Uuid::new_v4();
+        let runner = ssh_runner();
+        let job = Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status: JobStatus::Succeeded,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: Some(1_700_000_001_000),
+            event_count: 0,
+            source_snapshot: None,
+            stale_reason: None,
+            target_runner_id: None,
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: vec![JobArtifactMetadata {
+                id: "job-artifact-1".to_string(),
+                name: Some("job-log.txt".to_string()),
+                path: Some("runner-artifact://lab/runner-job/job-artifact-1".to_string()),
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                metadata: None,
+            }],
+        };
+        let detail = json!({
+            "id": "remote-campaign-run",
+            "kind": "fuzz",
+            "component_id": "component-a",
+            "started_at": "2026-05-16T00:00:00Z",
+            "finished_at": "2026-05-16T00:00:01Z",
+            "status": "pass",
+            "command": "homeboy fuzz run component-a --workload parser --run-id requested-proof",
+            "cwd": "/srv/homeboy/component-a",
+            "metadata": {
+                "campaign_id": "campaign-123"
+            },
+            "artifacts": [{
+                "id": "fuzz-results",
+                "kind": "fuzz_results",
+                "type": "file",
+                "created_at": "2026-05-16T00:00:01Z"
+            }]
+        });
+
+        let run = remote_detail_to_run_record(&detail, &runner, Some(&job)).expect("run record");
+        let artifacts = remote_detail_artifacts(&detail, &runner, &run.id).expect("artifacts");
+
+        assert_eq!(run.id, "requested-proof");
+        assert_eq!(run.metadata_json["lab"]["local_run_id"], "requested-proof");
+        assert_eq!(
+            run.metadata_json["lab"]["remote_run_id"],
+            "remote-campaign-run"
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["remote_job_id"],
+            job_id.to_string()
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["remote_workspace"],
+            "/srv/homeboy/component-a"
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["fuzz"]["campaign_id"],
+            "campaign-123"
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["fuzz"]["local_run_id"],
+            "requested-proof"
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["artifact_refs"][0]["artifact_id"],
+            "job-artifact-1"
+        );
+        assert_eq!(artifacts[0].run_id, "requested-proof");
+        assert_eq!(
+            artifacts[0].metadata_json["local_run_id"],
+            "requested-proof"
+        );
+        assert_eq!(
+            artifacts[0].metadata_json["remote_run_id"],
+            "remote-campaign-run"
+        );
+        assert_eq!(
+            artifacts[0].path,
+            "runner-artifact://lab/remote-campaign-run/fuzz-results"
+        );
+    }
+
+    #[test]
+    fn test_fuzz_run_id_from_command_accepts_split_and_equals_forms() {
+        assert_eq!(
+            fuzz_run_id_from_command("homeboy fuzz run component --run-id proof-1"),
+            Some("proof-1")
+        );
+        assert_eq!(
+            fuzz_run_id_from_command("homeboy fuzz run component --run-id=proof-2"),
+            Some("proof-2")
+        );
+    }
+
+    #[test]
+    fn test_primary_mirrored_run_prefers_fuzz_run_identity() {
+        let runner_exec = RunRecord {
+            id: "runner-exec-lab-job".to_string(),
+            kind: "runner-exec".to_string(),
+            component_id: None,
+            started_at: "2026-05-16T00:00:00Z".to_string(),
+            finished_at: Some("2026-05-16T00:00:01Z".to_string()),
+            status: "pass".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({}),
+        };
+        let fuzz = RunRecord {
+            id: "requested-proof".to_string(),
+            kind: "fuzz".to_string(),
+            ..runner_exec.clone()
+        };
+
+        let primary = primary_mirrored_run(&[runner_exec, fuzz]).expect("primary fuzz run");
+
+        assert_eq!(primary.id, "requested-proof");
     }
 
     #[test]

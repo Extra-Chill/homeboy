@@ -51,7 +51,9 @@ explain why `--runner` is unavailable.
 
 See the full list of supported subcommands in the [Commands index](../commands/commands-index.md).
 
-## Hidden Compatibility Aliases
+Automation that needs command safety, docs, output, and Lab metadata should use
+the first-class recursive manifest surface:
 
-`homeboy list` remains accepted as a hidden, deprecated alias for top-level help.
-It is omitted from normal help and the commands index; prefer `homeboy --help`.
+```sh
+homeboy manifest
+```

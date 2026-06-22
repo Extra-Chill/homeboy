@@ -23,7 +23,7 @@ pub mod status;
 pub mod tool;
 
 pub use args::{
-    AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
+    ActiveArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
     AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
@@ -31,8 +31,8 @@ pub use args::{
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
     AgentTaskFanoutPlanArgs, AgentTaskFanoutPlaneArg, AgentTaskFanoutRunPlanArgs,
     AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, CancelArgs, CompileLoopArgs, ContractArgs,
-    ContractFormat, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, RetryArgs,
-    ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    ContractFormat, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs,
+    ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -51,28 +51,20 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::RunNext => run::run_next(),
         AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
-        AgentTaskCommand::List => status::list_runs(
+        AgentTaskCommand::List(list_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::All,
-            discovery_options_from_raw_args(),
+            list_args.into(),
         ),
-        AgentTaskCommand::Active => {
-            // `Active` is a unit clap variant whose flag surface lives in the
-            // fleet-owned args module; until a typed `--reconcile`/`--dry-run`/
-            // `--limit` flag can be added there, detect them from the raw
-            // process args so the safe stale-run reconcile path and the shared
-            // `--limit` pagination cap are reachable today (#5682, #5681).
-            let raw: Vec<String> = std::env::args().collect();
-            let reconcile = raw.iter().any(|arg| arg == "--reconcile");
-            let dry_run = raw.iter().any(|arg| arg == "--dry-run");
-            if reconcile {
-                status::reconcile_active(dry_run)
+        AgentTaskCommand::Active(active_args) => {
+            if active_args.reconcile {
+                status::reconcile_active(active_args.dry_run)
             } else {
-                status::list_active(discovery_options_from_raw_args())
+                status::list_active(active_args.into())
             }
         }
-        AgentTaskCommand::Latest => status::list_runs(
+        AgentTaskCommand::Latest(latest_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::Latest,
-            discovery_options_from_raw_args(),
+            latest_args.into(),
         ),
         AgentTaskCommand::Logs(status_args) => status::logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
@@ -103,33 +95,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
     }
 }
 
-use homeboy::core::agent_task_service as agent_task_service_direct;
 use homeboy::core::agent_tasks::service as agent_task_service;
-
-/// Parse shared discovery options (`--limit`) from the raw process args for the
-/// `list`/`active`/`latest` unit clap variants. Their typed flag surface lives
-/// in the fleet-owned args module; mirroring the existing #5682
-/// `--reconcile`/`--dry-run` raw-arg detection, this lets the `--limit`
-/// pagination cap ship without editing that module. Accepts both `--limit N`
-/// and `--limit=N`; a missing/invalid value leaves the limit unset so the full
-/// list is returned (#5681).
-fn discovery_options_from_raw_args() -> agent_task_service_direct::AgentTaskDiscoveryOptions {
-    let raw: Vec<String> = std::env::args().collect();
-    let mut limit = None;
-    let mut iter = raw.iter();
-    while let Some(arg) = iter.next() {
-        if let Some(value) = arg.strip_prefix("--limit=") {
-            if let Ok(parsed) = value.parse::<usize>() {
-                limit = Some(parsed);
-            }
-        } else if arg == "--limit" {
-            if let Some(parsed) = iter.next().and_then(|value| value.parse::<usize>().ok()) {
-                limit = Some(parsed);
-            }
-        }
-    }
-    agent_task_service_direct::AgentTaskDiscoveryOptions { limit }
-}
 
 pub(crate) fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
     serde_json::to_value(value)

@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn interactive_passthrough_has_no_raw_text_result() {
         let result = run(
-            Commands::List { json: false },
+            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
             &GlobalArgs {},
             CommandRawOutputMode::InteractivePassthrough,
         );
@@ -163,13 +163,13 @@ mod tests {
     #[test]
     fn unsupported_plain_text_command_returns_output_mode_error() {
         let result = run(
-            Commands::List { json: false },
+            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
             &GlobalArgs {},
             CommandRawOutputMode::PlainText,
         )
         .expect("plain text mode should return a result")
         .stdout_result
-        .expect_err("list does not support plain text output");
+        .expect_err("manifest does not support plain text output");
 
         assert!(result.to_string().contains("plain text output"));
     }

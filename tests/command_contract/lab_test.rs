@@ -18,27 +18,27 @@ fn runner_workload_contract_serializes_versioned_shape() {
     let contract = parsed_command(&["homeboy", "trace"])
         .lab_contract()
         .expect("trace should declare a Lab contract");
-    let workload = contract.runner_workload(
-        "workload-1",
-        "plan-1",
-        RunnerWorkloadAssignment {
+    let workload = contract.runner_workload(RunnerWorkloadInput {
+        workload_id: "workload-1".to_string(),
+        plan_id: "plan-1".to_string(),
+        assignment: RunnerWorkloadAssignment {
             runner_id: Some("lab-a".to_string()),
             runner_mode: Some("direct_ssh".to_string()),
             source: Some("explicit".to_string()),
         },
-        RunnerWorkloadState {
+        state: RunnerWorkloadState {
             status: "offloaded".to_string(),
             remote_workspace: Some("/srv/homeboy/work".to_string()),
             fallback_reason: None,
         },
-        RunnerWorkloadMutationPolicy {
+        mutation_policy: RunnerWorkloadMutationPolicy {
             capture_patch: false,
             mutation_flag: Some("--keep-overlay".to_string()),
             allow_dirty_lab_workspace: false,
         },
-        Some("workspace_mapping".to_string()),
-        Some("proof-1".to_string()),
-    );
+        workspace_mapping_ref: Some("workspace_mapping".to_string()),
+        proof_id: Some("proof-1".to_string()),
+    });
 
     let serialized = serde_json::to_value(workload).expect("workload should serialize");
     assert_eq!(serialized["schema"], RUNNER_WORKLOAD_SCHEMA);
@@ -219,6 +219,23 @@ fn test_supports_lab_runner() {
     assert!(
         parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
             .supports_lab_runner()
+    );
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "list", "--limit", "5"]).supports_lab_runner()
+    );
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "active", "--limit", "5"]).supports_lab_runner()
+    );
+    assert!(parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "active",
+        "--reconcile",
+        "--dry-run"
+    ])
+    .supports_lab_runner());
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "latest", "--limit", "1"]).supports_lab_runner()
     );
     assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
     assert!(parsed_command(&[
@@ -958,4 +975,19 @@ fn test_lab_offload_mutation_flag() {
         parsed_command(&["homeboy", "audit", "--ratchet"]).lab_offload_mutation_flag(),
         Some("--baseline/--ratchet")
     );
+}
+
+#[test]
+fn lab_mutation_patch_capture_is_descriptor_owned() {
+    let mutating_lint = parsed_command(&["homeboy", "lint", "--fix"]);
+    let mutating_descriptor = mutating_lint.descriptor(false);
+    assert!(mutating_lint.lab_offload_captures_mutation_patch());
+    assert!(mutating_descriptor.lab_offload_captures_mutation_patch);
+    assert_eq!(mutating_descriptor.lab_offload_mutation_flag, Some("--fix"));
+
+    let read_only_lint = parsed_command(&["homeboy", "lint"]);
+    let read_only_descriptor = read_only_lint.descriptor(false);
+    assert!(!read_only_lint.lab_offload_captures_mutation_patch());
+    assert!(!read_only_descriptor.lab_offload_captures_mutation_patch);
+    assert_eq!(read_only_descriptor.lab_offload_mutation_flag, None);
 }

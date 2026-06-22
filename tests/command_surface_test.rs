@@ -12,6 +12,7 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
+    assert!(surface.contains_path(&["manifest"]));
     assert!(surface.contains_path(&["report"]));
     assert!(surface.contains_path(&["git", "status"]));
     assert!(surface.contains_path(&["http", "get"]));
@@ -26,6 +27,7 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     assert!(!surface.contains_path(&["components"]));
     assert!(!surface.contains_path(&["stacks", "inspect"]));
     assert!(!surface.contains_path(&["audit", "code"]));
+    assert!(!surface.contains_path(&["list"]));
     assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
@@ -51,6 +53,88 @@ fn agent_task_prompt_store_commands_parse() {
         "prompt:issue-123",
     ])
     .expect("stored prompt refs should parse as prompt values");
+}
+
+#[test]
+fn agent_task_discovery_commands_use_typed_args() {
+    let list = Cli::try_parse_from(["homeboy", "agent-task", "list", "--limit", "5"])
+        .expect("agent-task list --limit should parse");
+    let active = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "active",
+        "--limit=7",
+        "--reconcile",
+        "--dry-run",
+    ])
+    .expect("agent-task active typed flags should parse");
+    let latest = Cli::try_parse_from(["homeboy", "agent-task", "latest", "--limit", "1"])
+        .expect("agent-task latest --limit should parse");
+
+    match list.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::List(args) => {
+                assert_eq!(args.limit, Some(5));
+            }
+            other => panic!("expected agent-task list, got {other:?}"),
+        },
+        _ => panic!("expected agent-task command"),
+    }
+
+    match active.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::Active(args) => {
+                assert_eq!(args.limit, Some(7));
+                assert!(args.reconcile);
+                assert!(args.dry_run);
+            }
+            other => panic!("expected agent-task active, got {other:?}"),
+        },
+        _ => panic!("expected agent-task command"),
+    }
+
+    match latest.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::Latest(args) => {
+                assert_eq!(args.limit, Some(1));
+            }
+            other => panic!("expected agent-task latest, got {other:?}"),
+        },
+        _ => panic!("expected agent-task command"),
+    }
+
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--dry-run"]).is_err());
+}
+
+#[test]
+fn agent_task_discovery_help_documents_typed_flags() {
+    let mut root = Cli::command();
+    let agent_task = root
+        .find_subcommand_mut("agent-task")
+        .expect("agent-task command");
+
+    let list_help = agent_task
+        .find_subcommand_mut("list")
+        .expect("agent-task list command")
+        .render_long_help()
+        .to_string();
+    assert!(list_help.contains("--limit <N>"));
+
+    let active_help = agent_task
+        .find_subcommand_mut("active")
+        .expect("agent-task active command")
+        .render_long_help()
+        .to_string();
+    assert!(active_help.contains("--limit <N>"));
+    assert!(active_help.contains("--reconcile"));
+    assert!(active_help.contains("--dry-run"));
+
+    let latest_help = agent_task
+        .find_subcommand_mut("latest")
+        .expect("agent-task latest command")
+        .render_long_help()
+        .to_string();
+    assert!(latest_help.contains("--limit <N>"));
 }
 
 #[test]
@@ -115,10 +199,11 @@ fn command_surface_depth_is_configurable() {
 }
 
 #[test]
-fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
-    let cli = Cli::try_parse_from(["homeboy", "list", "--json"])
-        .expect("hidden list --json should parse");
-    assert!(matches!(cli.command, Commands::List { json: true }));
+fn manifest_command_exposes_recursive_safety_manifest() {
+    let cli = Cli::try_parse_from(["homeboy", "manifest"])
+        .expect("manifest command should parse");
+    assert!(matches!(cli.command, Commands::Manifest(_)));
+    assert!(Cli::try_parse_from(["homeboy", "list", "--json"]).is_err());
 
     let value =
         serde_json::to_value(command_safety_manifest()).expect("safety manifest should serialize");
@@ -176,7 +261,7 @@ fn command_index_matches_top_level_command_surface() {
 #[test]
 fn command_safety_manifest_docs_paths_match_command_docs() {
     let manifest = command_safety_manifest();
-    let hidden_top_level_commands = BTreeSet::from(["lab", "list"]);
+    let hidden_top_level_commands = BTreeSet::from(["lab"]);
 
     for entry in &manifest.commands {
         if entry.hidden {
