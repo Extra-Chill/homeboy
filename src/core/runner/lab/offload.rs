@@ -327,6 +327,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         return Ok(skipped_automatic_run_local(plan, reason));
     };
 
+    let release_gate_local_hot_allowed =
+        crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed();
     let mut messages = Vec::new();
     if matches!(selection.source, LabRunnerSelectionSource::Default) {
         // Make the auto-offload visible up front (#3815): the operator did not
@@ -335,8 +337,15 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         // to keep it local. Without this the first sign of remote execution is
         // a confusing remote-specific failure (e.g. a local `@file` that does
         // not exist on the runner).
+        let local_hot_hint = if contract.routing_policy.release_gate
+            && !release_gate_local_hot_allowed
+        {
+            " Release-gate local-hot fallback is disabled by `/release_gate/local_hot: fail_closed`; repair the runner instead of bypassing Lab routing."
+        } else {
+            " Pass `--force-hot --allow-local-hot` to run it locally instead."
+        };
         let auto_offload_signal = format!(
-            "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine. Pass `--force-hot --allow-local-hot` to run it locally instead.",
+            "Lab offload: auto-selected default {} runner `{}`; this command will run REMOTELY on that runner, not on this machine.{local_hot_hint}",
             selection.mode.label(),
             selection.runner_id
         );
@@ -384,7 +393,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             // The operator-only override is `/release_gate/local_hot: allowed`.
             if contract.routing_policy.release_gate
                 && matches!(selection.source, LabRunnerSelectionSource::Default)
-                && !crate::core::defaults::resolve_release_gate_local_hot_policy().is_allowed()
+                && !release_gate_local_hot_allowed
             {
                 return Err(release_gate_local_hot_denied_error(
                     format!(
@@ -678,6 +687,14 @@ fn run_runner_resident_lab_offload(
     }
     stderr.push_str(&exec_output.stderr);
     if exit_code != 0 {
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &contract,
+            runner_id,
+            runner_workspace_root,
+            &exec_output.stdout,
+            &exec_output.stderr,
+        );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
     }
 
@@ -1515,6 +1532,14 @@ fn run_lab_offload_inner(
         stderr.push_str(&format!(
             "Lab offload FAILED REMOTELY: command exited {exit_code} on runner `{runner_id}` (remote workspace `{remote_cwd}`), NOT on this machine. If the error references a path or file, check that it exists on runner `{runner_id}`, not just locally.\n"
         ));
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &contract,
+            runner_id,
+            &remote_cwd,
+            &exec_output.stdout,
+            &exec_output.stderr,
+        );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = agent_task_run_id.as_deref() {
             if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
@@ -2212,6 +2237,30 @@ fn append_runner_failure_context_summary(
     ));
 }
 
+fn append_runner_component_registry_repair_hint(
+    stderr: &mut String,
+    contract: &LabOffloadCommand,
+    runner_id: &str,
+    remote_cwd: &str,
+    stdout: &str,
+    command_stderr: &str,
+) {
+    if !contract.routing_policy.release_gate
+        || !contains_component_not_found(stdout) && !contains_component_not_found(command_stderr)
+    {
+        return;
+    }
+
+    stderr.push_str(&format!(
+        "Lab runner registry repair: runner `{runner_id}` did not know the component metadata required by this release gate. Register the synced runner checkout, then retry the original gate: `homeboy runner exec {runner_id} -- homeboy component create --local-path {}`. Inspect runner-side registry state with `homeboy runner exec {runner_id} -- homeboy component list`.\n",
+        shell_arg(remote_cwd)
+    ));
+}
+
+fn contains_component_not_found(output: &str) -> bool {
+    output.contains("component.not_found") || output.contains("Component not found")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::lab_capabilities::lab_runner_capability_contract;
@@ -2260,6 +2309,48 @@ mod tests {
             requires_playwright: false,
             routing_policy: crate::command_contract::LabRoutingPolicy::default(),
         }
+    }
+
+    fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand {
+        let mut command = portable_lab_command(label);
+        command.routing_policy.release_gate = true;
+        command
+    }
+
+    #[test]
+    fn release_gate_component_not_found_adds_runner_registry_repair_hint() {
+        let mut stderr = String::new();
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &release_gate_lab_command("lint"),
+            "homeboy-lab",
+            "/home/lab/Developer/frontend-agent-chat",
+            "",
+            r#"{"success":false,"error":{"code":"component.not_found"}}"#,
+        );
+
+        assert!(stderr.contains("Lab runner registry repair"));
+        assert!(stderr.contains(
+            "homeboy runner exec homeboy-lab -- homeboy component create --local-path /home/lab/Developer/frontend-agent-chat"
+        ));
+        assert!(stderr.contains("homeboy runner exec homeboy-lab -- homeboy component list"));
+        assert!(!stderr.contains("--force-hot"));
+        assert!(!stderr.contains("--allow-local-hot"));
+    }
+
+    #[test]
+    fn non_release_gate_component_not_found_does_not_add_registry_repair_hint() {
+        let mut stderr = String::new();
+        append_runner_component_registry_repair_hint(
+            &mut stderr,
+            &portable_lab_command("bench"),
+            "homeboy-lab",
+            "/home/lab/Developer/frontend-agent-chat",
+            "component.not_found",
+            "",
+        );
+
+        assert!(stderr.is_empty());
     }
 
     #[test]
