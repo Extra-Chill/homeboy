@@ -10,6 +10,10 @@ const {
 	normalizeWordPressSurfaceDiscovery,
 } = require('./wordpress-fuzz-schemas');
 const {
+	WORDPRESS_CRUD_OPERATION_SCHEMA,
+	normalizeWordPressCrudOperation,
+} = require('./wordpress-generic-fuzz-primitives');
+const {
 	WORDPRESS_SURFACE_COLLECTION_KEYS,
 	wordpressSurfaceTypeFromCollectionKey,
 } = require('./wordpress-surface-types');
@@ -108,7 +112,7 @@ function surfaceTypeFromCollectionKey(key) {
 }
 
 function targetFromSurface(surface, options = {}) {
-	if (surface.type === 'rest-route') {
+	if (surface.type === 'rest-route' && !crudResourceForSurface(surface)) {
 		return restRouteTargetFromSurface(surface, options);
 	}
 	return genericTargetFromSurface(surface, options);
@@ -141,24 +145,14 @@ function restRouteTargetFromSurface(surface, options = {}) {
 }
 
 function genericTargetFromSurface(surface, options = {}) {
-	const operation = operationForSurface(surface);
-	const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
-	const caseId = `${surface.id}-generic-fuzz`;
+	const cases = casesForSurface(surface, options);
+	const operationId = cases[0]?.operation_id || surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
 	return {
 		id: surface.id,
 		surface_id: surface.id,
 		type: surface.type,
 		operation_id: operationId,
-		cases: [{
-			id: caseId,
-			intent: caseIntent(surface.type),
-			operation_id: operationId,
-			operation,
-			seed: options.seed,
-			skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
-			destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
-			metadata: { surface },
-		}],
+		cases,
 		metadata: {
 			label: surface.label,
 			type: surface.type,
@@ -198,6 +192,186 @@ function restMethodsForSurface(surface) {
 	return [...new Set((Array.isArray(rawMethods) ? rawMethods : String(rawMethods || '').split(','))
 		.map((method) => String(method).trim().toUpperCase())
 		.filter(Boolean))].sort();
+}
+
+function casesForSurface(surface, options = {}) {
+	const crudResource = crudResourceForSurface(surface);
+	if (!crudResource) {
+		return [genericCaseForSurface(surface, options)];
+	}
+
+	const actions = crudActionsForSurface(surface, crudResource);
+	return actions.map((action) => crudCaseForSurface(surface, crudResource, action, options));
+}
+
+function genericCaseForSurface(surface, options = {}) {
+	const operation = operationForSurface(surface);
+	const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
+	return {
+		id: `${surface.id}-generic-fuzz`,
+		intent: caseIntent(surface.type),
+		operation_id: operationId,
+		operation,
+		seed: options.seed,
+		skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
+		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
+		metadata: { surface },
+	};
+}
+
+function crudCaseForSurface(surface, resource, action, options = {}) {
+	const operation = crudOperationForSurface(surface, resource, action);
+	const gateReasons = mutatingCrudAction(action.action) && !allowsCrudMutation(surface, action.action) ? ['crud_mutation_requires_explicit_allow'] : [];
+	return {
+		id: `${surface.id}-${action.intent}-crud-fuzz`,
+		intent: action.intent,
+		operation_id: operation.id,
+		operation,
+		seed: options.seed,
+		skip_reasons: [
+			...reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
+			...gateReasons,
+		],
+		destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
+		metadata: { surface, crud: { resource_type: resource.type, intent: action.intent, action: action.action } },
+	};
+}
+
+function crudOperationForSurface(surface, resource, action) {
+	return normalizeWordPressCrudOperation({
+		schema: WORDPRESS_CRUD_OPERATION_SCHEMA,
+		id: `${surface.id}:${action.intent}`,
+		action: action.action,
+		resource_type: resource.type,
+		label: `${action.intent} ${resource.type}`,
+		capability_context: capabilityContextForCrudAction(surface, resource, action.action),
+		transport: transportForCrudAction(surface, resource, action),
+		input: inputForCrudAction(surface, resource, action.action),
+		expected: { intent: action.intent },
+		rollback_policy: rollbackPolicyForCrudAction(action.action),
+		metadata: {
+			...resource.metadata,
+			intent: action.intent,
+			surface_id: surface.id,
+			surface_type: surface.type,
+		},
+	});
+}
+
+function crudResourceForSurface(surface) {
+	const explicitType = surface.resource_type || surface.resourceType || surface.resource || surface.object_type || surface.objectType;
+	if (explicitType) {
+		return { type: String(explicitType), metadata: resourceMetadataForSurface(surface) };
+	}
+	if (surface.type === 'post-type') {
+		return { type: 'post', metadata: { post_type: surface.post_type || surface.postType || surface.name || surface.id } };
+	}
+	if (surface.type === 'taxonomy') {
+		return { type: 'term', metadata: { taxonomy: surface.taxonomy || surface.name || surface.id } };
+	}
+	if (surface.type === 'user') {
+		return { type: 'user', metadata: resourceMetadataForSurface(surface) };
+	}
+	if (surface.type === 'option') {
+		return { type: 'option', metadata: { option: surface.option || surface.name || surface.id } };
+	}
+	return null;
+}
+
+function resourceMetadataForSurface(surface) {
+	const metadata = {};
+	for (const key of ['post_type', 'postType', 'taxonomy', 'option', 'setting', 'name', 'route', 'method']) {
+		if (surface[key] !== undefined) {
+			metadata[key] = surface[key];
+		}
+	}
+	return metadata;
+}
+
+function crudActionsForSurface(surface, resource) {
+	const safeActions = resource.type === 'option'
+		? [{ action: 'read', intent: 'read-option' }]
+		: [
+			{ action: 'read', intent: `list-${resource.type}s` },
+			{ action: 'read', intent: `read-${resource.type}` },
+		];
+	const mutating = ['create', 'update', 'delete'].map((action) => ({ action, intent: `${action}-${resource.type}` }));
+	return [...safeActions, ...mutating];
+}
+
+function allowsCrudMutation(surface, action) {
+	if (surface.allow_mutations === true || surface.allowMutations === true || surface.allow_crud_mutations === true || surface.allowCrudMutations === true) {
+		return true;
+	}
+	return reasonList(surface.crud_actions || surface.crudActions || surface.actions || []).includes(action);
+}
+
+function mutatingCrudAction(action) {
+	return ['create', 'update', 'delete'].includes(action);
+}
+
+function capabilityContextForCrudAction(surface, resource, action) {
+	const explicit = surface.capability_context || surface.capabilityContext;
+	if (explicit) {
+		return explicit;
+	}
+	const capability = surface.capability || defaultCrudCapability(resource.type, action);
+	return capability ? { required: [capability] } : undefined;
+}
+
+function defaultCrudCapability(resourceType, action) {
+	if (resourceType === 'option' || resourceType === 'setting') {
+		return 'manage_options';
+	}
+	if (resourceType === 'user') {
+		return { create: 'create_users', read: 'list_users', update: 'edit_users', delete: 'delete_users' }[action];
+	}
+	if (resourceType === 'post') {
+		return { create: 'edit_posts', read: 'read', update: 'edit_posts', delete: 'delete_posts' }[action];
+	}
+	if (resourceType === 'term' && mutatingCrudAction(action)) {
+		return 'manage_categories';
+	}
+	return undefined;
+}
+
+function transportForCrudAction(surface, resource, action) {
+	if (surface.transport) {
+		return surface.transport;
+	}
+	return stripUndefined({
+		type: surface.route ? 'rest' : undefined,
+		method: action.action === 'read' ? (surface.method || 'GET') : undefined,
+		route: surface.route,
+		path: surface.path,
+	});
+}
+
+function inputForCrudAction(surface, resource, action) {
+	const input = {
+		...resource.metadata,
+		...(surface.input || {}),
+	};
+	if (action === 'create') {
+		Object.assign(input, surface.create_input || surface.createInput || {});
+	}
+	if (action === 'update') {
+		Object.assign(input, surface.update_input || surface.updateInput || {});
+	}
+	if (action === 'delete') {
+		Object.assign(input, surface.delete_input || surface.deleteInput || {});
+	}
+	return Object.keys(input).length > 0 ? input : undefined;
+}
+
+function rollbackPolicyForCrudAction(action) {
+	if (action === 'read') {
+		return { strategy: 'none', scope: 'operation', after_each_case: false };
+	}
+	if (action === 'create') {
+		return { strategy: 'delete-created', scope: 'operation', after_each_case: true };
+	}
+	return { strategy: 'restore-snapshot', scope: 'operation', after_each_case: true };
 }
 
 function operationForSurface(surface) {
