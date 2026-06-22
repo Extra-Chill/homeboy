@@ -335,7 +335,7 @@ pub(super) fn agent_task_provider_runtime_component_extra_workspaces(
                 "lab_runtime_components",
                 format!(
                     "agent-task provider requires Lab runtime component `{component_id}`, but Homeboy could not resolve it: {}",
-                    error.message()
+                    error
                 ),
                 Some(component_id.clone()),
                 Some(vec![

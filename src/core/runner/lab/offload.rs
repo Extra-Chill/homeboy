@@ -71,11 +71,9 @@ use super::super::{
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
     status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
-#[cfg(test)]
-use super::super::{RunnerActiveJobSource, RunnerActiveJobState};
 
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
