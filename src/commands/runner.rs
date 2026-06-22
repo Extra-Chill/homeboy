@@ -1697,6 +1697,7 @@ fn exec(
             }),
             required_extensions: Vec::new(),
             require_paths,
+            runner_workload: None,
             detach_after_handoff: false,
         },
     )

@@ -2072,6 +2072,7 @@ mod tests {
                 Some("/srv"),
             )),
             require_paths: Vec::new(),
+            runner_workload: None,
             metadata: Some(json!({ "submitted_by": "controller" })),
         }
     }

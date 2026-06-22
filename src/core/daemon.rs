@@ -7,6 +7,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::command_contract::RunnerWorkload;
 use crate::core::api_jobs::{JobStatus, JobStore};
 use crate::core::build_identity;
 use crate::core::error::{Error, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -95,6 +96,8 @@ struct ExecRequest {
     source_snapshot: Option<SourceSnapshot>,
     #[serde(default)]
     require_paths: Vec<String>,
+    #[serde(default)]
+    runner_workload: Option<RunnerWorkload>,
 }
 
 pub fn parse_bind_addr(addr: &str) -> Result<SocketAddr> {
@@ -378,6 +381,14 @@ fn enqueue_exec_job(
                 None,
             )
         })?;
+    crate::core::runner::workload::validate_runner_workload_dispatch(
+        request.runner_workload.as_ref(),
+        &request.runner_id,
+        request.cwd.as_deref(),
+        &request.command,
+        &request.secret_env_names,
+        request.capture_patch,
+    )?;
     let plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
         runner: request.runner,

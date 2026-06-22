@@ -338,8 +338,9 @@ fn run_once_output(
             raw_exec: false,
             source_snapshot: claim.request.source_snapshot.clone(),
             capability_preflight,
-            required_extensions: Vec::new(),
+            required_extensions: claim.request.required_extensions(),
             require_paths: claim.request.require_paths.clone(),
+            runner_workload: claim.request.runner_workload.clone(),
             detach_after_handoff: false,
         },
         || {
@@ -424,6 +425,7 @@ fn run_once_output(
     let job = finish(remote_runner_result_from_exec_output(
         exec_output,
         exit_code,
+        claim.request.runner_workload.clone(),
     ))?;
 
     Ok((
@@ -443,6 +445,7 @@ fn run_once_output(
 fn remote_runner_result_from_exec_output(
     exec_output: super::execution::RunnerExecOutput,
     exit_code: i32,
+    runner_workload: Option<crate::command_contract::RunnerWorkload>,
 ) -> RemoteRunnerJobResult {
     let patch = exec_output.patch.clone();
     let mutation_artifacts = exec_output.mutation_artifacts.clone();
@@ -459,6 +462,16 @@ fn remote_runner_result_from_exec_output(
     }
     if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
         data["mirror_run_id"] = json!(mirror_run_id);
+    }
+    if let Some(runner_workload) = runner_workload {
+        data["runner_workload"] =
+            serde_json::to_value(super::workload::runner_workload_with_result_refs(
+                runner_workload,
+                exec_output.job_id.as_deref(),
+                exec_output.mirror_run_id.as_deref(),
+                &exec_output.artifacts,
+            ))
+            .unwrap_or(serde_json::Value::Null);
     }
     RemoteRunnerJobResult {
         exit_code,
@@ -946,6 +959,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
@@ -1051,6 +1065,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
@@ -1090,6 +1105,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
@@ -1160,6 +1176,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
@@ -1220,6 +1237,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
@@ -1292,6 +1310,7 @@ mod tests {
                     capture_patch: false,
                     source_snapshot: None,
                     require_paths: Vec::new(),
+                    runner_workload: None,
                     metadata: None,
                 })
                 .expect("submit job");
