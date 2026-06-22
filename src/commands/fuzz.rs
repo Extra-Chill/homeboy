@@ -7,7 +7,7 @@ use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
-use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
+use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
     merge_fuzz_target_inventory, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
@@ -65,13 +65,13 @@ enum FuzzCommand {
     List(FuzzListArgs),
     /// Build a fuzz execution request without executing it
     Plan(FuzzPlanArgs),
-    /// Execute the selected fuzz workload and persist fuzz evidence
+    /// Execute the selected fuzz workload, persist fuzz evidence, and surface its campaign contract
     Run(FuzzRunArgs),
     /// Validate a fuzz result campaign file
     Validate(FuzzValidateArgs),
     /// Persist a result envelope from a fuzz campaign file
     Report(FuzzReportArgs),
-    /// Reserved replay surface for persisted fuzz cases
+    /// Resolve replay metadata for persisted fuzz cases
     Replay(FuzzReplayArgs),
 }
 
@@ -238,6 +238,7 @@ pub struct FuzzRunOutput {
     pub target_inventory: Option<FuzzTargetInventory>,
     pub execution: Option<FuzzExecutionOutput>,
     pub results: Option<FuzzCampaign>,
+    pub campaign_contract: FuzzCampaignContract,
     pub runner_contract: FuzzRunnerContract,
     pub evidence_followups: Vec<String>,
 }
@@ -323,6 +324,18 @@ pub struct FuzzRunnerContract {
     pub capability: String,
     pub extension_script_required: bool,
     pub env: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzCampaignContract {
+    pub case_artifact: Option<String>,
+    pub corpus_artifacts: Vec<String>,
+    pub seed: Option<String>,
+    pub replay_command: Option<String>,
+    pub minimize_command: Option<String>,
+    pub result_schema: String,
+    pub artifact_retention: Option<String>,
+    pub unsupported: Vec<&'static str>,
 }
 
 #[derive(Serialize, Clone)]
@@ -848,10 +861,15 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         ExtensionCapability::Fuzz,
         rig_context.as_ref(),
     )?;
+    let extension_id = ctx.extension_id.clone();
+    let fuzz_config = extension_id
+        .as_deref()
+        .and_then(|extension_id| extension::load_extension(extension_id).ok())
+        .and_then(|manifest| manifest.fuzz);
     let workloads = fuzz_workloads(
         &ctx.component,
         rig_context.as_ref(),
-        ctx.extension_id.as_deref(),
+        extension_id.as_deref(),
     );
     let selected_workload = select_workload(&workloads, args.workload_id.as_deref())?;
     let target_inventory = build_target_inventory(
@@ -898,6 +916,7 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         results.as_ref(),
     )?;
     let evidence_followups = fuzz_evidence_followups(args.run_id.as_deref());
+    let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
 
     Ok((
         FuzzRunOutput {
@@ -927,11 +946,64 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
                 stderr: runner_output.stderr,
             }),
             results,
+            campaign_contract,
             runner_contract: default_runner_contract(),
             evidence_followups,
         },
         exit_code,
     ))
+}
+
+fn fuzz_campaign_contract(
+    config: Option<&FuzzConfig>,
+    cli_seed: Option<&str>,
+) -> FuzzCampaignContract {
+    let unsupported = fuzz_contract_unsupported(config);
+    FuzzCampaignContract {
+        case_artifact: config.and_then(|config| config.case_artifact.clone()),
+        corpus_artifacts: config
+            .map(|config| config.corpus_artifacts.clone())
+            .unwrap_or_default(),
+        seed: cli_seed
+            .map(str::to_string)
+            .or_else(|| config.and_then(|config| config.seed.clone())),
+        replay_command: config.and_then(|config| config.replay_command.clone()),
+        minimize_command: config.and_then(|config| config.minimize_command.clone()),
+        result_schema: config
+            .and_then(|config| config.result_schema.clone())
+            .unwrap_or_else(|| homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string()),
+        artifact_retention: config.and_then(|config| config.artifact_retention.clone()),
+        unsupported,
+    }
+}
+
+fn fuzz_contract_unsupported(config: Option<&FuzzConfig>) -> Vec<&'static str> {
+    let Some(config) = config else {
+        return vec![
+            "case_artifact",
+            "corpus_artifacts",
+            "replay_command",
+            "minimize_command",
+            "artifact_retention",
+        ];
+    };
+    let mut unsupported = Vec::new();
+    if config.case_artifact.is_none() {
+        unsupported.push("case_artifact");
+    }
+    if config.corpus_artifacts.is_empty() {
+        unsupported.push("corpus_artifacts");
+    }
+    if config.replay_command.is_none() {
+        unsupported.push("replay_command");
+    }
+    if config.minimize_command.is_none() {
+        unsupported.push("minimize_command");
+    }
+    if config.artifact_retention.is_none() {
+        unsupported.push("artifact_retention");
+    }
+    unsupported
 }
 
 fn persist_fuzz_run_evidence(
@@ -1740,6 +1812,7 @@ mod tests {
             target_inventory: None,
             execution: None,
             results: None,
+            campaign_contract: fuzz_campaign_contract(None, None),
             runner_contract: FuzzRunnerContract {
                 capability: "fuzz".to_string(),
                 extension_script_required: true,
@@ -2266,6 +2339,7 @@ mod tests {
                 stderr: String::new(),
             }),
             results: Some(results),
+            campaign_contract: fuzz_campaign_contract(None, Some("seed-1")),
             runner_contract: FuzzRunnerContract {
                 capability: "fuzz".to_string(),
                 extension_script_required: true,
@@ -2288,6 +2362,43 @@ mod tests {
             run["runner_contract"]["env"][0],
             "HOMEBOY_FUZZ_RESULTS_FILE"
         );
+        assert_eq!(run["campaign_contract"]["seed"], "seed-1");
+        assert_eq!(
+            run["campaign_contract"]["result_schema"],
+            homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA
+        );
+        assert!(run["campaign_contract"]["unsupported"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "replay_command"));
+    }
+
+    #[test]
+    fn fuzz_campaign_contract_surfaces_extension_metadata() {
+        let config = FuzzConfig {
+            extension_script: Some("fuzz.sh".to_string()),
+            workloads: Vec::new(),
+            case_artifact: Some("failing-case".to_string()),
+            corpus_artifacts: vec!["corpus".to_string()],
+            seed: Some("manifest-seed".to_string()),
+            replay_command: Some("runner replay {case}".to_string()),
+            minimize_command: Some("runner minimize {case}".to_string()),
+            result_schema: Some("custom/fuzz-result/v1".to_string()),
+            artifact_retention: Some("persisted-run-artifacts".to_string()),
+        };
+
+        let contract =
+            serde_json::to_value(fuzz_campaign_contract(Some(&config), Some("cli-seed"))).unwrap();
+
+        assert_eq!(contract["case_artifact"], "failing-case");
+        assert_eq!(contract["corpus_artifacts"][0], "corpus");
+        assert_eq!(contract["seed"], "cli-seed");
+        assert_eq!(contract["replay_command"], "runner replay {case}");
+        assert_eq!(contract["minimize_command"], "runner minimize {case}");
+        assert_eq!(contract["result_schema"], "custom/fuzz-result/v1");
+        assert_eq!(contract["artifact_retention"], "persisted-run-artifacts");
+        assert!(contract["unsupported"].as_array().unwrap().is_empty());
     }
 
     #[test]

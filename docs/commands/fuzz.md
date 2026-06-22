@@ -221,6 +221,25 @@ The `fuzz` block is valid manifest support with only workload metadata. Add
 `"extension_script": "scripts/fuzz.sh"` when the extension is ready to execute
 workloads through `homeboy fuzz run`.
 
+Extensions can also publish generic campaign metadata. Homeboy surfaces these
+fields in `fuzz run` output without interpreting product-specific runner
+details:
+
+```json
+{
+  "fuzz": {
+    "extension_script": "scripts/fuzz.sh",
+    "case_artifact": "failing-case",
+    "corpus_artifacts": ["seed-corpus", "generated-corpus"],
+    "seed": "default-seed",
+    "replay_command": "runner replay {case_artifact}",
+    "minimize_command": "runner minimize {case_artifact}",
+    "result_schema": "homeboy/fuzz-campaign/v1",
+    "artifact_retention": "persisted-run-artifacts"
+  }
+}
+```
+
 Rigs can add private fuzz workloads keyed by extension id:
 
 ```json
@@ -244,3 +263,9 @@ JSON envelopes with stable `variant` values.
 `run.execution.results_file` is the path advertised to the runner through
 `HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote
 a valid campaign result file.
+
+`run.campaign_contract` always includes `case_artifact`, `corpus_artifacts`,
+`seed`, `replay_command`, `minimize_command`, `result_schema`,
+`artifact_retention`, and `unsupported`. Missing extension metadata is rendered
+as empty/null values and named in `unsupported`, so automation can distinguish an
+unsupported replay/minimize/corpus contract from a runner that provided one.
