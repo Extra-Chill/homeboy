@@ -1,47 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy::core::observation::{ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{ObservationStore, RunRecord};
 use homeboy::core::Error;
 use serde_json::Value;
 
 use crate::commands::escape_markdown_table_cell;
 
-use super::{require_run, run_detail, run_summary, CmdResult, RunDetail, RunSummary, RunsOutput};
+use super::{require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 
 mod types;
 pub use types::*;
 
-pub fn bench_history(
-    component_id: &str,
-    scenario_id: Option<&str>,
-    rig_id: Option<&str>,
-    limit: i64,
-) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    let runs = store
-        .list_runs(RunListFilter {
-            kind: Some("bench".to_string()),
-            component_id: Some(component_id.to_string()),
-            rig_id: rig_id.map(str::to_string),
-            limit: Some(limit.clamp(1, 1000)),
-            ..RunListFilter::default()
-        })?
-        .into_iter()
-        .filter(|run| scenario_id.is_none_or(|scenario| run_contains_scenario(run, scenario)))
-        .take(limit.max(1) as usize)
-        .map(|run| run_detail(&store, run))
-        .collect::<homeboy::core::Result<Vec<_>>>()?;
-
-    Ok((
-        RunsOutput::BenchHistory(BenchHistoryOutput {
-            command: "bench.history",
-            component_id: component_id.to_string(),
-            scenario_id: scenario_id.map(str::to_string),
-            rig_id: rig_id.map(str::to_string),
-            runs,
-        }),
-        0,
-    ))
+pub fn bench_compare_from_args(args: RunsBenchCompareArgs) -> CmdResult<RunsOutput> {
+    bench_compare(&args.from_run, &args.to_run, &args.metrics)
 }
 
 pub fn bench_compare(
@@ -118,7 +89,7 @@ pub fn bench_compare(
 
     Ok((
         RunsOutput::BenchCompare(BenchCompareOutput {
-            command: "bench.compare",
+            command: "runs.bench-compare",
             baseline,
             candidate,
             shared,
