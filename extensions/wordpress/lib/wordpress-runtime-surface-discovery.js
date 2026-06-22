@@ -4,6 +4,7 @@
  * Internal dependencies
  */
 const { isPlainObject } = require('./shared');
+const { normalizeWordPressFuzzSurfaceType } = require('./wordpress-fuzz-schemas');
 
 const WORDPRESS_RUNTIME_SURFACE_DISCOVERY_SCHEMA = 'homeboy/wordpress-surface-discovery/v1';
 const WORDPRESS_RUNTIME_SURFACE_COVERAGE_MANIFEST_SCHEMA = 'homeboy/wordpress-fuzz-coverage-manifest/v1';
@@ -40,6 +41,15 @@ const COVERAGE_ID_PREFIXES = Object.freeze({
 	frontend_url: 'frontend',
 	rest_route: 'rest',
 });
+
+const FUZZ_TO_RUNTIME_SURFACE_TYPES = new Map([
+	['admin-page', 'admin_page'],
+	['ajax-action', 'ajax_action'],
+	['block', 'block'],
+	['database-table', 'db_table'],
+	['frontend-url', 'frontend_url'],
+	['rest-route', 'rest_route'],
+]);
 
 function normalizeWordPressRuntimeSurfaceDiscovery(input = {}, options = {}) {
 	const surfaces = collectRuntimeSurfaceInputs(input, options)
@@ -200,7 +210,11 @@ function normalizeRuntimeSurface(surface, index) {
 
 function normalizeRuntimeSurfaceType(value) {
 	const key = String(value || '').trim().toLowerCase().replace(/\s+/g, '-');
-	return SURFACE_TYPE_ALIASES.get(key) || '';
+	const alias = SURFACE_TYPE_ALIASES.get(key);
+	if (alias) {
+		return alias;
+	}
+	return FUZZ_TO_RUNTIME_SURFACE_TYPES.get(normalizeWordPressFuzzSurfaceType(value)) || '';
 }
 
 function runtimeSurfaceValue(surface, type, index) {

@@ -37,6 +37,10 @@ const SURFACE_COLLECTION_KEYS = [
 	'admin',
 	'adminPages',
 	'admin_pages',
+	'ajax',
+	'actions',
+	'ajaxActions',
+	'ajax_actions',
 	'externalHttp',
 	'external_http',
 	'http',
@@ -161,6 +165,10 @@ function surfaceTypeFromCollectionKey(key) {
 		admin: 'admin-page',
 		adminPages: 'admin-page',
 		admin_pages: 'admin-page',
+		ajax: 'ajax-action',
+		actions: 'ajax-action',
+		ajaxActions: 'ajax-action',
+		ajax_actions: 'ajax-action',
 		externalHttp: 'external-http',
 		external_http: 'external-http',
 		http: 'external-http',
@@ -203,7 +211,7 @@ function targetFromSurface(surface, options = {}) {
 
 function operationForSurface(surface) {
 	const operation = { id: surface.operation_id || surface.operationId, surface_type: surface.type };
-	for (const key of ['id', 'name', 'hook', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
+	for (const key of ['id', 'name', 'hook', 'action', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
 		if (surface[key] !== undefined) {
 			operation[key] = surface[key];
 		}
@@ -214,6 +222,7 @@ function operationForSurface(surface) {
 function caseIntent(type) {
 	return {
 		'admin-page': 'request-admin-page',
+		'ajax-action': 'exercise-ajax-action',
 		block: 'render-block',
 		'cron-event': 'inspect-cron-event',
 		capability: 'check-capability-boundary',
