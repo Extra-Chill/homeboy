@@ -71,6 +71,47 @@ pub struct GithubPrView {
     pub ci_summary: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityReconcileOutput {
+    pub component_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub action: String,
+    pub number: u64,
+    pub classification: String,
+    pub recommended_action: String,
+    pub github: PrMergeabilityGithubEvidence,
+    pub git: PrMergeabilityGitEvidence,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityGithubEvidence {
+    pub state: String,
+    pub base: String,
+    pub head: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    pub ci_state: String,
+    pub ci_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrMergeabilityGitEvidence {
+    pub base_ref: String,
+    pub base_sha: String,
+    pub head_ref: String,
+    pub head_sha: String,
+    pub merge_tree_clean: bool,
+    pub merge_tree_exit_code: Option<i32>,
+    pub merge_tree_stdout: String,
+    pub merge_tree_stderr: String,
+    pub head_matches_github: Option<bool>,
+}
+
 /// Result of a find-many operation (list of matches).
 #[derive(Debug, Clone, Serialize)]
 pub struct GithubFindOutput {
@@ -178,6 +219,14 @@ pub struct PrFindOptions {
     pub head: Option<String>,
     pub state: PrState,
     pub limit: usize,
+    /// Optional workspace path. See [`IssueCreateOptions::path`].
+    pub path: Option<String>,
+}
+
+/// Parameters for reconciling GitHub PR mergeability with local git evidence.
+#[derive(Debug, Clone, Default)]
+pub struct PrMergeabilityReconcileOptions {
+    pub number: u64,
     /// Optional workspace path. See [`IssueCreateOptions::path`].
     pub path: Option<String>,
 }

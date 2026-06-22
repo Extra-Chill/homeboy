@@ -31,9 +31,10 @@ pub use super::github_types::{
     GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
     IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
-    PrState,
+    PrMergeabilityGitEvidence, PrMergeabilityGithubEvidence, PrMergeabilityReconcileOptions,
+    PrMergeabilityReconcileOutput, PrState,
 };
-use super::resolve_target;
+use super::{resolve_target, run_git, run_git_output};
 
 // ---------------------------------------------------------------------------
 // Public API — issue
@@ -565,6 +566,104 @@ pub fn pr_view(
         ci_state,
         ci_summary,
     })
+}
+
+/// Compare GitHub's PR mergeability state with local `git merge-tree` evidence.
+pub fn pr_reconcile_mergeability(
+    component_id: Option<&str>,
+    options: PrMergeabilityReconcileOptions,
+) -> Result<PrMergeabilityReconcileOutput> {
+    let view = pr_view(component_id, options.number, options.path.clone())?;
+    let (_id, repo_path) = resolve_target(component_id, options.path.as_deref())?;
+    let repo_path = Path::new(&repo_path);
+
+    let base_ref = format!("origin/{}", view.base);
+    let head_ref = format!("pull/{}/head", view.number);
+    let base_sha = fetch_ref_sha(repo_path, &view.base)?;
+    let head_sha = fetch_ref_sha(repo_path, &head_ref)?;
+    let merge_tree = run_git_output(
+        repo_path,
+        &["merge-tree", "--write-tree", &base_sha, &head_sha],
+        "git merge-tree",
+    )?;
+    let merge_tree_stdout = String::from_utf8_lossy(&merge_tree.stdout)
+        .trim()
+        .to_string();
+    let merge_tree_stderr = String::from_utf8_lossy(&merge_tree.stderr)
+        .trim()
+        .to_string();
+    let merge_tree_clean = merge_tree.status.success();
+    let head_matches_github = view
+        .head_sha
+        .as_ref()
+        .map(|github_sha| github_sha.eq_ignore_ascii_case(&head_sha));
+    let github_merge_state = view.merge_state.as_deref().unwrap_or_default();
+    let (classification, recommended_action) =
+        classify_mergeability_reconcile(merge_tree_clean, github_merge_state, head_matches_github);
+
+    Ok(PrMergeabilityReconcileOutput {
+        component_id: view.component_id,
+        owner: view.owner,
+        repo: view.repo,
+        action: "pr.reconcile_mergeability".to_string(),
+        number: view.number,
+        classification: classification.to_string(),
+        recommended_action: recommended_action.to_string(),
+        github: PrMergeabilityGithubEvidence {
+            state: view.state,
+            base: view.base,
+            head: view.head,
+            head_repository: view.head_repository,
+            head_sha: view.head_sha,
+            merge_state: view.merge_state,
+            ci_state: view.ci_state,
+            ci_summary: view.ci_summary,
+        },
+        git: PrMergeabilityGitEvidence {
+            base_ref,
+            base_sha,
+            head_ref,
+            head_sha,
+            merge_tree_clean,
+            merge_tree_exit_code: merge_tree.status.code(),
+            merge_tree_stdout,
+            merge_tree_stderr,
+            head_matches_github,
+        },
+    })
+}
+
+fn fetch_ref_sha(repo_path: &Path, remote_ref: &str) -> Result<String> {
+    run_git(
+        repo_path,
+        &["fetch", "--quiet", "origin", remote_ref],
+        "git fetch",
+    )?;
+    Ok(
+        run_git(repo_path, &["rev-parse", "FETCH_HEAD"], "git rev-parse")?
+            .trim()
+            .to_string(),
+    )
+}
+
+fn classify_mergeability_reconcile(
+    merge_tree_clean: bool,
+    github_merge_state: &str,
+    head_matches_github: Option<bool>,
+) -> (&'static str, &'static str) {
+    if head_matches_github == Some(false) {
+        return ("github_stale", "wait");
+    }
+    if !merge_tree_clean {
+        return ("real_conflict", "resolve_conflicts");
+    }
+
+    match github_merge_state.to_ascii_uppercase().as_str() {
+        "CLEAN" | "HAS_HOOKS" | "UNSTABLE" => ("clean", "proceed"),
+        "BEHIND" => ("needs_update", "update_branch"),
+        "DIRTY" | "UNKNOWN" | "" => ("github_stale", "wait"),
+        _ => ("needs_update", "rebase_or_replace"),
+    }
 }
 
 /// List changed files for one PR.
