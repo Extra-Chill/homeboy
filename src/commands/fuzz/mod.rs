@@ -684,6 +684,9 @@ mod tests {
                 .as_str(),
             Some(format!("{}/plugins/package", temp.path().display()).as_str())
         );
+        assert!(env.iter().any(|(key, value)| {
+            key == "WP_CODEBOX_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
+        }));
     }
 
     #[test]

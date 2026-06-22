@@ -382,6 +382,7 @@ pub(super) fn default_runner_contract() -> FuzzRunnerContract {
             "HOMEBOY_FUZZ_RESULTS_FILE",
             "HOMEBOY_FUZZ_WORKLOAD_ID",
             "HOMEBOY_FUZZ_WORKLOAD_PATH",
+            "WP_CODEBOX_FUZZ_WORKLOAD_ROOT",
             "HOMEBOY_FUZZ_RUN_ID",
             "HOMEBOY_FUZZ_SEED",
             "HOMEBOY_FUZZ_INVENTORY_FILE",
@@ -448,6 +449,12 @@ pub(super) fn fuzz_runner_env(
         if let Some(path) = fuzz_runner_workload_path(workload, rig_context, run_dir)? {
             env.push(("HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(), path.clone()));
         }
+    }
+    if let Some(package_root) = rig_context.and_then(|context| context.package_root.as_ref()) {
+        env.push((
+            "WP_CODEBOX_FUZZ_WORKLOAD_ROOT".to_string(),
+            package_root.to_string_lossy().to_string(),
+        ));
     }
     push_opt_env(&mut env, "HOMEBOY_FUZZ_RUN_ID", args.run_id.as_ref());
     push_opt_env(&mut env, "HOMEBOY_FUZZ_SEED", args.seed.as_ref());
