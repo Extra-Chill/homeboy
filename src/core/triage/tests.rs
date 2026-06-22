@@ -473,6 +473,121 @@ mod pull_requests {
     }
 
     #[test]
+    fn landing_classifier_covers_ready_and_blocked_states() {
+        assert_eq!(
+            classify_landing_pr("MERGED", Some("2026-06-01T00:00:00Z"), None, None),
+            TriageLandingClassification::Merged
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("SUCCESS"), Some("CLEAN")),
+            TriageLandingClassification::CleanMergeable
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("SUCCESS"), Some("DIRTY")),
+            TriageLandingClassification::ConflictRepairNeeded
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("PENDING"), Some("CLEAN")),
+            TriageLandingClassification::ChecksPending
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, Some("FAILURE"), Some("CLEAN")),
+            TriageLandingClassification::CandidateRed
+        );
+        assert_eq!(
+            classify_landing_pr("OPEN", None, None, Some("UNKNOWN")),
+            TriageLandingClassification::BaselineRedInconclusive
+        );
+    }
+
+    #[test]
+    fn parse_landing_pr_adds_classification_and_command() {
+        let repo = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "homeboy".to_string(),
+        };
+        let raw = r#"{
+          "number": 42,
+          "title": "Ready",
+          "url": "https://github.com/Extra-Chill/homeboy/pull/42",
+          "state": "OPEN",
+          "isDraft": false,
+          "reviewDecision": "APPROVED",
+          "mergeStateStatus": "CLEAN",
+          "statusCheckRollup": [{"status":"COMPLETED","conclusion":"SUCCESS"}],
+          "headRefName": "cook/ready",
+          "mergedAt": null,
+          "comments": [],
+          "reviews": [],
+          "updatedAt": "2026-06-01T00:00:00Z"
+        }"#;
+
+        let item = parse_landing_pr(raw, &repo, false).unwrap();
+
+        assert_eq!(
+            item.classification,
+            TriageLandingClassification::CleanMergeable
+        );
+        assert_eq!(item.head_branch.as_deref(), Some("cook/ready"));
+        assert_eq!(
+            item.suggested_next_command,
+            "homeboy triage --watch Extra-Chill/homeboy#42 --until green-mergeable"
+        );
+    }
+
+    #[test]
+    fn landing_pr_ref_accepts_number_repo_ref_and_url() {
+        let repo = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "homeboy".to_string(),
+        };
+
+        assert_eq!(
+            parse_landing_pr_ref("42", &repo).unwrap().unwrap(),
+            LandingPrRef {
+                owner: "Extra-Chill".to_string(),
+                repo: "homeboy".to_string(),
+                number: 42,
+            }
+        );
+        assert_eq!(
+            parse_landing_pr_ref("Extra-Chill/homeboy#43", &repo)
+                .unwrap()
+                .unwrap()
+                .number,
+            43
+        );
+        assert_eq!(
+            parse_landing_pr_ref("https://github.com/Extra-Chill/homeboy/pull/44", &repo)
+                .unwrap()
+                .unwrap()
+                .number,
+            44
+        );
+    }
+
+    #[test]
+    fn bare_pr_number_detection_only_matches_numbers() {
+        assert!(is_bare_pr_number("42"));
+        assert!(is_bare_pr_number("#42"));
+        assert!(!is_bare_pr_number("Extra-Chill/homeboy#42"));
+        assert!(!is_bare_pr_number(
+            "https://github.com/Extra-Chill/homeboy/pull/42"
+        ));
+    }
+
+    #[test]
+    fn branch_matcher_supports_simple_globs_and_contains() {
+        assert!(branch_matches("cook/*", "cook/landing"));
+        assert!(branch_matches("*landing", "cook/landing"));
+        assert!(branch_matches("*land*", "cook/landing"));
+        assert!(branch_matches("land", "cook/landing"));
+        assert!(!branch_matches("fix/*", "cook/landing"));
+    }
+
+    #[test]
     fn parse_prs_flags_clean_with_zero_checks_as_not_reported() {
         // Reproduces the #4872 force-push window: GitHub reports mergeStateStatus
         // CLEAN with an empty statusCheckRollup before CI registers on the new head.
