@@ -145,6 +145,7 @@ const cli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
+		HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH: '0',
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'cli-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'cli-run',
@@ -164,6 +165,43 @@ const homeboyCampaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
+
+const fakeCodeboxBin = path.join(tempDir, 'fake-wp-codebox.js');
+const dispatchResultsPath = path.join(tempDir, 'dispatch-results.json');
+fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
+const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+process.stdout.write(JSON.stringify({
+  success: true,
+  result: {
+    schema: 'wp-codebox/fuzz-suite-result/v1',
+    request_id: request.task_id,
+    status: 'succeeded',
+    artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+    coverage_summary: { surface_count: 1, exercised_count: 1 }
+  }
+}));
+`);
+fs.chmodSync(fakeCodeboxBin, 0o755);
+
+const dispatchCli = spawnSync(runnerPath, [], {
+	encoding: 'utf8',
+	env: {
+		...process.env,
+		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
+		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'dispatch-cli-workload',
+		HOMEBOY_FUZZ_RUN_ID: 'dispatch-cli-run',
+		HOMEBOY_FUZZ_RESULTS_FILE: dispatchResultsPath,
+	},
+});
+
+assert.equal(dispatchCli.status, 0, dispatchCli.stderr);
+const dispatchCliResult = JSON.parse(dispatchCli.stdout);
+assert.equal(dispatchCliResult.succeeded, true);
+assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
+assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
 
 dispatchPromise.then(() => {
 	console.log('WordPress fuzz runner smoke passed.');
