@@ -159,20 +159,6 @@ pub fn run(args: FileArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<F
             };
             Ok((FileCommandOutput::Download(out), code))
         }
-        FileCommand::Upload {
-            server,
-            local_path,
-            remote_path,
-            ..
-        } => Err(homeboy::core::Error::validation_invalid_argument(
-            "file.upload",
-            "`homeboy file upload` is deprecated; use `homeboy file copy` for local-to-remote transfers",
-            None,
-            Some(vec![format!(
-                "Use: homeboy file copy {} {}:{}",
-                local_path, server, remote_path
-            )]),
-        )),
         FileCommand::Copy(args) => transfer_command(args.into_config()),
         FileCommand::Sync(args) => transfer_command(args.into_config()),
         FileCommand::Edit(args) => {

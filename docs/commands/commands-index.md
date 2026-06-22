@@ -21,7 +21,7 @@
 - [doctor](doctor.md) — local diagnostics for runtime and resource health
 - [docs](docs.md) — embedded topic display and codebase map generation
 - [extension](extension.md)
-- [file](file.md) — remote file operations, downloads, uploads, copies, and syncs
+- [file](file.md) — remote file operations, downloads, copies, and syncs
 - [fleet](fleet.md)
 - [fuzz](fuzz.md) — generic fuzz workload discovery, execution, and evidence
 - [git](git.md)
