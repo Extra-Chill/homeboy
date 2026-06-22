@@ -15,7 +15,8 @@ const homeboyRoot = path.join(root, '.config', 'homeboy');
 const extensionPath = path.join(homeboyRoot, 'extensions', 'wordpress');
 const installedRuntimePath = path.join(homeboyRoot, 'agent-runtimes', 'wp-codebox');
 const legacyRuntimePath = path.join(homeboyRoot, 'extensions', 'agent-runtimes', 'wp-codebox');
-const cachedCoreModule = path.join(root, 'wp-codebox-cache', 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
+const cachedCoreModule = path.join(root, 'wp-codebox-cache', 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js');
+const cachedCoreIndex = path.join(root, 'wp-codebox-cache', 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
 
 fs.mkdirSync(extensionPath, { recursive: true });
 fs.mkdirSync(installedRuntimePath, { recursive: true });
@@ -24,6 +25,7 @@ fs.writeFileSync(path.join(installedRuntimePath, 'index.js'), 'module.exports = 
 fs.writeFileSync(path.join(legacyRuntimePath, 'index.js'), 'module.exports = {};\n');
 fs.mkdirSync(path.dirname(cachedCoreModule), { recursive: true });
 fs.writeFileSync(cachedCoreModule, 'export {};\n');
+fs.writeFileSync(cachedCoreIndex, 'export {};\n');
 
 assert.equal(
 	resolveWpCodeboxRuntimePath({ env: { HOMEBOY_EXTENSION_PATH: extensionPath } }),
