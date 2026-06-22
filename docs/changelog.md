@@ -4,6 +4,37 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.252.0] - 2026-06-22
+
+### Added
+- feat(agent-task): surface backend selection and source before dispatch
+- feat(agent-task): consistent discovery + list pagination
+
+### Changed
+- de-hardcode ecosystem literals (#5897)
+- consolidate parallel git probe impls (#5901)
+- Guard release tags behind default branch
+- Add fuzz-safe lifecycle contracts
+- cheapen homeboy quality gates
+- Classify agent-task promote safety metadata
+- Export fuzz manifest config
+- simplify observation output runtime
+- Unify Lab route contract policy
+- Improve command safety manifest metadata
+- Refine agent task runtime contracts
+- Clarify generic fuzz campaign contract
+
+### Fixed
+- remove dead code in worktree (#5898)
+- fail closed on off-branch release tags
+- Fix lifecycle contract lint failures
+- Fix fuzz sidecar manifest expectation
+- repair observation runtime rebase
+- prepare runner source checkout
+- Fix Lab extension sync capability preflight
+- Fix runtime status normalization borrow
+- Fix runner lifecycle handoff contracts
+
 ## [0.251.0] - 2026-06-22
 
 ### Added
