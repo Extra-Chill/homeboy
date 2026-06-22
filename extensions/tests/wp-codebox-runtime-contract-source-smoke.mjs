@@ -10,6 +10,7 @@ const require = createRequire(import.meta.url);
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {
 	DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
+	coreModuleCandidates,
 	loadCanonicalRuntimeContractSource,
 	loadRuntimeContractSource,
 	providerRuntimeInvocationContract,
@@ -111,6 +112,20 @@ const fallbackLoaded = await loadRuntimeContractSource({ wpCodeboxCoreModule: pa
 assert.equal(fallbackLoaded.canonical, false);
 assert.equal(fallbackLoaded.diagnostics[0].status, 'deprecated');
 assert.match(fallbackLoaded.diagnostics[0].replacement, /@automattic\/wp-codebox-core/);
+
+const installRoot = path.join(tempRoot, 'wp-codebox-install');
+const focusedContractsPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'contracts.js');
+const legacyIndexPath = path.join(installRoot, 'source', 'node_modules', '@automattic', 'wp-codebox-core', 'dist', 'index.js');
+fs.mkdirSync(path.dirname(focusedContractsPath), { recursive: true });
+fs.writeFileSync(focusedContractsPath, 'export function runtimeContractManifest() { return {}; }\n');
+fs.writeFileSync(legacyIndexPath, 'export function runtimeContractManifest() { return {}; }\n');
+const contractCandidates = coreModuleCandidates({ wpCodeboxInstallDir: installRoot });
+assert.equal(contractCandidates[0], '@automattic/wp-codebox-core/contracts');
+assert.equal(contractCandidates[1], 'wp-codebox-workspace/contracts');
+assert.equal(contractCandidates[2], '@automattic/wp-codebox-core');
+assert.equal(contractCandidates[3], 'wp-codebox-workspace/core');
+assert.match(contractCandidates[4], /dist\/contracts\.js$/);
+assert.match(contractCandidates[5], /dist\/index\.js$/);
 
 const mismatchedModule = path.join(tempRoot, 'mismatched-runtime-core.mjs');
 fs.writeFileSync(mismatchedModule, `
