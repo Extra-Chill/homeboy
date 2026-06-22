@@ -7,7 +7,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const {
-  agentTaskOutcomeFromCodeboxResult,
+  agentTaskOutcomeFromCodeboxResult: rawAgentTaskOutcomeFromCodeboxResult,
   codeboxTaskRequestFromAgentTaskRequest,
   missingRequiredSecretEnvMapping,
   missingRequiredSecretEnvValues,
@@ -44,6 +44,13 @@ const repoLoopCapabilities = [
   'ability:example/run-agent-bundle',
   'ability:github_pull_request_publish',
 ];
+
+function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
+  return rawAgentTaskOutcomeFromCodeboxResult(request, result, {
+    allowLegacyCodeboxResultCompatibility: true,
+    ...options,
+  });
+}
 
 function exampleAgentCiCodeboxExecutorConfig(config = {}) {
   const profileId = 'example-agent-ci';

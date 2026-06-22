@@ -646,7 +646,14 @@ async function runTaskRunner(request) {
     payload = stderrFailurePayload(result);
   }
 
-  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1, ...coreNormalizers });
+  return agentTaskOutcomeFromCodeboxResult(request, payload, { exitStatus: result.status ?? 1, ...coreNormalizers, ...legacyResultCompatibilityOptions(request, payload) });
+}
+
+function legacyResultCompatibilityOptions(request, payload = {}) {
+  const config = request.executor?.config || {};
+  const explicitConfig = config.allowLegacyCodeboxResultCompatibility || config.allow_legacy_codebox_result_compatibility;
+  const explicitRunnerFallback = payload.metadata?.run_agent_task_compatibility?.legacy_result_normalization === true;
+  return explicitConfig || explicitRunnerFallback ? { allowLegacyCodeboxResultCompatibility: true } : {};
 }
 
 (async () => {
