@@ -1105,8 +1105,9 @@ try {
   const runtimeToolsPath = path.join(defaultsRoot, 'example-runtime-tools');
   const staleStandaloneAgentsApiPath = path.join(defaultsRoot, 'agents-api');
   const providerPath = path.join(defaultsRoot, 'ai-provider-for-openai');
+  const dataMachinePath = path.join(defaultsRoot, 'data-machine');
   const phpAiClientPath = path.join(defaultsRoot, 'php-ai-client');
-  for (const directory of [workspaceRoot, bundledAgentsApiPath, runtimeToolsPath, staleStandaloneAgentsApiPath, providerPath, phpAiClientPath]) {
+  for (const directory of [workspaceRoot, bundledAgentsApiPath, runtimeToolsPath, staleStandaloneAgentsApiPath, providerPath, dataMachinePath, phpAiClientPath]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -1165,6 +1166,32 @@ try {
   assert.equal(bundledAgentsApiContract.activate, false);
   assert.deepEqual(bundledAgentsApiRequest.runtime_requirements.ability_requirements, ['agents/chat']);
   assert.equal(bundledAgentsApiRequest.component_contracts.some((contract) => contract.slug === 'agents-api'), true);
+
+  const chatHandlerRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'configured-chat-handler-runtime-task-123',
+    executor: {
+      backend: 'codebox',
+      config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    agentRuntime: runtimePath,
+    settings: {
+      wp_codebox_chat_handler_plugin_paths: [dataMachinePath],
+    },
+  });
+  const chatHandlerContract = chatHandlerRequest.runtime_requirements.component_contracts.find((contract) => contract.slug === 'data-machine');
+  assert.equal(chatHandlerContract.path, dataMachinePath);
+  assert.equal(chatHandlerContract.pluginFile, 'data-machine/data-machine.php');
+  assert.equal(chatHandlerContract.loadAs, 'plugin');
+  assert.equal(chatHandlerContract.activate, true);
+  assert.deepEqual(chatHandlerContract.metadata.registers, ['wp_agent_chat_handler']);
+  assert.deepEqual(chatHandlerRequest.runtime_requirements.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine']);
+  assert.deepEqual(chatHandlerRequest.component_contracts.map((contract) => contract.slug), ['agents-api', 'data-machine']);
+  assert.deepEqual(chatHandlerRequest.runtime_requirements.ability_requirements, ['agents/chat']);
 
   const configuredDefaultProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
