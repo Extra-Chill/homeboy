@@ -58,21 +58,25 @@ function runGenericAgentLoop(options = {}) {
   const request = options.request || buildGenericAgentLoopRequest(options);
   const execute = options.execute || executeRuntimeProvider;
   const validationPolicy = options.validationPolicy || options.validation_policy || {};
-  const loop = runDeterministicLoop({
+  const loop = runGenericDeterministicLoop({
     loopId: request.task_id,
-    maxIterations: 1,
+    maxIterations: options.maxIterations || options.max_iterations || options.loop?.maxIterations || options.loop?.max_iterations || 1,
     state: { request },
-    buildIteration: ({ state }) => state.request,
-    execute: ({ input }) => normalizeOutcome(execute({ ...options, request: input, runtime }), input),
-    reconcile: ({ state, outcome, artifacts }) => ({
+    buildTask: ({ state }) => state.request,
+    executeTask: ({ task }) => normalizeOutcome(execute({ ...options, request: task, runtime }), task),
+    collectResult: ({ outcome }) => outcome,
+    reconcile: ({ state, result, artifacts, results, evidence }) => ({
       ...state,
-      status: outcome?.status || 'failed',
-      outcome,
+      status: result?.status || 'failed',
+      outcome: result,
       artifacts,
+      results,
+      evidence,
     }),
-    stopCriteria: () => true,
+    shouldContinue: options.shouldContinue || options.should_continue || (() => false),
+    stopPolicy: options.stopPolicy || options.stop_policy,
   });
-  const outcome = loop.iterations[0]?.outcome || normalizeOutcome(null, request);
+  const outcome = loop.outcome || normalizeOutcome(null, request);
   validateGenericAgentLoopOutcomeContract({
     request,
     outcome,
@@ -83,6 +87,144 @@ function runGenericAgentLoop(options = {}) {
   const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
   const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, validationPolicy);
   return { request, outcome, results, assertion, loop };
+}
+
+function runGenericDeterministicLoop(options = {}) {
+  const loopId = options.loopId || options.loop_id || 'generic-deterministic-loop';
+  const buildTask = options.buildTask || options.build_task || options.buildIteration || options.build_iteration || defaultBuildTask;
+  const executeTask = requiredFunction(options.executeTask || options.execute_task || options.execute, 'executeTask');
+  const collectResult = options.collectResult || options.collect_result || defaultCollectResult;
+  const reconcile = options.reconcile || defaultGenericReconcile;
+  const shouldContinue = options.shouldContinue || options.should_continue || defaultShouldContinue;
+  const stopPolicy = options.stopPolicy || options.stop_policy || defaultStopPolicy;
+  const maxIterations = positiveInteger(options.maxIterations || options.max_iterations) || 1;
+  const initialState = optionalObject(options.state || options.initialState || options.initial_state);
+  const tasks = [];
+  const results = [];
+  const evidence = [];
+  const loop = runDeterministicLoop({
+    loopId,
+    maxIterations,
+    maxAttempts: options.maxAttempts || options.max_attempts || options.retry?.max_attempts,
+    state: {
+      ...initialState,
+      tasks,
+      results,
+      evidence,
+    },
+    buildIteration: ({ loop_id, iteration, state, iterations }) => {
+      const task = buildTask({ loop_id, loopId: loop_id, iteration, state, iterations, tasks, results, evidence });
+      tasks.push(task);
+      return task;
+    },
+    execute: ({ loop_id, iteration, attempt, input, state, iterations }) => executeTask({
+      loop_id,
+      loopId: loop_id,
+      iteration,
+      attempt,
+      task: input,
+      input,
+      state,
+      iterations,
+      tasks,
+      results,
+      evidence,
+    }),
+    reconcile: ({ loop_id, iteration, attempt, input, outcome, error, artifacts, state, iterations }) => {
+      const result = collectResult({
+        loop_id,
+        loopId: loop_id,
+        iteration,
+        attempt,
+        task: input,
+        outcome,
+        error,
+        artifacts,
+        state,
+        iterations,
+        tasks,
+        results,
+        evidence,
+      });
+      results.push(result);
+      evidence.push(...collectEvidence({ iteration, outcome, result, artifacts }));
+      const nextState = reconcile({
+        loop_id,
+        loopId: loop_id,
+        iteration,
+        attempt,
+        task: input,
+        result,
+        outcome,
+        error,
+        artifacts,
+        state,
+        iterations,
+        tasks,
+        results,
+        evidence,
+      });
+      return isPlainObject(nextState) ? {
+        ...nextState,
+        tasks,
+        results,
+        evidence,
+      } : {
+        ...state,
+        tasks,
+        results,
+        evidence,
+      };
+    },
+    stopCriteria: (context) => {
+      const stop = stopPolicy({
+        ...context,
+        task: context.input,
+        result: results[results.length - 1],
+        tasks,
+        results,
+        evidence,
+        max_iterations: maxIterations,
+        maxIterations,
+      });
+      if (isPlainObject(stop) ? stop.stop : Boolean(stop)) {
+        return stop;
+      }
+      const continueDecision = shouldContinue({
+        ...context,
+        task: context.input,
+        result: results[results.length - 1],
+        tasks,
+        results,
+        evidence,
+        max_iterations: maxIterations,
+        maxIterations,
+      });
+      if (continueDecision === false || (isPlainObject(continueDecision) && continueDecision.continue === false)) {
+        return { stop: true, reason: isPlainObject(continueDecision) ? continueDecision.reason || 'continuation_declined' : 'continuation_declined' };
+      }
+      return { stop: false };
+    },
+  });
+  const finalOutcome = results[results.length - 1] || null;
+  return {
+    ...loop,
+    schema: 'homeboy/generic-deterministic-loop-output/v1',
+    deterministic_loop_schema: loop.schema,
+    outcome: finalOutcome,
+    tasks,
+    results,
+    evidence,
+    evidence_envelope: {
+      schema: 'homeboy/generic-deterministic-loop-evidence/v1',
+      loop_id: loopId,
+      status: loop.status,
+      iteration_count: loop.iterations.length,
+      task_count: tasks.length,
+      result_count: results.length,
+      evidence,
+    },
+  };
 }
 
 function executeRuntimeProvider(options = {}) {
@@ -174,6 +316,59 @@ function captureInvocationResult(outcome, invocation, result) {
       runtime_invocation_result: invocationResult,
     },
   };
+}
+
+function defaultBuildTask({ state }) {
+  return state.task || state.input || state.request || state;
+}
+
+function defaultCollectResult({ outcome }) {
+  return outcome;
+}
+
+function defaultGenericReconcile({ state, result, artifacts, results, evidence }) {
+  return {
+    ...state,
+    status: result?.status || state.status || '',
+    outcome: result,
+    artifacts,
+    results,
+    evidence,
+  };
+}
+
+function defaultShouldContinue() {
+  return false;
+}
+
+function defaultStopPolicy({ iteration, maxIterations }) {
+  return iteration >= maxIterations
+    ? { stop: true, reason: 'max_iterations_reached' }
+    : { stop: false };
+}
+
+function collectEvidence({ iteration, outcome, result, artifacts }) {
+  const resultEvidence = result === outcome ? [] : normalizeArray(result?.evidence_refs || result?.evidence);
+  return [
+    ...normalizeArray(artifacts).map((artifact) => ({
+      kind: 'artifact',
+      iteration,
+      ref: artifact.path || artifact.url || artifact.id || artifact.name || '',
+      artifact,
+    })),
+    ...normalizeArray(outcome?.evidence_refs || outcome?.evidence).map((ref) => ({
+      kind: ref.kind || 'evidence_ref',
+      iteration,
+      ref: evidenceRefUrl(ref),
+      evidence: ref,
+    })),
+    ...resultEvidence.map((ref) => ({
+      kind: ref.kind || 'evidence_ref',
+      iteration,
+      ref: evidenceRefUrl(ref),
+      evidence: ref,
+    })),
+  ];
 }
 
 function materializeGenericAgentLoopResults(outcome, options = {}) {
@@ -495,6 +690,13 @@ function requiredStringValue(value, name) {
   return value;
 }
 
+function requiredFunction(value, name) {
+  if (typeof value !== 'function') {
+    throw new Error(`${name} must be a function.`);
+  }
+  return value;
+}
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -503,12 +705,17 @@ function nonEmpty(value) {
   return value !== undefined && value !== null && value !== '';
 }
 
+function isPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
 module.exports = {
   assertGenericAgentLoopOutcome,
   assertGenericAgentLoopRuntimeContract,
   buildGenericAgentLoopRequest,
   materializeGenericAgentLoopResults,
   runGenericAgentLoop,
+  runGenericDeterministicLoop,
   validateGenericAgentLoopOutcomeContract,
   writeGenericAgentLoopArtifacts,
 };
