@@ -309,7 +309,10 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         observed.workspace.root.as_deref(),
         Some("/tmp/homeboy-worktrees/sample-component@fix-179-runtime-guidance")
     );
-    assert_eq!(observed.workspace.slug.as_deref(), Some("sample-agent-runtime"));
+    assert_eq!(
+        observed.workspace.slug.as_deref(),
+        Some("sample-agent-runtime")
+    );
     assert!(observed.workspace.kind.is_none());
     assert!(observed.workspace.component_id.is_none());
     assert!(observed.workspace.branch.is_none());
