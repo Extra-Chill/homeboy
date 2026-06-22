@@ -350,6 +350,90 @@ fn controller_materialize_rejects_non_object_policy_result_fields() {
 }
 
 #[test]
+fn controller_materialize_runs_generator_manifest_and_records_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest_path = temp.path().join("generator.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&json!({
+            "schema": "homeboy/agent-task-loop-spec-generator/v1",
+            "command": [
+                "/bin/sh",
+                "-c",
+                "cat > generated-loop.json <<'JSON'\n{\"loop_id\":\"generated-materialize-loop\",\"workflows\":[{\"workflow_id\":\"brief\",\"prompt\":\"Draft.\"}]}\nJSON"
+            ],
+            "inputs": { "idea": "evidence" },
+            "output_path": "generated-loop.json"
+        }))
+        .expect("manifest json"),
+    )
+    .expect("write manifest");
+
+    let (value, status) =
+        super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
+            spec: format!("@{}", manifest_path.display()),
+            inputs: None,
+            policy_results: Vec::new(),
+        })
+        .expect("materialize generated spec");
+
+    assert_eq!(status, 0);
+    assert_eq!(value["spec"]["loop_id"], "generated-materialize-loop");
+    assert_eq!(
+        value["generator_evidence"]["schema"],
+        "homeboy/agent-task-loop-spec-generator-evidence/v1"
+    );
+    assert_eq!(value["generator_evidence"]["command"][0], "/bin/sh");
+    assert_eq!(value["generator_evidence"]["inputs"]["idea"], "evidence");
+    assert!(value["generator_evidence"]["output_path"]
+        .as_str()
+        .expect("output path")
+        .ends_with("generated-loop.json"));
+    assert_eq!(
+        value["generator_evidence"]["validation_result"]["valid"],
+        true
+    );
+    assert_eq!(
+        value["generator_evidence"]["spec_hash"]
+            .as_str()
+            .expect("hash")
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn controller_materialize_reports_missing_generated_spec_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let manifest_path = temp.path().join("generator.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&json!({
+            "schema": "homeboy/agent-task-loop-spec-generator/v1",
+            "command": ["/bin/sh", "-c", "true"],
+            "output_path": "missing-loop.json"
+        }))
+        .expect("manifest json"),
+    )
+    .expect("write manifest");
+
+    let error = super::support::controller_materialize(AgentTaskControllerMaterializeArgs {
+        spec: format!("@{}", manifest_path.display()),
+        inputs: None,
+        policy_results: Vec::new(),
+    })
+    .expect_err("missing generated output is rejected");
+
+    assert_eq!(error.details["field"], "spec.output_path");
+    assert!(error.message.contains("generated spec was not found"));
+    assert!(error.message.contains("missing-loop.json"));
+    assert!(error.details["tried"][0]
+        .as_str()
+        .expect("remediation")
+        .contains("must write missing-loop.json"));
+}
+
+#[test]
 fn controller_from_spec_doctor_reports_missing_provider_before_resume() {
     let (value, status) = controller_from_spec(AgentTaskControllerFromSpecArgs {
         spec: serde_json::to_string(&json!({
