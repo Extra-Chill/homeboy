@@ -8,6 +8,7 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
+homeboy fuzz replay [<case>] [--run-id <id>] [-- <runner-args>]
 ```
 
 ## Description
@@ -56,6 +57,11 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 `homeboy/fuzz-campaign/v1` campaign object there, `homeboy fuzz run` parses it
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
+
+`homeboy fuzz replay` is reserved for a future generic replay contract. Today it
+returns a product-agnostic `not_implemented` JSON response and does not execute
+local fuzz code. Use the originating fuzz runner's replay command until Homeboy
+owns that contract.
 
 Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
@@ -113,8 +119,8 @@ Rigs can add private fuzz workloads keyed by extension id:
 
 ## Output
 
-Both `list` and `run` return JSON envelopes with stable `variant` values:
-`list` and `run`.
+`list`, `run`, and `replay` return JSON envelopes with stable `variant` values:
+`list`, `run`, and `replay`.
 
 `run.execution.results_file` is the path advertised to the runner through
 `HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote
