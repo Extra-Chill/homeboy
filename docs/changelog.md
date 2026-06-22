@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.252.1] - 2026-06-22
+
+### Changed
+- split github.rs god-file into modules (#5891)
+- thin command adapters, move logic to core (#5902)
+- extract shared field groups (#5899)
+- Sync Lab runtime components from providers
+
+### Fixed
+- Fix changed-file clippy findings
+- Fix Lab runtime component lint
+
 ## [0.252.0] - 2026-06-22
 
 ### Added
