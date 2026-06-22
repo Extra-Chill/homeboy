@@ -10,9 +10,10 @@ use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
     default_fuzz_gates, default_fuzz_required_artifacts, fuzz_core_contract,
     merge_fuzz_target_inventory, parse_fuzz_results_file, parse_fuzz_target_inventory_file,
-    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance, FuzzRequiredArtifact,
-    FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
-    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
+    FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzProvenance, FuzzReplayMetadata,
+    FuzzRequiredArtifact, FuzzResultEnvelope, FuzzTargetInventory, FUZZ_CAMPAIGN_SCHEMA,
+    FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
+    FUZZ_TARGET_INVENTORY_SCHEMA,
 };
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, RigSpec};
@@ -168,9 +169,17 @@ struct FuzzReportArgs {
 
 #[derive(Args, Clone)]
 struct FuzzReplayArgs {
-    /// Persisted fuzz case path or case identifier to replay in a future runner.
-    #[arg(value_name = "CASE")]
-    case: Option<String>,
+    /// Fuzz campaign/result envelope path, or a case id when --artifact is used.
+    #[arg(value_name = "ARTIFACT_OR_CASE")]
+    artifact_or_case: Option<String>,
+
+    /// Fuzz campaign or result envelope artifact to inspect for replay metadata.
+    #[arg(long = "artifact", value_name = "PATH")]
+    artifact: Option<PathBuf>,
+
+    /// Case id to replay from the campaign/envelope artifact.
+    #[arg(long = "case-id", value_name = "ID")]
+    case_id: Option<String>,
 
     /// Stable Homeboy run id associated with the persisted fuzz evidence.
     #[arg(long = "run-id", value_name = "ID")]
@@ -270,10 +279,21 @@ pub struct FuzzReplayOutput {
     pub command: String,
     pub status: String,
     pub message: String,
-    pub case: Option<String>,
+    pub artifact_file: Option<String>,
+    pub campaign_id: Option<String>,
+    pub envelope_id: Option<String>,
+    pub case_id: Option<String>,
     pub run_id: Option<String>,
+    pub replay: Option<FuzzReplayMetadata>,
+    pub env: Vec<FuzzReplayEnv>,
     pub passthrough_args: Vec<String>,
     pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzReplayEnv {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Serialize)]
@@ -345,7 +365,7 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
             Ok((FuzzOutput::Report(run_report(report_args)?), 0))
         }
         Some(FuzzCommand::Replay(replay_args)) => {
-            Ok((FuzzOutput::Replay(run_replay(replay_args)), 0))
+            Ok((FuzzOutput::Replay(run_replay(replay_args)?), 0))
         }
         None => {
             let (output, exit) = run_run(args.run)?;
@@ -363,20 +383,247 @@ fn run_contract() -> FuzzContractOutput {
     }
 }
 
-fn run_replay(args: FuzzReplayArgs) -> FuzzReplayOutput {
-    FuzzReplayOutput {
+fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<FuzzReplayOutput> {
+    let artifact_file = replay_artifact_path(&args);
+    let positional_case = args.artifact_or_case.as_ref().and_then(|value| {
+        if artifact_file.is_some() && !Path::new(value).exists() {
+            Some(value.clone())
+        } else {
+            None
+        }
+    });
+    let requested_case_id = args.case_id.clone().or(positional_case);
+
+    let resolved = if let Some(path) = artifact_file.as_ref() {
+        Some(resolve_replay_artifact(path, requested_case_id.as_deref())?)
+    } else {
+        None
+    };
+    let case_id = resolved
+        .as_ref()
+        .and_then(|resolved| resolved.case_id.clone())
+        .or(requested_case_id);
+    let replay = resolved
+        .as_ref()
+        .and_then(|resolved| resolved.replay.clone());
+    let env = fuzz_replay_env(
+        artifact_file.as_ref(),
+        case_id.as_deref(),
+        replay.as_ref(),
+        args.run_id.as_ref(),
+    );
+
+    let status = if artifact_file.is_some() {
+        "dry_run"
+    } else {
+        "needs_artifact"
+    };
+
+    Ok(FuzzReplayOutput {
         command: "fuzz.replay".to_string(),
-        status: "not_implemented".to_string(),
-        message: "Generic fuzz replay is reserved but not implemented yet; use the originating fuzz runner's replay command for now."
+        status: status.to_string(),
+        message: "Generic fuzz replay resolves replay metadata and prints the extension-owned execution contract; it does not execute local fuzz code without a component/extension context."
             .to_string(),
-        case: args.case,
+        artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+        campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
+        envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
+        case_id,
         run_id: args.run_id,
+        replay,
+        env,
         passthrough_args: args.args,
         next_steps: vec![
-            "Use `homeboy fuzz list <component>` to inspect configured fuzz workloads.".to_string(),
+            "Pass the reported HOMEBOY_FUZZ_REPLAY_* values to the originating extension replay runner."
+                .to_string(),
             "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it."
                 .to_string(),
         ],
+    })
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedReplayArtifact {
+    campaign_id: Option<String>,
+    envelope_id: Option<String>,
+    case_id: Option<String>,
+    replay: Option<FuzzReplayMetadata>,
+}
+
+fn replay_artifact_path(args: &FuzzReplayArgs) -> Option<PathBuf> {
+    args.artifact.clone().or_else(|| {
+        args.artifact_or_case.as_ref().and_then(|value| {
+            let path = PathBuf::from(value);
+            (path.exists() || value.contains(std::path::MAIN_SEPARATOR) || value.ends_with(".json"))
+                .then_some(path)
+        })
+    })
+}
+
+fn resolve_replay_artifact(
+    path: &Path,
+    requested_case_id: Option<&str>,
+) -> homeboy::core::Result<ResolvedReplayArtifact> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(format!("parse fuzz replay artifact {}", path.display())),
+            Some(contents.clone()),
+        )
+    })?;
+    let schema = value
+        .get("schema")
+        .and_then(|schema| schema.as_str())
+        .unwrap_or_default();
+
+    if schema == FUZZ_RESULT_ENVELOPE_SCHEMA {
+        let envelope: FuzzResultEnvelope = serde_json::from_value(value).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                format!("failed to decode fuzz result envelope: {error}"),
+                Some(path.display().to_string()),
+                None,
+            )
+        })?;
+        let campaign = envelope.campaign.as_ref();
+        let (case_id, replay) = resolve_replay_metadata(campaign, requested_case_id)?;
+        return Ok(ResolvedReplayArtifact {
+            campaign_id: campaign.map(|campaign| campaign.id.clone()),
+            envelope_id: Some(envelope.id),
+            case_id,
+            replay,
+        });
+    }
+
+    if schema == FUZZ_CAMPAIGN_SCHEMA {
+        let campaign: FuzzCampaign = serde_json::from_value(value).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                format!("failed to decode fuzz campaign: {error}"),
+                Some(path.display().to_string()),
+                None,
+            )
+        })?;
+        let (case_id, replay) = resolve_replay_metadata(Some(&campaign), requested_case_id)?;
+        return Ok(ResolvedReplayArtifact {
+            campaign_id: Some(campaign.id),
+            envelope_id: None,
+            case_id,
+            replay,
+        });
+    }
+
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "artifact",
+        format!(
+            "fuzz replay artifact schema must be {FUZZ_CAMPAIGN_SCHEMA} or {FUZZ_RESULT_ENVELOPE_SCHEMA}, got {schema}"
+        ),
+        Some(path.display().to_string()),
+        None,
+    ))
+}
+
+fn resolve_replay_metadata(
+    campaign: Option<&FuzzCampaign>,
+    requested_case_id: Option<&str>,
+) -> homeboy::core::Result<(Option<String>, Option<FuzzReplayMetadata>)> {
+    let Some(campaign) = campaign else {
+        return Ok((requested_case_id.map(str::to_string), None));
+    };
+
+    if let Some(case_id) = requested_case_id {
+        let case = campaign
+            .cases
+            .iter()
+            .find(|case| case.id == case_id)
+            .ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "case-id",
+                    format!(
+                        "fuzz campaign '{}' does not contain case '{case_id}'",
+                        campaign.id
+                    ),
+                    Some(case_id.to_string()),
+                    None,
+                )
+            })?;
+        let replay = case
+            .replay_id
+            .as_ref()
+            .and_then(|replay_id| {
+                campaign
+                    .replay
+                    .as_ref()
+                    .filter(|replay| replay.id == *replay_id)
+            })
+            .cloned()
+            .or_else(|| campaign.replay.clone());
+        return Ok((Some(case.id.clone()), replay));
+    }
+
+    if campaign.cases.len() == 1 {
+        let case = &campaign.cases[0];
+        let replay = case
+            .replay_id
+            .as_ref()
+            .and_then(|replay_id| {
+                campaign
+                    .replay
+                    .as_ref()
+                    .filter(|replay| replay.id == *replay_id)
+            })
+            .cloned()
+            .or_else(|| campaign.replay.clone());
+        return Ok((Some(case.id.clone()), replay));
+    }
+
+    Ok((None, campaign.replay.clone()))
+}
+
+fn fuzz_replay_env(
+    artifact_file: Option<&PathBuf>,
+    case_id: Option<&str>,
+    replay: Option<&FuzzReplayMetadata>,
+    run_id: Option<&String>,
+) -> Vec<FuzzReplayEnv> {
+    let mut env = Vec::new();
+    if let Some(path) = artifact_file {
+        push_replay_env(
+            &mut env,
+            "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE",
+            path.to_string_lossy().to_string(),
+        );
+    }
+    if let Some(case_id) = case_id.filter(|case_id| !case_id.trim().is_empty()) {
+        push_replay_env(&mut env, "HOMEBOY_FUZZ_REPLAY_CASE_ID", case_id.to_string());
+    }
+    if let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) {
+        push_replay_env(&mut env, "HOMEBOY_FUZZ_RUN_ID", run_id.clone());
+    }
+    if let Some(replay) = replay {
+        push_replay_env(&mut env, "HOMEBOY_FUZZ_REPLAY_ID", replay.id.clone());
+        push_opt_replay_env(&mut env, "HOMEBOY_FUZZ_REPLAY_SEED", replay.seed.as_ref());
+        push_opt_replay_env(
+            &mut env,
+            "HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID",
+            replay.artifact_id.as_ref(),
+        );
+    }
+    env
+}
+
+fn push_replay_env(env: &mut Vec<FuzzReplayEnv>, name: &str, value: String) {
+    env.push(FuzzReplayEnv {
+        name: name.to_string(),
+        value,
+    });
+}
+
+fn push_opt_replay_env(env: &mut Vec<FuzzReplayEnv>, name: &str, value: Option<&String>) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        push_replay_env(env, name, value.clone());
     }
 }
 
@@ -1661,6 +1908,7 @@ mod tests {
                 workload_id: Some("parser".to_string()),
                 run_id: Some("proof-1".to_string()),
                 seed: Some("1234".to_string()),
+                inventory: None,
                 max_duration: None,
                 args: vec![],
             };
@@ -1706,6 +1954,90 @@ mod tests {
             assert_eq!(artifacts[0].artifact_type, "file");
             assert!(std::path::Path::new(&artifacts[0].path).is_file());
         });
+    }
+
+    #[test]
+    fn fuzz_replay_parses_artifact_and_case_id_flags() {
+        let cli = FuzzCli::parse_from([
+            "fuzz",
+            "replay",
+            "/tmp/fuzz-results.json",
+            "--case-id",
+            "case-1",
+            "--run-id",
+            "proof-1",
+            "--",
+            "--runner-flag",
+        ]);
+
+        match cli.args.command {
+            Some(FuzzCommand::Replay(replay)) => {
+                assert_eq!(
+                    replay.artifact_or_case.as_deref(),
+                    Some("/tmp/fuzz-results.json")
+                );
+                assert_eq!(replay.case_id.as_deref(), Some("case-1"));
+                assert_eq!(replay.run_id.as_deref(), Some("proof-1"));
+                assert_eq!(replay.args, vec!["--runner-flag"]);
+            }
+            _ => panic!("expected fuzz replay command"),
+        }
+    }
+
+    #[test]
+    fn fuzz_replay_resolves_campaign_metadata_without_executing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("fuzz-results.json");
+        let campaign = serde_json::json!({
+            "schema": homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA,
+            "version": homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            "id": "campaign-1",
+            "safety_class": "read_only",
+            "cases": [
+                {
+                    "schema": homeboy::core::fuzz::FUZZ_CASE_SCHEMA,
+                    "id": "case-1",
+                    "replay_id": "replay-1"
+                }
+            ],
+            "replay": {
+                "schema": homeboy::core::fuzz::FUZZ_REPLAY_SCHEMA,
+                "id": "replay-1",
+                "seed": "1234",
+                "artifact_id": "case-artifact"
+            }
+        });
+        std::fs::write(&path, serde_json::to_string(&campaign).unwrap()).expect("write campaign");
+
+        let output = run_replay(FuzzReplayArgs {
+            artifact_or_case: Some(path.to_string_lossy().to_string()),
+            artifact: None,
+            case_id: Some("case-1".to_string()),
+            run_id: Some("proof-1".to_string()),
+            args: vec!["--runner-flag".to_string()],
+        })
+        .expect("resolve replay");
+
+        assert_eq!(output.status, "dry_run");
+        assert_eq!(output.campaign_id.as_deref(), Some("campaign-1"));
+        assert_eq!(output.case_id.as_deref(), Some("case-1"));
+        assert_eq!(
+            output.replay.as_ref().map(|replay| replay.id.as_str()),
+            Some("replay-1")
+        );
+        assert!(output.env.iter().any(|env| {
+            env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE"
+                && env.value == path.to_string_lossy().to_string()
+        }));
+        assert!(output
+            .env
+            .iter()
+            .any(|env| { env.name == "HOMEBOY_FUZZ_REPLAY_CASE_ID" && env.value == "case-1" }));
+        assert!(output
+            .env
+            .iter()
+            .any(|env| { env.name == "HOMEBOY_FUZZ_REPLAY_SEED" && env.value == "1234" }));
+        assert_eq!(output.passthrough_args, vec!["--runner-flag"]);
     }
 
     #[test]
