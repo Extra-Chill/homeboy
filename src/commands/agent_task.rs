@@ -24,16 +24,17 @@ pub mod tool;
 
 pub use args::{
     ActiveArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
-    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs, AgentTaskDoctorArgs,
-    AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs,
-    AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs,
-    AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
-    AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, PromoteArgs, ProvidersArgs, RetryArgs,
-    ReviewArgs, RunPlanArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskControllerStatusArgs, AgentTaskDoctorArgs, AgentTaskFanoutArgs,
+    AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
+    AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
+    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
+    CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, LatestArgs,
+    ListArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs,
+    SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 

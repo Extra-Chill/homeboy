@@ -8,6 +8,8 @@ pub enum AgentTaskControllerCommand {
     Init(AgentTaskControllerInitArgs),
     /// Initialize or resume a durable loop controller from a repo-authored JSON spec.
     FromSpec(AgentTaskControllerFromSpecArgs),
+    /// Materialize, initialize, and run a bounded controller loop from a repo-authored JSON spec.
+    RunFromSpec(AgentTaskControllerRunFromSpecArgs),
     /// Materialize a repo-authored loop spec with explicit run inputs.
     Materialize(AgentTaskControllerMaterializeArgs),
     /// Validate a proof, materialized spec, or controller record for deterministic handoff.
@@ -59,6 +61,49 @@ pub struct AgentTaskControllerFromSpecArgs {
     /// Compile and preflight generic controller prerequisites without writing state.
     #[arg(long)]
     pub doctor: bool,
+
+    /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+
+    /// Provider id to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(
+        long = "dispatch-selector",
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - to use for controller-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskControllerRunFromSpecArgs {
+    /// Repo loop spec JSON, @file, -, or a generator manifest that writes a spec file.
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
+
+    /// Explicit run inputs JSON, @file, or - for stdin. Supports `inputs` and `metadata` objects.
+    #[arg(long, value_name = "JSON")]
+    pub inputs: Option<String>,
+
+    /// Declarative policy result JSON, @file, or - for stdin. Repeatable.
+    #[arg(long = "policy-result", value_name = "JSON")]
+    pub policy_results: Vec<String>,
+
+    /// Maximum controller actions to execute before returning a bounded partial result.
+    #[arg(
+        long = "max-actions",
+        visible_alias = "max-iterations",
+        value_name = "N"
+    )]
+    pub max_actions: u32,
 
     /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
     #[arg(long = "dispatch-backend", value_name = "BACKEND")]

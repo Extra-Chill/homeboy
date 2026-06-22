@@ -125,6 +125,30 @@ resolution behavior unless the prompt string starts with `prompt:`.
 | `loop define\|status\|resume\|stop` | Operate durable defined loops with explicit on/off, revolutions, continuation policy, and handoffs. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
+`agent-task controller run-from-spec <SPEC> --max-actions <N>` is the stable
+bounded loop primitive for headless callers. It materializes an optional spec
+generator or repo-authored spec, applies `--inputs` and repeated
+`--policy-result` envelopes, initializes durable controller state, executes up to
+`N` pending controller actions, and returns one persisted status envelope with the
+materialized spec, controller initialization report, per-action results, final
+controller status, and artifact/status lineage recorded by the normal agent-task
+lifecycle.
+
+```bash
+homeboy agent-task controller run-from-spec @controller.json \
+  --inputs @run-inputs.json \
+  --policy-result @policy-result.json \
+  --max-actions 5 \
+  --dispatch-backend fixture
+```
+
+The command stops when no executable action remains, a terminal controller state
+is reached, an action fails, or `--max-actions` is reached. `--max-iterations` is
+accepted as an alias for `--max-actions` for loop-oriented callers. Execution
+remains provider-neutral: controller actions use their declared generic request
+shape, and `--dispatch-backend`, `--dispatch-selector`, `--dispatch-model`, and
+`--dispatch-provider-config` only provide defaults when an action omits them.
+
 ## Internal Bridge
 
 `agent-task tool` is a hidden provider-runtime bridge. It remains parseable for
