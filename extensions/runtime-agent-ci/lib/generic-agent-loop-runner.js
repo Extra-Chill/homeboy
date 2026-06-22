@@ -87,20 +87,23 @@ function runGenericAgentLoop(options = {}) {
 
 function executeRuntimeProvider(options = {}) {
   const runtime = requiredObject(options.runtime, 'runtime');
-  if (!runtime.executor.path) {
-    throw new Error(`Runtime ${runtime.id || '(unknown)'} does not declare an executor path.`);
+  const invocation = runtimeExecutorInvocation(runtime);
+  if (!invocation.command) {
+    throw new Error(`Runtime ${runtime.id || '(unknown)'} does not declare an executor command.`);
   }
   const spawn = options.spawnSync || spawnSync;
-  const result = spawn(process.execPath, [runtime.executor.path], {
+  const result = spawn(invocation.command, invocation.argv || [], {
     encoding: 'utf8',
-    input: JSON.stringify(options.request),
-    env: options.env || process.env,
+    cwd: invocation.cwd || process.cwd(),
+    input: invocationStdin(invocation, options.request),
+    env: { ...(options.env || process.env), ...(invocation.env || {}) },
     maxBuffer: 1024 * 1024 * 20,
   });
-  if (result.stderr && options.stderr !== false) {
+  if (result.stderr && options.stderr !== false && (result.status !== 0 || invocation.stderr === 'inherit')) {
     process.stderr.write(result.stderr);
   }
-  if (!result.stdout || !result.stdout.trim()) {
+  const stdout = String(result.stdout || '');
+  if (!stdout.trim()) {
     return {
       schema: 'homeboy/agent-task-outcome/v1',
       task_id: options.request.task_id,
@@ -113,7 +116,64 @@ function executeRuntimeProvider(options = {}) {
       }],
     };
   }
-  return JSON.parse(result.stdout);
+  const outcome = JSON.parse(stdout);
+  return captureInvocationResult(outcome, invocation, result);
+}
+
+function runtimeExecutorInvocation(runtime = {}) {
+  const executor = requiredObject(runtime.executor, 'runtime.executor');
+  if (executor.invocation && typeof executor.invocation === 'object' && !Array.isArray(executor.invocation)) {
+    return {
+      command: executor.invocation.command || '',
+      argv: normalizeArray(executor.invocation.argv),
+      cwd: executor.invocation.cwd || process.cwd(),
+      env: optionalObject(executor.invocation.env),
+      stdin: executor.invocation.stdin || 'request_json',
+      stdout: executor.invocation.stdout || 'outcome_json',
+      stderr: executor.invocation.stderr || 'inherit_on_failure',
+      artifacts: executor.invocation.artifacts || {},
+      results: executor.invocation.results || {},
+    };
+  }
+  if (executor.path) {
+    return {
+      command: process.execPath,
+      argv: [executor.path],
+      cwd: process.cwd(),
+      env: {},
+      stdin: 'request_json',
+      stdout: 'outcome_json',
+      stderr: 'inherit_on_failure',
+      artifacts: {},
+      results: {},
+    };
+  }
+  return {};
+}
+
+function invocationStdin(invocation, request) {
+  if (invocation.stdin === false || invocation.stdin === 'none') {
+    return undefined;
+  }
+  return JSON.stringify(request);
+}
+
+function captureInvocationResult(outcome, invocation, result) {
+  const metadata = optionalObject(outcome.metadata);
+  const invocationResult = {
+    command: invocation.command,
+    argv: invocation.argv || [],
+    cwd: invocation.cwd || '',
+    exit_status: result.status ?? 0,
+    signal: result.signal || null,
+  };
+  return {
+    ...outcome,
+    metadata: {
+      ...metadata,
+      runtime_invocation_result: invocationResult,
+    },
+  };
 }
 
 function materializeGenericAgentLoopResults(outcome, options = {}) {

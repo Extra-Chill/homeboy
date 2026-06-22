@@ -186,16 +186,66 @@ function isWorkspaceRelativePath(value) {
 
 function resolveExecutor(manifest, repoRoot, options = {}) {
 	const provider = selectExecutor(manifest, executorSelectionFromOptions(options));
-	const scriptArg = executorScriptArg(provider);
+	const runtimePath = path.join(repoRoot, 'agent-runtimes', manifest.id);
+	const invocation = resolveExecutorInvocation(provider, runtimePath, options);
+	const scriptArg = invocation.argv.find((arg) => typeof arg === 'string' && arg.includes(runtimePath)) || executorScriptArg(provider);
 	return {
 		id: provider.id || '',
 		backend: provider?.backend || '',
 		status: provider?.status || '',
 		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities : [],
-		path: scriptArg ? scriptArg.replace('{{runtime_path}}', path.join(repoRoot, 'agent-runtimes', manifest.id)) : '',
+		path: scriptArg ? scriptArg.replace('{{runtime_path}}', runtimePath) : '',
+		invocation,
 		capabilities: Array.isArray(provider?.capabilities) ? provider.capabilities.filter(Boolean) : [],
 		runtime_execution_contracts: provider?.runtime_execution_contracts || provider?.execution_contracts || {},
 	};
+}
+
+function resolveExecutorInvocation(provider, runtimePath, options = {}) {
+	const invocation = objectOption(provider?.invocation) || {};
+	const argv = normalizeInvocationArgv(provider, invocation).map((arg) => replaceRuntimePath(arg, runtimePath));
+	const command = replaceRuntimePath(firstString(invocation.command, argv[0]), runtimePath);
+	if (!command) {
+		throw new Error(`agent_task_executor ${provider?.id || '(unknown)'} requires invocation.command or invocation.argv.`);
+	}
+	const cwd = replaceRuntimePath(firstString(invocation.cwd, options.cwd, process.cwd()), runtimePath);
+	return {
+		schema: invocation.schema || 'homeboy/command-invocation/v1',
+		command,
+		argv: argv.length > 0 ? argv.slice(1) : [],
+		cwd,
+		env: normalizeInvocationEnv(invocation.env || {}),
+		stdin: invocation.stdin || 'request_json',
+		stdout: invocation.stdout || 'outcome_json',
+		stderr: invocation.stderr || 'inherit_on_failure',
+		artifacts: invocation.artifacts || provider?.artifact_contract || {},
+		results: invocation.results || {},
+		display: invocation.display || [command, ...(argv.length > 0 ? argv.slice(1) : [])].join(' '),
+	};
+}
+
+function normalizeInvocationArgv(provider, invocation) {
+	if (Array.isArray(invocation.argv)) {
+		return invocation.argv.filter((arg) => typeof arg === 'string');
+	}
+	if (Array.isArray(invocation.args)) {
+		return [firstString(invocation.command), ...invocation.args.filter((arg) => typeof arg === 'string')].filter(Boolean);
+	}
+	if (typeof provider?.command === 'string' && provider.command.trim() !== '') {
+		return provider.command.trim().split(/\s+/);
+	}
+	return [];
+}
+
+function normalizeInvocationEnv(env) {
+	if (!env || typeof env !== 'object' || Array.isArray(env)) {
+		return {};
+	}
+	return Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string'));
+}
+
+function replaceRuntimePath(value, runtimePath) {
+	return typeof value === 'string' ? value.replaceAll('{{runtime_path}}', runtimePath) : value;
 }
 
 function executorSelectionFromOptions(options = {}) {
@@ -304,6 +354,9 @@ function selectExecutor(manifest, selection) {
 
 function executorStatusMatches(provider, requestedStatus) {
 	if (requestedStatus === 'active' && !provider.status) {
+		return true;
+	}
+	if (requestedStatus === 'active' && provider.status === 'available') {
 		return true;
 	}
 	return provider.status === requestedStatus;
