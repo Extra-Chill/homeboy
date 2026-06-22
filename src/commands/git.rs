@@ -7,8 +7,8 @@ use homeboy::core::git::{
     IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions,
     PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions, PrLandOptions, PrLandOutput,
     PrLandRefreshHelper, PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput,
-    PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions,
-    PrRefreshOutput, PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
+    PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions, PrRefreshOutput,
+    PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 

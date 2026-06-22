@@ -578,9 +578,7 @@ mod tests {
 
         assert!(!report.valid);
         assert_eq!(report.diagnostics[0].code, "invalid_controller_loop_spec");
-        assert!(report.diagnostics[0]
-            .message
-            .contains("workflows[0].gates"));
+        assert!(report.diagnostics[0].message.contains("workflows[0].gates"));
     }
 
     #[test]
