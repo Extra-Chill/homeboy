@@ -1702,18 +1702,9 @@ fn lab_materialization_proof_metadata(
         "source_snapshot": source_snapshot,
         "source_checkout": source_checkout,
         "runner_homeboy": runner_homeboy,
-        "wp_codebox_version": passive_wp_codebox_version(),
         "workspace_mapping": workspace_mapping,
         "rigs": synced_rigs,
     })
-}
-
-fn passive_wp_codebox_version() -> Option<String> {
-    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
@@ -2779,7 +2770,6 @@ mod tests {
             proof["runner_homeboy"]["active_daemon_version"],
             "homeboy 0.1.0"
         );
-        assert!(proof["wp_codebox_version"].is_null());
     }
 
     #[test]

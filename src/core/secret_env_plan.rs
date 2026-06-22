@@ -489,15 +489,15 @@ mod tests {
     fn secret_env_plan_redacts_secret_values_without_storing_them() {
         let mut provider_credentials = BTreeMap::new();
         provider_credentials.insert(
-            "codex".to_string(),
+            "example-oauth".to_string(),
             SecretEnvProviderCredentialMapping {
-                secret_env: vec!["CODEX_REFRESH_TOKEN".to_string()],
+                secret_env: vec!["EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string()],
                 sources: BTreeMap::from([(
-                    "CODEX_REFRESH_TOKEN".to_string(),
+                    "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
                     SecretEnvCredentialSource {
                         source: "keychain-bundle".to_string(),
                         scope: Some("agent-task".to_string()),
-                        name: Some("codex-oauth".to_string()),
+                        name: Some("example-oauth".to_string()),
                         field: Some("refresh_token".to_string()),
                         env_var: None,
                     },
@@ -522,7 +522,7 @@ mod tests {
             Some(&"https://example.test/?token=[REDACTED]&ok=1".to_string())
         );
         assert_eq!(
-            redacted.get("CODEX_REFRESH_TOKEN"),
+            redacted.get("EXAMPLE_PROVIDER_REFRESH_TOKEN"),
             Some(&"[REDACTED]".to_string())
         );
     }

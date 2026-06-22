@@ -1198,7 +1198,7 @@ mod tests {
                 "runtime_id": "runtime-a",
                 "backend": "runtime-backend",
                 "selector": "runtime-selector",
-                "provider": "codex",
+                "provider": "example-oauth",
                 "model": "gpt-5.5",
                 "substrate_ref": "sample-runtime://sandbox/123"
             }
@@ -1211,7 +1211,7 @@ mod tests {
         assert_eq!(executor.runtime_id(), Some("runtime-a"));
         assert_eq!(executor.executor_backend(), "runtime-backend");
         assert_eq!(executor.executor_provider_id(), Some("runtime-selector"));
-        assert_eq!(executor.provider(), Some("codex"));
+        assert_eq!(executor.provider(), Some("example-oauth"));
         assert_eq!(executor.model(), Some("gpt-5.5"));
         assert_eq!(
             executor.substrate_ref(),

@@ -780,7 +780,7 @@ mod tests {
                     "status": "provider_error",
                     "diagnostics": [{
                         "class": "provider_discovery",
-                        "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                        "message": "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
                     }]
                 }]
             }
@@ -789,7 +789,7 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
 
         assert!(summary.contains(
-            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+            "Diagnostic: Requested provider \"example-oauth\" is not registered. Registered provider plugins: []\n"
         ));
     }
 
@@ -898,14 +898,14 @@ mod tests {
             "diagnostic_summary": {
                 "task_id": "agent-task-d1622a44",
                 "class": "provider_discovery",
-                "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                "message": "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
             }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
         assert!(summary.contains(
-            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+            "Diagnostic: Requested provider \"example-oauth\" is not registered. Registered provider plugins: []\n"
         ));
     }
 
@@ -922,7 +922,7 @@ mod tests {
             "diagnostic_summary": {
                 "task_id": "agent-task-d1622a44",
                 "class": "provider_discovery",
-                "message": "Requested provider \"codex\" is not registered. Registered provider plugins: []"
+                "message": "Requested provider \"example-oauth\" is not registered. Registered provider plugins: []"
             }
         });
 
@@ -930,7 +930,7 @@ mod tests {
 
         assert!(summary.starts_with("Agent task logs\nRun: agent-task-d1622a44\nEvents: 1\n"));
         assert!(summary.contains(
-            "Diagnostic: Requested provider \"codex\" is not registered. Registered provider plugins: []\n"
+            "Diagnostic: Requested provider \"example-oauth\" is not registered. Registered provider plugins: []\n"
         ));
     }
 

@@ -777,7 +777,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            source.resolve("AI_PROVIDER_OPENAI_CODEX_FEDRAMP", &mut cache),
+            source.resolve("EXAMPLE_PROVIDER_FEDRAMP", &mut cache),
             Some("false".to_string())
         );
     }
@@ -813,7 +813,7 @@ mod tests {
         let mut cache = HashMap::new();
 
         assert_eq!(
-            source.resolve("AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT", &mut cache),
+            source.resolve("EXAMPLE_PROVIDER_EXPIRES_AT", &mut cache),
             Some("4102444800".to_string())
         );
     }
