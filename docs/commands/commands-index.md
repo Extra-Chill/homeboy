@@ -63,6 +63,8 @@ Note: some extensions also expose additional top-level CLI commands at runtime
 when installed. Extension command docs, including `cargo` and `wp`, describe
 possible runtime-provided commands rather than guaranteed core subcommands.
 
+Agents and automation that need command safety metadata should read the recursive manifest with `homeboy list --json`. The `list` command is hidden and deprecated as a help alias, but `list --json` remains the compatibility entry point for the safety manifest.
+
 Related:
 
 - [Root command](../cli/homeboy-root-command.md)
