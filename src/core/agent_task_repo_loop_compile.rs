@@ -11,8 +11,9 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::core::agent_task::{
-    AgentTaskArtifactDeclaration, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
-    AgentTaskRequest, AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskArtifactDeclaration, AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_controller_service::{
     AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecArtifact, AgentTaskRepoLoopSpecArtifactGraphEdge,
@@ -263,6 +264,7 @@ fn repo_loop_workflow_request(
 
     let task_id = repo_loop_task_id(workflow, entity_id);
     let inputs = repo_loop_workflow_inputs(workflow, entity_id);
+    let component_contracts = repo_loop_workflow_component_contracts(&inputs)?;
 
     Ok(AgentTaskRequest {
         schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -282,7 +284,7 @@ fn repo_loop_workflow_request(
         inputs,
         source_refs: Vec::new(),
         workspace: repo_loop_workspace(spec),
-        component_contracts: Vec::new(),
+        component_contracts,
         policy: AgentTaskPolicy::default(),
         limits: AgentTaskLimits::default(),
         expected_artifacts: Vec::new(),
@@ -333,9 +335,6 @@ fn repo_loop_workflow_inputs(
     workflow: &AgentTaskRepoLoopSpecWorkflow,
     entity_id: Option<&str>,
 ) -> Value {
-    let Some(entity_id) = entity_id else {
-        return workflow.inputs.clone();
-    };
     let mut inputs = match workflow.inputs.clone() {
         Value::Object(map) => map,
         Value::Null => serde_json::Map::new(),
@@ -344,6 +343,16 @@ fn repo_loop_workflow_inputs(
             map.insert("workflow_inputs".to_string(), other);
             map
         }
+    };
+
+    if let Some(runtime_task) = runtime_task_from_workflow_execution(&workflow.runtime_execution) {
+        inputs
+            .entry("runtime_task".to_string())
+            .or_insert(runtime_task);
+    }
+
+    let Some(entity_id) = entity_id else {
+        return Value::Object(inputs);
     };
     let mut repo_loop = inputs
         .remove("repo_loop")
@@ -359,6 +368,54 @@ fn repo_loop_workflow_inputs(
     );
     inputs.insert("repo_loop".to_string(), Value::Object(repo_loop));
     Value::Object(inputs)
+}
+
+fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Value> {
+    let execution = runtime_execution.as_object()?;
+    let ability = execution.get("ability")?.as_str()?.trim();
+    if ability.is_empty() {
+        return None;
+    }
+
+    let mut runtime_task = serde_json::Map::new();
+    runtime_task.insert("ability".to_string(), Value::String(ability.to_string()));
+    runtime_task.insert(
+        "input".to_string(),
+        execution
+            .get("input")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+    );
+    if let Some(kind) = execution
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+    {
+        runtime_task.insert("kind".to_string(), Value::String(kind.to_string()));
+    }
+    Some(Value::Object(runtime_task))
+}
+
+fn repo_loop_workflow_component_contracts(
+    inputs: &Value,
+) -> Result<Vec<AgentTaskComponentContract>> {
+    let Some(raw) = inputs
+        .get("runtime_config")
+        .and_then(|runtime_config| runtime_config.get("component_contracts"))
+    else {
+        return Ok(Vec::new());
+    };
+
+    serde_json::from_value(raw.clone()).map_err(|error| {
+        Error::validation_invalid_argument(
+            "workflows[].inputs.runtime_config.component_contracts",
+            format!(
+                "repo loop workflow runtime_config.component_contracts must be an array of component contracts: {error}"
+            ),
+            Some(raw.to_string()),
+            None,
+        )
+    })
 }
 
 fn repo_loop_workspace(spec: &AgentTaskRepoLoopSpec) -> AgentTaskWorkspace {

@@ -368,6 +368,7 @@ fn repo_loop_reconcile_spec(loop_id: &str) -> AgentTaskRepoLoopSpec {
                 dependencies: Vec::new(),
                 gates: Vec::new(),
                 metrics: Vec::new(),
+                runtime_execution: Value::Null,
                 inputs: Value::Null,
             },
             AgentTaskRepoLoopSpecWorkflow {
@@ -384,6 +385,7 @@ fn repo_loop_reconcile_spec(loop_id: &str) -> AgentTaskRepoLoopSpec {
                 dependencies: vec!["static_site_pull_request".to_string()],
                 gates: Vec::new(),
                 metrics: Vec::new(),
+                runtime_execution: Value::Null,
                 inputs: Value::Null,
             },
         ],
@@ -641,6 +643,7 @@ fn init_from_spec_compiles_repo_workflows_into_deduped_dispatch_actions() {
                 ],
                 gates: vec!["quality".to_string()],
                 metrics: vec!["visual-parity".to_string()],
+                runtime_execution: Value::Null,
                 inputs: json!({ "finding_key": "abc" }),
             }],
             artifacts: vec![
@@ -902,6 +905,7 @@ fn init_from_spec_reconciles_removed_and_added_workflows() {
                 dependencies: vec!["static_site_candidate".to_string()],
                 gates: Vec::new(),
                 metrics: Vec::new(),
+                runtime_execution: Value::Null,
                 inputs: Value::Null,
             });
         });
@@ -979,6 +983,7 @@ fn init_from_spec_rejects_undeclared_workflow_requirements() {
                 dependencies: Vec::new(),
                 gates: Vec::new(),
                 metrics: Vec::new(),
+                runtime_execution: Value::Null,
                 inputs: Value::Null,
             }],
             artifacts: Vec::new(),
@@ -2106,6 +2111,7 @@ fn from_spec_resume_drives_generic_workflow_gates_completion_and_lineage() {
                 dependencies: vec!["source-tree".to_string()],
                 gates: vec!["quality".to_string()],
                 metrics: vec!["coverage".to_string()],
+                runtime_execution: Value::Null,
                 inputs: json!({ "scope": "changed findings" }),
             }],
             artifacts: vec![AgentTaskRepoLoopSpecArtifact {

@@ -179,6 +179,8 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<String>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub runtime_execution: Value,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub inputs: Value,
 }
 
