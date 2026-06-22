@@ -13,6 +13,7 @@ use crate::core::agent_task::{
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
+use crate::core::agent_task_prompts;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskRetryPolicy};
 use crate::core::agent_task_secrets::validate_secret_env;
@@ -532,6 +533,10 @@ fn provider_config_secret_env(provider_config: &Value) -> Vec<String> {
 }
 
 fn read_text_spec(spec: &str, label: &str) -> Result<String> {
+    if let Some(prompt) = agent_task_prompts::resolve_stored_prompt_ref(spec)? {
+        return Ok(prompt);
+    }
+
     config::read_json_spec_to_string(spec).map_err(|error| {
         Error::internal_unexpected(format!(
             "failed to read agent-task dispatch {label} input: {error}"
@@ -701,6 +706,30 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn builds_dispatch_plan_from_stored_prompt_ref() {
+        with_isolated_home(|_| {
+            crate::core::agent_task_prompts::save_prompt(
+                "review-fix",
+                "# Review fix\nCook from stored markdown.\n",
+            )
+            .expect("save prompt");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("prompt:review-fix".to_string()),
+                repo: Some("homeboy".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert_eq!(plan.tasks.len(), 1);
+            assert_eq!(
+                plan.tasks[0].instructions,
+                "# Review fix\nCook from stored markdown.\n"
+            );
+        });
     }
 
     #[test]

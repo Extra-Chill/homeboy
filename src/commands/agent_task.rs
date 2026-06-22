@@ -16,6 +16,7 @@ pub mod controller;
 pub mod doctor;
 pub mod fanout;
 pub mod loop_definition;
+pub mod prompts;
 pub mod review;
 pub mod run;
 pub mod status;
@@ -70,6 +71,7 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
         AgentTaskCommand::FinalizePr(finalize_args) => review::finalize_pull_request(finalize_args),
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
+        AgentTaskCommand::Prompts(prompts_args) => prompts::prompts(prompts_args),
         AgentTaskCommand::Contract(contract_args) => contract::contract(contract_args),
         AgentTaskCommand::CompileLoop(compile_args) => loop_definition::compile_loop(compile_args),
         AgentTaskCommand::Auth(auth_args) => auth::auth(auth_args),

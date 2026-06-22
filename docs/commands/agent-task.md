@@ -13,6 +13,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 - **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
 - **Cook/review:** workspace task conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
 - **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
+- **Prompt store:** Homeboy-owned markdown prompts for reusable dispatch/cook/loop input.
 - **Controller:** durable multi-agent loop state that can create or observe lifecycle runs over time.
 
 ## Subcommands
@@ -36,6 +37,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `fanout plan\|submit\|run-plan` | Compile, persist, or run generic provider-neutral fanout inputs. |
+| `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 ### Cook/Review
 
@@ -73,6 +75,23 @@ processes start. Compact `agent-task status` includes `execution_location` as
 | `providers` | List extension-declared executor providers and optional secret/backend readiness. |
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
+
+### Prompt Store
+
+`agent-task prompts` stores markdown prompt files under Homeboy's data directory,
+not under the current repo/worktree. Save prompt content with inline text,
+`@file`, or `-` for stdin, then reference it from `dispatch`, `cook`, or `loop`
+with `prompt:<id>` anywhere a prompt string is accepted.
+
+```bash
+homeboy agent-task prompts save issue-123 --input @prompt.md
+homeboy agent-task prompts list
+homeboy agent-task cook --repo homeboy --prompt prompt:issue-123
+```
+
+Existing prompt inputs remain compatible: `--prompt @file`, `--prompt -`, inline
+prompt text, repeated `--task`, and `--tasks @tasks.json` still use the existing
+resolution behavior unless the prompt string starts with `prompt:`.
 
 ### Controller
 
