@@ -181,9 +181,11 @@ mod tests {
         )
         .is_ok());
 
-        assert!(
-            command_adapter(Commands::List { json: false }, CommandOutputFileMode::None).is_err()
-        );
+        assert!(command_adapter(
+            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            CommandOutputFileMode::None,
+        )
+        .is_ok());
     }
 
     #[test]

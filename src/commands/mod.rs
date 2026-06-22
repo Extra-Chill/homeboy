@@ -220,6 +220,7 @@ pub mod json_output;
 pub mod lab;
 pub mod lint;
 pub mod logs;
+pub mod manifest;
 pub mod observe;
 pub mod output_runtime;
 pub mod project;

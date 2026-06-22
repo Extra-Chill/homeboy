@@ -10,7 +10,6 @@ Exceptions:
 - `homeboy trace --report markdown` prints a raw markdown trace report.
 - `homeboy runs compare` prints raw markdown unless `--output` is provided.
 - `homeboy report failure-digest` prints raw markdown because markdown is currently the only report format.
-- `homeboy list` prints clap help text (raw; not JSON-wrapped).
 - `homeboy ssh` connect mode and `homeboy logs show --follow` use interactive passthrough output.
 
 For raw markdown commands, `--output <path>` still writes a JSON file when the

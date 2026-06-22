@@ -6,9 +6,9 @@ use crate::command_contract::registered_command;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
-    issues, lab, lint, logs, observe, project, refactor, refs, release, report, review, rig,
-    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
-    upgrade, version, worktree,
+    issues, lab, lint, logs, manifest, observe, project, refactor, refs, release, report, review,
+    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel,
+    undo, upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -118,6 +118,8 @@ pub enum Commands {
     Status(status::StatusArgs),
     /// Display CLI documentation
     Docs(crate::commands::docs::DocsArgs),
+    /// Print the recursive command safety, docs, and output manifest
+    Manifest(manifest::ManifestArgs),
     /// Changelog operations
     Changelog(changelog::ChangelogArgs),
     /// Remove declared reconstructable artifacts from managed worktrees
@@ -177,13 +179,6 @@ pub enum Commands {
     Http(http::HttpArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
-    /// List available commands (deprecated alias for --help)
-    #[command(hide = true)]
-    List {
-        /// Print the recursive command safety manifest as JSON.
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +325,7 @@ impl Commands {
             Commands::Extension(_) => "extension",
             Commands::Status(_) => "status",
             Commands::Docs(_) => "docs",
+            Commands::Manifest(_) => "manifest",
             Commands::Changelog(_) => "changelog",
             Commands::Cleanup(_) => "cleanup",
             Commands::Git(_) => "git",
@@ -358,7 +354,6 @@ impl Commands {
             Commands::Api(_) => "api",
             Commands::Http(_) => "http",
             Commands::Upgrade(_) => "upgrade",
-            Commands::List { .. } => "list",
         }
     }
 }
@@ -498,9 +493,9 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["list"] => {
-            metadata.structured_output = true;
-            metadata.output_notes = "hidden compatibility entry point for the command safety manifest; run `homeboy list --json`";
+        ["manifest"] => {
+            metadata.output_notes =
+                "recursive command safety, docs, output, and Lab metadata in the standard JSON envelope";
         }
         ["deploy"] => {
             metadata.mutates = true;
@@ -910,10 +905,13 @@ mod tests {
     fn command_safety_manifest_records_clap_visibility_metadata() {
         let manifest = current_command_safety_manifest();
 
-        let list = manifest_path(&manifest, &["list"]);
-        assert!(list.hidden);
-        assert!(list.output.structured);
-        assert!(list.output.notes.contains("homeboy list --json"));
+        let command_manifest = manifest_path(&manifest, &["manifest"]);
+        assert!(!command_manifest.hidden);
+        assert!(command_manifest.output.structured);
+        assert!(command_manifest
+            .output
+            .notes
+            .contains("recursive command safety"));
 
         let lab = manifest_path(&manifest, &["lab"]);
         assert!(lab.hidden);

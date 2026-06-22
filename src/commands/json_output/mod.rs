@@ -192,14 +192,16 @@ mod tests {
     use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand, StatusArgs};
 
     #[test]
-    fn list_json_dispatch_reports_raw_output_mode() {
-        let (result, exit_code) = dispatch(Commands::List { json: false }, &GlobalArgs {});
+    fn manifest_dispatches_as_json_workspace_output() {
+        let (result, exit_code) = dispatch(
+            Commands::Manifest(crate::commands::manifest::ManifestArgs {}),
+            &GlobalArgs {},
+        );
 
-        assert_ne!(exit_code, 0);
-        assert!(result
-            .expect_err("list should not dispatch as JSON")
-            .to_string()
-            .contains("raw output mode"));
+        assert_eq!(exit_code, 0);
+        let value = result.expect("manifest should dispatch as JSON");
+        assert_eq!(value["command"], "manifest");
+        assert!(value["commands"].is_array());
     }
 
     #[test]
@@ -218,8 +220,10 @@ mod tests {
     #[test]
     fn json_dispatch_family_comes_from_command_registry() {
         assert_eq!(
-            dispatch_family(&Commands::List { json: false }),
-            CommandDispatchFamily::RawOnly
+            dispatch_family(&Commands::Manifest(
+                crate::commands::manifest::ManifestArgs {}
+            )),
+            CommandDispatchFamily::Workspace
         );
     }
 }
