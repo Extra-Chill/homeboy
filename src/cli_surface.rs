@@ -622,6 +622,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
                 "default output is a non-mutating cleanup plan; pass --apply to delete artifacts";
             metadata.dangerous_flags = vec!["--apply"];
         }
+        ["agent-task", "promote"] => {
+            metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "applies a selected patch artifact into a managed worktree unless --dry-run is passed";
+        }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
             metadata.operator = true;
@@ -971,6 +977,7 @@ mod tests {
             ["runs", "import"].as_slice(),
             ["runs", "artifact", "cleanup-downloads"].as_slice(),
             ["runs", "artifact", "cleanup-persisted"].as_slice(),
+            ["agent-task", "promote"].as_slice(),
             ["extension", "install"].as_slice(),
             ["extension", "update"].as_slice(),
             ["extension", "uninstall"].as_slice(),
@@ -1058,6 +1065,12 @@ mod tests {
 
         let runs_cleanup = manifest_path(&manifest, &["runs", "artifact", "cleanup-persisted"]);
         assert!(runs_cleanup.output.notes.contains("--apply"));
+
+        let agent_task_promote = manifest_path(&manifest, &["agent-task", "promote"]);
+        assert_eq!(
+            agent_task_promote.dry_run.flag.as_deref(),
+            Some("--dry-run")
+        );
     }
 
     #[test]
