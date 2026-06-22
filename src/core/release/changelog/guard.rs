@@ -111,21 +111,13 @@ fn normalize_relative_path(raw: &str) -> Option<PathBuf> {
 /// guard should not miss an edit purely because of casing differences between
 /// the configured target and the changed path.
 fn paths_eq_ignore_case(a: &Path, b: &Path) -> bool {
-    let mut a_components = a.components();
-    let mut b_components = b.components();
-    loop {
-        match (a_components.next(), b_components.next()) {
-            (Some(a_component), Some(b_component)) => {
-                let a_str = a_component.as_os_str().to_string_lossy();
-                let b_str = b_component.as_os_str().to_string_lossy();
-                if !a_str.eq_ignore_ascii_case(&b_str) {
-                    return false;
-                }
-            }
-            (None, None) => return true,
-            _ => return false,
-        }
-    }
+    let a_components = crate::core::paths::path_component_strings(a);
+    let b_components = crate::core::paths::path_component_strings(b);
+    a_components.len() == b_components.len()
+        && a_components
+            .iter()
+            .zip(b_components.iter())
+            .all(|(a_str, b_str)| a_str.eq_ignore_ascii_case(b_str))
 }
 
 #[cfg(test)]

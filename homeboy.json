@@ -493,7 +493,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-06-20T15:43:14Z",
-      "item_count": 395,
+      "item_count": 391,
       "known_fingerprints": [
         "compiler::src/core/deploy/planning.rs::CompilerWarning",
         "compiler::src/core/extension/test/run.rs::CompilerWarning",
@@ -758,9 +758,13 @@
         "output_capture::src/core/upgrade/execution.rs::UnboundedOutputCapture",
         "output_capture::tests/agent_tool_dispatch.rs::UnboundedOutputCapture",
         "parallel-implementation::src/commands/report/browser_evidence_compare.rs::ParallelImplementation",
+        "parallel-implementation::src/core/agent_task_prompts.rs::ParallelImplementation",
         "parallel-implementation::src/core/artifact_links.rs::ParallelImplementation",
         "parallel-implementation::src/core/component/inventory.rs::ParallelImplementation",
+        "parallel-implementation::src/core/extension/trace/attach.rs::ParallelImplementation",
         "parallel-implementation::src/core/extension/trace/run.rs::ParallelImplementation",
+        "parallel-implementation::src/core/git/gh_client.rs::ParallelImplementation",
+        "parallel-implementation::src/core/git/github.rs::ParallelImplementation",
         "parallel-implementation::src/core/git/operations.rs::ParallelImplementation",
         "parallel-implementation::src/core/git/operations_tags.rs::ParallelImplementation",
         "parallel-implementation::src/core/release/changelog/guard.rs::ParallelImplementation",

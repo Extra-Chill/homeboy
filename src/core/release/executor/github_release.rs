@@ -592,6 +592,7 @@ pub(super) fn not_created_result(
 /// `gh release create` failed, so no GitHub Release object exists. `Failed`,
 /// carrying the recovery commands so the operator can finish the release from
 /// the already-pushed tag + built artifacts without making a second tag.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_failed_result(
     tag: &str,
     github: &GitHubRepo,
@@ -982,7 +983,14 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn gh_probe_succeeds(github: &GitHubRepo, config: &GithubConfig, args: &[&str]) -> bool {
-    gh_command(github, config, args)
+    command_probe_succeeds(gh_command(github, config, args))
+}
+
+/// Run a prepared command swallowing stdout/stderr and report whether it exited
+/// successfully. Centralizes the probe-style `null stdio + status + success`
+/// pattern so probe call sites do not each reimplement it.
+fn command_probe_succeeds(mut command: std::process::Command) -> bool {
+    command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

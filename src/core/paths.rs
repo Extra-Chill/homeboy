@@ -201,6 +201,18 @@ pub fn normalize_local_path(path: impl AsRef<Path>) -> PathBuf {
     }
 }
 
+/// Render each path component as a lossy UTF-8 string, in order.
+///
+/// Centralizes the `path.components()` + `as_os_str().to_string_lossy()`
+/// traversal so component-walking helpers (temp-marker detection, case
+/// insensitive comparison, etc.) share one primitive instead of each
+/// reimplementing the same iteration.
+pub fn path_component_strings(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Return whether `path` is inside `root` after lexical normalization.
 pub fn local_path_is_contained(root: impl AsRef<Path>, path: impl AsRef<Path>) -> bool {
     let root = normalize_local_path(root);
