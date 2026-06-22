@@ -2064,6 +2064,9 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.outcome === 'no_op' || result?.no_op) {
     return 'no_op';
   }
+  if (agentRuntimeSucceeded(result)) {
+    return 'succeeded';
+  }
   return (publicEnvelope?.success ?? result?.success) === true ? 'succeeded' : 'failed';
 }
 
@@ -2122,11 +2125,22 @@ function agentRuntimeFailure(result) {
   return agentRuntimeResultCandidates(result).find(agentRuntimeCandidateFailed) || null;
 }
 
+function agentRuntimeSucceeded(result) {
+  return agentRuntimeResultCandidates(result).some(agentRuntimeCandidateSucceeded);
+}
+
+function agentRuntimeCandidateSucceeded(candidate) {
+  const runtime = candidate.agent_runtime || candidate.agentRuntime;
+  return runtime && typeof runtime === 'object' && !Array.isArray(runtime) && runtime.success === true;
+}
+
 function agentRuntimeCandidateFailed(candidate) {
+  const runtime = candidate.agent_runtime || candidate.agentRuntime;
   const terminalStatus = String(candidate.terminal_status || candidate.terminalStatus || '').toLowerCase();
   const status = String(candidate.status || candidate.outcome || '').toLowerCase();
   const completionStatus = String(candidate.completion_outcome?.status || candidate.completionOutcome?.status || '').toLowerCase();
   return candidate.success === false
+    || runtime?.success === false
     || candidate.completion_outcome?.success === false
     || candidate.completionOutcome?.success === false
     || terminalStatus === 'failed'

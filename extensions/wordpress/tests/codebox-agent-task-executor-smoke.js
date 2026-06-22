@@ -1964,6 +1964,30 @@ assert.equal(outputRuntimeFailureMetadataOutcome.status, 'failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].class, 'agent_runtime.failed');
 assert.equal(outputRuntimeFailureMetadataOutcome.diagnostics[0].data.reason, 'provider_auth_failed');
 
+const outputAgentRuntimeSuccessOutcome = agentTaskOutcomeFromCodeboxResult(request, {
+  success: true,
+  schema: 'wp-codebox/agent-task-run/v1',
+  status: 'completed',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        agent_runtime: {
+          success: true,
+          result: {
+            reply: 'Static site candidate produced.',
+            messages: [],
+            run_id: 'dm-chat-run-1',
+          },
+        },
+      },
+    },
+  },
+});
+assert.equal(outputAgentRuntimeSuccessOutcome.status, 'succeeded');
+assert.equal(outputAgentRuntimeSuccessOutcome.failure_classification, undefined);
+
 const outputAgentRuntimeFailureWithoutTypedArtifactsOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
