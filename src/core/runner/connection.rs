@@ -8,7 +8,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::core::api_jobs::ActiveRunnerJobSummary;
+use crate::core::api_jobs::{ActiveRunnerJobSummary, RunnerJobSource};
 use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
 use crate::core::paths;
@@ -16,10 +16,10 @@ use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
 use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStatusReport, RunnerTunnelMode,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
+    RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use super::{load, Runner, RunnerKind};
 
@@ -315,24 +315,30 @@ fn active_runner_jobs(
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
-    let body = if let Some(local_url) = session.local_url.as_deref() {
+    let (body, source) = if let Some(local_url) = session.local_url.as_deref() {
         let data = daemon_get(&client, local_url, "/jobs")?;
-        data.get("body")
-            .cloned()
-            .ok_or_else(|| Error::internal_unexpected("daemon jobs response missing data.body"))?
+        (
+            data.get("body").cloned().ok_or_else(|| {
+                Error::internal_unexpected("daemon jobs response missing data.body")
+            })?,
+            RunnerJobSource::Daemon,
+        )
     } else if session.mode == RunnerTunnelMode::Reverse {
         let Some(broker_url) = session.broker_url.as_deref() else {
             return Err(Error::internal_unexpected(format!(
                 "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
             )));
         };
-        broker_http::get_json(
-            &client,
-            broker_url,
-            "/jobs",
-            "list reverse runner broker jobs",
-            None,
-        )?
+        (
+            broker_http::get_json(
+                &client,
+                broker_url,
+                "/jobs",
+                "list reverse runner broker jobs",
+                None,
+            )?,
+            RunnerJobSource::Broker,
+        )
     } else {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` is connected but has no active-job status endpoint"
@@ -352,6 +358,10 @@ fn active_runner_jobs(
     Ok(jobs
         .into_iter()
         .filter(|job| job.runner_id == runner_id)
+        .map(|mut job| {
+            job.source = source;
+            job
+        })
         .collect())
 }
 

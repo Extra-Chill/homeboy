@@ -915,8 +915,12 @@ fn detached_handoff_output(
         }
     }))
     .unwrap_or_else(|_| "{}".to_string());
-    let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
-    let handoff = runner_handoff(runner, "daemon", Some(runner_job.clone()), None);
+    let source = match &mode {
+        RunnerExecMode::ReverseBroker => "broker",
+        _ => "daemon",
+    };
+    let runner_job = RunnerJob::from_job(&runner.id, source, &command, Some(cwd.clone()), &job);
+    let handoff = runner_handoff(runner, source, Some(runner_job.clone()), None);
 
     (
         RunnerExecOutput {

@@ -1949,7 +1949,7 @@ mod tests {
                 runner_id: "homeboy-lab".to_string(),
                 job_id: "job-123".to_string(),
                 operation: "runner.exec".to_string(),
-                source: "broker".to_string(),
+                source: homeboy::core::api_jobs::RunnerJobSource::Broker,
                 kind: "runner.exec".to_string(),
                 status: JobStatus::Running,
                 command: "true".to_string(),
