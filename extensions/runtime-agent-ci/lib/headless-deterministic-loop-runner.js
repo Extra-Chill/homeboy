@@ -5,6 +5,7 @@ const path = require('node:path');
 const {
   buildGenericAgentLoopRequest,
   runGenericAgentLoop,
+  runGenericDeterministicLoop,
   writeGenericAgentLoopArtifacts,
 } = require('./generic-agent-loop-runner');
 const { resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
@@ -37,10 +38,31 @@ function runHeadlessDeterministicLoop(options = {}) {
     });
     pushEvent(events, 'task_planned', { task_id: request.task_id, backend: request.executor.backend });
 
+    const loopPolicy = normalizeLoopPolicy(plan);
+
     if (dryRun) {
       finalOutcome = dryRunOutcome(request);
       finalResults = dryRunResults(request);
       pushEvent(events, 'task_dry_run', { task_id: request.task_id });
+    } else if (loopPolicy.enabled) {
+      pushEvent(events, 'task_policy_started', { task_id: request.task_id, max_iterations: loopPolicy.max_iterations });
+      const result = runHeadlessPolicyLoop({
+        ...options,
+        plan,
+        request,
+        runtime,
+        repoRoot,
+        configPath: options.configPath || options.config_path || '',
+        validate,
+        validationPolicy: validationPolicyForPlan(plan, options.validationPolicy || options.validation_policy),
+        loopPolicy,
+        extensionPath: options.extensionPath || options.extension_path || spec.homeboy_extensions_path || repoRoot,
+        replayBundleDir: options.replayBundleDir || options.replay_bundle_dir || spec.replay_bundle_dir,
+      });
+      finalOutcome = result.outcome;
+      finalResults = result.results;
+      finalLoop = result.loop;
+      pushEvent(events, 'task_policy_completed', { task_id: request.task_id, status: result.outcome.status, stop_reason: result.loop.policy_status.stop_reason });
     } else {
       pushEvent(events, 'task_started', { task_id: request.task_id });
       const result = runGenericAgentLoop({
@@ -68,6 +90,7 @@ function runHeadlessDeterministicLoop(options = {}) {
       outcome: finalOutcome,
       results: finalResults,
       loop: finalLoop,
+      loop_policy: finalLoop?.policy_status || null,
       state: finalLoop?.state || null,
     });
   }
@@ -98,12 +121,342 @@ function writeHeadlessDeterministicLoopArtifacts(options = {}) {
   if (options.eventsFile || options.events_file) {
     writeJsonFile(options.eventsFile || options.events_file, options.result?.events || []);
   }
+  if (options.loopPolicyFile || options.loop_policy_file) {
+    writeJsonFile(options.loopPolicyFile || options.loop_policy_file, policyArtifact(options.result));
+  }
+  if (options.statusFile || options.status_file) {
+    writeJsonFile(options.statusFile || options.status_file, statusArtifact(options.result));
+  }
   writeGenericAgentLoopArtifacts({
     outcome: options.result?.outcome,
     results: options.result?.results,
     outcomeFile: options.outcomeFile || options.outcome_file,
     resultsFile: options.resultsFile || options.results_file,
   });
+}
+
+function runHeadlessPolicyLoop(options = {}) {
+  const loopPolicy = requiredObject(options.loopPolicy || options.loop_policy, 'loopPolicy');
+  const basePlan = requiredObject(options.plan, 'plan');
+  const baseRequest = requiredObject(options.request, 'request');
+  const runtime = requiredObject(options.runtime, 'runtime');
+  const iterationRecords = [];
+  let latestAccepted = false;
+  let stopReason = '';
+
+  const loop = runGenericDeterministicLoop({
+    loopId: `${baseRequest.task_id}-headless-policy`,
+    maxIterations: loopPolicy.max_iterations,
+    state: {
+      request: baseRequest,
+      plan: basePlan,
+      repair_required: false,
+      failure_summary: '',
+    },
+    buildTask: ({ iteration, state }) => {
+      const candidatePlan = iteration === 1 || !state.repair_required
+        ? basePlan
+        : materializeRepairPlan(loopPolicy.repair_task_template, basePlan, { iteration, state, baseRequest });
+      const candidateRequest = buildRequestForPlan(candidatePlan, options);
+      const validationPlan = loopPolicy.validation_task
+        ? materializeTemplate(loopPolicy.validation_task, basePlan, { iteration, state, baseRequest, candidateRequest })
+        : null;
+      const validationRequest = validationPlan ? buildRequestForPlan(validationPlan, options) : null;
+      return {
+        schema: 'homeboy/headless-loop-policy-iteration-task/v1',
+        iteration,
+        candidate_plan: candidatePlan,
+        candidate_request: candidateRequest,
+        validation_plan: validationPlan,
+        validation_request: validationRequest,
+      };
+    },
+    executeTask: ({ task }) => {
+      const candidate = runGenericAgentLoop({
+        ...options,
+        plan: task.candidate_plan,
+        request: task.candidate_request,
+        runtime,
+        validate: false,
+        maxIterations: 1,
+      });
+      if (!task.validation_request) {
+        return policyIterationOutcome(task, candidate, null);
+      }
+      const validation = runGenericAgentLoop({
+        ...options,
+        plan: task.validation_plan,
+        request: task.validation_request,
+        runtime,
+        validate: false,
+        maxIterations: 1,
+      });
+      return policyIterationOutcome(task, candidate, validation);
+    },
+    collectResult: ({ outcome }) => outcome,
+    reconcile: ({ state, task, result }) => {
+      const accepted = policyAcceptsResult(result, loopPolicy);
+      const failureSummary = accepted ? '' : failureSummaryForResult(result);
+      const repair = !accepted && loopPolicy.repair_task_template
+        ? {
+            required: true,
+            task_template: loopPolicy.repair_task_template,
+            next_task_id: materializeRepairPlan(loopPolicy.repair_task_template, basePlan, {
+              iteration: task.iteration + 1,
+              state: { ...state, failure_summary: failureSummary },
+              baseRequest,
+            }).task_id,
+          }
+        : { required: false };
+      const record = {
+        schema: 'homeboy/headless-loop-policy-iteration/v1',
+        loop_id: `${baseRequest.task_id}-headless-policy`,
+        iteration: task.iteration,
+        candidate_task_id: task.candidate_request.task_id,
+        validation_task_id: task.validation_request?.task_id || '',
+        accepted,
+        result: compactOutcome(result),
+        repair,
+      };
+      iterationRecords.push(record);
+      latestAccepted = accepted;
+      return {
+        ...state,
+        latest_result: result,
+        latest_policy_iteration: record,
+        repair_required: repair.required,
+        failure_summary: failureSummary,
+        accepted,
+        policy_iterations: iterationRecords,
+      };
+    },
+    stopPolicy: (context) => {
+      const stop = firstMatchingCondition(loopPolicy.stop_conditions, context);
+      if (stop) {
+        stopReason = stop.reason;
+        return { stop: true, reason: stopReason, data: stop.condition };
+      }
+      if (latestAccepted) {
+        stopReason = 'accepted';
+        return { stop: true, reason: stopReason };
+      }
+      if (context.iteration >= loopPolicy.max_iterations) {
+        stopReason = 'max_iterations_reached';
+        return { stop: true, reason: stopReason };
+      }
+      return { stop: false };
+    },
+    shouldContinue: (context) => {
+      if (latestAccepted || context.iteration >= loopPolicy.max_iterations) {
+        return false;
+      }
+      if (loopPolicy.continue_conditions.length === 0) {
+        return true;
+      }
+      const matched = firstMatchingCondition(loopPolicy.continue_conditions, context);
+      return matched ? { continue: true, reason: matched.reason } : { continue: false, reason: 'continue_conditions_not_satisfied' };
+    },
+  });
+
+  const policyStatus = {
+    schema: 'homeboy/headless-loop-policy-status/v1',
+    status: latestAccepted ? 'succeeded' : 'failed',
+    stop_reason: stopReason || 'unknown',
+    max_iterations: loopPolicy.max_iterations,
+    iteration_count: iterationRecords.length,
+    accepted: latestAccepted,
+    iterations: iterationRecords,
+  };
+  loop.policy_status = policyStatus;
+  return {
+    request: baseRequest,
+    outcome: policyOutcome(baseRequest, policyStatus),
+    results: policyResults(baseRequest, policyStatus),
+    assertion: null,
+    loop,
+  };
+}
+
+function compactOutcome(outcome) {
+  return {
+    schema: outcome?.schema || '',
+    task_id: outcome?.task_id || '',
+    status: outcome?.status || '',
+    summary: outcome?.summary || '',
+    diagnostics: normalizeArray(outcome?.diagnostics),
+    artifacts: normalizeArray(outcome?.artifacts),
+    evidence_refs: normalizeArray(outcome?.evidence_refs || outcome?.evidence),
+  };
+}
+
+function policyIterationOutcome(task, candidate, validation) {
+  const result = validation?.outcome || candidate.outcome;
+  return {
+    ...result,
+    metadata: {
+      ...optionalObject(result?.metadata),
+      headless_loop_policy: {
+        candidate_task_id: task.candidate_request.task_id,
+        validation_task_id: task.validation_request?.task_id || '',
+        candidate_outcome: compactOutcome(candidate.outcome),
+        validation_outcome: validation?.outcome ? compactOutcome(validation.outcome) : null,
+      },
+    },
+  };
+}
+
+function normalizeLoopPolicy(plan) {
+  const raw = optionalObject(plan.loop_policy || plan.loopPolicy);
+  const maxIterations = positiveInteger(raw.max_iterations || raw.maxIterations || plan.max_iterations || plan.maxIterations);
+  const enabled = Object.keys(raw).length > 0 || maxIterations > 1;
+  return {
+    enabled,
+    max_iterations: maxIterations || 1,
+    accepted_statuses: normalizeArray(raw.accepted_statuses || raw.acceptedStatuses).length > 0
+      ? normalizeArray(raw.accepted_statuses || raw.acceptedStatuses)
+      : ['accepted', 'succeeded', 'passed', 'no_op'],
+    continue_conditions: normalizeArray(raw.continue_conditions || raw.continueConditions),
+    stop_conditions: normalizeArray(raw.stop_conditions || raw.stopConditions),
+    validation_task: optionalNullableObject(raw.validation_task || raw.validationTask),
+    repair_task_template: optionalNullableObject(raw.repair_task_template || raw.repairTaskTemplate),
+  };
+}
+
+function buildRequestForPlan(plan, options) {
+  return buildGenericAgentLoopRequest({
+    plan,
+    runtime: options.runtime,
+    configPath: options.configPath || options.config_path || '',
+    extensionPath: options.extensionPath || options.extension_path,
+    replayBundleDir: options.replayBundleDir || options.replay_bundle_dir,
+    env: options.env,
+  });
+}
+
+function materializeRepairPlan(template, basePlan, context) {
+  const repairTemplate = template || basePlan;
+  return {
+    ...basePlan,
+    ...materializeTemplate(repairTemplate, basePlan, context),
+  };
+}
+
+function materializeTemplate(template, basePlan, context) {
+  return replaceTemplateStrings({ ...basePlan, ...template }, {
+    task_id: basePlan.task_id || basePlan.workload_id || context.baseRequest?.task_id || '',
+    workload_id: basePlan.workload_id || basePlan.task_id || context.baseRequest?.task_id || '',
+    iteration: context.iteration,
+    previous_task_id: context.state?.latest_policy_iteration?.candidate_task_id || context.baseRequest?.task_id || '',
+    failure_summary: context.state?.failure_summary || '',
+  });
+}
+
+function replaceTemplateStrings(value, vars) {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : match);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => replaceTemplateStrings(entry, vars));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, replaceTemplateStrings(entry, vars)]));
+  }
+  return value;
+}
+
+function policyAcceptsResult(result, policy) {
+  return policy.accepted_statuses.includes(result?.status);
+}
+
+function firstMatchingCondition(conditions, context) {
+  for (const condition of conditions) {
+    if (conditionMatches(condition, context)) {
+      return { reason: condition.reason || condition.name || 'condition_satisfied', condition };
+    }
+  }
+  return null;
+}
+
+function conditionMatches(condition, context) {
+  if (!condition || typeof condition !== 'object' || Array.isArray(condition)) {
+    return false;
+  }
+  const value = condition.path ? getPath(context, condition.path) : undefined;
+  if (Object.prototype.hasOwnProperty.call(condition, 'equals')) {
+    return value === condition.equals;
+  }
+  if (Array.isArray(condition.in)) {
+    return condition.in.includes(value);
+  }
+  if (Array.isArray(condition.outcome_status)) {
+    return condition.outcome_status.includes(context.result?.status || context.outcome?.status);
+  }
+  if (condition.outcome_status) {
+    return (context.result?.status || context.outcome?.status) === condition.outcome_status;
+  }
+  return false;
+}
+
+function getPath(value, pathExpression) {
+  return String(pathExpression).split('.').filter(Boolean).reduce((current, segment) => {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    return current[segment];
+  }, value);
+}
+
+function failureSummaryForResult(result) {
+  return result?.summary || result?.diagnostics?.[0]?.message || result?.status || 'iteration not accepted';
+}
+
+function policyOutcome(request, status) {
+  return {
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: request.task_id,
+    status: status.status,
+    summary: `Headless loop policy ${status.status} after ${status.iteration_count} iteration(s).`,
+    metadata: { headless_loop_policy_status: status },
+  };
+}
+
+function policyResults(request, status) {
+  return {
+    scenarios: [{
+      id: request.task_id,
+      label: request.instructions || request.task_id,
+      metrics: { generic_agent_task_executor_mean: status.status === 'succeeded' ? 1 : 0 },
+      metadata: {
+        job_status: status.status,
+        success_status: status.status,
+        completion_outcome: status.stop_reason,
+        completion_outcome_satisfied: status.status === 'succeeded',
+        headless_loop_policy_status: status,
+      },
+    }],
+  };
+}
+
+function policyArtifact(result) {
+  return {
+    schema: 'homeboy/headless-loop-policy-artifact/v1',
+    loop_id: result?.loop_id || '',
+    status: result?.status || '',
+    tasks: normalizeArray(result?.tasks).map((task) => ({
+      task_id: task.task_id,
+      loop_policy: task.loop_policy,
+    })),
+  };
+}
+
+function statusArtifact(result) {
+  return {
+    schema: 'homeboy/headless-deterministic-loop-status/v1',
+    loop_id: result?.loop_id || '',
+    status: result?.status || '',
+    task_count: normalizeArray(result?.tasks).length,
+    failed_tasks: normalizeArray(result?.tasks).filter((task) => !['succeeded', 'no_op'].includes(task.outcome?.status)).map((task) => task.task_id),
+  };
 }
 
 function resolveLoopRuntime(spec, options = {}) {
@@ -176,6 +529,23 @@ function loopStatus(taskResults) {
   return taskResults.every((entry) => ['succeeded', 'no_op'].includes(entry.outcome?.status)) ? 'succeeded' : 'failed';
 }
 
+function positiveInteger(value) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function optionalObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function optionalNullableObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function normalizeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 function pushEvent(events, type, data = {}) {
   events.push({
     schema: 'homeboy/headless-deterministic-loop-event/v1',
@@ -192,7 +562,20 @@ function loopId(spec) {
 
 function writeJsonFile(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  fs.writeFileSync(filePath, `${safeJsonStringify(value)}\n`);
+}
+
+function safeJsonStringify(value) {
+  const seen = new WeakSet();
+  return JSON.stringify(value, (key, entry) => {
+    if (entry && typeof entry === 'object') {
+      if (seen.has(entry)) {
+        return '[Circular]';
+      }
+      seen.add(entry);
+    }
+    return entry;
+  }, 2);
 }
 
 function requiredObject(value, name) {
