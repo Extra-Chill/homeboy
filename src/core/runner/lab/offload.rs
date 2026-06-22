@@ -22,6 +22,7 @@ use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
+use crate::core::redaction::{redact_argv, redact_argv_display};
 use crate::core::server::{self, SshClient};
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, ErrorCode, Result};
@@ -608,7 +609,7 @@ fn run_runner_resident_lab_offload(
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &command))
+            .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
 
@@ -627,7 +628,7 @@ fn run_runner_resident_lab_offload(
 
     eprintln!(
         "Lab offload: running runner-resident `{}` on runner `{}` in `{}`.",
-        command.join(" "),
+        redact_argv_display(&command),
         runner_id,
         runner_workspace_root
     );
@@ -1015,7 +1016,7 @@ fn prepare_lab_offload_workspace_stage(
     plan = with_step(
         plan,
         PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", &command))
+            .inputs(PlanValues::new().json("argv", &redact_argv(&command)))
             .build(),
     );
 
@@ -1279,7 +1280,7 @@ fn run_lab_offload_inner(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
         source_path.display(),
         source_checkout_ref_display(&source_checkout),
-        command_prefix.argv.join(" "),
+        redact_argv_display(&command_prefix.argv),
         runner_id,
     );
     let capability_contract =
@@ -1399,7 +1400,7 @@ fn run_lab_offload_inner(
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
-        command.join(" "),
+        redact_argv_display(&command),
         runner_id,
         remote_cwd
     );
@@ -1664,8 +1665,8 @@ fn run_lab_offload_inner(
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
                         identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                        local_command: request.normalized_args.to_vec(),
-                        remote_command: remote_command.clone(),
+                        local_command: redact_argv(request.normalized_args),
+                        remote_command: redact_argv(&remote_command),
                         remote_workspace: &remote_cwd,
                         stdout: &exec_output.stdout,
                         stderr: &exec_output.stderr,
@@ -1692,8 +1693,8 @@ fn run_lab_offload_inner(
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
                 agent_task_lifecycle::AgentTaskPreDispatchFailure {
                     identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
-                    local_command: request.normalized_args.to_vec(),
-                    remote_command: remote_command.clone(),
+                    local_command: redact_argv(request.normalized_args),
+                    remote_command: redact_argv(&remote_command),
                     remote_workspace: &remote_cwd,
                     failure_message: &failure_message,
                     stdout: &exec_output.stdout,
@@ -2160,8 +2161,8 @@ fn missing_mutation_patch_error(
     exec_output: &super::super::RunnerExecOutput,
 ) -> Error {
     let flag_label = mutation_flag.unwrap_or("write");
-    let original_command = normalized_args.join(" ");
-    let remote_command = exec_output.argv.join(" ");
+    let original_command = redact_argv_display(normalized_args);
+    let remote_command = redact_argv_display(&exec_output.argv);
     let patch_artifact_id = exec_output
         .patch
         .as_ref()
@@ -2235,7 +2236,7 @@ fn append_runner_failure_context_summary(
         .unwrap_or("unknown contract field");
     stderr.push_str(&format!(
         "Lab offload failure context: command `{}` failed on runner `{}`; runner job `{job}`; persisted run `{run}`; contract field `{field}`; reason: {}.\n",
-        context.command.join(" "),
+        redact_argv_display(&context.command),
         context.runner_id,
         context.reason
     ));

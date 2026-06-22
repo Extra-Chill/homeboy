@@ -14,6 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::core::error::{Error, Result};
+use crate::core::redaction::redact_argv_display;
 use crate::core::source_snapshot::SourceSnapshot;
 
 mod remote_runner;
@@ -610,7 +611,7 @@ fn active_runner_job_summary(
             .unwrap_or_else(|| "runner-daemon".to_string()),
         kind: request_metadata_string(request, "kind").unwrap_or_else(|| job.operation.clone()),
         status: job.status,
-        command: request.command.join(" "),
+        command: redact_argv_display(&request.command),
         cwd: request.cwd.clone(),
         started_at_ms,
         updated_at_ms: job.updated_at_ms,
