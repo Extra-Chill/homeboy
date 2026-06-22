@@ -11,7 +11,8 @@ use crate::core::upgrade::ExtensionUpgradeEntry;
 use crate::core::Result;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 thread_local! {
     static LOCAL_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -1025,6 +1026,83 @@ fn source_runner_upgrade_realigns_to_same_version_source_checkout_identity() {
 }
 
 #[test]
+fn runner_source_prepare_fast_forwards_attached_upstream_branch() {
+    let fixture = remote_source_fixture();
+    let checkout = fixture.root.path().join("attached");
+    run_git(
+        fixture.root.path(),
+        &[
+            "clone",
+            fixture.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+
+    run_source_prepare_script(&checkout);
+
+    assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), "main");
+    assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), expected_head);
+    assert_eq!(
+        git_stdout(&checkout, &["rev-parse", "origin/main"]),
+        expected_head
+    );
+}
+
+#[test]
+fn runner_source_prepare_updates_detached_checkout_to_remote_default() {
+    let fixture = remote_source_fixture();
+    let checkout = fixture.root.path().join("detached");
+    run_git(
+        fixture.root.path(),
+        &[
+            "clone",
+            fixture.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    run_git(&checkout, &["checkout", "--detach", "HEAD"]);
+    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+
+    run_source_prepare_script(&checkout);
+
+    assert_eq!(git_stdout(&checkout, &["branch", "--show-current"]), "");
+    assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), expected_head);
+}
+
+#[test]
+fn runner_source_prepare_detached_checkout_ignores_default_branch_checked_out_elsewhere() {
+    let fixture = remote_source_fixture();
+    let primary = fixture.root.path().join("primary");
+    let detached = fixture.root.path().join("detached-worktree");
+    run_git(
+        fixture.root.path(),
+        &[
+            "clone",
+            fixture.origin.to_str().unwrap(),
+            primary.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            detached.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let expected_head = add_remote_commit(&fixture.seed, "remote update");
+
+    run_source_prepare_script(&detached);
+
+    assert_eq!(git_stdout(&detached, &["branch", "--show-current"]), "");
+    assert_eq!(git_stdout(&detached, &["rev-parse", "HEAD"]), expected_head);
+    assert_eq!(git_stdout(&primary, &["branch", "--show-current"]), "main");
+}
+
+#[test]
 fn realigns_versioned_runner_homeboy_path_using_final_bare_homeboy_state() {
     let _local_version = pin_local_version_for_fixtures();
     let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy-0.229.1"));
@@ -1325,6 +1403,95 @@ fn git_source_checkout() -> tempfile::TempDir {
         &["commit", "--no-gpg-sign", "-m", "Initial commit"],
     );
     dir
+}
+
+struct RemoteSourceFixture {
+    root: tempfile::TempDir,
+    seed: PathBuf,
+    origin: PathBuf,
+}
+
+fn remote_source_fixture() -> RemoteSourceFixture {
+    let root = tempfile::tempdir().expect("tempdir");
+    let seed = root.path().join("seed");
+    let origin = root.path().join("origin.git");
+
+    std::fs::create_dir_all(&seed).expect("mkdir seed");
+    std::fs::write(seed.join("README.md"), "initial\n").expect("write readme");
+    run_git(&seed, &["init", "-b", "main"]);
+    configure_test_git_identity(&seed);
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "--no-gpg-sign", "-m", "Initial commit"]);
+    run_git(
+        root.path(),
+        &[
+            "clone",
+            "--bare",
+            seed.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        &seed,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+
+    RemoteSourceFixture { root, seed, origin }
+}
+
+fn configure_test_git_identity(path: &Path) {
+    run_git(path, &["config", "user.email", "homeboy@example.test"]);
+    run_git(path, &["config", "user.name", "Homeboy Test"]);
+    run_git(path, &["config", "commit.gpgsign", "false"]);
+    run_git(path, &["config", "tag.gpgsign", "false"]);
+}
+
+fn add_remote_commit(seed: &Path, message: &str) -> String {
+    let file = seed.join("README.md");
+    let mut content = std::fs::read_to_string(&file).expect("read readme");
+    content.push_str(message);
+    content.push('\n');
+    std::fs::write(&file, content).expect("write readme");
+    run_git(seed, &["add", "README.md"]);
+    run_git(seed, &["commit", "--no-gpg-sign", "-m", message]);
+    run_git(seed, &["push", "origin", "main"]);
+    git_stdout(seed, &["rev-parse", "HEAD"])
+}
+
+fn run_source_prepare_script(path: &Path) {
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(runner_source_checkout_prepare_script())
+        .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run source prepare script");
+    assert!(
+        output.status.success(),
+        "source prepare script failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout(path: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: stdout={} stderr={}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn run_git(path: &Path, args: &[&str]) {

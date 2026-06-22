@@ -116,23 +116,16 @@ pub fn runner_source_checkout_prepare_options(
 pub fn runner_source_checkout_prepare_script() -> &'static str {
     r#"set -e
 git fetch origin
+if git symbolic-ref -q HEAD >/dev/null && git rev-parse --abbrev-ref --symbolic-full-name @{upstream} >/dev/null 2>&1; then
+  git pull --ff-only
+  exit 0
+fi
 remote_head="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
-branch="${remote_head#origin/}"
-if [ -z "$branch" ]; then
-  if git symbolic-ref -q HEAD >/dev/null && git rev-parse --abbrev-ref --symbolic-full-name @{upstream} >/dev/null 2>&1; then
-    git pull --ff-only
-    exit 0
-  fi
+if [ -z "$remote_head" ]; then
   echo "Cannot determine origin default branch for source checkout" >&2
   exit 1
 fi
-if git show-ref --verify --quiet "refs/heads/$branch"; then
-  git switch "$branch"
-else
-  git switch --track -c "$branch" "origin/$branch"
-fi
-git branch --set-upstream-to="origin/$branch" "$branch"
-git pull --ff-only origin "$branch"
+git checkout --detach "$remote_head"
 "#
 }
 
