@@ -178,7 +178,7 @@ fn controller_run_from_spec_materializes_runs_bounded_actions_and_returns_status
                 dispatch_model: None,
                 dispatch_provider_config: None,
             },
-            CapturingExecutor::default(),
+            ArtifactCapturingExecutor::default(),
         )
         .expect("run from spec");
 
