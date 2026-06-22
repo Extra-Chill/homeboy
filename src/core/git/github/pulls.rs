@@ -13,6 +13,7 @@ use super::super::github_types::{
 use super::client::{
     ensure_gh_ready, parse_issue_number_from_url, resolve_component_github, run_gh, string_value,
 };
+use super::push_markdown_body_file_arg;
 use super::readiness::classify_pr_ci;
 
 /// Open a new pull request.
@@ -49,9 +50,9 @@ pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result
         options.head.clone(),
         "--title".into(),
         options.title.clone(),
-        "--body".into(),
-        options.body.clone(),
     ];
+    let mut body_files = Vec::new();
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
     if options.draft {
         args.push("--draft".into());
     }
@@ -98,13 +99,13 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
         "-R".into(),
         repo_flag,
     ];
+    let mut body_files = Vec::new();
     if let Some(title) = &options.title {
         args.push("--title".into());
         args.push(title.clone());
     }
     if let Some(body) = &options.body {
-        args.push("--body".into());
-        args.push(body.clone());
+        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)?;
     }
 
     let output = run_gh(&args)?;

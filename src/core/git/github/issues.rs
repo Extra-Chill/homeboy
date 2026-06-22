@@ -9,6 +9,7 @@ use super::super::github_types::{
 use super::client::{
     ensure_gh_ready, parse_issue_number_from_url, resolve_component_github, run_gh,
 };
+use super::push_markdown_body_file_arg;
 
 /// Create a new issue on the component's GitHub repository.
 pub fn issue_create(
@@ -35,9 +36,9 @@ pub fn issue_create(
         repo_flag.clone(),
         "--title".into(),
         options.title.clone(),
-        "--body".into(),
-        options.body.clone(),
     ];
+    let mut body_files = Vec::new();
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
     for label in &options.labels {
         args.push("--label".into());
         args.push(label.clone());
@@ -69,15 +70,15 @@ pub fn issue_comment(
     ensure_gh_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "issue".into(),
         "comment".into(),
         options.number.to_string(),
         "-R".into(),
         repo_flag,
-        "--body".into(),
-        options.body.clone(),
     ];
+    let mut body_files = Vec::new();
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
 
     let output = run_gh(&args)?;
     Ok(GithubIssueOutput {
@@ -171,13 +172,13 @@ pub fn issue_edit(
         "-R".into(),
         repo_flag,
     ];
+    let mut body_files = Vec::new();
     if let Some(title) = &options.title {
         args.push("--title".into());
         args.push(title.clone());
     }
     if let Some(body) = &options.body {
-        args.push("--body".into());
-        args.push(body.clone());
+        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)?;
     }
     for label in &options.add_labels {
         args.push("--add-label".into());

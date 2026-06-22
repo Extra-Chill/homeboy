@@ -30,6 +30,7 @@
 //! - [`fleet`] — batch PR reporting and landing.
 //! - [`readiness`] — CI-check classification and merge-readiness reasoning.
 
+mod body_file;
 mod client;
 mod fleet;
 mod issues;
@@ -51,6 +52,7 @@ pub use super::github_types::{
 // Internal helpers shared with sibling modules (e.g. `github_pr_comments`),
 // re-exported at this module path so existing `super::github::X` paths keep
 // resolving after the split.
+pub(in crate::core) use body_file::push_markdown_body_file_arg;
 pub(in crate::core::git) use client::{ensure_gh_ready, resolve_component_github, run_gh};
 
 // Public probe/token helpers.

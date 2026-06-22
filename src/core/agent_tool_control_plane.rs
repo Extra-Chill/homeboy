@@ -448,9 +448,10 @@ fn github_issue_create(
         repo.to_string(),
         "--title".to_string(),
         title.to_string(),
-        "--body".to_string(),
-        body.to_string(),
     ];
+    let mut body_files = Vec::new();
+    git::push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)
+        .map_err(|error| validation_error("github_body_file", &error.to_string(), Value::Null))?;
     for label in optional_string_array(input, "labels").unwrap_or_default() {
         args.push("--label".to_string());
         args.push(label);
@@ -492,9 +493,10 @@ fn github_pull_create(
         head.to_string(),
         "--title".to_string(),
         title.to_string(),
-        "--body".to_string(),
-        body.to_string(),
     ];
+    let mut body_files = Vec::new();
+    git::push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)
+        .map_err(|error| validation_error("github_body_file", &error.to_string(), Value::Null))?;
     if bool_input(input, "draft") {
         args.push("--draft".to_string());
     }
@@ -507,18 +509,17 @@ fn github_pull_comment(
     let repo = required_string(input, &["repo"])?;
     let number = required_u64(input, &["number", "pr", "pull_number"])?;
     let body = required_string(input, &["body", "comment"])?;
-    run_gh_url(
-        &[
-            "pr".to_string(),
-            "comment".to_string(),
-            number.to_string(),
-            "-R".to_string(),
-            repo.to_string(),
-            "--body".to_string(),
-            body.to_string(),
-        ],
-        "pr.comment",
-    )
+    let mut args = vec![
+        "pr".to_string(),
+        "comment".to_string(),
+        number.to_string(),
+        "-R".to_string(),
+        repo.to_string(),
+    ];
+    let mut body_files = Vec::new();
+    git::push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)
+        .map_err(|error| validation_error("github_body_file", &error.to_string(), Value::Null))?;
+    run_gh_url(&args, "pr.comment")
 }
 
 fn run_gh_json(args: &[&str]) -> Result<Value, AgentTaskDiagnostic> {

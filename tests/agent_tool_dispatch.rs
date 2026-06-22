@@ -136,15 +136,26 @@ fn agent_tool_dispatch_outputs_raw_control_plane_validation_result() {
 }
 
 fn run_tool_dispatch(policy: Value, request: Value) -> std::process::Output {
-    let mut child = Command::new(homeboy_bin())
+    run_tool_dispatch_with_env(policy, request, &[])
+}
+
+fn run_tool_dispatch_with_env(
+    policy: Value,
+    request: Value,
+    envs: &[(&str, String)],
+) -> std::process::Output {
+    let mut command = Command::new(homeboy_bin());
+    command
         .args(["agent-task", "tool", "dispatch"])
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("HOMEBOY_AGENT_TOOL_POLICY_JSON", policy.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn homeboy");
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("spawn homeboy");
     child
         .stdin
         .as_mut()
@@ -175,6 +186,76 @@ fn run_tool_dispatch(policy: Value, request: Value) -> std::process::Output {
     output.stdout = stdout;
     output.stderr = stderr;
     output
+}
+
+#[test]
+fn agent_tool_github_issue_create_uses_body_file_for_shell_sensitive_markdown() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gh_path = dir.path().join("gh");
+    let capture_prefix = dir.path().join("gh-capture");
+    std::fs::write(
+        &gh_path,
+        r#"#!/bin/sh
+set -eu
+out="$HOMEBOY_FAKE_GH_OUTPUT"
+printf '%s
+' "$@" > "$out.args"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--body-file" ]; then
+    shift
+    cp "$1" "$out.body"
+  fi
+  shift || true
+done
+printf '%s
+' 'https://github.com/Extra-Chill/homeboy/issues/1'
+"#,
+    )
+    .expect("write fake gh");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gh");
+    }
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{}", dir.path().display(), old_path);
+    let body = "`homeboy-lab run`\n/home/chubes/.cache/homeboy/wp-codebox/source\n> quoted";
+    let output = run_tool_dispatch_with_env(
+        json!({
+            "schema": "homeboy/agent-tool-policy/v1",
+            "default_location": "control_plane"
+        }),
+        json!({
+            "schema": "homeboy/agent-tool-request/v1",
+            "request_id": "request-gh-issue",
+            "task_id": "task-1",
+            "tool": "create_github_issue",
+            "input": {
+                "repo": "Extra-Chill/homeboy",
+                "title": "Safe issue body files",
+                "body": body
+            }
+        }),
+        &[
+            ("PATH", path),
+            (
+                "HOMEBOY_FAKE_GH_OUTPUT",
+                capture_prefix.to_string_lossy().into_owned(),
+            ),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout: Value = serde_json::from_slice(&output.stdout).expect("dispatch json");
+    assert_eq!(stdout["status"], "succeeded");
+    let args = std::fs::read_to_string(capture_prefix.with_extension("args")).expect("gh args");
+    assert!(args.contains("--body-file\n"));
+    assert!(!args.contains(body));
+    let captured_body =
+        std::fs::read_to_string(capture_prefix.with_extension("body")).expect("gh body");
+    assert_eq!(captured_body, body);
 }
 
 #[test]
