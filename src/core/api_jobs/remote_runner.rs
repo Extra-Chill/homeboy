@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::{
     job_not_found, timestamp_ms, Job, JobEvent, JobEventKind, JobStatus, JobStore, StoredJob,
 };
+use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
 use crate::core::runner::{RunnerMutationArtifacts, RunnerResourceMetrics};
@@ -54,10 +55,19 @@ pub struct RemoteRunnerJobRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_workload: Option<RunnerWorkload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
 }
 
 impl RemoteRunnerJobRequest {
+    pub(crate) fn required_extensions(&self) -> Vec<String> {
+        self.runner_workload
+            .as_ref()
+            .map(|workload| workload.required_extensions.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn public_metadata(&self) -> Self {
         let mut public = self.clone();
         let secret_env_names = self
@@ -130,6 +140,14 @@ impl JobStore {
                 None,
             ));
         }
+        crate::core::runner::workload::validate_runner_workload_dispatch(
+            request.runner_workload.as_ref(),
+            &request.runner_id,
+            request.cwd.as_deref(),
+            &request.command,
+            &request.secret_env_names,
+            request.capture_patch,
+        )?;
 
         let now = timestamp_ms();
         let job = Job {

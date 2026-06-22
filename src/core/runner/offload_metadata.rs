@@ -379,6 +379,9 @@ mod tests {
                 plan_id: plan.id.clone(),
                 proof_id: None,
                 workspace_mapping_ref: Some("workspace_mapping".to_string()),
+                job_id: None,
+                mirror_run_id: None,
+                artifacts: Vec::new(),
             },
         };
 

@@ -296,6 +296,7 @@ fn run_rig_source_management_on_runner(
             capability_preflight,
             required_extensions: Vec::new(),
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         },
     )?;

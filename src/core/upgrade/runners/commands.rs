@@ -156,6 +156,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         capability_preflight: Some(runner_upgrade_capability_plan()),
         required_extensions: Vec::new(),
         require_paths: Vec::new(),
+        runner_workload: None,
         detach_after_handoff: false,
     }
 }

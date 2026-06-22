@@ -668,6 +668,7 @@ fn run_runner_resident_lab_offload(
             capability_preflight: None,
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
+            runner_workload: None,
             detach_after_handoff: false,
         },
     )?;
@@ -1423,26 +1424,26 @@ fn run_lab_offload_inner(
         None,
         Some(&workspace_mapping_metadata),
     );
+    let runner_workload = build_runner_workload(RunnerWorkloadBuildInput {
+        plan: &plan,
+        command: &contract,
+        capture_patch: request.capture_patch,
+        mutation_flag: request.mutation_flag,
+        allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        runner_id,
+        runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
+        assignment_source: selection.source.metadata_value(),
+        status: "offloaded",
+        remote_workspace: Some(&remote_cwd),
+        fallback_reason: None,
+        workspace_mapping_ref: Some("workspace_mapping"),
+        proof_id: lab_metadata
+            .get("proof")
+            .and_then(|proof| proof.get("id"))
+            .and_then(|id| id.as_str()),
+    });
     lab_metadata["runner_workload"] =
-        serde_json::to_value(build_runner_workload(RunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &contract,
-            capture_patch: request.capture_patch,
-            mutation_flag: request.mutation_flag,
-            allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
-            runner_id,
-            runner_mode: status_tunnel_mode(&runner_status).metadata_value(),
-            assignment_source: selection.source.metadata_value(),
-            status: "offloaded",
-            remote_workspace: Some(&remote_cwd),
-            fallback_reason: None,
-            workspace_mapping_ref: Some("workspace_mapping"),
-            proof_id: lab_metadata
-                .get("proof")
-                .and_then(|proof| proof.get("id"))
-                .and_then(|id| id.as_str()),
-        }))
-        .unwrap_or(serde_json::json!(null));
+        serde_json::to_value(&runner_workload).unwrap_or(serde_json::json!(null));
     lab_metadata["source_snapshot"] =
         serde_json::to_value(&source_snapshot).unwrap_or(serde_json::json!(null));
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
@@ -1530,6 +1531,7 @@ fn run_lab_offload_inner(
             capability_preflight,
             required_extensions: contract.required_extensions.clone(),
             require_paths: Vec::new(),
+            runner_workload: Some(runner_workload),
             detach_after_handoff: request.detach_after_handoff,
         },
     );
