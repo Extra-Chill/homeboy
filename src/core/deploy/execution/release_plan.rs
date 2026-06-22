@@ -110,9 +110,15 @@ fn release_asset_download_error(
     artifact_name: &str,
     error: crate::core::error::Error,
 ) -> String {
+    let error_details = if error.details.is_null() {
+        error.to_string()
+    } else {
+        format!("{}: {}", error, error.details)
+    };
+
     format!(
         "artifact source release_asset failed for '{}' tag {} artifact '{}': {}. Refusing to fall back to local_build; use --tagged to request an explicit local tag build.",
-        component.id, tag, artifact_name, error
+        component.id, tag, artifact_name, error_details
     )
 }
 
