@@ -42,6 +42,10 @@ const wpCodeboxRuntime = resolveRuntimeProvider('wp-codebox', { repoRoot, regist
 assert.equal(wpCodeboxRuntime.id, 'wp-codebox');
 assert.equal(wpCodeboxRuntime.executor.backend, 'codebox');
 assert.equal(wpCodeboxRuntime.executor.path, path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs'));
+assert.equal(wpCodeboxRuntime.executor.invocation.command, 'node');
+assert.deepEqual(wpCodeboxRuntime.executor.invocation.argv, [path.join(repoRoot, 'agent-runtimes/wp-codebox/scripts/agent/homeboy-codebox-agent-task-executor.cjs')]);
+assert.equal(wpCodeboxRuntime.executor.invocation.stdin, 'request_json');
+assert.equal(wpCodeboxRuntime.executor.invocation.stdout, 'outcome_json');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-runtime-registry-'));
 try {
