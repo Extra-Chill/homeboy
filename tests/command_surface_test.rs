@@ -175,7 +175,7 @@ fn command_index_matches_top_level_command_surface() {
 #[test]
 fn command_safety_manifest_docs_paths_match_command_docs() {
     let manifest = current_command_safety_manifest();
-    let hidden_top_level_commands = BTreeSet::from(["list"]);
+    let hidden_top_level_commands = BTreeSet::from(["lab", "list"]);
 
     for entry in &manifest.commands {
         if entry.hidden {
@@ -276,7 +276,7 @@ fn command_docs_files_match_command_index_snapshot() {
     ]);
     // Hidden top-level commands ship a docs file for runtimes but are
     // deliberately kept out of the human-facing command index.
-    let hidden_documented_commands = BTreeSet::from(["list".to_string()]);
+    let hidden_documented_commands = BTreeSet::from(["lab".to_string(), "list".to_string()]);
     let docs_files = documented_command_doc_files();
 
     // Guard against a vacuously-passing snapshot: the index and the docs

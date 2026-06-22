@@ -65,7 +65,7 @@ enum FuzzCommand {
     List(FuzzListArgs),
     /// Build a fuzz execution request without executing it
     Plan(FuzzPlanArgs),
-    /// Resolve the selected fuzz workload contract without executing it
+    /// Execute the selected fuzz workload and persist fuzz evidence
     Run(FuzzRunArgs),
     /// Validate a fuzz result campaign file
     Validate(FuzzValidateArgs),
