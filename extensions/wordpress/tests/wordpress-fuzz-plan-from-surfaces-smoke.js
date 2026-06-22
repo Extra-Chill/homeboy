@@ -43,11 +43,21 @@ assert.equal(plan.targets.length, 16);
 const targetTypes = Object.fromEntries(plan.targets.map((target) => [target.type, target]));
 assert.equal(targetTypes.hook.cases[0].intent, 'exercise-hook');
 assert.equal(targetTypes['cron-event'].cases[0].intent, 'inspect-cron-event');
-assert.equal(targetTypes.option.cases[0].operation.option, 'blogname');
-assert.equal(targetTypes['post-type'].cases[0].operation.post_type, 'post');
-assert.equal(targetTypes.taxonomy.cases[0].operation.taxonomy, 'category');
+assert.deepEqual(targetTypes.option.cases.map((testCase) => testCase.intent), ['read-option', 'create-option', 'update-option', 'delete-option']);
+assert.equal(targetTypes.option.cases[0].operation.resource_type, 'option');
+assert.equal(targetTypes.option.cases[0].operation.input.option, 'blogname');
+assert.equal(targetTypes.option.cases[0].operation.safety.level, 'safe');
+assert.equal(targetTypes.option.cases[1].operation.capability_context.required[0], 'manage_options');
+assert.deepEqual(targetTypes.option.cases[1].skip_reasons, ['crud_mutation_requires_explicit_allow']);
+assert.deepEqual(targetTypes['post-type'].cases.map((testCase) => testCase.intent), ['list-posts', 'read-post', 'create-post', 'update-post', 'delete-post']);
+assert.equal(targetTypes['post-type'].cases[0].operation.resource_type, 'post');
+assert.equal(targetTypes['post-type'].cases[0].operation.input.post_type, 'post');
+assert.equal(targetTypes['post-type'].cases[3].operation.rollback_policy.strategy, 'restore-snapshot');
+assert.equal(targetTypes.taxonomy.cases[0].operation.resource_type, 'term');
+assert.equal(targetTypes.taxonomy.cases[0].operation.input.taxonomy, 'category');
 assert.equal(targetTypes.media.cases[0].intent, 'query-media');
-assert.equal(targetTypes.user.cases[0].intent, 'query-user');
+assert.deepEqual(targetTypes.user.cases.map((testCase) => testCase.intent), ['list-users', 'read-user', 'create-user', 'update-user', 'delete-user']);
+assert.equal(targetTypes.user.cases[2].operation.capability_context.required[0], 'create_users');
 assert.equal(targetTypes.role.cases[0].intent, 'check-role-boundary');
 assert.equal(targetTypes.capability.cases[0].intent, 'check-capability-boundary');
 assert.equal(targetTypes['database-table'].cases[0].intent, 'inspect-database-table');
@@ -72,6 +82,7 @@ const aliasPlan = buildWordPressFuzzPlanFromSurfaces({
 	],
 });
 assert.deepEqual(aliasPlan.targets.map((target) => target.type), ['rest-route', 'frontend-url', 'user', 'hook']);
+assert.equal(aliasPlan.targets[0].cases.length, 1, 'REST routes without a declared resource keep legacy single-case behavior');
 
 const runtimeDiscovery = normalizeWordPressRuntimeSurfaceDiscovery({
 	id: 'runtime-surfaces',
@@ -140,5 +151,18 @@ for (const method of ['POST', 'DELETE']) {
 	assert.equal(testCase.metadata.safety.requires_explicit_opt_in, true);
 	assert.deepEqual(testCase.metadata.auth, { required: true, source: 'permission_callback', capability: 'edit_posts' });
 }
+
+const resourcePlan = buildWordPressFuzzPlanFromSurfaces({
+	surfaces: [
+		{ id: 'rest:settings', type: 'rest-route', route: '/wp/v2/settings', resource_type: 'setting', allowCrudMutations: true },
+		{ id: 'custom:legacy', type: 'wp-cli-command', command: 'wp option list' },
+	],
+});
+assert.deepEqual(resourcePlan.targets[0].cases.map((testCase) => testCase.intent), ['list-settings', 'read-setting', 'create-setting', 'update-setting', 'delete-setting']);
+assert.equal(resourcePlan.targets[0].cases[2].operation.resource_type, 'setting');
+assert.equal(resourcePlan.targets[0].cases[2].operation.capability_context.required[0], 'manage_options');
+assert.deepEqual(resourcePlan.targets[0].cases[2].skip_reasons, []);
+assert.equal(resourcePlan.targets[1].cases.length, 1);
+assert.equal(resourcePlan.targets[1].cases[0].intent, 'exercise-wordpress-surface');
 
 console.log('WordPress fuzz plan from surfaces smoke passed.');
