@@ -8,7 +8,8 @@ use crate::core::project::Project;
 use crate::core::release::version;
 
 use super::execution::{
-    execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
+    execute_preflighted_component_deploy, prepare_component_deploy, release_artifact_plan,
+    PreparedComponentDeploy, ReleaseArtifactPlan,
 };
 use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
 use super::orchestration_tag_checkout::{
@@ -483,6 +484,7 @@ fn run_dry_run_mode(
             if let Some(deploy_ref) = planned_deploy_ref(c, config)? {
                 result = result.with_deployed_ref(deploy_ref);
             }
+            result = with_dry_run_artifact_plan(result, c, config);
             if config.check {
                 result = result.with_component_status(status);
             }
@@ -500,6 +502,33 @@ fn run_dry_run_mode(
             skipped: 0,
         },
     })
+}
+
+fn with_dry_run_artifact_plan(
+    mut result: ComponentDeployResult,
+    component: &Component,
+    config: &DeployConfig,
+) -> ComponentDeployResult {
+    let is_git_deploy = component.deploy_strategy.as_deref() == Some("git");
+    let is_file_deploy = component.deploy_strategy.as_deref() == Some("file");
+    if is_git_deploy || is_file_deploy {
+        return result;
+    }
+
+    match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
+        ReleaseArtifactPlan::Reuse { url, tag } => {
+            result.warnings.push(format!(
+                "artifact source: release asset for tag {tag}; build phase: skipped if asset is available; deploy phase: would upload downloaded asset"
+            ));
+            result.with_artifact_path(Some(url))
+        }
+        ReleaseArtifactPlan::LocalBuild { reason } => {
+            result.warnings.push(format!(
+                "artifact source: local rebuild; reason: {reason}; build phase: would run before deploy; deploy phase: would upload local build_artifact"
+            ));
+            result
+        }
+    }
 }
 
 fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Option<String>> {
