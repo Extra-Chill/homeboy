@@ -112,6 +112,9 @@ function surfaceTypeFromCollectionKey(key) {
 }
 
 function targetFromSurface(surface, options = {}) {
+	if (surface.type === 'admin-page') {
+		return adminPageTargetFromSurface(surface, options);
+	}
 	if (surface.type === 'rest-route' && !crudResourceForSurface(surface)) {
 		return restRouteTargetFromSurface(surface, options);
 	}
@@ -158,6 +161,42 @@ function genericTargetFromSurface(surface, options = {}) {
 			type: surface.type,
 			skip_reasons: reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason),
 			destructive_reasons: reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons),
+			...(surface.metadata || {}),
+		},
+	};
+}
+
+function adminPageTargetFromSurface(surface, options = {}) {
+	const operation = operationForSurface(surface);
+	const operationId = surface.operation_id || surface.operationId || `${surface.id}:request-admin-page`;
+	const skipReasons = reasonList(surface.skip_reasons || surface.skipReasons || surface.skip_reason || surface.skipReason);
+	const destructiveReasons = reasonList(surface.destructive_reasons || surface.destructiveReasons || surface.destructive_reason || surface.destructiveReason || surface.unsafeReasons);
+	const cases = [{
+		id: `${surface.id}-generic-fuzz`,
+		intent: 'request-admin-page',
+		operation_id: operationId,
+		operation,
+		seed: options.seed,
+		skip_reasons: skipReasons,
+		destructive_reasons: destructiveReasons,
+		metadata: { surface, executable: skipReasons.length === 0 && destructiveReasons.length === 0 },
+	}];
+
+	for (const interaction of collectAdminPageInteractions(surface)) {
+		cases.push(adminPageInteractionCase(surface, interaction, options));
+	}
+
+	return {
+		id: surface.id,
+		surface_id: surface.id,
+		type: surface.type,
+		operation_id: operationId,
+		cases,
+		metadata: {
+			label: surface.label,
+			type: surface.type,
+			skip_reasons: skipReasons,
+			destructive_reasons: destructiveReasons,
 			...(surface.metadata || {}),
 		},
 	};
@@ -374,6 +413,104 @@ function rollbackPolicyForCrudAction(action) {
 	return { strategy: 'restore-snapshot', scope: 'operation', after_each_case: true };
 }
 
+function collectAdminPageInteractions(surface) {
+	return [
+		...tagAdminPageInteractions(surface.interactions, 'interaction'),
+		...tagAdminPageInteractions(surface.forms, 'form'),
+		...tagAdminPageInteractions(surface.actions, 'action'),
+	];
+}
+
+function tagAdminPageInteractions(items, kind) {
+	return Array.isArray(items) ? items.map((item, index) => ({ kind, index, ...(isObject(item) ? item : { value: item }) })) : [];
+}
+
+function adminPageInteractionCase(surface, interaction, options = {}) {
+	const operation = stripUndefined({
+		...operationForSurface(surface),
+		interaction_kind: interaction.kind,
+		interaction_id: interaction.id || interaction.name || interaction.selector || interaction.action || `${interaction.kind}-${interaction.index + 1}`,
+		selector: interaction.selector,
+		action: interaction.action,
+		method: interaction.method,
+		fields: interaction.fields,
+	});
+	const safety = adminPageInteractionSafety(interaction);
+	const skipReasons = reasonList(interaction.skip_reasons || interaction.skipReasons || interaction.skip_reason || interaction.skipReason);
+	const destructiveReasons = reasonList(interaction.destructive_reasons || interaction.destructiveReasons || interaction.destructive_reason || interaction.destructiveReason || safety.reason_codes);
+	const gated = safety.mutates || destructiveReasons.length > 0;
+	if (gated) {
+		skipReasons.push('requires_explicit_mutation_opt_in');
+	}
+
+	return {
+		id: `${surface.id}-${interaction.kind}-${normalizeToken(operation.interaction_id)}-plan`,
+		intent: gated ? 'plan-admin-page-mutation' : 'exercise-admin-page-read-only-interaction',
+		operation_id: `${surface.id}:${interaction.kind}:${normalizeToken(operation.interaction_id)}`,
+		operation,
+		seed: options.seed,
+		skip_reasons: [...new Set(skipReasons)].sort(),
+		destructive_reasons: destructiveReasons,
+		metadata: stripUndefined({
+			interaction,
+			safety,
+			capability_context: normalizeCapabilityContext(interaction),
+			nonce_context: normalizeNonceContext(interaction),
+			executable: !gated,
+			gated,
+			requires_explicit_opt_in: gated || undefined,
+		}),
+	};
+}
+
+function adminPageInteractionSafety(interaction) {
+	const declared = isObject(interaction.safety) ? interaction.safety : {};
+	const method = String(interaction.method || declared.method || 'GET').toUpperCase();
+	const mutates = interaction.mutates === true || interaction.destructive === true || declared.mutates === true || !['GET', 'HEAD'].includes(method);
+	const destructive = interaction.destructive === true || declared.level === 'destructive';
+	let level = declared.level;
+	if (!level) {
+		level = 'safe';
+		if (destructive) {
+			level = 'destructive';
+		} else if (mutates) {
+			level = 'mutating';
+		}
+	}
+	return {
+		level,
+		mutates,
+		rollback_required: declared.rollback_required ?? declared.rollbackRequired ?? mutates,
+		reason_codes: reasonList(declared.reason_codes || declared.reasonCodes || (mutates ? [`${interaction.kind}_mutation`] : [])),
+	};
+}
+
+function normalizeCapabilityContext(interaction) {
+	const context = interaction.capability_context || interaction.capabilityContext;
+	if (isObject(context)) {
+		return context;
+	}
+	if (interaction.capability) {
+		return { required: [String(interaction.capability)] };
+	}
+	return undefined;
+}
+
+function normalizeNonceContext(interaction) {
+	const context = interaction.nonce_context || interaction.nonceContext;
+	if (isObject(context)) {
+		return context;
+	}
+	if (interaction.nonce || interaction.nonce_action || interaction.nonceAction) {
+		return stripUndefined({
+			required: true,
+			action: interaction.nonce_action || interaction.nonceAction || interaction.action,
+			field: interaction.nonce_field || interaction.nonceField || '_wpnonce',
+		});
+	}
+	return undefined;
+}
+
 function operationForSurface(surface) {
 	const operation = { id: surface.operation_id || surface.operationId, surface_type: surface.type };
 	for (const key of ['id', 'name', 'hook', 'action', 'event', 'option', 'post_type', 'taxonomy', 'block_name', 'path', 'route', 'method', 'url', 'role', 'capability', 'table', 'query', 'request', 'endpoint']) {
@@ -419,6 +556,14 @@ function stripUndefined(value) {
 
 function isObject(value) {
 	return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeToken(value) {
+	return String(value || '')
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '_')
+		.replace(/^_+|_+$/g, '') || 'interaction';
 }
 
 module.exports = {
