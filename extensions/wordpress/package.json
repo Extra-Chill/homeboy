@@ -96,6 +96,7 @@
     "test:codebox-memory-report": "node tests/codebox-memory-report-smoke.js",
     "test:codebox-provider-adapter": "node tests/codebox-provider-adapter-smoke.js",
     "test:wp-codebox-apply-adapter": "node tests/wp-codebox-apply-adapter-smoke.js",
+    "test:wp-codebox-core-loader": "node tests/wp-codebox-core-loader-smoke.js",
     "test:wp-codebox-recipe-helper": "node tests/wp-codebox-recipe-helper-smoke.js",
     "test:wp-codebox-fuzz-plan-recipe-builder": "node tests/wp-codebox-fuzz-plan-recipe-builder-smoke.js",
     "test:wp-codebox-artifacts": "node tests/wp-codebox-artifacts-smoke.js",
