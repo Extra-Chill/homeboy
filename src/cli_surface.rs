@@ -496,17 +496,131 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         metadata.lab_notes = top_level.lab_notes;
     }
 
-    match path
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
+    let path = path.iter().map(String::as_str).collect::<Vec<_>>();
+    match path.as_slice() {
+        ["list"] => {
+            metadata.structured_output = true;
+            metadata.output_notes = "hidden compatibility entry point for the command safety manifest; run `homeboy list --json`";
+        }
         ["deploy"] => {
             metadata.mutates = true;
             metadata.operator = true;
             metadata.dry_run_flag = Some("--dry-run");
             metadata.dangerous_flags = vec!["--head", "--force"];
+        }
+        ["release"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes = "release execution mutates git tags/releases and may deploy; use --dry-run to plan and --apply for risky modes";
+            metadata.dangerous_flags = vec![
+                "--apply",
+                "--deploy",
+                "--recover",
+                "--retag",
+                "--head",
+                "--skip-checks",
+                "--force-lower-bump",
+            ];
+        }
+        ["upgrade"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used";
+            metadata.dangerous_flags = vec!["--force", "--upgrade-runner"];
+        }
+        ["cleanup", "artifacts"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "default output is a non-mutating cleanup plan; pass --apply to remove artifacts";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["self", "cleanup-runtime-tmp"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+            metadata.output_notes = "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries";
+            metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["config", "set"] | ["config", "remove"] | ["config", "reset"] => {
+            metadata.mutates = true;
+        }
+        ["project", "create"]
+        | ["project", "set"]
+        | ["project", "remove"]
+        | ["project", "rename"]
+        | ["project", "delete"]
+        | ["project", "init"]
+        | ["project", "components", "set"]
+        | ["project", "components", "attach-path"]
+        | ["project", "components", "remove"]
+        | ["project", "components", "clear"]
+        | ["project", "pin", "add"]
+        | ["project", "pin", "remove"]
+        | ["project", "pin", "update"] => {
+            metadata.mutates = true;
+        }
+        ["component", "create"]
+        | ["component", "set"]
+        | ["component", "delete"]
+        | ["component", "rename"]
+        | ["component", "setup"] => {
+            metadata.mutates = true;
+        }
+        ["server", "create"]
+        | ["server", "set"]
+        | ["server", "delete"]
+        | ["server", "connect"]
+        | ["server", "disconnect"]
+        | ["server", "key", "generate"]
+        | ["server", "key", "import"]
+        | ["server", "key", "use"]
+        | ["server", "key", "unset"] => {
+            metadata.mutates = true;
+            metadata.operator = true;
+        }
+        ["extension", "setup"]
+        | ["extension", "refresh"]
+        | ["extension", "relink"]
+        | ["extension", "install-for-component"]
+        | ["extension", "set"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates installed extension files or extension manifest metadata";
+        }
+        ["extension", "install"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates installed extension files or extension manifest metadata";
+            metadata.dangerous_flags = vec!["--replace"];
+        }
+        ["extension", "update"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates installed extension files or extension manifest metadata";
+            metadata.dangerous_flags = vec!["--force"];
+        }
+        ["extension", "uninstall"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "mutates installed extension files or extension manifest metadata";
+            metadata.dangerous_flags = vec!["uninstall"];
+        }
+        ["runs", "reconcile"] => {
+            metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "marks orphaned running records stale unless --dry-run is passed";
+        }
+        ["runs", "import"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "imports observation bundle or GitHub Actions artifacts into the local run store";
+        }
+        ["runs", "artifact", "cleanup-downloads"] | ["runs", "artifact", "cleanup-persisted"] => {
+            metadata.mutates = true;
+            metadata.output_notes =
+                "default output is a non-mutating cleanup plan; pass --apply to delete artifacts";
+            metadata.dangerous_flags = vec!["--apply"];
         }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
@@ -577,7 +691,6 @@ fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> 
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
     command
         .get_subcommands()
-        .filter(|subcommand| !subcommand.is_hide_set())
         .map(|subcommand| CommandSurfaceEntry {
             name: subcommand.get_name().to_string(),
             visible_aliases: subcommand
@@ -654,6 +767,94 @@ mod tests {
         }
     }
 
+    fn manifest_path<'a>(
+        manifest: &'a CommandSafetyManifest,
+        path: &[&str],
+    ) -> &'a CommandSafetyEntry {
+        manifest
+            .find_path(path)
+            .unwrap_or_else(|| panic!("missing safety entry for {path:?}"))
+    }
+
+    fn flatten_manifest_entries<'a>(
+        entries: &'a [CommandSafetyEntry],
+        flattened: &mut Vec<&'a CommandSafetyEntry>,
+    ) {
+        for entry in entries {
+            flattened.push(entry);
+            flatten_manifest_entries(&entry.subcommands, flattened);
+        }
+    }
+
+    fn command_has_visible_flag(command: &clap::Command, flag: &str) -> bool {
+        command
+            .get_arguments()
+            .any(|arg| !arg.is_hide_set() && arg.get_long().is_some_and(|long| long == flag))
+    }
+
+    fn command_has_visible_risk_flag(command: &clap::Command) -> bool {
+        ["apply", "dry-run", "force"]
+            .iter()
+            .any(|flag| command_has_visible_flag(command, flag))
+    }
+
+    fn path_has_visible_risk_flag(command: &clap::Command, path: &[String]) -> bool {
+        let Some((first, rest)) = path.split_first() else {
+            return false;
+        };
+        let Some(subcommand) = command.find_subcommand(first) else {
+            return false;
+        };
+        if rest.is_empty() {
+            return command_has_visible_risk_flag(subcommand);
+        }
+        path_has_visible_risk_flag(subcommand, rest)
+    }
+
+    fn is_suspicious_path(entry: &CommandSafetyEntry) -> bool {
+        let Some(name) = entry.path.last().map(String::as_str) else {
+            return false;
+        };
+
+        matches!(
+            name,
+            "apply"
+                | "cleanup"
+                | "cleanup-downloads"
+                | "cleanup-persisted"
+                | "connect"
+                | "create"
+                | "delete"
+                | "disconnect"
+                | "generate"
+                | "import"
+                | "init"
+                | "install"
+                | "install-for-component"
+                | "refresh"
+                | "relink"
+                | "release"
+                | "remove"
+                | "rename"
+                | "reset"
+                | "set"
+                | "uninstall"
+                | "unset"
+                | "update"
+                | "upgrade"
+                | "use"
+        )
+    }
+
+    fn entry_has_safety_classification(entry: &CommandSafetyEntry) -> bool {
+        entry.mutates
+            || entry.operator
+            || entry.dry_run.supported
+            || !entry.dangerous_flags.is_empty()
+            || entry.output.notes.contains("--apply")
+            || entry.output.notes.contains("--dry-run")
+    }
+
     #[test]
     fn test_current_command_surface() {
         let surface = current_command_surface();
@@ -703,8 +904,13 @@ mod tests {
     fn command_safety_manifest_records_clap_visibility_metadata() {
         let manifest = current_command_safety_manifest();
 
-        assert!(manifest.find_path(&["list"]).is_none());
-        assert!(manifest.find_path(&["lab"]).is_none());
+        let list = manifest_path(&manifest, &["list"]);
+        assert!(list.hidden);
+        assert!(list.output.structured);
+        assert!(list.output.notes.contains("homeboy list --json"));
+
+        let lab = manifest_path(&manifest, &["lab"]);
+        assert!(lab.hidden);
 
         let visible_status = manifest.find_path(&["status"]).unwrap();
         assert!(!visible_status.hidden);
@@ -753,21 +959,51 @@ mod tests {
         let manifest = current_command_safety_manifest();
 
         for path in [
+            ["release"].as_slice(),
+            ["upgrade"].as_slice(),
+            ["cleanup", "artifacts"].as_slice(),
+            ["self", "cleanup-runtime-tmp"].as_slice(),
             ["db", "delete-row"].as_slice(),
             ["db", "drop-table"].as_slice(),
             ["file", "write"].as_slice(),
             ["file", "delete"].as_slice(),
+            ["runs", "reconcile"].as_slice(),
+            ["runs", "import"].as_slice(),
+            ["runs", "artifact", "cleanup-downloads"].as_slice(),
+            ["runs", "artifact", "cleanup-persisted"].as_slice(),
+            ["extension", "install"].as_slice(),
+            ["extension", "update"].as_slice(),
+            ["extension", "uninstall"].as_slice(),
+            ["config", "set"].as_slice(),
+            ["config", "remove"].as_slice(),
+            ["project", "set"].as_slice(),
+            ["project", "delete"].as_slice(),
+            ["component", "set"].as_slice(),
+            ["component", "delete"].as_slice(),
+            ["server", "set"].as_slice(),
+            ["server", "delete"].as_slice(),
             ["api", "post"].as_slice(),
             ["api", "put"].as_slice(),
             ["api", "patch"].as_slice(),
             ["api", "delete"].as_slice(),
             ["http", "request"].as_slice(),
         ] {
-            let entry = manifest
-                .find_path(path)
-                .unwrap_or_else(|| panic!("missing safety entry for {path:?}"));
+            let entry = manifest_path(&manifest, path);
 
             assert!(entry.mutates, "{path:?} should be marked mutating");
+        }
+
+        for path in [
+            ["release"].as_slice(),
+            ["upgrade"].as_slice(),
+            ["self", "cleanup-runtime-tmp"].as_slice(),
+            ["db", "delete-row"].as_slice(),
+            ["file", "delete"].as_slice(),
+            ["server", "set"].as_slice(),
+            ["api", "post"].as_slice(),
+            ["http", "request"].as_slice(),
+        ] {
+            let entry = manifest_path(&manifest, path);
             assert!(entry.operator, "{path:?} should be marked operator-gated");
         }
     }
@@ -805,6 +1041,43 @@ mod tests {
         assert!(http_request
             .dangerous_flags
             .contains(&"METHOD!=GET".to_string()));
+
+        let release = manifest_path(&manifest, &["release"]);
+        assert_eq!(release.dry_run.flag.as_deref(), Some("--dry-run"));
+        assert!(release.dangerous_flags.contains(&"--apply".to_string()));
+        assert!(release.dangerous_flags.contains(&"--head".to_string()));
+
+        let cleanup_artifacts = manifest_path(&manifest, &["cleanup", "artifacts"]);
+        assert!(cleanup_artifacts.output.notes.contains("--apply"));
+
+        let self_cleanup = manifest_path(&manifest, &["self", "cleanup-runtime-tmp"]);
+        assert!(self_cleanup.output.notes.contains("--apply"));
+
+        let runs_reconcile = manifest_path(&manifest, &["runs", "reconcile"]);
+        assert_eq!(runs_reconcile.dry_run.flag.as_deref(), Some("--dry-run"));
+
+        let runs_cleanup = manifest_path(&manifest, &["runs", "artifact", "cleanup-persisted"]);
+        assert!(runs_cleanup.output.notes.contains("--apply"));
+    }
+
+    #[test]
+    fn suspicious_command_paths_require_safety_classification() {
+        let manifest = current_command_safety_manifest();
+        let command = Cli::command();
+        let mut entries = Vec::new();
+        flatten_manifest_entries(&manifest.commands, &mut entries);
+
+        for entry in entries {
+            let suspicious = !entry.hidden
+                && (is_suspicious_path(entry) || path_has_visible_risk_flag(&command, &entry.path));
+            if suspicious {
+                assert!(
+                    entry_has_safety_classification(entry),
+                    "suspicious command path {:?} lacks explicit safety metadata",
+                    entry.path
+                );
+            }
+        }
     }
 
     #[test]
