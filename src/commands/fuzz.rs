@@ -463,7 +463,7 @@ fn run_validate(args: FuzzValidateArgs) -> homeboy::core::Result<FuzzValidateOut
         command: "fuzz.validate".to_string(),
         status: gate_status(&gates),
         results_file: args.results_file.to_string_lossy().to_string(),
-        campaign_id: campaign.id,
+        campaign_id: campaign.id.clone(),
         open_findings: open_finding_count(&campaign),
         artifacts: campaign.artifacts.len(),
         gates,
