@@ -7,12 +7,6 @@ const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const {
   runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
-const {
-  allowLegacyCodeboxResultCompatibility,
-  legacyArtifactResultEnvelopeCandidates,
-  legacyTypedArtifactCandidatesFromCodeboxResult,
-} = require('./codebox-legacy-result-adapter');
-
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
@@ -87,19 +81,8 @@ function normalizeTypedArtifacts(value, options = {}) {
 }
 
 function typedArtifactsFromCodeboxResult(result, options = {}) {
-  const workload = options.workload || agentRuntimeWorkload(result) || {};
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
-  const envelopeArtifacts = typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
-  if (Object.keys(envelopeArtifacts).length > 0) {
-    return envelopeArtifacts;
-  }
-
-  if (!allowLegacyCodeboxResultCompatibility(options)) {
-    return {};
-  }
-
-  return Object.assign({}, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, workload)
-    .map((candidate) => normalizeTypedArtifacts(candidate, options)));
+  return typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
 }
 
 function normalizeWithCoreTypedArtifactNormalizer(normalizer, name, artifact, options = {}) {
@@ -131,14 +114,6 @@ function caseArtifactIndexFromCodeboxResult(result, options = {}) {
   return normalizeCaseArtifactIndex({
     schema: WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
     caseRefs: [
-      ...caseRefsFromCaseArtifactCandidates(result),
-      ...caseRefsFromCaseArtifactCandidates(result?.outputs),
-      ...caseRefsFromCaseArtifactCandidates(result?.run),
-      ...caseRefsFromCaseArtifactCandidates(result?.run?.agentResult),
-      ...caseRefsFromCaseArtifactCandidates(result?.agentResult),
-      ...caseRefsFromCaseArtifactCandidates(result?.agent_result),
-      ...caseRefsFromCaseArtifactCandidates(result?.metadata),
-      ...caseRefsFromCaseArtifactCandidates(result?.metadata?.agent_runtime?.result),
       ...caseRefsFromCaseArtifactCandidates(artifactResult),
       ...caseRefsFromCaseArtifactCandidates(artifactResult?.result),
       ...caseRefsFromCaseArtifactCandidates(artifactResult?.result?.outputs),
@@ -352,11 +327,47 @@ function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
     result?.artifactResult,
     result?.metadata?.artifact_result,
     result?.metadata?.artifactResult,
-    ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
-    ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
-    ...legacyArtifactResultEnvelopeCandidates(result),
-  ] : [];
-  return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+		...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
+		...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
+		...legacyArtifactResultEnvelopeCandidates(result),
+	] : [];
+	return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+}
+
+function normalizeCodeboxPublicResultEnvelope(result, options = {}) {
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
+  if (!artifactResult) {
+    return null;
+  }
+  const payload = plainObject(artifactResult.result) ? artifactResult.result : {};
+  const outputs = plainObject(payload.outputs) ? payload.outputs : {};
+  const metadata = plainObject(artifactResult.metadata) ? artifactResult.metadata : {};
+  return cleanObject({
+    schema: 'wp-codebox/public-result-envelope/v1',
+    artifact_result: artifactResult,
+    status: payload.status || artifactResult.status,
+    success: payload.success === undefined ? artifactResult.success : payload.success === true,
+    summary: payload.summary || payload.message || artifactResult.reason,
+    message: payload.message,
+    error_message: payload.error_message || payload.errorMessage,
+    error_reason: payload.error_reason || payload.errorReason,
+    error_step_id: payload.error_step_id || payload.errorStepId,
+    terminal_status: payload.terminal_status || payload.terminalStatus,
+    completion_outcome: payload.completion_outcome || payload.completionOutcome,
+    reply: firstString(payload.reply, payload.text, outputs.reply, outputs.text, outputs.content),
+    outputs,
+    artifacts: artifactResult.artifactRefs || [],
+    evidence_refs: artifactResult.evidenceRefs || [],
+    diagnostics: [
+      ...(Array.isArray(payload.diagnostics) ? payload.diagnostics : []),
+      ...(Array.isArray(artifactResult.diagnostics) ? artifactResult.diagnostics : []),
+    ],
+    metadata,
+  });
+}
+
+function firstString(...values) {
+	return values.find((value) => typeof value === 'string' && value.trim() !== '');
 }
 
 function normalizeArtifactResultEnvelope(envelope) {
@@ -506,10 +517,6 @@ function artifactNameFromDeclaration(declaration) {
     return '';
   }
   return declaration.name || declaration.id || '';
-}
-
-function agentRuntimeWorkload(result = {}) {
-  return result.workload || result.metadata?.workload || result.metadata?.agent_runtime?.workload || result.run?.workload || {};
 }
 
 function artifactPath(root, relativePath) {
@@ -749,6 +756,7 @@ module.exports = {
   discoverCodeboxArtifactRefs,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
+  normalizeCodeboxPublicResultEnvelope,
   normalizeArtifactResultEnvelope,
   normalizeCaseArtifactIndex,
   normalizeTypedArtifactEntry,

@@ -29,7 +29,7 @@ const {
 const {
   artifactResultEnvelopeFromCodeboxResult,
   artifactNameFromDeclaration,
-  artifactPath,
+  normalizeCodeboxPublicResultEnvelope,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome: normalizeCodeboxArtifactOutcomeContract,
   normalizeTypedArtifactEntry: normalizeCodeboxTypedArtifactEntry,
@@ -59,10 +59,6 @@ const {
 } = require('./wp-codebox-adapter-contract');
 const {
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
-  allowLegacyCodeboxResultCompatibility,
-  isCodeboxLegacyAgentTaskRunResult,
-  legacyAgentTaskRunEvidenceRefs,
-  legacyAgentTaskRunSessionArtifacts,
 } = require('./codebox-run-agent-task-contract');
 const {
   wpCodeboxBin,
@@ -794,7 +790,7 @@ function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, 
   for (const declaration of declarations) {
     const name = typedArtifactNameFromDeclaration(declaration);
     if (name && !engineDataOutputs[name]) {
-      engineDataOutputs[name] = `metadata.engine_data.outputs.typed_artifacts.${name}.payload`;
+      engineDataOutputs[name] = `outputs.typed_artifacts.${name}.payload`;
     }
   }
 
@@ -1884,10 +1880,14 @@ function agentBundleConfigFromAgentTaskRequest(request, config, inputs) {
 }
 
 function normalizeStatus(result, exitStatus = 0) {
+  const publicEnvelope = codeboxPublicResultEnvelope(result);
+  if (!publicEnvelope && privateCodeboxRuntimeResultShapeNames(result).length > 0) {
+    return 'failed';
+  }
   if (recipeRunFailedPhase(recipeRunFromResult(result))) {
     return 'failed';
   }
-  if (result?.outputs && typeof result.outputs === 'object' && result.outputs.success === false) {
+  if (publicEnvelope?.outputs && typeof publicEnvelope.outputs === 'object' && publicEnvelope.outputs.success === false) {
     return 'failed';
   }
   if (agentRuntimeFailure(result)) {
@@ -1914,55 +1914,64 @@ function normalizeStatus(result, exitStatus = 0) {
   if (result?.status === 'completed') {
     return result?.success === true ? 'succeeded' : 'failed';
   }
-  const agentResult = result?.run?.agentResult || result?.agentResult || result?.agent_result || result?.metadata?.recipe_run?.agentResult || result?.metadata?.recipe_run?.run?.agentResult;
-  const changedFileCount = agentResult?.changedFiles?.count;
-  const patchBytes = agentResult?.patch?.bytes;
-  if (result?.success === true && agentResult?.noOpReason && changedFileCount === 0 && patchBytes === 0) {
+  if (publicEnvelope?.success === true && publicEnvelope?.metadata?.no_op_reason) {
     return 'no_op';
   }
   if (result?.outcome === 'no_op' || result?.no_op) {
     return 'no_op';
   }
-  return result?.success === true ? 'succeeded' : 'failed';
+  return (publicEnvelope?.success ?? result?.success) === true ? 'succeeded' : 'failed';
+}
+
+function codeboxPublicResultEnvelope(result, options = {}) {
+  return options.publicResultEnvelope || options.public_result_envelope || normalizeCodeboxPublicResultEnvelope(result, options);
+}
+
+function privateCodeboxRuntimeResultShapeNames(result = {}) {
+  const names = [];
+  if (result?.run?.agentResult) {
+    names.push('run.agentResult');
+  }
+  if (result?.agentResult) {
+    names.push('agentResult');
+  }
+  if (result?.agent_result) {
+    names.push('agent_result');
+  }
+  if (result?.metadata?.agent_runtime) {
+    names.push('metadata.agent_runtime');
+  }
+  if (result?.engine_data || result?.metadata?.engine_data) {
+    names.push('engine_data');
+  }
+  return names;
+}
+
+function publicEnvelopeBoundaryDiagnostic(result, options = {}) {
+  if (codeboxPublicResultEnvelope(result, options)) {
+    return null;
+  }
+  const privateShapes = privateCodeboxRuntimeResultShapeNames(result);
+  if (privateShapes.length === 0) {
+    return null;
+  }
+  return {
+    class: 'codebox.public_result_envelope_missing',
+    message: 'WP Codebox result used private runtime fields without the canonical public artifact result envelope.',
+    data: {
+      required_schema: 'wp-codebox/artifact-result-envelope/v1',
+      private_shapes: privateShapes,
+    },
+  };
 }
 
 function agentRuntimeResultCandidates(result) {
-  const workload = agentRuntimeWorkload(result) || {};
-  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
+  const publicEnvelope = codeboxPublicResultEnvelope(result);
   return [
-    result?.outputs?.agent_runtime?.result,
-    result?.outputs?.agent_runtime?.workload,
-    result?.outputs?.agent_runtime,
-    result?.raw?.agent_runtime,
-    result?.raw?.agent_runtime?.result,
-    result?.raw?.agent_runtime?.workload,
-    result?.metadata?.agent_runtime,
-    result?.metadata?.agent_runtime?.result,
-    result?.metadata?.agent_runtime?.workload,
-    result?.run?.agentResult,
-    result?.agentResult,
-    result?.agent_result,
-    result?.outputs,
-    workload,
-    workload.outputs,
-    ...scenarios,
-    ...scenarios.map((scenario) => scenario?.metadata),
-    ...scenarios.map((scenario) => scenario?.outputs),
+    publicEnvelope,
+    publicEnvelope?.outputs,
+    ...(Array.isArray(publicEnvelope?.diagnostics) ? publicEnvelope.diagnostics : []),
   ].filter((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
-}
-
-function agentRuntimeWorkload(result) {
-  return firstObject(
-    result?.outputs?.agent_runtime?.result,
-    result?.outputs?.agent_runtime?.workload,
-    result?.raw?.agent_runtime?.result,
-    result?.raw?.agent_runtime?.workload,
-    result?.metadata?.agent_runtime?.result,
-    result?.metadata?.agent_runtime?.workload,
-    result?.run?.agentResult,
-    result?.agentResult,
-    result?.agent_result,
-  );
 }
 
 function agentRuntimeFailure(result) {
@@ -2044,76 +2053,6 @@ function appendUniqueEvidenceRef(refs, ref) {
   refs.push(ref);
 }
 
-function codeboxBundleArtifacts(result) {
-  const artifacts = [];
-  const artifactRefs = Array.isArray(result.run?.artifactRefs) ? result.run.artifactRefs : [];
-  for (const ref of artifactRefs) {
-    appendUniqueArtifact(artifacts, {
-      id: ref.id || ref.digest?.value,
-      kind: ref.kind || 'codebox-artifact-bundle',
-      path: ref.directory,
-      sha256: ref.digest?.value,
-      metadata: { digest: ref.digest },
-    });
-  }
-
-  const completionOutcome = result.completionOutcome || result.completion_outcome || {};
-  const bundleDirectory = result.run?.agentResult?.artifacts?.directory || result.agent_result?.artifacts?.directory || completionOutcome?.provenance?.artifactDirectory || result.session?.artifacts?.path;
-  const artifactBundleId = completionOutcome?.provenance?.artifactBundleId || result.session?.artifacts?.bundle_id || result.artifacts?.id;
-  appendUniqueArtifact(artifacts, {
-    id: artifactBundleId,
-    kind: 'codebox-artifact-bundle',
-    path: bundleDirectory,
-    metadata: {
-      runtime_id: result.run?.runtime?.id,
-      runtime_status: result.run?.runtime?.status,
-    },
-  });
-
-  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || {};
-  const changedFilesPath = artifactPath(bundleDirectory, agentResult.changedFiles?.artifact || '');
-  appendUniqueArtifact(artifacts, {
-    id: changedFilesPath ? 'codebox-changed-files' : '',
-    kind: 'codebox-changed-files',
-    path: changedFilesPath,
-    metadata: agentResult.changedFiles || {},
-  });
-
-  const patchPath = artifactPath(bundleDirectory, agentResult.patch?.artifact || '');
-  appendUniqueArtifact(artifacts, {
-    id: patchPath ? 'codebox-patch' : '',
-    kind: 'codebox-patch',
-    path: patchPath,
-    sha256: agentResult.patch?.sha256,
-    size_bytes: agentResult.patch?.bytes,
-    metadata: agentResult.patch || {},
-  });
-
-  const transcriptPath = artifactPath(bundleDirectory, agentResult.transcript?.artifact || '');
-  appendUniqueArtifact(artifacts, {
-    id: transcriptPath ? 'codebox-transcript' : '',
-    kind: 'codebox-transcript',
-    path: transcriptPath,
-    metadata: agentResult.transcript || {},
-  });
-
-  const runtimeLogPath = result.artifacts?.runtimeLogPath;
-  appendUniqueArtifact(artifacts, {
-    id: runtimeLogPath ? 'codebox-runtime-log' : '',
-    kind: 'codebox-runtime-log',
-    path: runtimeLogPath,
-  });
-
-  const commandsLogPath = result.artifacts?.commandsLogPath;
-  appendUniqueArtifact(artifacts, {
-    id: commandsLogPath ? 'codebox-command-log' : '',
-    kind: 'codebox-command-log',
-    path: commandsLogPath,
-  });
-
-  return artifacts;
-}
-
 function recipeRunFromResult(result) {
   return firstObject(
     result?.recipe_run,
@@ -2170,70 +2109,6 @@ function recipeRunFailureDiagnostic(recipeRun) {
   };
 }
 
-function appendRecipeArtifact(artifacts, artifact, fallbackKind, index) {
-  if (!artifact) {
-    return;
-  }
-  if (typeof artifact === 'string') {
-    appendUniqueArtifact(artifacts, {
-      id: artifact,
-      kind: fallbackKind,
-      path: artifact,
-    });
-    return;
-  }
-  appendUniqueArtifact(artifacts, {
-    id: artifact.id || artifact.name || artifact.path || artifact.url || `${fallbackKind}-${index + 1}`,
-    kind: artifact.kind || artifact.type || fallbackKind,
-    name: artifact.name,
-    path: artifact.path || artifact.file || artifact.directory,
-    url: artifact.url,
-    mime: artifact.mime,
-    size_bytes: artifact.size_bytes || artifact.sizeBytes,
-    sha256: artifact.sha256,
-    metadata: artifact.metadata || {},
-  });
-}
-
-function recipeRunArtifacts(result) {
-  const recipeRun = recipeRunFromResult(result);
-  if (!recipeRun || Object.keys(recipeRun).length === 0) {
-    return [];
-  }
-
-  const artifacts = [];
-  const startupLogs = [recipeRun.startup_log, recipeRun.startupLog, recipeRun.startup?.log, recipeRun.startup?.log_path, recipeRun.startup?.logPath].filter(Boolean);
-  startupLogs.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-startup-log', index));
-
-  const probeJson = [recipeRun.probe_json, recipeRun.probeJson, recipeRun.probe_results, recipeRun.probeResults, recipeRun.probe?.artifact, recipeRun.probe?.path].filter(Boolean);
-  probeJson.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-probe-json', index));
-
-  const probes = Array.isArray(recipeRun.probes) ? recipeRun.probes : [];
-  probes.forEach((probe, index) => {
-    appendRecipeArtifact(artifacts, probe.artifact || probe.path || probe.result_path || probe.resultPath, 'codebox-recipe-probe-json', index);
-    appendRecipeArtifact(artifacts, probe.screenshot || probe.screenshot_path || probe.screenshotPath, 'codebox-recipe-screenshot', index);
-  });
-
-  const screenshots = [
-    ...(Array.isArray(recipeRun.screenshots) ? recipeRun.screenshots : []),
-    ...(Array.isArray(recipeRun.browser_screenshots) ? recipeRun.browser_screenshots : []),
-    ...(Array.isArray(recipeRun.browserScreenshots) ? recipeRun.browserScreenshots : []),
-  ];
-  screenshots.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-screenshot', index));
-
-  const sideEffects = [recipeRun.fake_side_effects, recipeRun.fakeSideEffects, recipeRun.side_effects, recipeRun.sideEffects].filter(Boolean);
-  sideEffects.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-fake-side-effects', index));
-
-  const declaredArtifacts = [
-    ...(Array.isArray(recipeRun.artifacts) ? recipeRun.artifacts : []),
-    ...(Array.isArray(recipeRun.declared_artifacts) ? recipeRun.declared_artifacts : []),
-    ...(Array.isArray(recipeRun.declaredArtifacts) ? recipeRun.declaredArtifacts : []),
-  ];
-  declaredArtifacts.forEach((artifact, index) => appendRecipeArtifact(artifacts, artifact, 'codebox-recipe-artifact', index));
-
-  return artifacts;
-}
-
 function homeboyFailureClassification(classification, status) {
   return providerFailureClassification(classification, status);
 }
@@ -2267,36 +2142,19 @@ function typedArtifactsFromResult(result, options = {}) {
 }
 
 function codeboxAgentResultFromResult(result) {
-  return result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || {};
+  return codeboxPublicResultEnvelope(result)?.metadata || {};
 }
 
 function codeboxBundleDirectoryFromResult(result) {
-  const completionOutcome = result.completionOutcome || result.completion_outcome || {};
-  const agentResult = codeboxAgentResultFromResult(result);
-  return agentResult.artifacts?.directory
-    || completionOutcome?.provenance?.artifactDirectory
-    || result.session?.artifacts?.path
-    || result.session?.artifacts?.directory
-    || (typeof result.artifacts === 'string' ? result.artifacts : '')
-    || '';
+  const artifactBundle = codeboxPublicResultEnvelope(result)?.artifact_result?.artifactBundle;
+  return artifactBundle?.path || artifactBundle?.uri || '';
 }
 
 function firstTranscriptArtifactRefFromResult(result) {
-  const agentResult = codeboxAgentResultFromResult(result);
-  const directPath = artifactPath(codeboxBundleDirectoryFromResult(result), agentResult.transcript?.artifact || '');
-  if (directPath) {
-    return {
-      kind: 'codebox-transcript',
-      path: directPath,
-      mime: 'application/json',
-      metadata: agentResult.transcript || {},
-      schema: agentResult.transcript?.schema,
-    };
-  }
-
+  const publicEnvelope = codeboxPublicResultEnvelope(result);
   const candidates = [
-    ...(Array.isArray(result.artifacts) ? result.artifacts : Object.values(result.artifacts || {}).filter((value) => value && typeof value === 'object')),
-    ...agentRuntimeBundleArtifacts(result),
+    ...(publicEnvelope?.artifact_result?.artifactRefs || []),
+    ...(publicEnvelope?.artifact_result?.evidenceRefs || []),
   ];
   const transcriptArtifact = candidates
     .map((artifact) => artifactFromCodeboxArtifact(artifact))
@@ -2309,17 +2167,6 @@ function firstTranscriptArtifactRefFromResult(result) {
       mime: transcriptArtifact.mime || 'application/json',
       metadata: transcriptArtifact.metadata || {},
       schema: transcriptArtifact.metadata?.schema || transcriptArtifact.metadata?.artifact_schema,
-    };
-  }
-
-  const bundleDirectory = codeboxBundleDirectoryFromResult(result);
-  const fallbackPath = artifactPath(bundleDirectory, 'files/transcript.json');
-  if (fallbackPath && fs.existsSync(fallbackPath)) {
-    return {
-      kind: 'codebox-transcript',
-      path: fallbackPath,
-      mime: 'application/json',
-      metadata: { source: 'codebox_artifact_directory' },
     };
   }
 
@@ -2422,28 +2269,12 @@ function isTranscriptArtifactDeclaration(declaration) {
 }
 
 function replyTextFromResult(result) {
-  const workload = agentRuntimeWorkload(result) || {};
+  const publicEnvelope = codeboxPublicResultEnvelope(result) || {};
   const candidates = [
-    result?.reply,
-    result?.result?.reply,
-    result?.outputs?.reply,
-    result?.outputs?.text,
-    result?.outputs?.content,
-    result?.run?.agentResult?.reply,
-    result?.run?.agentResult?.result?.reply,
-    result?.run?.agentResult?.metadata?.result?.reply,
-    result?.agentResult?.reply,
-    result?.agentResult?.result?.reply,
-    result?.agentResult?.metadata?.result?.reply,
-    result?.agent_result?.reply,
-    result?.agent_result?.result?.reply,
-    result?.agent_result?.metadata?.result?.reply,
-    result?.metadata?.agent_runtime?.workload?.reply,
-    result?.metadata?.agent_runtime?.workload?.result?.reply,
-    result?.metadata?.agent_runtime?.workload?.metadata?.result?.reply,
-    workload.reply,
-    workload.result?.reply,
-    workload.metadata?.result?.reply,
+    publicEnvelope.reply,
+    publicEnvelope.outputs?.reply,
+    publicEnvelope.outputs?.text,
+    publicEnvelope.outputs?.content,
     replyTextFromResultExecutions(result),
     replyTextFromTranscriptArtifact(result),
   ];
@@ -2601,30 +2432,6 @@ function outputsWithInputTypedArtifacts(outputs, request) {
   return added ? { ...outputs, typed_artifacts: typedArtifacts } : outputs;
 }
 
-function typedBundleOutputArtifacts(result, options = {}) {
-  return Object.values(typedArtifactsFromResult(result, options)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
-    const fileRef = typeof ref === 'string' ? { path: ref } : ref;
-    if (!fileRef || typeof fileRef !== 'object') {
-      return null;
-    }
-    return {
-      id: fileRef.id || `${typedArtifact.name}-${index + 1}`,
-      kind: 'typed-bundle-output',
-      name: typedArtifact.name,
-      path: fileRef.path || fileRef.file || fileRef.directory,
-      url: fileRef.url,
-      mime: fileRef.mime,
-      sha256: fileRef.sha256,
-      metadata: {
-        type: typedArtifact.type,
-        artifact_schema: typedArtifact.artifact_schema,
-        provenance: typedArtifact.provenance,
-        file_ref: fileRef,
-      },
-    };
-  }).filter(Boolean));
-}
-
 function artifactFromCodeboxArtifact(artifact, index) {
   const normalized = agentTaskArtifactFromRef(
     {
@@ -2654,7 +2461,10 @@ function firstPlainObject(...candidates) {
 }
 
 function normalizeOutputs(result, request = null, options = {}) {
-  const workload = agentRuntimeWorkload(result) || {};
+  const publicEnvelope = codeboxPublicResultEnvelope(result, options) || {};
+  const publicOutputs = publicEnvelope.outputs && typeof publicEnvelope.outputs === 'object' && !Array.isArray(publicEnvelope.outputs)
+    ? publicEnvelope.outputs
+    : {};
   const typedArtifacts = typedArtifactsFromResult(result, options);
   Object.assign(typedArtifacts, transcriptTypedArtifactsFromCodeboxResult(request, result, typedArtifacts));
   if (request) {
@@ -2673,30 +2483,15 @@ function normalizeOutputs(result, request = null, options = {}) {
       }
     : outputs;
 
-  const bundle = result.metadata?.agent_runtime?.bundle || result.task_input?.agent_bundle || {};
+  const bundle = result.task_input?.agent_bundle || {};
   const configuredOutputs = firstPlainObject(bundle.runtime_output_projections, bundle.runtimeOutputProjections, bundle.engine_data_outputs, bundle.engineDataOutputs) || {};
-  if (Object.keys(configuredOutputs).length === 0 && workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)) {
-    return sanitizePublicMetadata(appendTypedArtifacts(workload.outputs));
+  if (Object.keys(configuredOutputs).length === 0) {
+    return sanitizePublicMetadata(appendTypedArtifacts(publicOutputs));
   }
-  if (Object.keys(configuredOutputs).length === 0 && result.outputs && typeof result.outputs === 'object' && !Array.isArray(result.outputs)) {
-    return sanitizePublicMetadata(appendTypedArtifacts(result.outputs));
-  }
-  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
   const configuredOutputSources = [
-    ...scenarios,
-    ...scenarios.map((scenario) => scenario?.metadata),
-    ...scenarios.map((scenario) => scenario?.outputs),
-    result.run?.agentResult,
-    result.agentResult,
-    result.agent_result,
-    result.metadata?.agent_runtime?.result,
-    result.outputs,
-    result.run?.agentResult?.outputs,
-    result.agentResult?.outputs,
-    result.agent_result?.outputs,
-    result.metadata?.agent_runtime?.result?.outputs,
-    workload,
-    workload.outputs,
+    publicEnvelope,
+    publicOutputs,
+    publicEnvelope.artifact_result?.result,
   ].filter((source) => source && typeof source === 'object' && !Array.isArray(source));
   const outputSources = configuredOutputSources.flatMap((source) => [source, { metadata: source }]);
   const outputs = {};
@@ -2713,10 +2508,7 @@ function normalizeOutputs(result, request = null, options = {}) {
       }
     }
   }
-  const fallbackOutputs = workload.outputs && typeof workload.outputs === 'object' && !Array.isArray(workload.outputs)
-    ? workload.outputs
-    : result.outputs || {};
-  return sanitizePublicMetadata(appendTypedArtifacts(Object.keys(outputs).length > 0 ? outputs : fallbackOutputs));
+  return sanitizePublicMetadata(appendTypedArtifacts(Object.keys(outputs).length > 0 ? outputs : publicOutputs));
 }
 
 function outputEvidenceRefs(outputs) {
@@ -2820,110 +2612,11 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null, opt
     recipeSummary.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(normalizedArtifacts, artifact));
   }
 
-  if (isCodeboxLegacyAgentTaskRunResult(result) && allowLegacyCodeboxResultCompatibility(options)) {
-    const artifacts = [...normalizedArtifacts];
-    legacyAgentTaskRunSessionArtifacts(result).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
-    if (Array.isArray(result.artifacts)) {
-      result.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
-    }
-    if (!artifactResult) {
-      for (const artifact of codeboxBundleArtifacts(result)) {
-        appendUniqueArtifact(artifacts, artifact);
-      }
-      for (const artifact of agentRuntimeBundleArtifacts(result)) {
-        appendUniqueArtifact(artifacts, artifact);
-      }
-      for (const artifact of typedBundleOutputArtifacts(result, options)) {
-        appendUniqueArtifact(artifacts, artifact);
-      }
-      if (!recipeSummary) {
-        for (const artifact of recipeRunArtifacts(result)) {
-          appendUniqueArtifact(artifacts, artifact);
-        }
-      }
-    }
-    return artifacts.map(artifactFromCodeboxArtifact);
-  }
-  const artifacts = Array.isArray(result?.artifacts)
-    ? result.artifacts
-    : Object.values(result?.artifacts || {}).filter((value) => value && typeof value === 'object');
-  const mappedArtifacts = [...normalizedArtifacts];
-  artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(mappedArtifacts, artifact));
-  return mappedArtifacts;
+  return normalizedArtifacts;
 }
 
 function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null, options = {}) {
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
-  if (isCodeboxLegacyAgentTaskRunResult(result) && allowLegacyCodeboxResultCompatibility(options)) {
-    const refs = legacyAgentTaskRunEvidenceRefs(result);
-    for (const artifact of artifactResult?.artifactRefs || []) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.uri || artifact.path || artifact.url,
-        label: artifact.name || artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-      });
-    }
-    for (const evidenceRef of artifactResult?.evidenceRefs || []) {
-      appendUniqueEvidenceRef(refs, {
-        kind: evidenceRef.kind,
-        uri: evidenceRef.uri || evidenceRef.path || evidenceRef.url,
-        label: evidenceRef.name || evidenceRef.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-      });
-    }
-    if (!artifactResult) {
-      for (const artifact of codeboxBundleArtifacts(result)) {
-        appendUniqueEvidenceRef(refs, {
-          kind: artifact.kind,
-          uri: artifact.path || artifact.url,
-          label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-        });
-      }
-      for (const artifact of agentRuntimeBundleArtifacts(result)) {
-        appendUniqueEvidenceRef(refs, {
-          kind: artifact.kind,
-          uri: artifact.path || artifact.url,
-          label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
-        });
-      }
-      for (const artifact of typedBundleOutputArtifacts(result, options)) {
-        appendUniqueEvidenceRef(refs, {
-          kind: artifact.kind,
-          uri: artifact.path || artifact.url,
-          label: `Typed bundle output ${artifact.name || ''}`.trim(),
-        });
-      }
-      if (!recipeSummary) {
-        for (const artifact of recipeRunArtifacts(result)) {
-          appendUniqueEvidenceRef(refs, {
-            kind: artifact.kind,
-            uri: artifact.path || artifact.url,
-            label: artifact.kind.replace(/^codebox-recipe-/, 'WP Codebox recipe ').replace(/-/g, ' '),
-          });
-        }
-      }
-    }
-    for (const artifact of runSummary?.artifacts || []) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-      });
-    }
-    for (const artifact of recipeSummary?.artifacts || []) {
-      appendUniqueEvidenceRef(refs, {
-        kind: artifact.kind,
-        uri: artifact.path || artifact.url,
-        label: artifact.kind.replace(/^codebox-/, 'WP Codebox ').replace(/-/g, ' '),
-      });
-    }
-    for (const ref of outputEvidenceRefs(normalizeOutputs(result))) {
-      appendUniqueEvidenceRef(refs, ref);
-    }
-    for (const ref of result?.evidence_refs || result?.evidence || []) {
-      appendUniqueEvidenceRef(refs, agentTaskEvidenceRefFromRef(ref, 'codebox_evidence'));
-    }
-    return refs;
-  }
   const evidenceRefs = [
     ...(artifactResult?.artifactRefs || []).map((artifact) => ({
       kind: artifact.kind,
@@ -2935,64 +2628,24 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null, 
       uri: ref.uri || ref.path || ref.url,
       label: ref.name || ref.kind,
     })),
-    ...(result?.evidence_refs || result?.evidence || []),
+    ...(runSummary?.artifacts || []).map((artifact) => ({
+      kind: artifact.kind,
+      uri: artifact.path || artifact.url,
+      label: artifact.name || artifact.kind,
+    })),
+    ...(recipeSummary?.artifacts || []).map((artifact) => ({
+      kind: artifact.kind,
+      uri: artifact.path || artifact.url,
+      label: artifact.name || artifact.kind,
+    })),
   ];
   return evidenceRefs.map((ref) => agentTaskEvidenceRefFromRef(ref, 'codebox_evidence')).filter((ref) => ref.uri);
 }
 
-function agentRuntimeBundleArtifacts(result) {
-  const artifacts = [];
-  const workload = agentRuntimeWorkload(result) || {};
-  const scenarios = Array.isArray(workload.scenarios) ? workload.scenarios : [];
-  for (const scenario of scenarios) {
-    const metadata = scenario?.metadata || {};
-    const transcript = metadata.transcript_artifacts || {};
-    appendUniqueArtifact(artifacts, {
-      id: transcript.json ? 'agent-runtime-transcript-json' : '',
-      kind: 'agent-runtime-transcript',
-      path: transcript.json,
-      metadata: { scenario_id: scenario.id, format: 'json' },
-    });
-    appendUniqueArtifact(artifacts, {
-      id: transcript.summary ? 'agent-runtime-transcript-summary' : '',
-      kind: 'agent-runtime-transcript-summary',
-      path: transcript.summary,
-      metadata: { scenario_id: scenario.id, format: 'markdown' },
-    });
-    const replayBundlePath = metadata.replay_bundle_path || metadata.replay_bundle?.path;
-    appendUniqueArtifact(artifacts, {
-      id: replayBundlePath ? 'agent-runtime-replay-bundle' : '',
-      kind: 'agent-runtime-replay-bundle',
-      path: replayBundlePath,
-      metadata: { scenario_id: scenario.id },
-    });
-    const exports = Array.isArray(metadata.job_artifact_exports) ? metadata.job_artifact_exports : [];
-    for (const [index, exported] of exports.entries()) {
-      appendUniqueArtifact(artifacts, {
-        id: exported.id || exported.path || `agent-runtime-job-artifact-${index + 1}`,
-        kind: exported.kind || 'agent-runtime-job-artifact',
-        path: exported.path,
-        url: exported.url,
-        metadata: { ...exported, scenario_id: scenario.id },
-      });
-    }
-    const runnerPublicationUrl = Array.isArray(metadata.engine_data?.runner_publications)
-      ? metadata.engine_data.runner_publications.find((publication) => publication?.url)?.url
-      : '';
-    const pullRequestUrl = metadata.runner_workspace_publication?.url || metadata.runner_workspace_publication?.html_url || metadata.runner_workspace_publication?.result?.url || metadata.runner_workspace_publication?.result?.html_url || runnerPublicationUrl || metadata.engine_data?.pull_request?.url || metadata.engine_data?.static_site_agent?.pr_url;
-    appendUniqueArtifact(artifacts, {
-      id: pullRequestUrl ? 'agent-runtime-pull-request' : '',
-      kind: 'agent-runtime-pull-request',
-      url: pullRequestUrl,
-      metadata: { scenario_id: scenario.id },
-    });
-  }
-  return artifacts;
-}
-
 function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null, options = {}) {
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
-  const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
+  const publicEnvelope = codeboxPublicResultEnvelope(result, options) || {};
+  const publicMetadata = publicEnvelope.metadata || {};
   const completionOutcome = result.completionOutcome || result.completion_outcome || result.metadata?.recipe_run?.completionOutcome || {};
   const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
   const run = result.run || result.metadata?.recipe_run?.run || {};
@@ -3009,10 +2662,10 @@ function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null
     runtime_status: runSummary?.metadata?.runtime_status || runtime.status,
     heartbeat_at: run.heartbeatAt,
     cleanup_observed: (runSummary?.metadata?.runtime_status || runtime.status) === 'destroyed' ? 'runtime_destroyed' : '',
-    changed_files_count: runSummary?.metadata?.changed_files_count ?? agentResult.changedFiles?.count,
-    patch_bytes: runSummary?.metadata?.patch_bytes ?? agentResult.patch?.bytes,
-    patch_sha256: runSummary?.metadata?.patch_sha256 || agentResult.patch?.sha256,
-    no_op_reason: runSummary?.metadata?.no_op_reason || agentResult.noOpReason,
+    changed_files_count: runSummary?.metadata?.changed_files_count ?? publicMetadata.changed_files_count,
+    patch_bytes: runSummary?.metadata?.patch_bytes ?? publicMetadata.patch_bytes,
+    patch_sha256: runSummary?.metadata?.patch_sha256 || publicMetadata.patch_sha256,
+    no_op_reason: runSummary?.metadata?.no_op_reason || publicMetadata.no_op_reason,
     completion_status: runSummary?.metadata?.completion_status || completionOutcome.status,
     completion_next_action: runSummary?.metadata?.completion_next_action || completionOutcome.nextAction,
     confidence: runSummary?.metadata?.confidence || completionOutcome.confidence,
@@ -3078,8 +2731,10 @@ function providerNotRegisteredDiagnostic(request, result = {}) {
 
 function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   assertAgentTaskRequest(request);
-  const runSummary = codeboxRunSummary(result, options);
-  const recipeSummary = codeboxRecipeRunSummary(result, options);
+  const publicResultEnvelope = codeboxPublicResultEnvelope(result, options);
+  const envelopeOptions = { ...options, publicResultEnvelope };
+  const runSummary = codeboxRunSummary(result, envelopeOptions);
+  const recipeSummary = codeboxRecipeRunSummary(result, envelopeOptions);
   const localStatus = normalizeStatus(result, options.exitStatus ?? 0);
   let status = runSummary?.status || recipeSummary?.status || localStatus;
   if (recipeSummary?.status && recipeSummary.status !== 'succeeded') {
@@ -3088,10 +2743,11 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     status = localStatus;
   }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
-  const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request, options), request);
+  const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request, envelopeOptions), request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
   const invalidRequiredTypedArtifacts = invalidRequiredTypedArtifactDiagnostic(request, outputs);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
+  const envelopeBoundaryDiagnostic = publicEnvelopeBoundaryDiagnostic(result, envelopeOptions);
   if (status === 'succeeded' && missingRequiredTypedArtifacts) {
     status = 'failed';
   }
@@ -3099,6 +2755,9 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     status = 'failed';
   }
   if (status === 'succeeded' && runtimeFailureDiagnostic) {
+    status = 'failed';
+  }
+  if (envelopeBoundaryDiagnostic) {
     status = 'failed';
   }
   const recipeRun = recipeRunFromResult(result);
@@ -3111,11 +2770,11 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     providerLabel: 'WP Codebox agent',
     integrationContract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
     status,
-    summary: missingRequiredTypedArtifacts?.message || invalidRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
-    artifacts: normalizeArtifacts(result, runSummary, recipeSummary, options),
-    evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary, options),
+    summary: envelopeBoundaryDiagnostic?.message || missingRequiredTypedArtifacts?.message || invalidRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
+    artifacts: normalizeArtifacts(result, runSummary, recipeSummary, envelopeOptions),
+    evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary, envelopeOptions),
     outputs,
-    diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
+    diagnostics: [providerDiagnostic, envelopeBoundaryDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
       message: diagnostic.message || String(diagnostic),
       data: sanitizePublicMetadata(diagnostic.data || {}),
@@ -3124,7 +2783,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       codebox: sanitizePublicMetadata(result.metadata || result),
       codebox_run_result: runSummary ? sanitizePublicMetadata(runSummary) : undefined,
       codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
-      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary, options)),
+      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary, envelopeOptions)),
       artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
       typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
       sandbox_policy: sanitizePublicMetadata({
@@ -3137,7 +2796,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
   });
   if (failureClassification) {
     outcome.failure_classification = failureClassification;
-  } else if (missingRequiredTypedArtifacts || invalidRequiredTypedArtifacts) {
+  } else if (envelopeBoundaryDiagnostic || missingRequiredTypedArtifacts || invalidRequiredTypedArtifacts) {
     outcome.failure_classification = 'execution_failed';
   }
   return outcomeWithOutputTypedArtifacts(outcome, outputs);

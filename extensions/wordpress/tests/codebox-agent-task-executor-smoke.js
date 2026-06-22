@@ -100,27 +100,25 @@ process.stdout.write(JSON.stringify({
   success: true,
   status: 'completed',
   summary: 'Sandbox completed.',
-  artifact_result: {
-    schema: 'wp-codebox/artifact-result-envelope/v1',
-    typed_artifacts: [
-      {
-        name: 'fixture_report',
+	artifact_result: {
+		schema: 'wp-codebox/artifact-result-envelope/v1',
+		status: 'created',
+		metadata: { changed_files_count: 2, patch_bytes: 123, patch_sha256: 'fixture-patch-sha' },
+		typed_artifacts: [
+			{
+				name: 'fixture_report',
         type: 'FixtureReport',
         artifact_schema: 'example/fixture-report/v1',
         payload: { ok: true }
-      }
-    ]
-  },
-  artifacts: [{ id: 'artifact-1', kind: 'screenshot', path: '/artifacts/screenshot.png' }],
-  evidence_refs: [{ kind: 'preview', uri: 'https://example.test/preview', label: 'Preview' }],
-  run: {
+			}
+		],
+		artifact_refs: [{ id: 'artifact-1', kind: 'screenshot', path: '/artifacts/screenshot.png' }],
+		evidence_refs: [{ kind: 'preview', uri: 'https://example.test/preview', label: 'Preview' }],
+	},
+	run: {
     runId: 'fixture-run-1',
     status: 'succeeded',
     runtime: { id: 'fixture-runtime-1', status: 'destroyed' },
-    agentResult: {
-      changedFiles: { count: 2 },
-      patch: { bytes: 123, sha256: 'fixture-patch-sha' }
-    }
   },
   recipe_run: {
     success: true,
@@ -145,9 +143,12 @@ process.stdout.write(JSON.stringify({
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'Semantic output was produced before provider exit failure.',
-  outputs: { issue_url: 'https://github.com/example/repo/issues/456' },
-  artifacts: [{ id: 'semantic-artifact', kind: 'codebox-patch', path: '/tmp/semantic.patch' }],
-  session: { id: 'sandbox-session-failed-exit', status: 'completed' }
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [{ id: 'semantic-artifact', kind: 'codebox-patch', path: '/tmp/semantic.patch' }],
+    result: { outputs: { issue_url: 'https://github.com/example/repo/issues/456' } },
+  }
 }));
 process.exit(7);
 `);
@@ -213,8 +214,11 @@ if (process.env.FIXTURE_WP_CODEBOX_AGENT_TASK_FAILURE) {
     schema: 'wp-codebox/agent-task-run/v1',
     status: 'failed',
     summary: 'WP Codebox agent task failed.',
-    session: { id: input.sandbox_session_id, status: 'failed' },
-    artifacts: input.artifacts_path,
+    artifact_result: {
+      schema: 'wp-codebox/artifact-result-envelope/v1',
+      status: 'failed',
+      artifact_bundle_refs: [{ id: 'fake-artifact-bundle', kind: 'codebox-artifact-bundle', path: input.artifacts_path }]
+    },
     metadata: {}
   }));
   process.exit(0);
@@ -223,37 +227,21 @@ process.stdout.write(JSON.stringify({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  session: {
-    schema: 'wp-codebox/sandbox-session/v1',
-    id: input.sandbox_session_id,
-    status: 'completed',
-    artifacts: { bundle_id: 'fake-artifact-bundle', path: input.artifacts_path, preview_url: 'https://preview.example.test/fake' },
-    orchestrator: input.orchestrator
-  },
   task_input: input,
-  artifacts: input.artifacts_path,
-  agent_result: {
-    scenarios: [{
-      id: 'agent-bundle',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_bundle_refs: [{ id: 'fake-artifact-bundle', kind: 'codebox-artifact-bundle', path: input.artifacts_path }],
+    artifact_refs: [
+      { kind: 'agent-runtime-transcript', path: input.artifacts_path + '/transcript.json' },
+      { kind: 'agent-runtime-replay-bundle', path: input.artifacts_path + '/replay-bundle' },
+      { kind: 'agent-runtime-pull-request', url: 'https://github.com/example-org/example-repo/pull/123' }
+    ],
+    evidence_refs: [{ kind: 'agent-runtime-pull-request', uri: 'https://github.com/example-org/example-repo/pull/123' }],
+    result: {
+      outputs: { example_pr_url: 'https://github.com/example-org/example-repo/pull/123' },
       metadata: {
-        transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
-        replay_bundle_path: input.artifacts_path + '/replay-bundle',
         engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } }
-      }
-    }]
-  },
-  metadata: {
-    agent_runtime: {
-      bundle: input.agent_bundle,
-      workload: {
-        scenarios: [{
-          id: 'agent-bundle',
-          metadata: {
-            transcript_artifacts: { json: input.artifacts_path + '/transcript.json' },
-            replay_bundle_path: input.artifacts_path + '/replay-bundle',
-            engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } }
-          }
-        }]
       }
     }
   }
@@ -1540,7 +1528,11 @@ const outcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: false,
   provider_error: true,
   summary: 'Provider failed.',
-  artifacts: { bundle: { id: 'bundle-1', directory: '/tmp/artifacts' } },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_bundle_refs: [{ id: 'bundle-1', kind: 'artifact-bundle', path: '/tmp/artifacts' }],
+  },
 });
 assert.equal(outcome.schema, 'homeboy/agent-task-outcome/v1');
 assert.equal(outcome.task_id, 'task-123');
@@ -1553,14 +1545,12 @@ const upstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  session: {
-    id: 'sandbox-session-1',
-    artifacts: {
-      bundle_id: 'artifact-bundle-1',
-      preview_url: 'https://preview.example.test/sandbox-session-1',
-    },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_bundle_refs: [{ id: 'artifact-bundle-1', kind: 'codebox-artifact-directory', path: '/tmp/wp-codebox-artifacts' }],
+    evidence_refs: [{ kind: 'codebox-preview', uri: 'https://preview.example.test/sandbox-session-1' }],
   },
-  artifacts: '/tmp/wp-codebox-artifacts',
 });
 assert.equal(upstreamRunnerOutcome.status, 'succeeded');
 assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
@@ -1596,12 +1586,15 @@ assert.equal(canonicalArtifactEnvelopeOutcome.artifacts.some((artifact) => artif
 const failedUpstreamRunnerOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'failed',
-  session: { id: 'sandbox-session-1', status: 'failed' },
-  evidence_refs: [{
-    kind: 'codebox-command-evidence',
-    uri: '/tmp/wp-codebox-artifacts/wp-codebox-command-evidence.json',
-    label: 'codebox command evidence',
-  }],
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'failed',
+    evidence_refs: [{
+      kind: 'codebox-command-evidence',
+      uri: '/tmp/wp-codebox-artifacts/wp-codebox-command-evidence.json',
+      label: 'codebox command evidence',
+    }],
+  },
 });
 assert.equal(failedUpstreamRunnerOutcome.status, 'failed');
 assert.equal(
@@ -1704,6 +1697,17 @@ const recipeProbeFailureOutcome = agentTaskOutcomeFromCodeboxResult(request, {
     fake_side_effects: '/tmp/recipe/fakes/side-effects.json',
     declared_artifacts: [{ name: 'runtime-log', path: '/tmp/recipe/logs/runtime.log' }],
   },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [
+      { kind: 'codebox-recipe-startup-log', path: '/tmp/recipe/startup.log' },
+      { kind: 'codebox-recipe-probe-json', path: '/tmp/recipe/probes/home-page.json' },
+      { kind: 'codebox-recipe-screenshot', path: '/tmp/recipe/screens/home-page.png' },
+      { kind: 'codebox-recipe-fake-side-effects', path: '/tmp/recipe/fakes/side-effects.json' },
+      { kind: 'codebox-recipe-artifact', path: '/tmp/recipe/logs/runtime.log' },
+    ],
+  },
 });
 assert.equal(recipeProbeFailureOutcome.status, 'failed');
 assert.equal(recipeProbeFailureOutcome.summary, 'WP Codebox home-page failed.');
@@ -1752,9 +1756,16 @@ const normalizedCompletedOutcome = agentTaskOutcomeFromCodeboxResult(request, {
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'WP Codebox agent task succeeded.',
-  outputs: {
-    issue_number: 123,
-    issue_url: 'https://github.com/example-org/example-repo/issues/123',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    evidence_refs: [{ kind: 'agent-output-issue-url', uri: 'https://github.com/example-org/example-repo/issues/123' }],
+    result: {
+      outputs: {
+        issue_number: 123,
+        issue_url: 'https://github.com/example-org/example-repo/issues/123',
+      },
+    },
   },
   session: { id: 'sandbox-session-1', status: 'completed' },
 }, { exitStatus: 1 });
@@ -1795,12 +1806,17 @@ const nestedAgentRuntimeOutputFailureOutcome = agentTaskOutcomeFromCodeboxResult
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'Outer runner completed.',
-  outputs: {
-    success: false,
-    status: 'completed_no_items',
-    completion_outcome: {
-      status: 'completed_no_items',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    evidence_refs: [{ kind: 'agent-output-issue-url', uri: 'https://github.com/example-org/example-repo/issues/123' }],
+    result: {
       success: false,
+      status: 'completed_no_items',
+      completion_outcome: {
+        status: 'completed_no_items',
+        success: false,
+      },
     },
   },
 });
@@ -1812,16 +1828,15 @@ const rawNestedAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(re
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'WP Codebox agent task succeeded.',
-  raw: {
-    agent_runtime: {
-      success: true,
-      result: {
-        success: false,
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      success: false,
+      status: 'completed_no_items',
+      completion_outcome: {
         status: 'completed_no_items',
-        completion_outcome: {
-          status: 'completed_no_items',
-          success: false,
-        },
+        success: false,
       },
     },
   },
@@ -1834,16 +1849,16 @@ const metadataAgentRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(req
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'WP Codebox agent task succeeded.',
-  metadata: {
-    agent_runtime: {
-      result: {
-        error_message: 'Codex OAuth refresh failed.',
-        error_reason: 'ai_processing_failed',
-        terminal_status: 'failed - ai_processing_failed',
-        reason: 'empty_data_packet_returned',
-        outputs: {
-          error_step_id: 'ephemeral_step_0',
-        },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      error_message: 'Codex OAuth refresh failed.',
+      error_reason: 'ai_processing_failed',
+      terminal_status: 'failed - ai_processing_failed',
+      reason: 'empty_data_packet_returned',
+      outputs: {
+        error_step_id: 'ephemeral_step_0',
       },
     },
   },
@@ -1859,11 +1874,11 @@ const metadataAgentRuntimeTerminalFailureOutcome = agentTaskOutcomeFromCodeboxRe
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  metadata: {
-    agent_runtime: {
-      result: {
-        terminalStatus: 'failed - provider_auth_failed',
-      },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      terminalStatus: 'failed - provider_auth_failed',
     },
   },
 });
@@ -1875,19 +1890,14 @@ const workloadScenarioRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResult(
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        outputs: {},
-        scenarios: [{
-          id: 'agent-bundle',
-          metadata: {
-            error_step_id: 'ephemeral_step_0',
-            error_reason: 'ai_processing_failed',
-            terminal_status: 'failed - ai_processing_failed',
-          },
-        }],
-      },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      error_step_id: 'ephemeral_step_0',
+      error_reason: 'ai_processing_failed',
+      terminal_status: 'failed - ai_processing_failed',
+      outputs: {},
     },
   },
 });
@@ -1900,9 +1910,15 @@ const outputRuntimeFailureMetadataOutcome = agentTaskOutcomeFromCodeboxResult(re
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  outputs: {
-    error_step_id: 'ephemeral_step_1',
-    error_reason: 'provider_auth_failed',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        error_step_id: 'ephemeral_step_1',
+        error_reason: 'provider_auth_failed',
+      },
+    },
   },
 });
 assert.equal(outputRuntimeFailureMetadataOutcome.status, 'failed');
@@ -1914,16 +1930,15 @@ const outputAgentRuntimeFailureWithoutTypedArtifactsOutcome = agentTaskOutcomeFr
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'WP Codebox agent task succeeded.',
-  outputs: {
-    agent_runtime: {
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
       success: false,
-      result: {
-        success: false,
-        error_reason: 'ai_processing_failed',
-        error_message: 'Embedded runtime failed before emitting typed artifacts.',
-        terminal_status: 'failed - ai_processing_failed',
-        outputs: {},
-      },
+      error_reason: 'ai_processing_failed',
+      error_message: 'Embedded runtime failed before emitting typed artifacts.',
+      terminal_status: 'failed - ai_processing_failed',
+      outputs: {},
     },
   },
 }, {
@@ -1954,19 +1969,18 @@ const synthesizedArtifactRuntimeFailureOutcome = agentTaskOutcomeFromCodeboxResu
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
   summary: 'WP Codebox agent task succeeded.',
-  artifacts: [{ id: 'codebox-patch', kind: 'codebox-patch', path: '/tmp/patch.diff' }],
-  outputs: {
-    typed_artifacts: {
-      patch: { name: 'patch', type: 'file', payload: { path: '/tmp/patch.diff' } },
-      agent_result: { name: 'agent_result', type: 'json', payload: { status: 'failed' } },
-    },
-  },
-  metadata: {
-    agent_runtime: {
-      workload: {
-        success: false,
-        status: 'failed',
-        outputs: {},
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [{ id: 'codebox-patch', kind: 'codebox-patch', path: '/tmp/patch.diff' }],
+    result: {
+      success: false,
+      status: 'failed',
+      outputs: {
+        typed_artifacts: {
+          patch: { name: 'patch', type: 'file', payload: { path: '/tmp/patch.diff' } },
+          agent_result: { name: 'agent_result', type: 'json', payload: { status: 'failed' } },
+        },
       },
     },
   },
@@ -1991,39 +2005,39 @@ const agentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  artifacts: '/tmp/wp-codebox-artifacts',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [
+      { kind: 'typed-bundle-output', name: 'example_review', path: '/tmp/wp-codebox-artifacts/example-review.json' },
+      { kind: 'agent-runtime-transcript', path: '/tmp/transcript.json' },
+      { kind: 'agent-runtime-replay-bundle', path: '/tmp/replay-bundle' },
+      { kind: 'agent-runtime-pull-request', url: 'https://github.com/example-org/example-repo/pull/123' },
+    ],
+    result: {
+      metadata: {
+        engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } },
+      },
+      outputs: {
+        typed_artifacts: {
+          example_review: {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            type: 'ExampleReviewArtifact',
+            artifact_schema: 'example/review-artifact/v1',
+            payload: { slug: 'issue-1222-transformer-loop', review_ready: true },
+            provenance: { bundle_slug: 'example-agent', task_id: 'agent-bundle-task-123' },
+            file_refs: [{ path: '/tmp/wp-codebox-artifacts/example-review.json', mime: 'application/json' }],
+          },
+        },
+      },
+    },
+  },
   task_input: {
+    agent_bundle: agentBundleRequest.agent_bundle,
     policy: { write: 'sandbox', apply: 'review' },
     sandbox_tool_policy: {
       schema: 'wp-codebox/sandbox-tool-policy/v1',
       tools: [{ id: 'homeboy/no-runtime-tools', allowed: false }],
-    },
-  },
-  metadata: {
-    agent_runtime: {
-      bundle: agentBundleRequest.agent_bundle,
-      workload: {
-        outputs: {
-          typed_artifacts: {
-            example_review: {
-              schema: 'homeboy/agent-task-typed-artifact/v1',
-              type: 'ExampleReviewArtifact',
-              artifact_schema: 'example/review-artifact/v1',
-              payload: { slug: 'issue-1222-transformer-loop', review_ready: true },
-              provenance: { bundle_slug: 'example-agent', task_id: 'agent-bundle-task-123' },
-              file_refs: [{ path: '/tmp/wp-codebox-artifacts/example-review.json', mime: 'application/json' }],
-            },
-          },
-        },
-        scenarios: [{
-          id: 'agent-bundle',
-          metadata: {
-            transcript_artifacts: { json: '/tmp/transcript.json', summary: '/tmp/transcript.md' },
-            replay_bundle_path: '/tmp/replay-bundle',
-            engine_data: { example_agent: { pr_url: 'https://github.com/example-org/example-repo/pull/123' } },
-          },
-        }],
-      },
     },
   },
 });
@@ -2040,9 +2054,9 @@ assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === 'https:/
 assert.equal(agentBundleOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/wp-codebox-artifacts/example-review.json'), true);
 assert.equal(agentBundleOutcome.metadata.sandbox_policy.policy.apply, 'review');
 assert.equal(agentBundleOutcome.metadata.sandbox_policy.sandbox_tool_policy.tools[0].allowed, false);
-assert.equal(upstreamRunnerOutcome.artifacts[1].kind, 'codebox-session-artifacts');
-assert.equal(upstreamRunnerOutcome.evidence_refs[0].uri, 'https://preview.example.test/sandbox-session-1');
-assert.equal(upstreamRunnerOutcome.evidence_refs[1].uri, '/tmp/wp-codebox-artifacts');
+assert.equal(upstreamRunnerOutcome.artifacts[0].kind, 'codebox-artifact-directory');
+assert.equal(upstreamRunnerOutcome.evidence_refs.some((ref) => ref.uri === 'https://preview.example.test/sandbox-session-1'), true);
+assert.equal(upstreamRunnerOutcome.evidence_refs.some((ref) => ref.uri === '/tmp/wp-codebox-artifacts'), true);
 
 const missingRequiredTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   ...request,
@@ -2059,12 +2073,11 @@ const missingRequiredTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        outputs: {},
-        scenarios: [{ id: 'agent-bundle', metadata: {} }],
-      },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {},
     },
   },
 });
@@ -2091,12 +2104,11 @@ const inputBackfilledTypedArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        outputs: {},
-        scenarios: [{ id: 'agent-bundle', metadata: {} }],
-      },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {},
     },
   },
 });
@@ -2122,12 +2134,11 @@ const missingGenericRepoLoopArtifactOutcome = agentTaskOutcomeFromCodeboxResult(
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        outputs: {},
-        scenarios: [{ id: 'agent-bundle', metadata: {} }],
-      },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {},
     },
   },
 });
@@ -2144,27 +2155,28 @@ const canonicalTopLevelAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  artifacts: '/tmp/wp-codebox-artifacts',
-  metadata: {
-    agent_runtime: {
-      bundle: {
+  task_input: {
+    agent_bundle: {
         engine_data_outputs: {
           example_branch: 'metadata.engine_data.example_agent.branch',
           example_pr_url: 'metadata.engine_data.example_agent.pr_url',
           example_slug: 'metadata.engine_data.example_agent.slug',
         },
       },
-      workload: {
-        outputs: [],
-      },
-    },
   },
-  outputs: {
-    engine_data: {
-      example_agent: {
-        branch: 'example/issue-451-design-direction',
-        pr_url: 'https://github.com/example-org/example-repo/pull/453',
-        slug: 'issue-451-design-direction',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    evidence_refs: [{ kind: 'agent-runtime-pull-request', uri: 'https://github.com/example-org/example-repo/pull/453' }],
+    result: {
+      metadata: {
+        engine_data: {
+          example_agent: {
+            branch: 'example/issue-451-design-direction',
+            pr_url: 'https://github.com/example-org/example-repo/pull/453',
+            slug: 'issue-451-design-direction',
+          },
+        },
       },
     },
   },
@@ -2189,33 +2201,29 @@ const projectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  artifacts: '/tmp/wp-codebox-artifacts',
-  metadata: {
-    agent_runtime: {
-      bundle: {
+  task_input: {
+    agent_bundle: {
         engine_data_outputs: {
           example_review: 'outputs.typed_artifacts.example_review.payload',
         },
       },
-      workload: {
-        scenarios: [{
-          id: 'agent-bundle',
-          metadata: {
-            schema: 'datamachine/agent-bundle-run/v1',
-            outputs: {
-              typed_artifacts: {
-                example_review: {
-                  schema: 'homeboy/agent-task-typed-artifact/v1',
-                  type: 'ExampleReviewArtifact',
-                  artifact_schema: 'example/review-artifact/v1',
-                  payload: { slug: 'projected-review', review_ready: true },
-                  provenance: { bundle_slug: 'example-agent' },
-                  file_refs: [{ path: '/tmp/wp-codebox-artifacts/projected-review.json', mime: 'application/json' }],
-                },
-              },
-            },
+  },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    artifact_refs: [{ kind: 'typed-bundle-output', path: '/tmp/wp-codebox-artifacts/projected-review.json' }],
+    result: {
+      outputs: {
+        typed_artifacts: {
+          example_review: {
+            schema: 'homeboy/agent-task-typed-artifact/v1',
+            type: 'ExampleReviewArtifact',
+            artifact_schema: 'example/review-artifact/v1',
+            payload: { slug: 'projected-review', review_ready: true },
+            provenance: { bundle_slug: 'example-agent' },
+            file_refs: [{ path: '/tmp/wp-codebox-artifacts/projected-review.json', mime: 'application/json' }],
           },
-        }],
+        },
       },
     },
   },
@@ -2241,25 +2249,18 @@ const engineDataTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        scenarios: [{
-          id: 'agent-bundle',
-          metadata: {
-            engine_data: {
-              outputs: {
-                typed_artifacts: {
-                  concept_packet: {
-                    schema: 'example/concept-packet/v1',
-                    artifact: 'ConceptPacket',
-                    payload: { title: 'Projected concept' },
-                  },
-                },
-              },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        typed_artifacts: {
+          concept_packet: {
+            schema: 'example/concept-packet/v1',
+            artifact: 'ConceptPacket',
+            payload: { title: 'Projected concept' },
             },
           },
-        }],
       },
     },
   },
@@ -2283,20 +2284,13 @@ const replyTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  metadata: {
-    agent_runtime: {
-      workload: {
-        id: 'runtime-task',
-        success: true,
-        status: 'completed',
-        outputs: {},
-        metadata: {
-          result: {
-            reply: '## Commerce Concept Packet\n\nA focused commerce concept packet.',
-          },
-        },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      reply: '## Commerce Concept Packet\n\nA focused commerce concept packet.',
+      outputs: {},
       },
-    },
   },
 });
 assert.equal(replyTypedArtifactBundleOutcome.status, 'succeeded');
@@ -2317,21 +2311,20 @@ const failedProjectedTypedArtifactBundleOutcome = agentTaskOutcomeFromCodeboxRes
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
   status: 'completed',
-  outputs: {
-    agent_runtime: {
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
       success: false,
-      result: {
-        success: false,
-        error_reason: 'empty_data_packet_returned',
-        error_message: 'Runtime bundle returned an empty data packet.',
-        terminal_status: 'failed - empty_data_packet_returned',
-        outputs: {
-          typed_artifacts: {
-            failure_report: {
-              type: 'FailureReport',
-              artifact_schema: 'example/failure-report/v1',
-              payload: { reason: 'empty_data_packet_returned' },
-            },
+      error_reason: 'empty_data_packet_returned',
+      error_message: 'Runtime bundle returned an empty data packet.',
+      terminal_status: 'failed - empty_data_packet_returned',
+      outputs: {
+        typed_artifacts: {
+          failure_report: {
+            type: 'FailureReport',
+            artifact_schema: 'example/failure-report/v1',
+            payload: { reason: 'empty_data_packet_returned' },
           },
         },
       },
@@ -2351,22 +2344,28 @@ const singleResultAgentBundleOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  artifacts: '/tmp/wp-codebox-artifacts',
-  metadata: {
-    agent_runtime: {
-      bundle: {
+  task_input: {
+    agent_bundle: {
         engine_data_outputs: {
           issue_number: 'metadata.engine_data.example_agent.issue_number',
           issue_url: 'metadata.engine_data.example_agent.issue_url',
         },
       },
-      workload: {
-        outputs: {
-          issue_number: 123,
-          issue_url: 'https://github.com/example-org/example-repo/issues/123',
+  },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    evidence_refs: [{ kind: 'agent-output-issue-url', uri: 'https://github.com/example-org/example-repo/issues/123' }],
+    result: {
+      metadata: {
+        engine_data: {
+          example_agent: {
+            issue_number: 123,
+            issue_url: 'https://github.com/example-org/example-repo/issues/123',
+          },
         },
-        diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }],
       },
+      diagnostics: [{ class: 'agent_runtime.output', message: 'Semantic outputs captured.' }],
     },
   },
 });
@@ -2391,6 +2390,24 @@ const canaryRunOutcome = agentTaskOutcomeFromCodeboxResult(request, {
     runtimeLogPath: '/tmp/canary/runtime/logs/runtime.log',
     commandsLogPath: '/tmp/canary/runtime/logs/commands.log',
   },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    metadata: {
+      no_op_reason: 'no_file_changes',
+      changed_files_count: 0,
+      patch_bytes: 0,
+      patch_sha256: 'empty-patch-sha',
+    },
+    artifact_refs: [
+      { id: 'artifact-bundle-sha256-canary', kind: 'artifact-bundle', path: '/tmp/canary/runtime', sha256: 'canary-digest' },
+      { id: 'codebox-changed-files', kind: 'codebox-changed-files', path: '/tmp/canary/runtime/files/changed-files.json', metadata: { artifact: 'files/changed-files.json' } },
+      { id: 'codebox-patch', kind: 'codebox-patch', path: '/tmp/canary/runtime/files/patch.diff', sha256: 'empty-patch-sha', metadata: { artifact: 'files/patch.diff' } },
+      { id: 'codebox-transcript', kind: 'codebox-transcript', path: '/tmp/canary/runtime/files/transcript.json', metadata: { artifact: 'files/transcript.json', executionCount: 1 } },
+      { id: 'codebox-runtime-log', kind: 'codebox-runtime-log', path: '/tmp/canary/runtime/logs/runtime.log' },
+      { id: 'codebox-command-log', kind: 'codebox-command-log', path: '/tmp/canary/runtime/logs/commands.log' },
+    ],
+  },
   run: {
     runId: 'run-canary',
     status: 'succeeded',
@@ -2402,14 +2419,6 @@ const canaryRunOutcome = agentTaskOutcomeFromCodeboxResult(request, {
       id: 'artifact-bundle-sha256-canary',
       digest: { algorithm: 'sha256', value: 'canary-digest' },
     }],
-    agentResult: {
-      summary: 'Agent sandbox completed without actionable file changes.',
-      changedFiles: { count: 0, paths: [], artifact: 'files/changed-files.json' },
-      patch: { bytes: 0, sha256: 'empty-patch-sha', artifact: 'files/patch.diff' },
-      transcript: { artifact: 'files/transcript.json', executionCount: 1 },
-      artifacts: { directory: '/tmp/canary/runtime' },
-      noOpReason: 'no_file_changes',
-    },
   },
   completionOutcome: {
     status: 'partial',
@@ -2426,7 +2435,7 @@ assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'ar
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-changed-files' && artifact.path === '/tmp/canary/runtime/files/changed-files.json'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-patch' && artifact.path === '/tmp/canary/runtime/files/patch.diff'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-transcript' && artifact.path === '/tmp/canary/runtime/files/transcript.json'), true);
-assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'patch' && artifact.metadata.wp_codebox.kind === 'codebox-patch' && artifact.metadata.wp_codebox.raw.metadata.artifact === 'files/patch.diff'), true);
+assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'patch' && artifact.metadata.wp_codebox.kind === 'codebox-patch' && artifact.path === '/tmp/canary/runtime/files/patch.diff'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.role === 'transcript' && artifact.metadata.wp_codebox.kind === 'codebox-transcript'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-runtime-log'), true);
 assert.equal(canaryRunOutcome.artifacts.some((artifact) => artifact.kind === 'codebox-command-log'), true);
@@ -2449,16 +2458,15 @@ const canaryTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    metadata: { no_op_reason: 'no_file_changes', changed_files_count: 0, patch_bytes: 0 },
+    transcript_refs: [{ kind: 'codebox-transcript', path: '/tmp/canary/runtime/files/transcript.json' }],
+  },
   run: {
     runId: 'run-canary-transcript-required',
     status: 'succeeded',
-    agentResult: {
-      changedFiles: { count: 0, paths: [], artifact: 'files/changed-files.json' },
-      patch: { bytes: 0, sha256: 'empty-patch-sha', artifact: 'files/patch.diff' },
-      transcript: { artifact: 'files/transcript.json', executionCount: 1 },
-      artifacts: { directory: '/tmp/canary/runtime' },
-      noOpReason: 'no_file_changes',
-    },
   },
 });
 assert.equal(canaryTranscriptRequiredOutcome.status, 'no_op');
@@ -2479,21 +2487,17 @@ const labTranscriptRequiredOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   schema: 'wp-codebox/agent-task-run/v1',
-  session: {
-    id: 'lab-session-transcript-required',
-    status: 'completed',
-    artifacts: {
-      bundle_id: 'lab-artifact-bundle',
-      directory: labRuntimeRoot,
-    },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    transcript_refs: [{
+      id: 'lab-codebox-transcript',
+      kind: 'codebox-transcript',
+      path: path.join(labRuntimeRoot, 'files', 'transcript.json'),
+      mime: 'application/json',
+    }],
+    result: { outputs: {} },
   },
-  artifacts: [{
-    id: 'lab-codebox-transcript',
-    kind: 'codebox-transcript',
-    path: path.join(labRuntimeRoot, 'files', 'transcript.json'),
-    mime: 'application/json',
-  }],
-  outputs: {},
 });
 assert.equal(labTranscriptRequiredOutcome.outputs.typed_artifacts['datamachine-transcript'].file_refs[0].path, path.join(labRuntimeRoot, 'files', 'transcript.json'));
 assert.equal(labTranscriptRequiredOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.required_typed_artifacts_missing'), false);
@@ -2686,8 +2690,8 @@ try {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const cliOutcome = JSON.parse(result.stdout);
   assert.equal(cliOutcome.status, 'succeeded');
-  assert.equal(cliOutcome.artifacts[0].kind, 'screenshot');
-  assert.equal(cliOutcome.evidence_refs[0].uri, 'https://example.test/preview');
+  assert.equal(cliOutcome.artifacts.some((artifact) => artifact.kind === 'screenshot'), true);
+  assert.equal(cliOutcome.evidence_refs.some((ref) => ref.uri === 'https://example.test/preview'), true);
 
   const normalizedResult = spawnSync(process.execPath, [
     wpCodeboxRuntimeExecutor,
@@ -2995,7 +2999,7 @@ try {
         pipeline_slug: 'example-pipeline',
         flow_slug: 'example-manual-flow',
         evidence_projections: [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }],
-        runtime_output_projections: { example_pr_url: 'metadata.engine_data.example_agent.pr_url' },
+        runtime_output_projections: { example_pr_url: 'outputs.example_pr_url' },
       },
     },
   };
@@ -3027,7 +3031,7 @@ try {
   assert.equal(capturedAgentBundleRun.input.agent_bundle.agent_slug, 'example-agent');
   assert.equal(capturedAgentBundleRun.input.agent_bundle.pipeline_slug, 'example-pipeline');
   assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.evidence_projections, [{ operation: 'github/create-pull-request', outputs: { example_pr_url: 'data.html_url' } }]);
-  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.runtime_output_projections, { example_pr_url: 'metadata.engine_data.example_agent.pr_url' });
+  assert.deepEqual(capturedAgentBundleRun.input.agent_bundle.runtime_output_projections, { example_pr_url: 'outputs.example_pr_url' });
   assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'tool_recorders'), false);
   assert.equal(Object.hasOwn(capturedAgentBundleRun.input.agent_bundle, 'engine_data_outputs'), false);
 

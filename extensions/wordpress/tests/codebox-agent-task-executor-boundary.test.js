@@ -11,6 +11,7 @@ const {
   codeboxTaskRequestFromAgentTaskRequest,
   codeboxRunAgentTaskInvocation,
   discoverCodeboxArtifactRefs,
+  normalizeCodeboxPublicResultEnvelope,
   normalizeCodeboxArtifactDeclaration,
   normalizeCodeboxArtifactOutcome,
   providerContract,
@@ -64,7 +65,7 @@ const runAgentTaskRequirement = provider.upstream_primitive_requirements.find((r
 assert.equal(runAgentTaskRequirement.schema, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(
   provider.upstream_primitive_requirements.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
-  'consume_canonical_envelope_with_explicit_legacy_result_compatibility'
+  'consume_canonical_public_envelope_only'
 );
 assert.doesNotMatch(JSON.stringify(provider.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
@@ -119,6 +120,45 @@ assert.equal(artifactResultEnvelope.artifactRefs.length, 2);
 assert.equal(artifactResultEnvelope.evidenceRefs.length, 2);
 assert.equal(artifactResultEnvelope.evidenceRefs[0].uri, 'artifacts/run-1');
 assert.deepEqual(typedArtifactsFromCodeboxResult({ artifact_result: artifactResultEnvelope }).review.payload, { ok: true });
+assert.deepEqual(normalizeCodeboxPublicResultEnvelope({ artifact_result: artifactResultEnvelope }).outputs, {});
+const privateRuntimeShapeRequest = {
+  schema: 'homeboy/agent-task-request/v1',
+  task_id: 'private-runtime-shape-boundary',
+  executor: { backend: 'codebox', config: {} },
+  instructions: 'Reject private Codebox runtime result shapes.',
+  inputs: {},
+};
+const privateRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
+  success: true,
+  run: {
+    agentResult: {
+      reply: 'This private result shape must not be consumed.',
+      patch: { bytes: 10 },
+    },
+  },
+});
+assert.equal(privateRuntimeShapeOutcome.status, 'failed');
+assert.equal(privateRuntimeShapeOutcome.failure_classification, 'execution_failed');
+assert.equal(privateRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), true);
+assert.equal(privateRuntimeShapeOutcome.outputs.reply, undefined);
+const publicRuntimeShapeOutcome = agentTaskOutcomeFromCodeboxResult(privateRuntimeShapeRequest, {
+  success: true,
+  run: {
+    agentResult: {
+      reply: 'This private result shape must be ignored.',
+    },
+  },
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: { reply: 'Public reply' },
+    },
+  },
+});
+assert.equal(publicRuntimeShapeOutcome.status, 'succeeded');
+assert.equal(publicRuntimeShapeOutcome.outputs.reply, 'Public reply');
+assert.equal(publicRuntimeShapeOutcome.diagnostics.some((diagnostic) => diagnostic.class === 'codebox.public_result_envelope_missing'), false);
 assert.equal(normalizeCodeboxArtifactOutcome({ id: 'patch.diff', kind: 'codebox-patch' }, {}, {
   roleAliases: provider.role_aliases,
 }).role, 'patch');
@@ -299,14 +339,8 @@ const legacyShapedCodeboxResult = {
 };
 assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult), null);
 assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult), {});
-assert.equal(
-  artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }).status,
-  'created'
-);
-assert.equal(
-  typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true })['legacy-review'].payload.ok,
-  true
-);
+assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }), null);
+assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }), {});
 
 const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;
@@ -614,7 +648,7 @@ assert.deepEqual(controllerClientContextArtifactsTaskInput.artifact_declarations
 }]);
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.deepEqual(controllerClientContextArtifactsTaskInput.runtime_task.input.engine_data_outputs, {
-  concept_packet: 'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload',
+  concept_packet: 'outputs.typed_artifacts.concept_packet.payload',
 });
 
 const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskRequest({
@@ -643,7 +677,7 @@ assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.m
 assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.equal(
   providerAndControllerArtifactsTaskInput.runtime_task.input.engine_data_outputs.concept_packet,
-  'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload'
+  'outputs.typed_artifacts.concept_packet.payload'
 );
 
 const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
@@ -662,7 +696,15 @@ const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
 }, {
   success: true,
   status: 'completed',
-  reply: '<workspace_ls path="/workspace/wp-site-generator" />',
+  artifact_result: {
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        reply: '<workspace_ls path="/workspace/wp-site-generator" />',
+      },
+    },
+  },
 });
 assert.equal(placeholderArtifactOutcome.status, 'failed');
 assert.equal(placeholderArtifactOutcome.failure_classification, 'execution_failed');
