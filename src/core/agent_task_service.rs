@@ -39,6 +39,18 @@ pub enum AgentTaskDiscoveryFilter {
     Latest,
 }
 
+/// Discovery options layered on top of an [`AgentTaskDiscoveryFilter`]. Today
+/// this carries the operator-facing `--limit` cap shared by the `list`/`active`
+/// list surfaces so a large run history stays scannable, matching the
+/// pagination affordance other list commands expose (#5681).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentTaskDiscoveryOptions {
+    /// Maximum number of runs to return, applied after filtering/sorting.
+    /// `None` returns every matching run. Ignored for the `latest` filter,
+    /// which is always a single run.
+    pub limit: Option<usize>,
+}
+
 /// Number of minutes a `Running` record may go without an `updated_at`
 /// heartbeat before `agent-task active` treats it as suspect even when its
 /// owner process/runner-job liveness cannot be disproven. Lab/offloaded runs
@@ -51,12 +63,54 @@ pub struct AgentTaskDiscoveryReport {
     pub schema: &'static str,
     pub filter: &'static str,
     pub count: usize,
+    /// Total matching runs before any `--limit` cap was applied. Equals `count`
+    /// when no limit truncated the list; larger when results were capped so an
+    /// operator knows more runs exist (#5681).
+    pub total: usize,
+    /// The applied `--limit`, echoed back so consumers can tell a capped list
+    /// from a complete one. `None` when every matching run was returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// `true` when `total > count` because the `--limit` cap truncated results.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     /// Liveness buckets for the `active` filter so operators can separate
     /// genuinely-active runs from stale/suspect/unreconciled records at a
     /// glance. Only populated for the `active` filter; `None` elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness_summary: Option<AgentTaskLivenessSummary>,
+    /// Operator guidance explaining how to find Lab/offloaded runs that this
+    /// local discovery pass may not see. A freshly offloaded Lab cook's durable
+    /// record lives on the runner, so a local `agent-task list/active/latest`
+    /// can miss it; this note documents the correct runner-scoped command and
+    /// the `homeboy runs list` fallback (#5681).
+    pub lab_discovery: AgentTaskLabDiscoveryHint,
+}
+
+/// Guidance describing where Lab/offloaded agent-task runs are discoverable.
+/// Local discovery (`agent-task list/active/latest` without `--runner`) only
+/// sees runs whose durable records live on this controller; a run offloaded to
+/// a Lab runner is recorded on that runner until it reports back. This hint
+/// gives operators the exact runner-scoped command plus the cross-location
+/// fallback so a freshly-offloaded run is never "lost" (#5681).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskLabDiscoveryHint {
+    pub note: &'static str,
+    pub runner_scoped_command: &'static str,
+    pub fallback_command: &'static str,
+}
+
+impl Default for AgentTaskLabDiscoveryHint {
+    fn default() -> Self {
+        Self {
+            note: "This list covers runs whose durable records live on this controller. A run offloaded to a Lab runner is recorded on that runner until it reports back, so a freshly-offloaded run may not appear here yet.",
+            runner_scoped_command:
+                "homeboy --runner <runner-id> agent-task list   # discover runs resident on a specific Lab runner",
+            fallback_command:
+                "homeboy runs list   # cross-location fallback that includes offloaded runs",
+        }
+    }
 }
 
 /// Coarse liveness classification for an active (queued/running) run. The
@@ -237,6 +291,17 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
 }
 
 pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscoveryReport> {
+    discover_runs_with_options(filter, AgentTaskDiscoveryOptions::default())
+}
+
+/// Discovery with operator options (currently `--limit`). The `latest` filter
+/// is inherently a single run, so a limit is a no-op there; `all`/`active`
+/// truncate to the requested cap after filtering and sorting, and report the
+/// pre-cap `total` so consumers know more runs exist (#5681).
+pub fn discover_runs_with_options(
+    filter: AgentTaskDiscoveryFilter,
+    options: AgentTaskDiscoveryOptions,
+) -> Result<AgentTaskDiscoveryReport> {
     let mut records = agent_task_lifecycle::list_records()?;
     let is_active = filter == AgentTaskDiscoveryFilter::Active;
     if is_active {
@@ -252,6 +317,17 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
         records.truncate(1);
     }
 
+    let total = records.len();
+
+    // `latest` is always a single run; only `all`/`active` honor a limit cap.
+    let effective_limit = match filter {
+        AgentTaskDiscoveryFilter::Latest => None,
+        _ => options.limit,
+    };
+    if let Some(limit) = effective_limit {
+        records.truncate(limit);
+    }
+
     let now = chrono::Utc::now();
     let runs: Vec<_> = records
         .into_iter()
@@ -259,6 +335,7 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
         .collect();
 
     let liveness_summary = is_active.then(|| liveness_summary(&runs));
+    let truncated = runs.len() < total;
 
     Ok(AgentTaskDiscoveryReport {
         schema: "homeboy/agent-task-discovery/v1",
@@ -268,8 +345,12 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
             AgentTaskDiscoveryFilter::Latest => "latest",
         },
         count: runs.len(),
+        total,
+        limit: effective_limit,
+        truncated,
         runs,
         liveness_summary,
+        lab_discovery: AgentTaskLabDiscoveryHint::default(),
     })
 }
 
@@ -481,6 +562,18 @@ fn discovery_run(
     let source = run_source(&record);
     let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes));
 
+    // A runner-backed run's durable record (status/logs/artifacts/review) lives
+    // on the runner, so the emitted recovery commands must be runner-scoped to
+    // resolve against the run's actual location. Local runs use the bare
+    // command. This keeps "commands emitted in run metadata valid for the run
+    // location" (#5681).
+    let runner_id = metadata_string(&record.metadata, "runner_id")
+        .filter(|runner_id| !runner_id.trim().is_empty());
+    let command_prefix = match runner_id.as_deref() {
+        Some(runner_id) => format!("homeboy --runner {runner_id} agent-task"),
+        None => "homeboy agent-task".to_string(),
+    };
+
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
         state: record.state,
@@ -502,19 +595,19 @@ fn discovery_run(
         last_update,
         last_update_age_minutes,
         commands: AgentTaskDiscoveryCommands {
-            status: format!("homeboy agent-task status {run_id}"),
-            logs: format!("homeboy agent-task logs {run_id}"),
-            artifacts: format!("homeboy agent-task artifacts {run_id}"),
-            review: format!("homeboy agent-task review {run_id}"),
-            retry: format!("homeboy agent-task retry {run_id} --run"),
+            status: format!("{command_prefix} status {run_id}"),
+            logs: format!("{command_prefix} logs {run_id}"),
+            artifacts: format!("{command_prefix} artifacts {run_id}"),
+            review: format!("{command_prefix} review {run_id}"),
+            retry: format!("{command_prefix} retry {run_id} --run"),
             run_plan: format!(
                 "homeboy --runner <runner-id> agent-task run-plan --plan @{} --record-run-id <new-run-id>",
                 record.plan_path
             ),
             promote: aggregate_path
                 .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
-                .unwrap_or_else(|| format!("homeboy agent-task review {run_id}")),
-            reconcile: format!("homeboy agent-task cancel {run_id} --reason stale-running"),
+                .unwrap_or_else(|| format!("{command_prefix} review {run_id}")),
+            reconcile: format!("{command_prefix} cancel {run_id} --reason stale-running"),
         },
     }
 }
@@ -1366,6 +1459,14 @@ mod tests {
             assert_eq!(report.schema, "homeboy/agent-task-discovery/v1");
             assert_eq!(report.filter, "all");
             assert_eq!(report.count, 1);
+            assert_eq!(report.total, 1);
+            assert!(!report.truncated);
+            assert!(report.limit.is_none());
+            assert!(report
+                .lab_discovery
+                .runner_scoped_command
+                .contains("--runner"));
+            assert!(report.lab_discovery.fallback_command.contains("runs list"));
             assert_eq!(run.run_id, "run-discovery-list");
             assert_eq!(run.state, AgentTaskRunState::Queued);
             assert_eq!(run.repo.as_deref(), Some("homeboy"));
@@ -1584,6 +1685,90 @@ mod tests {
             assert_eq!(report.filter, "latest");
             assert_eq!(report.count, 1);
             assert_eq!(report.runs[0].run_id, "run-latest-z");
+        });
+    }
+
+    #[test]
+    fn discovery_limit_caps_list_and_reports_total() {
+        with_isolated_home(|_| {
+            for run_id in ["run-cap-a", "run-cap-b", "run-cap-c"] {
+                agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id))
+                    .expect("submitted");
+            }
+
+            let report = discover_runs_with_options(
+                AgentTaskDiscoveryFilter::All,
+                AgentTaskDiscoveryOptions { limit: Some(2) },
+            )
+            .expect("listed with limit");
+
+            assert_eq!(report.count, 2);
+            assert_eq!(report.total, 3);
+            assert_eq!(report.limit, Some(2));
+            assert!(report.truncated);
+            assert_eq!(report.runs.len(), 2);
+        });
+    }
+
+    #[test]
+    fn discovery_latest_ignores_limit() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-limit-a"))
+                .expect("submitted");
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-limit-z"))
+                .expect("submitted");
+
+            let report = discover_runs_with_options(
+                AgentTaskDiscoveryFilter::Latest,
+                AgentTaskDiscoveryOptions { limit: Some(5) },
+            )
+            .expect("latest listed");
+
+            // `latest` is always a single run; a limit is a no-op and not echoed.
+            assert_eq!(report.count, 1);
+            assert!(report.limit.is_none());
+            assert!(!report.truncated);
+        });
+    }
+
+    #[test]
+    fn discovery_runner_backed_run_emits_runner_scoped_commands() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-commands"))
+                .expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test("run-runner-commands", |record| {
+                record.state = AgentTaskRunState::Running;
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({
+                    "runner_id": "homeboy-lab",
+                });
+            })
+            .expect("runner-backed record stored");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::All).expect("listed");
+            let run = report
+                .runs
+                .iter()
+                .find(|run| run.run_id == "run-runner-commands")
+                .expect("runner-backed run listed");
+
+            // Commands must be valid for the run's location: runner-scoped.
+            assert_eq!(
+                run.commands.status,
+                "homeboy --runner homeboy-lab agent-task status run-runner-commands"
+            );
+            assert_eq!(
+                run.commands.logs,
+                "homeboy --runner homeboy-lab agent-task logs run-runner-commands"
+            );
+            assert_eq!(
+                run.commands.review,
+                "homeboy --runner homeboy-lab agent-task review run-runner-commands"
+            );
+            assert_eq!(
+                run.commands.reconcile,
+                "homeboy --runner homeboy-lab agent-task cancel run-runner-commands --reason stale-running"
+            );
         });
     }
 

@@ -32,8 +32,11 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     Ok((summary, 0))
 }
 
-pub(super) fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) -> CmdResult<Value> {
-    let report = agent_task_service::discover_runs(filter)?;
+pub(super) fn list_runs(
+    filter: agent_task_service::AgentTaskDiscoveryFilter,
+    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
+) -> CmdResult<Value> {
+    let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
@@ -45,9 +48,13 @@ pub(super) fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) ->
 /// The base discovery report (with per-run liveness, source, last-update age,
 /// and a per-run safe reconcile command) is preserved under `report`, and a
 /// `buckets` view groups run ids by classification for an at-a-glance triage.
-pub(super) fn list_active() -> CmdResult<Value> {
-    let report =
-        agent_task_service::discover_runs(agent_task_service::AgentTaskDiscoveryFilter::Active)?;
+pub(super) fn list_active(
+    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
+) -> CmdResult<Value> {
+    let report = agent_task_service_direct::discover_runs_with_options(
+        agent_task_service::AgentTaskDiscoveryFilter::Active,
+        options,
+    )?;
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
 
     let buckets = active_liveness_buckets(&report);
