@@ -165,7 +165,94 @@ function normalizeWpCodeboxFuzzSuiteCases(source = {}) {
 	if (source.schema !== HOMEBOY_FUZZ_WORKLOAD_SCHEMA) {
 		return directCases;
 	}
+	const planCases = homeboyFuzzWorkloadPlanCases(source);
+	if (planCases.length > 0) {
+		return planCases.map((entry, index) => homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry, source, index));
+	}
 	return directCases.map((entry, index) => homeboyFuzzWorkloadCaseToWpCodeboxCase(entry, source, index));
+}
+
+function homeboyFuzzWorkloadPlanCases(manifest = {}) {
+	return normalizeArray(manifest.plan?.targets).flatMap((target) => (
+		normalizeArray(target?.cases).map((testCase) => ({
+			...testCase,
+			target_id: target.id,
+			surface_id: target.surface_id || target.surfaceId,
+			target_metadata: objectOrUndefined(target.metadata),
+		}))
+	));
+}
+
+function homeboyFuzzWorkloadPlanCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0) {
+	const caseId = entry.case_id || entry.caseId || entry.id || `${manifest.id || 'fuzz-workload'}:${index}`;
+	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
+	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
+	return stripUndefined({
+		id: caseId,
+		case_id: caseId,
+		target: { kind: 'runtime', id: command, entrypoint: command },
+		description: entry.description || manifest.label,
+		input: objectOrUndefined(entry.input),
+		phases: homeboyFuzzWorkloadPlanCasePhases(entry, manifest, artifacts),
+		artifacts,
+		metadata: stripUndefined({
+			...(objectOrUndefined(entry.metadata) || {}),
+			source_schema: HOMEBOY_FUZZ_WORKLOAD_SCHEMA,
+			source_manifest_id: manifest.id,
+			source_plan_case: true,
+			target_id: entry.target_id,
+			surface_id: entry.surface_id,
+			target_metadata: objectOrUndefined(entry.target_metadata),
+		}),
+	});
+}
+
+function homeboyFuzzWorkloadPlanCasePhases(entry = {}, manifest = {}, artifacts = []) {
+	if (objectOrUndefined(entry.phases)) {
+		return entry.phases;
+	}
+	const activation = manifest.metadata?.fixture?.activation || firstHomeboyFuzzWorkloadActivation(manifest);
+	const setup = typeof activation === 'string' && activation.trim() !== ''
+		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
+		: undefined;
+	const command = entry.command || entry.target?.entrypoint || entry.target?.id;
+	const action = typeof command === 'string' && command.trim() !== ''
+		? [{ command, args: homeboyFuzzCommandArgs(entry.input) }]
+		: [];
+	const assert = artifacts
+		.map((artifact) => artifact.name)
+		.filter(Boolean)
+		.map((artifact) => ({ command: 'wordpress.collect-workload-result', args: [`artifact=${artifact}`] }));
+	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
+}
+
+function homeboyFuzzCommandArgs(input) {
+	const object = objectOrUndefined(input);
+	if (!object) {
+		return [];
+	}
+	return Object.entries(object).flatMap(([key, value]) => {
+		if (value === undefined || value === null) {
+			return [];
+		}
+		if (Array.isArray(value)) {
+			return [`${key}=${value.join(',')}`];
+		}
+		if (typeof value === 'object') {
+			return [`${key}=${JSON.stringify(value)}`];
+		}
+		return [`${key}=${value}`];
+	});
+}
+
+function firstHomeboyFuzzWorkloadActivation(manifest = {}) {
+	for (const entry of normalizeArray(manifest.cases)) {
+		const activation = entry?.intent?.plugin?.activation;
+		if (typeof activation === 'string' && activation.trim() !== '') {
+			return activation;
+		}
+	}
+	return undefined;
 }
 
 function homeboyFuzzWorkloadCaseToWpCodeboxCase(entry = {}, manifest = {}, index = 0) {

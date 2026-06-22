@@ -157,6 +157,56 @@ assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
 
+const planWorkloadManifest = {
+	schema: 'homeboy/fuzz-workload/v1',
+	id: 'plan-workload-smoke',
+	label: 'Plan workload smoke',
+	target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
+	metadata: {
+		fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' },
+	},
+	plan: {
+		schema: 'wordpress-fuzz-plan/v1',
+		id: 'plan-workload-smoke',
+		targets: [{
+			id: 'sample-rest-routes',
+			surface_id: 'sample-rest-routes',
+			cases: [{
+				id: 'plan-workload-smoke:default',
+				command: 'wordpress.inventory-rest-routes',
+				input: {
+					plugin: 'sample-plugin/sample-plugin.php',
+					namespaces: ['sample/v1', 'sample/v2'],
+					artifact: 'route_inventory',
+				},
+				metadata: { expected_artifact: 'route_inventory' },
+			}],
+		}],
+	},
+	artifacts: {
+		expected: [{ name: 'route_inventory', role: 'fuzz_report', semantic_key: 'fuzz.report', required: true }],
+	},
+	cases: [{
+		case_id: 'legacy-intent-should-not-win',
+		intent: {
+			plugin: { activation: 'sample-plugin/sample-plugin.php' },
+			execute: { path: '/host-only/workload.php', type: 'php' },
+		},
+	}],
+};
+const planWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'plan-workload-run', homeboyFuzzWorkload: planWorkloadManifest });
+assert.equal(planWorkloadInput.cases.length, 1);
+assert.equal(planWorkloadInput.cases[0].id, 'plan-workload-smoke:default');
+assert.equal(planWorkloadInput.cases[0].target.entrypoint, 'wordpress.inventory-rest-routes');
+assert.deepEqual(planWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(planWorkloadInput.cases[0].phases.action, [{
+	command: 'wordpress.inventory-rest-routes',
+	args: ['plugin=sample-plugin/sample-plugin.php', 'namespaces=sample/v1,sample/v2', 'artifact=route_inventory'],
+}]);
+assert.equal(JSON.stringify(planWorkloadInput).includes('/host-only/workload.php'), false);
+assert.equal(planWorkloadInput.cases[0].metadata.source_plan_case, true);
+assert.equal(planWorkloadInput.cases[0].metadata.target_id, 'sample-rest-routes');
+
 let invoked = false;
 runWpCodeboxFuzzSuite({
 	taskId: 'wp-codebox-fuzz-suite-delegation-smoke',
