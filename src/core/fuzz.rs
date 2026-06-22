@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::artifact_contract::ArtifactContract;
+use crate::core::lifecycle::{LifecycleContract, LifecycleResultMetadata};
 use crate::core::{Error, Result};
 
 pub const FUZZ_CORE_CONTRACT_SCHEMA: &str = "homeboy/fuzz-core-contract/v1";
@@ -75,6 +76,9 @@ pub struct FuzzContractSchemas {
     pub result_envelope: String,
     pub required_artifact: String,
     pub gate: String,
+    pub lifecycle_contract: String,
+    pub lifecycle_result: String,
+    pub lifecycle_snapshot_ref: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -272,6 +276,8 @@ pub struct FuzzWorkload {
     pub duration_budget_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thresholds: Vec<FuzzThreshold>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleContract>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -325,6 +331,8 @@ pub struct FuzzCampaign {
     pub provenance: Option<FuzzProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<FuzzReplayMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleResultMetadata>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -783,6 +791,10 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             result_envelope: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
             required_artifact: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
             gate: FUZZ_GATE_SCHEMA.to_string(),
+            lifecycle_contract: crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
+            lifecycle_result: crate::core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
+            lifecycle_snapshot_ref: crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
+                .to_string(),
         },
         safety_classes: vec![
             FuzzSafetyClass::ReadOnly,
@@ -1165,6 +1177,10 @@ mod tests {
             FUZZ_REQUIRED_ARTIFACT_SCHEMA
         );
         assert_eq!(contract.schemas.gate, FUZZ_GATE_SCHEMA);
+        assert_eq!(
+            contract.schemas.lifecycle_contract,
+            crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
+        );
         assert!(contract
             .safety_classes
             .contains(&FuzzSafetyClass::IsolatedMutation));
@@ -1386,6 +1402,20 @@ mod tests {
                 case_budget: Some(100),
                 duration_budget_seconds: Some(60),
                 thresholds: Vec::new(),
+                lifecycle: Some(LifecycleContract {
+                    schema: crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA.to_string(),
+                    version: crate::core::lifecycle::LIFECYCLE_CONTRACT_VERSION,
+                    phases: vec![crate::core::lifecycle::LifecyclePhaseContract {
+                        id: "snapshot".to_string(),
+                        phase: crate::core::lifecycle::LifecyclePhaseKind::Snapshot,
+                        label: None,
+                        extension_hook: Some("runtime.snapshot".to_string()),
+                        command: None,
+                        timeout_seconds: None,
+                        required: Some(true),
+                    }],
+                    metadata: BTreeMap::new(),
+                }),
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }],
@@ -1534,6 +1564,31 @@ mod tests {
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }),
+            lifecycle: Some(crate::core::lifecycle::LifecycleResultMetadata {
+                schema: crate::core::lifecycle::LIFECYCLE_RESULT_SCHEMA.to_string(),
+                version: crate::core::lifecycle::LIFECYCLE_CONTRACT_VERSION,
+                phases: vec![crate::core::lifecycle::LifecyclePhaseResult {
+                    id: "snapshot".to_string(),
+                    phase: crate::core::lifecycle::LifecyclePhaseKind::Snapshot,
+                    status: crate::core::lifecycle::LifecyclePhaseStatus::Passed,
+                    snapshot_ref: Some("snapshot-1".to_string()),
+                    started_at: None,
+                    finished_at: None,
+                    message: None,
+                }],
+                snapshot_refs: vec![crate::core::lifecycle::LifecycleSnapshotRef {
+                    schema: crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA.to_string(),
+                    id: "snapshot-1".to_string(),
+                    kind: "database".to_string(),
+                    phase_id: Some("snapshot".to_string()),
+                    artifact_id: Some("artifact-1".to_string()),
+                    artifact: None,
+                    locator: None,
+                    created_at: None,
+                    metadata: BTreeMap::new(),
+                }],
+                metadata: BTreeMap::new(),
+            }),
             metadata: Value::Null,
             extra: BTreeMap::new(),
         };
@@ -1561,6 +1616,14 @@ mod tests {
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);
         assert_eq!(value["provenance"]["schema"], FUZZ_PROVENANCE_SCHEMA);
         assert_eq!(value["replay"]["schema"], FUZZ_REPLAY_SCHEMA);
+        assert_eq!(
+            value["workloads"][0]["lifecycle"]["schema"],
+            crate::core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            value["lifecycle"]["snapshot_refs"][0]["schema"],
+            crate::core::lifecycle::LIFECYCLE_SNAPSHOT_REF_SCHEMA
+        );
     }
 
     #[test]

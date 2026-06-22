@@ -2311,6 +2311,7 @@ mod tests {
             thresholds: Vec::new(),
             provenance: None,
             replay: None,
+            lifecycle: None,
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
         };

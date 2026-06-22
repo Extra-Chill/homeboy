@@ -658,6 +658,7 @@ pub fn run_main_bench_workflow(
                     path: source_path.to_string_lossy().to_string(),
                     source_revision: None,
                 }),
+                lifecycle: None,
                 diagnostics: Vec::new(),
             });
             attach_memory_timeline_artifacts(

@@ -242,6 +242,7 @@ Extensions declare fuzz workload metadata with a top-level `fuzz` capability blo
 - **`fuzz.minimize_command`** (string): Optional extension-owned command template for minimizing a persisted case.
 - **`fuzz.result_schema`** (string): Optional campaign result schema identifier. Defaults to `homeboy/fuzz-campaign/v1` in `fuzz run` output.
 - **`fuzz.artifact_retention`** (string): Optional retention policy label for campaign artifacts.
+- **`fuzz.workloads[].lifecycle`** (object): Optional `homeboy/lifecycle-contract/v1` declaration with `prepare`, `seed`, `snapshot`, `reset`, `rollback`, and `teardown` phases. Extension hooks implement the runtime behavior; Homeboy core owns the contract and result metadata shape.
 
 ## Audit Configuration
 

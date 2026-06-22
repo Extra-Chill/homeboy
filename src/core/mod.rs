@@ -88,6 +88,7 @@ pub(crate) mod io;
 pub mod issues;
 pub mod keychain;
 pub mod lab_routing;
+pub mod lifecycle;
 pub mod observation;
 pub mod output;
 pub(crate) mod ownership;
