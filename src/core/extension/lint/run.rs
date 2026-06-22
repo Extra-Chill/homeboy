@@ -19,7 +19,7 @@ use crate::core::git;
 use crate::core::refactor::AppliedRefactor;
 use crate::core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Sniff-selection filters shared by every lint entry point.
@@ -75,6 +75,8 @@ pub struct LintRunWorkflowResult {
     pub autofix: Option<AppliedRefactor>,
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formatting_findings: Option<FormattingFindings>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub producer_summaries: Vec<FindingProducerSummary>,
@@ -96,6 +98,15 @@ pub struct LintSummaryOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub producer_summaries: Vec<FindingProducerSummary>,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FormattingFindings {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub suggested_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +139,7 @@ pub fn run_main_lint_workflow(
                 autofix: None,
                 hints: None,
                 baseline_comparison: None,
+                formatting_findings: None,
                 findings: None,
                 producer_summaries: Vec::new(),
                 summary: if args.json_summary {
@@ -190,6 +202,8 @@ pub fn run_main_lint_workflow(
     let raw_lint_findings =
         filter_findings_to_scoped_files(parsed_lint_findings, scoped_runs.as_deref());
     let lint_findings = filter_lint_findings(raw_lint_findings, &args);
+    let formatting_findings =
+        extract_formatting_findings(&output.stdout, &output.stderr, source_path);
     let declared_producers = parse_lint_producer_summaries_file(&lint_producers_file)?;
     let mut producer_summaries = build_lint_producer_summaries(
         &lint_findings,
@@ -276,6 +290,7 @@ pub fn run_main_lint_workflow(
         autofix: None,
         hints,
         baseline_comparison,
+        formatting_findings,
         summary: if args.json_summary {
             Some(build_lint_summary(
                 &lint_findings,
@@ -634,6 +649,8 @@ fn run_scoped_lint_runs(
 ) -> crate::core::Result<extension::RunnerOutput> {
     let mut success = true;
     let mut exit_code = 0;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
     let mut extension_phase_timings = Vec::new();
     let mut progress = ValidationProgressRecorder::new(
         run_dir,
@@ -691,6 +708,14 @@ fn run_scoped_lint_runs(
         let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
         progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
         extension_phase_timings.extend(output.extension_phase_timings);
+        if !stdout.is_empty() && !stdout.ends_with('\n') {
+            stdout.push('\n');
+        }
+        stdout.push_str(&output.stdout);
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&output.stderr);
 
         if !output.success {
             success = false;
@@ -703,8 +728,8 @@ fn run_scoped_lint_runs(
     Ok(extension::RunnerOutput {
         exit_code,
         success,
-        stdout: String::new(),
-        stderr: String::new(),
+        stdout,
+        stderr,
         child_resource: None,
         extension_phase_timings,
     })
@@ -773,6 +798,8 @@ Re-run `homeboy lint {}` or skip only this gate with `--skip-checks=lint`.",
         output.exit_code,
         Some("self-check"),
     );
+    let formatting_findings =
+        extract_formatting_findings(&output.stdout, &output.stderr, source_path);
 
     Ok(LintRunWorkflowResult {
         status,
@@ -782,6 +809,7 @@ Re-run `homeboy lint {}` or skip only this gate with `--skip-checks=lint`.",
         autofix: None,
         hints,
         baseline_comparison: None,
+        formatting_findings,
         findings: Some(Vec::new()),
         producer_summaries: producer_summaries.clone(),
         summary: if json_summary {
@@ -796,6 +824,63 @@ Re-run `homeboy lint {}` or skip only this gate with `--skip-checks=lint`.",
         self_check_capture: Some(output.capture),
         extension_phase_timings: Vec::new(),
     })
+}
+
+pub(crate) fn extract_formatting_findings(
+    stdout: &str,
+    stderr: &str,
+    source_path: &Path,
+) -> Option<FormattingFindings> {
+    let mut files = BTreeSet::new();
+    let mut summary = None;
+
+    for line in stdout.lines().chain(stderr.lines()) {
+        let trimmed = line.trim();
+        if trimmed.contains("FMT SUMMARY:") {
+            summary = Some(trimmed.to_string());
+        }
+        if let Some(path) = trimmed
+            .strip_prefix("Diff in ")
+            .and_then(|rest| formatting_diff_path(rest, source_path))
+        {
+            files.insert(path);
+        }
+    }
+
+    if files.is_empty() && summary.is_none() {
+        return None;
+    }
+
+    Some(FormattingFindings {
+        files: files.into_iter().collect(),
+        summary,
+        suggested_command: "cargo fmt".to_string(),
+    })
+}
+
+fn formatting_diff_path(raw: &str, source_path: &Path) -> Option<String> {
+    let candidate = raw
+        .split_once(" at line ")
+        .map(|(path, _)| path)
+        .or_else(|| raw.split_once(":").map(|(path, _)| path))
+        .unwrap_or(raw)
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"');
+    if candidate.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(candidate);
+    let relative = path
+        .strip_prefix(source_path)
+        .ok()
+        .and_then(|path| path.to_str())
+        .unwrap_or(candidate)
+        .trim_start_matches("./")
+        .to_string();
+
+    (!relative.is_empty()).then_some(relative)
 }
 
 /// Decide whether a non-zero lint exit with zero findings is a harness/infra
@@ -1094,6 +1179,25 @@ mod tests {
 
         assert!(hint.contains("homeboy lint demo --file src/lib.rs --changed-only --fix"));
         assert!(!hint.contains("homeboy refactor"));
+    }
+
+    #[test]
+    fn formatting_findings_parse_diff_paths_and_summary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stdout = format!(
+            "FMT SUMMARY: 2 files need formatting\nDiff in {} at line 12:\nDiff in src/lib.rs:1:\n",
+            dir.path().join("src/main.rs").display()
+        );
+
+        let findings = extract_formatting_findings(&stdout, "", dir.path())
+            .expect("formatting findings should parse");
+
+        assert_eq!(findings.files, vec!["src/lib.rs", "src/main.rs"]);
+        assert_eq!(
+            findings.summary.as_deref(),
+            Some("FMT SUMMARY: 2 files need formatting")
+        );
+        assert_eq!(findings.suggested_command, "cargo fmt");
     }
 
     #[test]

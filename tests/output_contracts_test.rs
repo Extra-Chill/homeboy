@@ -796,6 +796,7 @@ fn lint_findings_output() -> LintCommandOutput {
             "Run `homeboy lint fixture --fix` to apply safe fixes.".to_string(),
         ]),
         baseline_comparison: None,
+        formatting_findings: None,
         findings: Some(vec![HomeboyFinding::builder(
             "fixture-linter",
             "Trailing whitespace",

@@ -2,6 +2,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
+use homeboy::core::ci_failure_log_triage::{self, CiFailureTriageOutput, CiFailureTriageRequest};
+use homeboy::core::ci_gate::{
+    self, DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide,
+};
 use homeboy::core::ci_plan::{self, CiEventContext, CiPlan};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::ci_scope::{
@@ -49,6 +53,59 @@ pub enum CiCommand {
     /// `--github-actions` the context is read from the standard GitHub
     /// Actions environment; explicit flags override individual fields.
     Scope(CiScopeArgs),
+    /// Classify differential CI results without blaming a PR for a red baseline.
+    DifferentialGate(CiDifferentialGateArgs),
+    /// Summarize failed GitHub Actions runs for a pull request without dumping raw logs.
+    Triage(CiTriageArgs),
+}
+
+#[derive(Args)]
+pub struct CiDifferentialGateArgs {
+    /// Exact command run against the baseline checkout.
+    #[arg(long)]
+    pub baseline_command: String,
+
+    /// Exit code from the baseline command.
+    #[arg(long)]
+    pub baseline_exit_code: i32,
+
+    /// Evidence for baseline failures, such as log excerpts or artifact refs.
+    #[arg(long = "baseline-evidence")]
+    pub baseline_evidence: Vec<String>,
+
+    /// Exact command run against the candidate/PR-head checkout.
+    #[arg(long)]
+    pub head_command: String,
+
+    /// Exit code from the candidate/PR-head command.
+    #[arg(long)]
+    pub head_exit_code: i32,
+
+    /// Evidence for candidate failures, such as log excerpts or artifact refs.
+    #[arg(long = "head-evidence")]
+    pub head_evidence: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CiTriageArgs {
+    /// Pull request number, owner/repo#number, or GitHub PR URL.
+    pub reference: String,
+
+    /// GitHub repository in owner/repo form. Required when `reference` is only a number.
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Maximum failed workflow runs to inspect. Use 0 for the default.
+    #[arg(long, default_value_t = 5)]
+    pub max_runs: usize,
+
+    /// Maximum relevant log snippet lines to retain per failed job. Use 0 for the default.
+    #[arg(long, default_value_t = 4)]
+    pub max_snippets_per_job: usize,
+
+    /// Context lines around relevant log matches. Use 0 for the default.
+    #[arg(long, default_value_t = 2)]
+    pub context_lines: usize,
 }
 
 #[derive(Args)]
@@ -180,6 +237,15 @@ pub enum CiOutput {
     Run(CiRunCommandOutput),
     Autofix(CiAutofixCommandOutput),
     Scope(CiScopeCommandOutput),
+    DifferentialGate(CiDifferentialGateCommandOutput),
+    Triage(CiFailureTriageOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CiDifferentialGateCommandOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub decision: DifferentialGateDecision,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,7 +292,48 @@ pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
         CiCommand::Run(args) => run_ci(args, global),
         CiCommand::Autofix(args) => run_autofix(args, global),
         CiCommand::Scope(args) => run_scope(args, global),
+        CiCommand::DifferentialGate(args) => run_differential_gate(args, global),
+        CiCommand::Triage(args) => run_triage(args, global),
     }
+}
+
+fn run_differential_gate(
+    args: CiDifferentialGateArgs,
+    _global: &GlobalArgs,
+) -> CmdResult<CiOutput> {
+    let decision = ci_gate::classify(DifferentialGateInput {
+        baseline: DifferentialGateSide {
+            command: args.baseline_command,
+            exit_code: args.baseline_exit_code,
+            evidence: args.baseline_evidence,
+        },
+        head: DifferentialGateSide {
+            command: args.head_command,
+            exit_code: args.head_exit_code,
+            evidence: args.head_evidence,
+        },
+    });
+    let exit_code = decision.exit_code();
+
+    Ok((
+        CiOutput::DifferentialGate(CiDifferentialGateCommandOutput {
+            command: "ci.differential-gate",
+            decision,
+        }),
+        exit_code,
+    ))
+}
+
+fn run_triage(args: CiTriageArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+    let output = ci_failure_log_triage::triage_pr_failures(CiFailureTriageRequest {
+        reference: args.reference,
+        repo: args.repo,
+        max_runs: args.max_runs,
+        max_snippets_per_job: args.max_snippets_per_job,
+        context_lines: args.context_lines,
+    })?;
+
+    Ok((CiOutput::Triage(output), 0))
 }
 
 fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
@@ -534,6 +641,85 @@ mod tests {
     }
 
     #[test]
+    fn parses_ci_differential_gate_evidence() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "ci",
+            "differential-gate",
+            "--baseline-command",
+            "cargo fmt --check",
+            "--baseline-exit-code",
+            "1",
+            "--baseline-evidence",
+            "FMT SUMMARY: 7 files need formatting",
+            "--head-command",
+            "homeboy test homeboy",
+            "--head-exit-code",
+            "0",
+        ])
+        .expect("parse cli");
+
+        let crate::cli_surface::Commands::Ci(args) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommand::DifferentialGate(args) = args.command else {
+            panic!("expected ci differential-gate");
+        };
+
+        assert_eq!(args.baseline_command, "cargo fmt --check");
+        assert_eq!(args.baseline_exit_code, 1);
+        assert_eq!(
+            args.baseline_evidence,
+            vec!["FMT SUMMARY: 7 files need formatting"]
+        );
+        assert_eq!(args.head_command, "homeboy test homeboy");
+        assert_eq!(args.head_exit_code, 0);
+    }
+
+    #[test]
+    fn ci_differential_gate_baseline_red_exits_zero() {
+        let args = CiDifferentialGateArgs {
+            baseline_command: "cargo fmt --check".to_string(),
+            baseline_exit_code: 1,
+            baseline_evidence: vec!["FMT SUMMARY: 7 files need formatting".to_string()],
+            head_command: "homeboy test homeboy".to_string(),
+            head_exit_code: 0,
+            head_evidence: Vec::new(),
+        };
+
+        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+
+        assert_eq!(exit, 0);
+        let CiOutput::DifferentialGate(output) = output else {
+            panic!("expected ci differential gate output");
+        };
+        assert_eq!(output.command, "ci.differential-gate");
+        assert_eq!(output.decision.status, "baseline_red");
+        assert!(output.decision.passed);
+    }
+
+    #[test]
+    fn ci_differential_gate_candidate_failure_exits_nonzero() {
+        let args = CiDifferentialGateArgs {
+            baseline_command: "cargo fmt --check".to_string(),
+            baseline_exit_code: 0,
+            baseline_evidence: Vec::new(),
+            head_command: "homeboy test homeboy".to_string(),
+            head_exit_code: 1,
+            head_evidence: vec!["homeboy-ci-results/test.log".to_string()],
+        };
+
+        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+
+        assert_eq!(exit, 1);
+        let CiOutput::DifferentialGate(output) = output else {
+            panic!("expected ci differential gate output");
+        };
+        assert_eq!(output.decision.status, "failed");
+        assert!(!output.decision.passed);
+    }
+
+    #[test]
     fn ci_scope_pr_override_resolves_changed_flags() {
         let args = CiScopeArgs {
             github_actions: false,
@@ -569,5 +755,31 @@ mod tests {
         };
 
         assert!(ci_run_selection(&args).is_err());
+    }
+
+    #[test]
+    fn parses_ci_triage_pr_url() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "ci",
+            "triage",
+            "https://github.com/Extra-Chill/homeboy/pull/5808",
+            "--max-runs",
+            "2",
+        ])
+        .expect("parse cli");
+
+        let crate::cli_surface::Commands::Ci(args) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommand::Triage(args) = args.command else {
+            panic!("expected ci triage");
+        };
+
+        assert_eq!(
+            args.reference,
+            "https://github.com/Extra-Chill/homeboy/pull/5808"
+        );
+        assert_eq!(args.max_runs, 2);
     }
 }

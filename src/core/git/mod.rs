@@ -11,6 +11,7 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod pr_land;
 mod pr_policy;
 mod primitives;
 mod primitives_query;
@@ -32,13 +33,18 @@ pub use commits::{
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
-    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge,
-    pr_view, GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
-    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
-    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
-    PrState,
+    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_fleet,
+    pr_merge, pr_reconcile_mergeability, pr_view, GithubFindItem, GithubFindOutput,
+    GithubIssueOutput, GithubPrOutput, GithubPrView, IssueCloseOptions, IssueCloseReason,
+    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrMergeabilityReconcileOptions,
+    PrMergeabilityReconcileOutput, PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
+pub use github_types::{
+    GithubPrCheckRollup, GithubPrFleetItem, GithubPrFleetOutput, GithubPrFleetSummary,
+    PrFleetOptions,
+};
 pub use operation_output::GitOutput;
 pub use operations::{
     cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
@@ -58,6 +64,7 @@ pub use operations_tags::{
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote,
 };
+pub use pr_land::{land_prs, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,

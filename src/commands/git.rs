@@ -2,11 +2,12 @@ use clap::{Args, Subcommand};
 use serde::{Serialize, Serializer};
 
 use homeboy::core::git::{
-    self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
-    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
-    IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions,
-    PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrState,
-    PushOptions, RebaseOptions,
+    self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrFleetOutput,
+    GithubPrOutput, IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions,
+    IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions,
+    PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions, PrLandOptions, PrLandOutput,
+    PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrPolicyDecision,
+    PrPolicyMergeOptions, PrPolicyOpenOptions, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -563,8 +564,84 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Report and optionally land a fleet of pull requests.
+    Fleet {
+        /// Component ID
+        component_id: String,
+
+        /// PR numbers or URLs.
+        #[arg(value_name = "PR")]
+        refs: Vec<String>,
+
+        /// Update stale PR branches where GitHub can do so safely.
+        #[arg(long)]
+        update_branches: bool,
+
+        /// Merge green, clean PRs. Without this flag the command is read-only.
+        #[arg(long)]
+        apply: bool,
+
+        /// Merge method: merge, squash, or rebase.
+        #[arg(long, default_value = "squash")]
+        merge_method: String,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Compare GitHub mergeability with local git merge-tree evidence.
+    ReconcileMergeability {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Evaluate PR open/merge policy.
     Policy(PrPolicyArgs),
+    /// Land a train of ready PRs sequentially, pausing on the first blocker.
+    Land {
+        /// Repository as owner/repo or host/owner/repo.
+        repo: String,
+
+        /// PR numbers or URLs. URLs must point at the selected repo.
+        #[arg(value_name = "PR")]
+        prs: Vec<String>,
+
+        /// Merge method: merge, squash, or rebase.
+        #[arg(long, default_value = "squash", value_parser = ["merge", "squash", "rebase"])]
+        merge_method: String,
+
+        /// Delete the PR branch after merge.
+        #[arg(long)]
+        delete_branch: bool,
+
+        /// Inspect and report what would land without merging or refreshing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Safe helper program used to refresh a dirty dependent PR.
+        /// Not run through a shell. Combine with --refresh-helper-arg.
+        #[arg(long, value_name = "PROGRAM")]
+        refresh_helper: Option<String>,
+
+        /// Argument for --refresh-helper. Supports {repo}, {number}, {url}, {head_sha}.
+        #[arg(
+            long = "refresh-helper-arg",
+            value_name = "ARG",
+            requires = "refresh_helper"
+        )]
+        refresh_helper_args: Vec<String>,
+
+        /// Retry merge after this many base-branch-modified races.
+        #[arg(long, default_value_t = 1)]
+        max_base_retries: usize,
+    },
 }
 
 #[derive(Args)]
@@ -673,7 +750,10 @@ pub enum GitCommandOutput {
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
     Find(GithubFindOutput),
+    ReconcileMergeability(PrMergeabilityReconcileOutput),
     Policy(PrPolicyDecision),
+    Fleet(GithubPrFleetOutput),
+    Land(PrLandOutput),
 }
 
 impl Serialize for GitCommandOutput {
@@ -687,7 +767,12 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Issue(output) => ("issue", serde_json::to_value(output)),
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
+            GitCommandOutput::ReconcileMergeability(output) => {
+                ("reconcile_mergeability", serde_json::to_value(output))
+            }
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
+            GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
+            GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;
@@ -1180,7 +1265,69 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Pr(output), 0))
         }
+        PrCommand::Fleet {
+            component_id,
+            refs,
+            update_branches,
+            apply,
+            merge_method,
+            path,
+        } => {
+            if refs.is_empty() {
+                return Err(homeboy::core::Error::validation_missing_argument(vec![
+                    "at least one PR number or URL".to_string(),
+                ]));
+            }
+            let output = git::pr_fleet(
+                Some(&component_id),
+                PrFleetOptions {
+                    refs,
+                    update_branches,
+                    apply,
+                    merge_method,
+                    path,
+                },
+            )?;
+            let exit = if output.success { 0 } else { 1 };
+            Ok((GitCommandOutput::Fleet(output), exit))
+        }
+        PrCommand::ReconcileMergeability {
+            component_id,
+            number,
+            path,
+        } => {
+            let output = git::pr_reconcile_mergeability(
+                Some(&component_id),
+                PrMergeabilityReconcileOptions { number, path },
+            )?;
+            Ok((GitCommandOutput::ReconcileMergeability(output), 0))
+        }
         PrCommand::Policy(args) => run_pr_policy(args),
+        PrCommand::Land {
+            repo,
+            prs,
+            merge_method,
+            delete_branch,
+            dry_run,
+            refresh_helper,
+            refresh_helper_args,
+            max_base_retries,
+        } => {
+            let output = git::land_prs(PrLandOptions {
+                repo,
+                prs,
+                merge_method,
+                delete_branch,
+                dry_run,
+                refresh_helper: refresh_helper.map(|program| PrLandRefreshHelper {
+                    program,
+                    args: refresh_helper_args,
+                }),
+                max_base_retries,
+            })?;
+            let exit = if output.summary.blocked > 0 { 1 } else { 0 };
+            Ok((GitCommandOutput::Land(output), exit))
+        }
     }
 }
 

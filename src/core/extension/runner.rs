@@ -4,12 +4,15 @@ use crate::core::component::Component;
 use crate::core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use crate::core::engine::resource::{self, ExtensionChildResourceSummary};
 use crate::core::engine::run_dir::{self, RunDir};
+use crate::core::engine::shell;
 use crate::core::error::{Error, Result};
-use crate::core::extension::ExtensionPhaseTiming;
+use crate::core::extension::{ExtensionCapability, ExtensionPhaseTiming};
 use crate::core::server::CommandOutput;
+use serde_json::json;
 
 const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
 const STALE_VALIDATION_DEPENDENCY_PREFIX: &str = "Resolved validation dependency";
+const FAILURE_TAIL_LINES: usize = 80;
 
 /// Output from a extension runner script execution.
 pub struct RunnerOutput {
@@ -223,6 +226,17 @@ impl ExtensionRunner {
         )?;
 
         let output = self.execute_script(&prepared.execution.extension_path, &env_vars)?;
+        if !output.success {
+            if let Some(run_dir_path) = &self.run_dir_path {
+                let command = self.command_string(&prepared.execution.extension_path);
+                write_structured_failure_sidecar(
+                    run_dir_path,
+                    self.execution_context.capability,
+                    &command,
+                    &output,
+                )?;
+            }
+        }
         if self.strict_validation_dependencies() {
             if let Some(message) =
                 stale_validation_dependency_message(&output.stdout, &output.stderr)
@@ -312,6 +326,174 @@ impl ExtensionRunner {
                 stderr_passthrough: self.stderr_passthrough,
             },
         )
+    }
+
+    fn command_string(&self, extension_path: &Path) -> String {
+        if let Some(command) = &self.command_override {
+            return command.clone();
+        }
+
+        let resolved = extension_path.join(&self.execution_context.script_path);
+        let mut command = shell::quote_path(&resolved.to_string_lossy());
+        if !self.script_args.is_empty() {
+            command.push(' ');
+            command.push_str(&shell::quote_args(&self.script_args));
+        }
+        command
+    }
+}
+
+fn write_structured_failure_sidecar(
+    run_dir_path: &Path,
+    capability: ExtensionCapability,
+    command: &str,
+    output: &CommandOutput,
+) -> Result<()> {
+    match capability {
+        ExtensionCapability::Lint => write_lint_failure_sidecar(run_dir_path, command, output),
+        ExtensionCapability::Test => write_test_failure_sidecar(run_dir_path, command, output),
+        _ => Ok(()),
+    }
+}
+
+fn write_lint_failure_sidecar(
+    run_dir_path: &Path,
+    command: &str,
+    output: &CommandOutput,
+) -> Result<()> {
+    let path = run_dir_path.join(run_dir::files::LINT_FINDINGS);
+    if sidecar_has_payload(&path) {
+        return Ok(());
+    }
+
+    let failure = failure_payload("lint", command, output);
+    write_json_sidecar(
+        &path,
+        &json!([{
+            "tool": "homeboy-extension-runner",
+            "category": "infrastructure",
+            "severity": "error",
+            "message": format!("lint runner failed before producing lint findings (exit {})", output.exit_code),
+            "fingerprint": format!("homeboy-extension-runner:lint:{}", output.exit_code),
+            "metadata": {
+                "phase": "lint",
+                "failure": failure,
+            }
+        }]),
+    )
+}
+
+fn write_test_failure_sidecar(
+    run_dir_path: &Path,
+    command: &str,
+    output: &CommandOutput,
+) -> Result<()> {
+    let path = run_dir_path.join(run_dir::files::TEST_RESULTS);
+    if sidecar_has_payload(&path) {
+        return Ok(());
+    }
+
+    write_json_sidecar(
+        &path,
+        &json!({
+            "status": "failed",
+            "phase": "test",
+            "command": command,
+            "exit_code": output.exit_code,
+            "stdout_tail": tail_lines(&output.stdout, FAILURE_TAIL_LINES).0,
+            "stderr_tail": tail_lines(&output.stderr, FAILURE_TAIL_LINES).0,
+            "failure": failure_payload("test", command, output),
+        }),
+    )
+}
+
+fn sidecar_has_payload(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::Array(items)) => !items.is_empty(),
+        Ok(serde_json::Value::Object(fields)) => !fields.is_empty(),
+        Ok(_) => true,
+        Err(_) => true,
+    }
+}
+
+fn write_json_sidecar(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!(
+                    "create structured failure sidecar directory {}",
+                    parent.display()
+                )),
+            )
+        })?;
+    }
+
+    let payload = serde_json::to_string_pretty(value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize structured failure sidecar".to_string()),
+        )
+    })?;
+    std::fs::write(path, format!("{}\n", payload)).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!(
+                "write structured failure sidecar {}",
+                path.display()
+            )),
+        )
+    })
+}
+
+fn failure_payload(phase: &str, command: &str, output: &CommandOutput) -> serde_json::Value {
+    let (stdout_tail, stdout_truncated) = tail_lines(&output.stdout, FAILURE_TAIL_LINES);
+    let (stderr_tail, stderr_truncated) = tail_lines(&output.stderr, FAILURE_TAIL_LINES);
+    let mut payload = json!({
+        "phase": phase,
+        "command": command,
+        "exit_code": output.exit_code,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+    });
+
+    if let Some(detail) = parsed_detail(&output.stdout).or_else(|| parsed_detail(&output.stderr)) {
+        payload["parsed_detail"] = detail;
+    }
+
+    payload
+}
+
+fn parsed_detail(output: &str) -> Option<serde_json::Value> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str(trimmed).ok().or_else(|| {
+        trimmed
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find_map(|line| serde_json::from_str(line).ok())
+    })
+}
+
+fn tail_lines(s: &str, max_lines: usize) -> (String, bool) {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= max_lines {
+        (s.to_string(), false)
+    } else {
+        let start = lines.len() - max_lines;
+        (lines[start..].join("\n"), true)
     }
 }
 
@@ -460,6 +642,70 @@ mod tests {
         let runner = ExtensionRunner::for_context(context()).stderr_passthrough(true);
 
         assert!(runner.stderr_passthrough);
+    }
+
+    #[test]
+    fn writes_test_failure_sidecar_when_runner_fails_before_counts() {
+        let run_dir = RunDir::create().expect("run dir");
+        let output = CommandOutput {
+            stdout: "booting\n{\"detail\":\"missing db\"}".to_string(),
+            stderr: "fatal setup error".to_string(),
+            success: false,
+            exit_code: 2,
+            child_resource: None,
+        };
+
+        write_structured_failure_sidecar(
+            run_dir.path(),
+            ExtensionCapability::Test,
+            "./test.sh",
+            &output,
+        )
+        .expect("write fallback");
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.step_file(run_dir::files::TEST_RESULTS))
+                .expect("results file"),
+        )
+        .expect("json");
+        assert_eq!(payload["phase"], "test");
+        assert_eq!(payload["command"], "./test.sh");
+        assert_eq!(payload["exit_code"], 2);
+        assert_eq!(payload["stderr_tail"], "fatal setup error");
+        assert_eq!(payload["failure"]["parsed_detail"]["detail"], "missing db");
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn writes_lint_failure_sidecar_as_finding() {
+        let run_dir = RunDir::create().expect("run dir");
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: "formatter missing".to_string(),
+            success: false,
+            exit_code: 127,
+            child_resource: None,
+        };
+
+        write_structured_failure_sidecar(
+            run_dir.path(),
+            ExtensionCapability::Lint,
+            "./lint.sh",
+            &output,
+        )
+        .expect("write fallback");
+
+        let payload: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_FINDINGS))
+                .expect("findings file"),
+        )
+        .expect("json");
+        assert_eq!(payload[0]["tool"], "homeboy-extension-runner");
+        assert_eq!(payload[0]["metadata"]["phase"], "lint");
+        assert_eq!(payload[0]["metadata"]["failure"]["exit_code"], 127);
+
+        run_dir.cleanup();
     }
 
     #[test]

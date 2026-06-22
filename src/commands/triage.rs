@@ -133,6 +133,10 @@ enum TriageCommand {
         #[arg(long, value_name = "NUMBER")]
         source_issue: Vec<u64>,
 
+        /// Preserve supplied PR order and emit dependent-branch rebase plans.
+        #[arg(long)]
+        ordered: bool,
+
         /// Landing scope: project id.
         #[arg(long, conflicts_with_all = ["fleet", "component", "path", "workspace"])]
         project: Option<String>,
@@ -218,6 +222,7 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
         repo,
         branch,
         source_issue,
+        ordered,
         project,
         fleet,
         component,
@@ -232,6 +237,7 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
             pr_refs,
             branch_patterns: branch,
             source_issues: source_issue,
+            ordered,
             drilldown: args.drilldown,
             limit: args.limit,
         })?;
@@ -457,6 +463,24 @@ mod tests {
                 assert_eq!(args.max_checks, 2);
             }
             other => panic!("expected CiFailure subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn landing_ordered_flag_parses() {
+        let cli = TestCli::parse_from([
+            "triage",
+            "landing",
+            "42",
+            "43",
+            "--repo",
+            "Extra-Chill/homeboy",
+            "--ordered",
+        ]);
+
+        match cli.args.command {
+            Some(TriageCommand::Landing { ordered, .. }) => assert!(ordered),
+            other => panic!("expected Landing subcommand, got {other:?}"),
         }
     }
 
