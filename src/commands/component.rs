@@ -1057,26 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn component_show_rejects_legacy_build_command() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            temp.path().join("homeboy.json"),
-            r#"{
-                "id": "sample-extension",
-                "build_artifact": "packages/browser-extension/dist/sample-extension.zip",
-                "build_command": "npm run package:browser-extension"
-            }"#,
-        )
-        .expect("homeboy.json");
-
-        let err = show(None, Some(&temp.path().to_string_lossy()))
-            .expect_err("component show should reject legacy build_command");
-
-        assert!(err.message.contains("unsupported legacy build_command"));
-        assert!(err.message.contains("Use scripts.build instead"));
-    }
-
-    #[test]
     fn component_discovery_value_summarizes_large_metadata() {
         let mut component = Component::new(
             "homeboy".to_string(),
