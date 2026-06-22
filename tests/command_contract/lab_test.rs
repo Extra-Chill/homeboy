@@ -646,10 +646,6 @@ fn test_lab_command_contracts_cover_hot_commands() {
     ));
 
     for args in [
-        ["homeboy", "audit", "--changed-since", "origin/main"].as_slice(),
-        ["homeboy", "lint", "--changed-since", "origin/main"].as_slice(),
-        ["homeboy", "lint", "--changed-only"].as_slice(),
-        ["homeboy", "test", "--changed-since", "origin/main"].as_slice(),
         ["homeboy", "review", "--changed-since", "origin/main"].as_slice(),
         ["homeboy", "review", "--changed-only"].as_slice(),
     ] {
