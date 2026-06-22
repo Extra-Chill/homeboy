@@ -32,6 +32,13 @@ pub const FUZZ_EXECUTION_REQUEST_SCHEMA: &str = "homeboy/fuzz-execution-request/
 pub const FUZZ_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/fuzz-result-envelope/v1";
 pub const FUZZ_REQUIRED_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-required-artifact/v1";
 pub const FUZZ_GATE_SCHEMA: &str = "homeboy/fuzz-gate/v1";
+pub const FUZZ_SKIP_REASON_UNSAFE: &str = "unsafe";
+pub const FUZZ_SKIP_REASON_DESTRUCTIVE: &str = "destructive";
+pub const FUZZ_SKIP_REASON_AUTH_REQUIRED: &str = "auth_required";
+pub const FUZZ_SKIP_REASON_UNAVAILABLE: &str = "unavailable";
+pub const FUZZ_SKIP_REASON_LEGACY: &str = "legacy";
+pub const FUZZ_SKIP_REASON_UNSUPPORTED: &str = "unsupported";
+pub const FUZZ_SKIP_REASON_CONFIG_REQUIRED: &str = "config_required";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuzzCoreContract {
@@ -42,6 +49,8 @@ pub struct FuzzCoreContract {
     pub schemas: FuzzContractSchemas,
     pub safety_classes: Vec<FuzzSafetyClass>,
     pub finding_statuses: Vec<FuzzFindingStatus>,
+    #[serde(default = "standardized_fuzz_skip_reason_codes")]
+    pub skip_reason_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -385,7 +394,33 @@ pub struct FuzzCoverageSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_operations: Vec<FuzzCoverageSkip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_summaries: Vec<FuzzCoverageGroupSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kind_summaries: Vec<FuzzCoverageGroupSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCoverageGroupSummary {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_targets: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_operations: Vec<FuzzCoverageSkip>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -398,6 +433,21 @@ pub struct FuzzCoverageSkip {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+pub fn standardized_fuzz_skip_reason_codes() -> Vec<String> {
+    [
+        FUZZ_SKIP_REASON_UNSAFE,
+        FUZZ_SKIP_REASON_DESTRUCTIVE,
+        FUZZ_SKIP_REASON_AUTH_REQUIRED,
+        FUZZ_SKIP_REASON_UNAVAILABLE,
+        FUZZ_SKIP_REASON_LEGACY,
+        FUZZ_SKIP_REASON_UNSUPPORTED,
+        FUZZ_SKIP_REASON_CONFIG_REQUIRED,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -701,6 +751,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             FuzzFindingStatus::Mitigated,
             FuzzFindingStatus::Suppressed,
         ],
+        skip_reason_codes: standardized_fuzz_skip_reason_codes(),
     }
 }
 
@@ -1054,6 +1105,9 @@ mod tests {
             .safety_classes
             .contains(&FuzzSafetyClass::IsolatedMutation));
         assert!(contract.finding_statuses.contains(&FuzzFindingStatus::Open));
+        assert!(contract
+            .skip_reason_codes
+            .contains(&FUZZ_SKIP_REASON_AUTH_REQUIRED.to_string()));
     }
 
     #[test]
@@ -1203,6 +1257,36 @@ mod tests {
                 proven_operations: 1,
                 skipped_targets: Vec::new(),
                 skipped_operations: Vec::new(),
+                surface_summaries: vec![FuzzCoverageGroupSummary {
+                    id: "surface-1".to_string(),
+                    kind: "api".to_string(),
+                    label: Some("API".to_string()),
+                    declared_targets: 1,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 1,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: Vec::new(),
+                    skipped_operations: Vec::new(),
+                    metadata: Value::Null,
+                    extra: BTreeMap::new(),
+                }],
+                kind_summaries: vec![FuzzCoverageGroupSummary {
+                    id: "read".to_string(),
+                    kind: "operation_kind".to_string(),
+                    label: None,
+                    declared_targets: 1,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 1,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: Vec::new(),
+                    skipped_operations: Vec::new(),
+                    metadata: Value::Null,
+                    extra: BTreeMap::new(),
+                }],
                 artifact_ids: vec!["artifact-1".to_string()],
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
@@ -1282,6 +1366,11 @@ mod tests {
             value["coverage_summary"]["schema"],
             FUZZ_COVERAGE_SUMMARY_SCHEMA
         );
+        assert_eq!(
+            value["coverage_summary"]["surface_summaries"][0]["id"],
+            "surface-1"
+        );
+        assert_eq!(value["coverage_summary"]["kind_summaries"][0]["id"], "read");
         assert_eq!(value["findings"][0]["schema"], FUZZ_FINDING_SCHEMA);
         assert_eq!(value["artifacts"][0]["schema"], FUZZ_ARTIFACT_SCHEMA);
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);
