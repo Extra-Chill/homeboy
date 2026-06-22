@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.15] - 2026-06-22
+
+### Changed
+- Make Codebox run-agent-task contract the default
+- Add worktree PR capability bundles
+
 ## [3.12.14] - 2026-06-22
 
 ### Changed
