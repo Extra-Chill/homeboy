@@ -257,6 +257,8 @@ const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resu
 const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
+const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
+const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
 pub(crate) const LINT_LAB_LABEL: &str = "lint";
 pub(crate) const TEST_LAB_LABEL: &str = "test";
@@ -309,6 +311,14 @@ const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
         hint_label:
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+    },
+    LabSupportedCommandSummary {
+        contract_labels: &[
+            AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+            AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+        ],
+        message_label: "agent-task fanout submit-batch/status/artifacts",
+        hint_label: "agent-task fanout submit-batch/status/artifacts",
     },
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
@@ -465,6 +475,22 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::SubmitBatch(_),
+                    }),
+            }) => LabCommandContract::explicit_runner_simple(
+                AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command:
+                            agent_task::AgentTaskFanoutCommand::Status(_)
+                            | agent_task::AgentTaskFanoutCommand::Artifacts(_),
+                    }),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_FANOUT_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {

@@ -1009,6 +1009,78 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_only() {
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--lab-only".to_string(),
+            "agent-task".to_string(),
+            "fanout".to_string(),
+            "submit-batch".to_string(),
+            "--input".to_string(),
+            "fanout.json".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        let command = lab_offload_command(&cli.command).unwrap().unwrap();
+        assert_eq!(command.hot_label, "agent-task fanout submit-batch");
+        assert!(!command.routing_policy.default_lab_offload);
+        assert!(!command.routing_policy.infer_source_path_tools);
+
+        let err = route_after_parse(&cli, &normalized, None)
+            .expect_err("fanout submit-batch must not run locally under --lab-only");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err
+            .message
+            .contains("Lab-only execution refused local execution"));
+        assert!(err.message.contains("automatic Lab offload disabled"));
+    }
+
+    #[test]
+    fn agent_task_fanout_state_reads_are_runner_resident() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "fanout",
+                "status",
+                "fanout-batch-123",
+            ],
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "fanout",
+                "artifacts",
+                "fanout-batch-123",
+            ],
+        ] {
+            let cli = Cli::parse_from(args);
+
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            assert_eq!(command.hot_label, "agent-task fanout status/artifacts");
+            assert!(command.portable);
+            assert!(!command.routing_policy.default_lab_offload);
+            assert_eq!(
+                command.source_path_mode,
+                runners::LabOffloadSourcePathMode::RunnerResident
+            );
+            assert_eq!(
+                command.workspace_mode_policy,
+                runners::LabOffloadWorkspaceModePolicy::RunnerResident
+            );
+            assert!(command.required_extensions.is_empty());
+            assert!(!command.routing_policy.requires_extension_parity);
+            assert!(!command.routing_policy.infer_source_path_tools);
+        }
+    }
+
+    #[test]
     fn tunnel_service_start_supports_explicit_runner_discovery() {
         let cli = Cli::parse_from([
             "homeboy",
