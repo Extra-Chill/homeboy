@@ -11,7 +11,9 @@ use super::execution_plan::{
 };
 use super::pipeline_summary::{build_summary, derive_overall_status};
 use super::planner::plan;
-use super::types::{ReleaseOptions, ReleasePlan, ReleaseRun, ReleaseRunResult, ReleaseStepResult};
+use super::types::{
+    ReleaseOptions, ReleasePlan, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+};
 
 /// Execute a release end-to-end.
 ///
@@ -26,6 +28,25 @@ pub(crate) fn run_with_plan(
     component_id: &str,
     options: &ReleaseOptions,
 ) -> Result<(ReleasePlan, ReleaseRun)> {
+    let component = super::context::load_component(component_id, options)?;
+    let checkout_guard = super::checkout_guard::ReleaseCheckoutGuard::capture(&component)?;
+
+    match run_with_plan_inner(component_id, options, checkout_guard.as_ref()) {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            if let Some(checkout_guard) = checkout_guard.as_ref() {
+                checkout_guard.restore_after_failure()?;
+            }
+            Err(err)
+        }
+    }
+}
+
+fn run_with_plan_inner(
+    component_id: &str,
+    options: &ReleaseOptions,
+    checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
+) -> Result<(ReleasePlan, ReleaseRun)> {
     let mut results: Vec<ReleaseStepResult> = Vec::new();
 
     let initial_plan = build_initial_preflight_plan(component_id, options);
@@ -38,7 +59,9 @@ pub(crate) fn run_with_plan(
     )?;
 
     if initial_stop {
-        return Ok((initial_plan, finalize(component_id, results)));
+        let run = finalize(component_id, results);
+        restore_checkout_after_failed_run(checkout_guard, &run)?;
+        return Ok((initial_plan, run));
     }
 
     // Rebuild the full plan after executable preflights. `preflight.remote_sync`
@@ -57,7 +80,10 @@ pub(crate) fn run_with_plan(
         &completed_preflights,
     )?;
 
-    Ok((release_plan, finalize(component_id, results)))
+    let run = finalize(component_id, results);
+    restore_checkout_after_failed_run(checkout_guard, &run)?;
+
+    Ok((release_plan, run))
 }
 
 /// Wrap the accumulated step results into a `ReleaseRun` with an overall
@@ -76,6 +102,21 @@ fn finalize(component_id: &str, results: Vec<ReleaseStepResult>) -> ReleaseRun {
             summary: Some(summary),
         },
     }
+}
+
+fn restore_checkout_after_failed_run(
+    checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
+    run: &ReleaseRun,
+) -> Result<()> {
+    if matches!(run.result.status, ReleaseStepStatus::Success) {
+        return Ok(());
+    }
+
+    if let Some(checkout_guard) = checkout_guard {
+        checkout_guard.restore_after_failure()?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
