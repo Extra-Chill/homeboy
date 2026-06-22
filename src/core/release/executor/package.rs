@@ -342,6 +342,10 @@ pub(super) fn store_artifacts_from_output(
         ));
     }
 
+    if package_output_reports_missing_frontend_assets(stdout, stderr) {
+        return Err(package_missing_frontend_assets_error(stdout, stderr));
+    }
+
     let raw_artifacts: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
         Error::internal_json(
             e.to_string(),
@@ -382,6 +386,28 @@ fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> 
     // actual error to stderr; the operator needs both to see what happened
     // before the crash.
     if has_stderr && has_stdout {
+        detail.push_str("\n\n--- stdout ---\n");
+        detail.push_str(stdout_trimmed);
+    }
+
+    Error::internal_unexpected(detail)
+}
+
+fn package_output_reports_missing_frontend_assets(stdout: &str, stderr: &str) -> bool {
+    let output = format!("{}\n{}", stdout, stderr).to_ascii_lowercase();
+    output.contains("frontend assets were not included")
+}
+
+fn package_missing_frontend_assets_error(stdout: &str, stderr: &str) -> Error {
+    let mut detail = "Package command completed without required frontend assets".to_string();
+
+    let stderr_trimmed = stderr.trim();
+    let stdout_trimmed = stdout.trim();
+    if !stderr_trimmed.is_empty() {
+        detail.push_str(": ");
+        detail.push_str(stderr_trimmed);
+    }
+    if !stdout_trimmed.is_empty() {
         detail.push_str("\n\n--- stdout ---\n");
         detail.push_str(stdout_trimmed);
     }
