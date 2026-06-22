@@ -188,6 +188,40 @@ impl Language {
     pub fn builtin_trivial_method_prefixes() -> &'static [&'static str] {
         &["get_", "is_", "has_"]
     }
+
+    /// Whether this language's only declaration visibility is "public" — i.e. it
+    /// has no narrower-than-public visibility modifier (no `pub(crate)` / module
+    /// scoping). For such languages a top-level/public symbol called from
+    /// anywhere in its own file IS genuinely referenced, so the dead-code
+    /// detector must not suggest narrowing its visibility. Languages that *do*
+    /// support visibility narrowing (e.g. module-scoped `pub(...)`) return
+    /// `false`, because a self-only public symbol there is actionable dead code.
+    ///
+    /// Keeping this classification in the agnostic conventions home lets the
+    /// dead-code detector under `code_audit` stay free of hardcoded ecosystem
+    /// names.
+    pub fn lacks_visibility_narrowing(&self) -> bool {
+        matches!(
+            self,
+            Language::Php | Language::JavaScript | Language::TypeScript
+        )
+    }
+
+    /// Whether this language dispatches methods through the type system (trait /
+    /// interface implementations invoked by the compiler rather than by explicit
+    /// call sites). Detectors treat such methods as entry points because they
+    /// are reachable even with no direct caller in source.
+    pub fn has_typesystem_trait_dispatch(&self) -> bool {
+        matches!(self, Language::Rust)
+    }
+
+    /// Whether this language's runtime commonly dispatches lifecycle / magic /
+    /// hook callbacks by convention (methods the framework invokes by name
+    /// rather than by an explicit call site). Detectors treat such methods as
+    /// entry points so convention-invoked callbacks are not flagged as dead.
+    pub fn has_framework_lifecycle_dispatch(&self) -> bool {
+        matches!(self, Language::Php)
+    }
 }
 
 /// Builtin tracker-reference regex defaults shipped with Homeboy. These match
