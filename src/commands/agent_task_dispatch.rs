@@ -1,6 +1,7 @@
 use clap::Args;
 use serde_json::Value;
 
+use homeboy::core::agent_task_dispatch_service::render_backend_selection_summary;
 use homeboy::core::agent_tasks::dispatch_service::{
     self, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
@@ -9,6 +10,19 @@ use homeboy::core::agent_tasks::provider::{
 };
 
 use super::{CmdResult, GlobalArgs};
+
+/// Print the effective backend selection (and any override warning) to stderr
+/// before dispatch so operators can see which backend will run and where the
+/// selection came from. Resolution happens here without consuming `command`;
+/// dispatch re-resolves identically. Errors are intentionally swallowed — the
+/// summary is best-effort and the dispatch path surfaces the real error (#5685).
+fn print_backend_selection_summary(command: &AgentTaskDispatchCommand) {
+    if let Ok(request) = dispatch_service::resolve_dispatch_request(command.clone()) {
+        if let Some(selection) = request.backend_selection.as_ref() {
+            eprintln!("{}", render_backend_selection_summary(selection));
+        }
+    }
+}
 
 /// CLI surface for the dispatch inputs shared across dispatch carriers. Flattened
 /// into [`DispatchArgs`] so the `--tasks/--provider-config/--client-context/
@@ -135,8 +149,10 @@ impl From<DispatchArgs> for AgentTaskDispatchCommand {
 
 pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     let catalog = AgentTaskProviderCatalog::discover();
+    let command: AgentTaskDispatchCommand = args.into();
+    print_backend_selection_summary(&command);
     dispatch_service::run_dispatch_command_with_provider_catalog(
-        args.into(),
+        command,
         ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
         &catalog,
     )
@@ -144,8 +160,10 @@ pub fn run(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
 
 pub(crate) fn cook(args: DispatchArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     let catalog = AgentTaskProviderCatalog::discover();
+    let command: AgentTaskDispatchCommand = args.into();
+    print_backend_selection_summary(&command);
     dispatch_service::run_cook_command_with_provider_catalog(
-        args.into(),
+        command,
         ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
         &catalog,
     )
