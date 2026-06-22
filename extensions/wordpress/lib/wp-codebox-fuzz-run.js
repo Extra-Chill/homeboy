@@ -117,7 +117,7 @@ async function runWpCodeboxFuzzRun(options = {}) {
 const runWpCodeboxFuzzSuite = runWpCodeboxFuzzRun;
 
 function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
-	const source = result?.json || result?.result || result?.output || result;
+	const source = normalizeWpCodeboxFuzzResultSource(result?.json || result?.result || result?.output || result);
 	const status = source?.status || source?.outcome?.status || result?.status || '';
 	const artifacts = normalizeWpCodeboxFuzzArtifacts(source, result);
 	const coverageSummary = normalizeCoverageSummary(source?.coverage_summary || source?.coverageSummary || source?.coverage?.summary);
@@ -142,6 +142,23 @@ function normalizeWpCodeboxFuzzRunResult(result = {}, context = {}) {
 			summary: objectOrUndefined(source?.summary),
 		}),
 	});
+}
+
+function normalizeWpCodeboxFuzzResultSource(source = {}) {
+	if (source?.schema === WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA) {
+		return source;
+	}
+	const candidates = [
+		source?.result,
+		source?.agent_task_result?.result,
+		source?.agentTaskResult?.result,
+		source?.agent_result?.result,
+		source?.agentResult?.result,
+		source?.outputs?.result,
+		source?.outputs?.fuzz_result,
+		source?.outputs?.fuzzResult,
+	];
+	return candidates.find((candidate) => candidate?.schema === WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA) || source;
 }
 
 const normalizeWpCodeboxFuzzSuiteResult = normalizeWpCodeboxFuzzRunResult;
