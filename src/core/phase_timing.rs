@@ -203,6 +203,7 @@ pub struct PhaseGuard<'a> {
 impl PhaseGuard<'_> {
     /// Mark the in-flight phase as failed; it will be recorded as `failed`
     /// (with its duration) when the guard is dropped.
+    #[allow(dead_code)] // Error-path counterpart to the guard's `ok` default; part of the PhaseGuard RAII API and covered by tests.
     pub fn mark_failed(&mut self) {
         self.status = PhaseStatus::Failed;
     }
