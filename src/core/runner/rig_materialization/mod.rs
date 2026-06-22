@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::core::component::Component;
 use crate::core::rig;
 use crate::core::source_snapshot::SourceSnapshot;
 use crate::core::{Error, Result};
-use crate::extensions::deps_provider;
 
 use super::{
     exec, load, materialize_git_dependency, preflight_remote_argv_path_translation, sync_workspace,
@@ -399,7 +397,6 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         if !seen.insert(dependency.remote_checkout_root.clone()) {
             continue;
         }
-        prepare_rig_component_dependency(&dependency)?;
         synced.push(materialize_git_dependency(
             &runner,
             RunnerGitDependencyMaterializationOptions {
@@ -417,25 +414,6 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         materializations: synced,
         component_path_env,
     })
-}
-
-fn prepare_rig_component_dependency(dependency: &RigComponentDependency) -> Result<()> {
-    let path = Path::new(&dependency.local_checkout_root);
-    let component = Component {
-        id: dependency.component_id.clone(),
-        local_path: dependency.local_checkout_root.clone(),
-        remote_url: dependency.remote_url.clone(),
-        ..Component::default()
-    };
-    let providers = match deps_provider::resolve_dependency_providers(&component, path) {
-        Ok(providers) => providers,
-        Err(_) => return Ok(()),
-    };
-
-    for provider in providers {
-        provider.install(&component, path)?;
-    }
-    Ok(())
 }
 
 /// Join a runner-side checkout root with the component's required subpath.

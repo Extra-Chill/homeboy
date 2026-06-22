@@ -1041,7 +1041,7 @@ mod probes {
         // expand to the runner user's real home.
         let resolved_path = common::remote_line(
             client,
-            &format!("printf '%s\n' {}", common::shell_word(&contract.path)),
+            &format!("printf '%s\n' {}", common::shell_path_expr(&contract.path)),
         )
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| contract.path.clone());
@@ -2153,6 +2153,18 @@ mod common {
 
     pub fn shell_word(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    pub fn shell_path_expr(path: &str) -> String {
+        if path == "~" {
+            return "\"${HOME}\"".to_string();
+        }
+
+        if let Some(rest) = path.strip_prefix("~/") {
+            return format!("\"${{HOME}}\"/{}", shell_word(rest));
+        }
+
+        shell_word(path)
     }
 
     pub fn detail_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
