@@ -120,6 +120,43 @@ assert(!JSON.stringify(taskRequest).includes('woocommerce'), 'fuzz suite helper 
 assert.equal(wpCodeboxFuzzSuiteTaskRequest({ taskId: 'suite-task' }).executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.equal(wpCodeboxFuzzRunTaskRequest({ taskId: 'run-compat-task' }).executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 
+const jsonWorkloadManifest = {
+	schema: 'homeboy/fuzz-workload/v1',
+	id: 'json-workload-smoke',
+	label: 'JSON workload smoke',
+	target: { type: 'wordpress-plugin', slug: 'sample-plugin' },
+	workload: {
+		runner: 'wp-codebox',
+		type: 'json',
+		path: '${package.root}/bench/json-workload-smoke.workload.json',
+		entry: 'wp-codebox/run-fuzz-suite',
+	},
+	artifacts: {
+		expected: [{ name: 'json_fuzz_result', role: 'fuzz_report', semantic_key: 'fuzz.suite_result', schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA, required: true }],
+	},
+	cases: [{
+		case_id: 'json-workload-smoke:default',
+		artifacts: [{ name: 'json_fuzz_result', path: 'json-workload-smoke/fuzz-suite-result.json', required: true }],
+		intent: {
+			schema: 'homeboy/fuzz-workload-intent/v1',
+			type: 'wordpress-plugin-workload',
+			plugin: { activation: 'sample-plugin/sample-plugin.php' },
+			execute: { workload_ref: 'default', path: '${package.root}/bench/json-workload-smoke.workload.json', type: 'json', entry: 'wp-codebox/run-fuzz-suite' },
+			collect: [{ artifact: 'json_fuzz_result' }],
+		},
+	}],
+};
+const jsonWorkloadInput = wpCodeboxFuzzSuiteInput({ id: 'json-workload-run', homeboyFuzzWorkload: jsonWorkloadManifest });
+assert.equal(jsonWorkloadInput.cases.length, 1);
+assert.equal(jsonWorkloadInput.cases[0].id, 'json-workload-smoke:default');
+assert.equal(jsonWorkloadInput.cases[0].target.entrypoint, 'wordpress.run-workload');
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload-smoke.workload.json'] }]);
+assert.deepEqual(jsonWorkloadInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
+assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
+assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
+assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
+
 let invoked = false;
 runWpCodeboxFuzzSuite({
 	taskId: 'wp-codebox-fuzz-suite-delegation-smoke',
@@ -278,6 +315,30 @@ runWpCodeboxFuzzSuite({
 	});
 	assert.equal(rawNested.succeeded, true);
 	assert.equal(rawNested.metadata.suite.id, 'raw-nested-suite');
+	const emptyRequired = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			suite: { id: 'empty-required-suite' },
+			summary: { total: 0, passed: 0, failed: 0, error: 0, skipped: 0 },
+		},
+	}, { request: taskRequest });
+	assert.equal(emptyRequired.succeeded, false);
+	assert.deepEqual(emptyRequired.failures.map((failure) => failure.code), [
+		'wp_codebox_fuzz_empty_cases_for_declared_contract',
+		'wp_codebox_fuzz_required_artifacts_missing',
+	]);
+	const declaredOnlyEmpty = normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			suite: { id: 'declared-only-suite' },
+			summary: { total: 0, passed: 0, failed: 0, error: 0, skipped: 0 },
+			metadata: { readiness: { level: 'declared' } },
+		},
+	}, { request: taskRequest });
+	assert.equal(declaredOnlyEmpty.succeeded, true);
+	assert.deepEqual(declaredOnlyEmpty.failures, []);
 	assert.equal(normalizeWpCodeboxFuzzSuiteResult({ status: 'passed' }).result_schema, WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA);
 	assert.equal(normalizeWpCodeboxFuzzRunResult({ status: 'passed' }).schema, WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA);
 	return runWpCodeboxFuzzRun({ taskId: 'run-compat-alias', runFuzzRun: async () => ({ status: 'passed' }) });

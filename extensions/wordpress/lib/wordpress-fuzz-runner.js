@@ -156,10 +156,12 @@ function normalizeRunnerPlan(input) {
 }
 
 function buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions }) {
+	const homeboyFuzzWorkload = workload.schema === 'homeboy/fuzz-workload/v1' ? workload : undefined;
 	return wpCodeboxFuzzSuiteInput({
 		id: runId,
 		goal: instructions,
 		target: workload.target || { type: 'wordpress', workload_id: workloadId },
+		homeboyFuzzWorkload,
 		workload: stripUndefined({
 			id: workloadId,
 			plan_id: plan.id,
