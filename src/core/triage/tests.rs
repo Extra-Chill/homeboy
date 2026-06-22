@@ -381,6 +381,103 @@ mod pull_requests {
     }
 
     #[test]
+    fn summarize_ci_readiness_groups_requirement_states_and_actions() {
+        let checks: Vec<Value> = serde_json::from_str(
+            r#"[
+                {
+                  "name": "required queued",
+                  "required": true,
+                  "status": "QUEUED",
+                  "conclusion": null,
+                  "startedAt": "2026-04-26T10:00:00Z"
+                },
+                {
+                  "name": "required running",
+                  "isRequired": true,
+                  "status": "IN_PROGRESS",
+                  "conclusion": null,
+                  "startedAt": "2026-04-26T10:10:00Z"
+                },
+                {
+                  "name": "required passed",
+                  "required": true,
+                  "status": "COMPLETED",
+                  "conclusion": "SUCCESS"
+                },
+                {
+                  "name": "optional failed",
+                  "required": false,
+                  "status": "COMPLETED",
+                  "conclusion": "FAILURE",
+                  "detailsUrl": "https://github.com/o/r/actions/runs/1/job/2"
+                },
+                {
+                  "name": "unknown skipped",
+                  "status": "COMPLETED",
+                  "conclusion": "SKIPPED"
+                }
+            ]"#,
+        )
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-04-26T10:45:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let readiness = summarize_ci_readiness(&checks, now).unwrap();
+
+        assert_eq!(readiness.checks.required.queued, 1);
+        assert_eq!(readiness.checks.required.running, 1);
+        assert_eq!(readiness.checks.required.passed, 1);
+        assert_eq!(readiness.checks.optional.failed, 1);
+        assert_eq!(readiness.checks.unknown_requirement.skipped, 1);
+        assert_eq!(
+            readiness.oldest_pending_started_at.as_deref(),
+            Some("2026-04-26T10:00:00+00:00")
+        );
+        assert_eq!(readiness.oldest_pending_duration_seconds, Some(2700));
+        assert_eq!(
+            readiness.failure_urls,
+            vec!["https://github.com/o/r/actions/runs/1/job/2"]
+        );
+        assert!(readiness.next_steps.iter().any(|step| step.contains(
+            "Wait for required checks to finish; oldest pending check has been active for 45m."
+        )));
+    }
+
+    #[test]
+    fn parse_prs_marks_pending_required_checks_as_next_action() {
+        let raw = r#"[
+            {
+              "number": 11,
+              "title": "Waiting on required CI",
+              "url": "https://github.com/o/r/pull/11",
+              "state": "OPEN",
+              "isDraft": false,
+              "reviewDecision": "APPROVED",
+              "mergeStateStatus": "CLEAN",
+              "statusCheckRollup": [
+                {"name":"required", "required": true, "status":"IN_PROGRESS", "conclusion":null},
+                {"name":"optional", "required": false, "status":"COMPLETED", "conclusion":"SUCCESS"}
+              ],
+              "labels": [],
+              "assignees": [],
+              "author": {"login":"example-org"},
+              "updatedAt": "2026-04-26T00:00:00Z"
+            }
+        ]"#;
+
+        let items = parse_prs(raw, None, false).unwrap();
+
+        assert_eq!(
+            items[0].signals.next_action.as_deref(),
+            Some("required_checks_pending")
+        );
+        let readiness = items[0].ci_readiness.as_ref().unwrap();
+        assert_eq!(readiness.checks.required.running, 1);
+        assert_eq!(readiness.checks.optional.passed, 1);
+    }
+
+    #[test]
     fn parse_prs_derives_next_action_labels() {
         let raw = r#"[
             {
@@ -883,6 +980,7 @@ mod priority_and_summary {
                         next_action: Some("checks_failed".to_string()),
                         ..TriagePullRequestSignals::default()
                     },
+                    ci_readiness: None,
                     check_failures: Vec::new(),
                     labels: vec![],
                     assignees: vec![],
@@ -982,6 +1080,7 @@ fn triage_pr_with_action(action: &str) -> TriagePrItem {
             next_action: Some(action.to_string()),
             ..TriagePullRequestSignals::default()
         },
+        ci_readiness: None,
         check_failures: Vec::new(),
         labels: vec![],
         assignees: vec![],
