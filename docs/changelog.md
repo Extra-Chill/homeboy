@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.1] - 2026-06-22
+
+### Fixed
+- use body files for issue markdown
+- refresh managed runner sources before fuzz dispatch
+- merge PRs without local checkout cleanup
+- classify daemon disconnects as recoverable
+- refresh stale lab daemon before dispatch
+- honor nested result failures
+
 ## [0.255.0] - 2026-06-22
 
 ### Added
