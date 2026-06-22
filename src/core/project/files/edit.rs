@@ -8,6 +8,25 @@ use crate::core::project;
 
 use super::{read, write};
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EditOptions {
+    pub dry_run: bool,
+    pub force: bool,
+}
+
+fn write_modified_content(
+    project_id: &str,
+    path: &str,
+    content: &str,
+    options: EditOptions,
+) -> Result<()> {
+    if options.dry_run {
+        return Ok(());
+    }
+
+    write(project_id, path, content).map(|_| ())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EditResult {
     pub base_path: Option<String>,
@@ -32,6 +51,16 @@ pub fn edit_replace_line(
     path: &str,
     line_num: usize,
     content: &str,
+) -> Result<EditResult> {
+    edit_replace_line_with_options(project_id, path, line_num, content, EditOptions::default())
+}
+
+pub fn edit_replace_line_with_options(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+    options: EditOptions,
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
@@ -60,7 +89,7 @@ pub fn edit_replace_line(
     modified_lines[line_index] = content.to_string();
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes = vec![LineChange {
         line_number: line_num,
@@ -85,6 +114,16 @@ pub fn edit_insert_after_line(
     path: &str,
     line_num: usize,
     content: &str,
+) -> Result<EditResult> {
+    edit_insert_after_line_with_options(project_id, path, line_num, content, EditOptions::default())
+}
+
+pub fn edit_insert_after_line_with_options(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+    options: EditOptions,
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
@@ -111,7 +150,7 @@ pub fn edit_insert_after_line(
     modified_lines.insert(line_num, content.to_string());
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes = vec![LineChange {
         line_number: line_num + 1,
@@ -136,6 +175,22 @@ pub fn edit_insert_before_line(
     path: &str,
     line_num: usize,
     content: &str,
+) -> Result<EditResult> {
+    edit_insert_before_line_with_options(
+        project_id,
+        path,
+        line_num,
+        content,
+        EditOptions::default(),
+    )
+}
+
+pub fn edit_insert_before_line_with_options(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    content: &str,
+    options: EditOptions,
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
@@ -162,7 +217,7 @@ pub fn edit_insert_before_line(
     modified_lines.insert(line_num - 1, content.to_string());
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes = vec![LineChange {
         line_number: line_num,
@@ -183,6 +238,15 @@ pub fn edit_insert_before_line(
 }
 
 pub fn edit_delete_line(project_id: &str, path: &str, line_num: usize) -> Result<EditResult> {
+    edit_delete_line_with_options(project_id, path, line_num, EditOptions::default())
+}
+
+pub fn edit_delete_line_with_options(
+    project_id: &str,
+    path: &str,
+    line_num: usize,
+    options: EditOptions,
+) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path =
@@ -208,7 +272,7 @@ pub fn edit_delete_line(project_id: &str, path: &str, line_num: usize) -> Result
     let removed_content = modified_lines.remove(line_num - 1);
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes = vec![LineChange {
         line_number: line_num,
@@ -233,6 +297,22 @@ pub fn edit_delete_lines(
     path: &str,
     start_line: usize,
     end_line: usize,
+) -> Result<EditResult> {
+    edit_delete_lines_with_options(
+        project_id,
+        path,
+        start_line,
+        end_line,
+        EditOptions::default(),
+    )
+}
+
+pub fn edit_delete_lines_with_options(
+    project_id: &str,
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+    options: EditOptions,
 ) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
@@ -267,7 +347,7 @@ pub fn edit_delete_lines(
     let removed_lines: Vec<String> = modified_lines.drain(start_index..end_index).collect();
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes: Vec<LineChange> = removed_lines
         .iter()
@@ -298,6 +378,24 @@ pub fn edit_replace_pattern(
     replacement: &str,
     all: bool,
 ) -> Result<EditResult> {
+    edit_replace_pattern_with_options(
+        project_id,
+        path,
+        pattern,
+        replacement,
+        all,
+        EditOptions::default(),
+    )
+}
+
+pub fn edit_replace_pattern_with_options(
+    project_id: &str,
+    path: &str,
+    pattern: &str,
+    replacement: &str,
+    all: bool,
+    options: EditOptions,
+) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path =
@@ -306,13 +404,26 @@ pub fn edit_replace_pattern(
     let read_result = read(project_id, path)?;
     let original_lines: Vec<String> = read_result.content.lines().map(String::from).collect();
 
+    let match_count = read_result.content.matches(pattern).count();
+    if !all && match_count > 1 && !options.force {
+        return Err(Error::validation_invalid_argument(
+            "replace_pattern",
+            format!(
+                "Pattern matches {} times; use --replace-all-pattern or --force to replace only the first match",
+                match_count
+            ),
+            None,
+            None,
+        ));
+    }
+
     let modified_content = if all {
         read_result.content.replace(pattern, replacement)
     } else {
         read_result.content.replacen(pattern, replacement, 1)
     };
 
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let modified_lines: Vec<String> = modified_content.lines().map(String::from).collect();
 
@@ -346,6 +457,15 @@ pub fn edit_replace_pattern(
 }
 
 pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Result<EditResult> {
+    edit_delete_pattern_with_options(project_id, path, pattern, EditOptions::default())
+}
+
+pub fn edit_delete_pattern_with_options(
+    project_id: &str,
+    path: &str,
+    pattern: &str,
+    options: EditOptions,
+) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path =
@@ -361,7 +481,7 @@ pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Resul
         .collect();
 
     let modified_content = modified_lines.join("\n");
-    write(project_id, path, &modified_content)?;
+    write_modified_content(project_id, path, &modified_content, options)?;
 
     let changes: Vec<LineChange> = original_lines
         .iter()
@@ -387,6 +507,15 @@ pub fn edit_delete_pattern(project_id: &str, path: &str, pattern: &str) -> Resul
 }
 
 pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
+    edit_append_with_options(project_id, path, content, EditOptions::default())
+}
+
+pub fn edit_append_with_options(
+    project_id: &str,
+    path: &str,
+    content: &str,
+    options: EditOptions,
+) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path =
@@ -401,8 +530,10 @@ pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditRe
         shell::quote_path(&full_path)
     );
 
-    let output = execute_for_project(&project, &command)?;
-    command::require_success(output.success, &output.stderr, "EDIT")?;
+    if !options.dry_run {
+        let output = execute_for_project(&project, &command)?;
+        command::require_success(output.success, &output.stderr, "EDIT")?;
+    }
 
     let mut modified_lines = original_lines.clone();
     modified_lines.push(content.to_string());
@@ -426,6 +557,15 @@ pub fn edit_append(project_id: &str, path: &str, content: &str) -> Result<EditRe
 }
 
 pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditResult> {
+    edit_prepend_with_options(project_id, path, content, EditOptions::default())
+}
+
+pub fn edit_prepend_with_options(
+    project_id: &str,
+    path: &str,
+    content: &str,
+    options: EditOptions,
+) -> Result<EditResult> {
     let project = project::load(project_id)?;
     let project_base_path = require_project_base_path(project_id, &project)?;
     let full_path =
@@ -441,8 +581,10 @@ pub fn edit_prepend(project_id: &str, path: &str, content: &str) -> Result<EditR
         shell::quote_path(&full_path)
     );
 
-    let output = execute_for_project(&project, &command)?;
-    command::require_success(output.success, &output.stderr, "EDIT")?;
+    if !options.dry_run {
+        let output = execute_for_project(&project, &command)?;
+        command::require_success(output.success, &output.stderr, "EDIT")?;
+    }
 
     let mut modified_lines = original_lines.clone();
     modified_lines.insert(0, content.to_string());
