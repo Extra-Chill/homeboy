@@ -26,6 +26,7 @@ use crate::core::component;
 use crate::core::deploy::release_download::{detect_remote_url, parse_github_url, GitHubRepo};
 use crate::core::error::{Error, Result};
 
+use super::gh_client::GhClient;
 pub use super::github_types::{
     GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
@@ -744,47 +745,23 @@ fn gh_auth_token() -> Option<String> {
 /// (which soft-fails because the tag is already pushed), primitive operations
 /// have no already-committed side effect to preserve — fail loudly.
 pub(super) fn ensure_gh_ready() -> Result<()> {
-    if !gh_probe_succeeds(&["--version"]) {
-        return Err(Error::internal_io(
-            "`gh` CLI not found on PATH".to_string(),
-            Some("gh".to_string()),
-        )
-        .with_hint("Install the GitHub CLI: https://cli.github.com"));
-    }
-
-    if !gh_probe_succeeds(&["auth", "status", "--hostname", "github.com"]) {
-        return Err(Error::internal_io(
-            "`gh` is not authenticated for github.com".to_string(),
-            Some("gh auth status".to_string()),
-        )
-        .with_hint("Authenticate with: gh auth login"));
-    }
-
-    Ok(())
+    let host = std::env::var("GH_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "github.com".to_string());
+    GhClient::for_host(host).ensure_ready()
 }
 
 /// Run `gh <args>` and return stdout on success, or a structured error on
 /// failure (with stderr captured in the error message).
 pub(super) fn run_gh(args: &[String]) -> Result<String> {
-    let output = Command::new("gh")
-        .args(args.iter().map(|s| s.as_str()))
-        .output()
-        .map_err(|e| {
-            Error::internal_io(format!("Failed to invoke gh: {}", e), Some("gh".into()))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let combined = if stderr.is_empty() { stdout } else { stderr };
-        return Err(Error::git_command_failed(format!(
-            "gh {} failed: {}",
-            args.first().map(|s| s.as_str()).unwrap_or(""),
-            combined
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    let host = std::env::var("GH_HOST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "github.com".to_string());
+    GhClient::for_host(host).run(args)
 }
 
 fn parse_issue_number_from_url(url: &str) -> Option<u64> {
