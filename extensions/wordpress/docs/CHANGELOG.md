@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.34] - 2026-06-22
+
+### Changed
+- Pass Codebox core module to fuzz runner
+
 ## [3.12.33] - 2026-06-22
 
 ### Changed
