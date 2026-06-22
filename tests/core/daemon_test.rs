@@ -5,6 +5,12 @@ use crate::test_support::HomeGuard;
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
 
+fn serialized_contains(value: &serde_json::Value, needle: &str) -> bool {
+    serde_json::to_string(value)
+        .expect("serialize test value")
+        .contains(needle)
+}
+
 #[test]
 fn parse_bind_addr_defaults_to_loopback_shape() {
     let addr = parse_bind_addr(DEFAULT_ADDR).expect("parse default");
@@ -454,6 +460,67 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(finish.status_code, 200);
     assert_eq!(finish.body["endpoint"], "runner.jobs.finish");
     assert_eq!(finish.body["body"]["job"]["status"], "succeeded");
+}
+
+#[test]
+fn remote_runner_broker_redacts_secret_env_from_public_surfaces() {
+    let store = JobStore::default();
+    let sentinel = "homeboy-secret-sentinel-do-not-echo";
+    let submit = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "command": ["homeboy", "test", "sample-plugin"],
+            "cwd": "/home/user/Developer/sample-plugin",
+            "env": {
+                "PUBLIC_FLAG": "1",
+                "RUNNER_SECRET_TOKEN": sentinel
+            },
+            "secret_env_names": ["RUNNER_SECRET_TOKEN"]
+        })),
+        &store,
+    );
+
+    assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
+    assert!(!serialized_contains(&submit.body, sentinel));
+    assert_eq!(
+        submit.body["body"]["request"]["env"]["RUNNER_SECRET_TOKEN"],
+        "<redacted>"
+    );
+    let job_id = submit.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+
+    let list = route_with_job_store("GET", "/jobs", &store);
+    assert_eq!(list.status_code, 200, "list body: {}", list.body);
+    assert!(!serialized_contains(&list.body, sentinel));
+
+    let show = route_with_job_store("GET", &format!("/jobs/{job_id}"), &store);
+    assert_eq!(show.status_code, 200, "show body: {}", show.body);
+    assert!(!serialized_contains(&show.body, sentinel));
+
+    let events = route_with_job_store("GET", &format!("/jobs/{job_id}/events"), &store);
+    assert_eq!(events.status_code, 200, "events body: {}", events.body);
+    assert!(!serialized_contains(&events.body, sentinel));
+
+    let claim = route_with_job_store_and_body(
+        "POST",
+        "/runner/jobs/claim",
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "project_id": "extrachill",
+            "lease_ms": 30000
+        })),
+        &store,
+    );
+    assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+    assert_eq!(
+        claim.body["body"]["claim"]["request"]["env"]["RUNNER_SECRET_TOKEN"],
+        sentinel
+    );
 }
 
 #[test]
