@@ -6,7 +6,6 @@ mod detector_profile;
 mod exposure;
 mod known_symbols;
 mod remote_execution;
-mod requested_detector;
 mod source_policy;
 mod test_wiring;
 mod thin_command_adapter;
@@ -23,12 +22,10 @@ pub use known_symbols::{
     KnownSymbolVersionedEntry, KnownSymbolsConfig,
 };
 pub use remote_execution::{ArtifactPortabilityConfig, RemoteExecutionSafetyConfig};
-pub use requested_detector::{
-    RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope,
-};
 pub use source_policy::{
-    ConventionTagGlob, CoreBoundaryLeakConfig, MutatingResourceAccessConfig, SourcePolicyMatchMode,
-    SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
+    ConventionTagGlob, CoreBoundaryLeakConfig, MutatingResourceAccessConfig, RequestedDetectorRule,
+    RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode, SourcePolicyRule,
+    SourcePolicyRuleBody, SourcePolicyTerm,
 };
 pub use test_wiring::{TestWiringConfig, TestWiringPolicy};
 pub use thin_command_adapter::{ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup};

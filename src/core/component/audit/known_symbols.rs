@@ -9,10 +9,10 @@ pub struct KnownSymbolsConfig {
     pub header_versions: Vec<KnownSymbolHeaderVersionProvider>,
     /// Dependency-manifest package providers keyed by manifest + package name.
     ///
-    /// Each provider names the dependency manifest file (e.g. an extension may
-    /// point at `composer.json`/`package.json`) and the keys within it that hold
-    /// declared package names. Core does no ecosystem-specific parsing of its
-    /// own — it only inspects manifests an extension explicitly declares.
+    /// Each provider names the dependency manifest file (an extension may point
+    /// at its ecosystem's manifest) and the keys within it that hold declared
+    /// package names. Core does no ecosystem-specific parsing of its own — it
+    /// only inspects manifests an extension explicitly declares.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub manifest_packages: Vec<KnownSymbolManifestPackageProvider>,
     /// Bootstrap path providers keyed by a normalized path substring or suffix.
@@ -31,7 +31,7 @@ pub struct KnownSymbolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct KnownSymbolSourceScanConfig {
     /// File extensions (without the leading dot) that identify candidate entry
-    /// files, e.g. an extension may supply `["php"]`.
+    /// files (an extension supplies its ecosystem's source extensions).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entry_file_extensions: Vec<String>,
     /// Statement prefixes that introduce an unconditional include/require,
@@ -66,8 +66,8 @@ pub struct KnownSymbolHeaderVersionProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KnownSymbolManifestPackageProvider {
-    /// Dependency manifest file name relative to the component root, e.g. an
-    /// extension may declare `composer.json` or `package.json`.
+    /// Dependency manifest file name relative to the component root (an
+    /// extension declares its ecosystem's manifest file name).
     pub manifest_file: String,
     /// JSON object keys within the manifest that map package name -> version,
     /// e.g. `["require", "require-dev"]` or `["dependencies", "devDependencies"]`.

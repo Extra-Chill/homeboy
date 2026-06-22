@@ -5,7 +5,7 @@ use super::extend_unique;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DetectorProfileConfig {
     /// Include Homeboy's built-in detector profile defaults. Components can set
-    /// this to false when they provide a fully custom, non-PHP/non-WordPress profile.
+    /// this to false when they provide a fully custom, non-default ecosystem profile.
     #[serde(
         default = "default_use_builtin_detector_profile",
         skip_serializing_if = "is_true"
@@ -28,7 +28,7 @@ pub struct DetectorProfileConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vendored_path_markers: Vec<String>,
     /// Language/extension tokens the field-pattern detector scans for repeated
-    /// struct/record fields (e.g. `rs`, `php`, `ts`).
+    /// struct/record fields (component-supplied source extension tokens).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_pattern_scan_tokens: Vec<String>,
     /// Of the scanned tokens, those whose field declarations use the
@@ -48,10 +48,10 @@ pub struct DetectorProfileConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dead_guard_languages: Vec<String>,
     /// Basenames whose guards run outside normal production runtime assumptions
-    /// (e.g. `uninstall.php`, lifecycle entrypoints).
+    /// (e.g. uninstall scripts, lifecycle entrypoints).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle_basenames: Vec<String>,
-    /// Basename suffixes for lifecycle files (e.g. `-smoke.php`).
+    /// Basename suffixes for lifecycle files (e.g. a `-smoke` source suffix).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifecycle_basename_suffixes: Vec<String>,
     /// Path segments (directory names) that mark a file as lifecycle/test
