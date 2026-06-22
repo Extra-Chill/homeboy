@@ -1,13 +1,13 @@
 //! Project-level remote path resolution for ad-hoc file operations.
 //!
 //! Deploy resolves a component's `remote_path` against project `path_roots`
-//! (e.g. mapping a `wp-content/...` prefix onto an absolute managed root such
-//! as `/srv/htdocs/wp-content`). Ad-hoc `homeboy file` commands historically
-//! joined every relative path against `base_path` alone, so on installs whose
-//! active component directory lives outside `base_path` (e.g. WP Cloud, where
-//! `base_path` is `/htdocs/__wp__` but active plugins are written under
-//! `/srv/htdocs/wp-content/plugins/...`) operators could not inspect the path
-//! deploy actually writes to. (#5456)
+//! (e.g. mapping a `<managed-root>/...` prefix onto an absolute managed root
+//! such as `/srv/htdocs/<managed-root>`). Ad-hoc `homeboy file` commands
+//! historically joined every relative path against `base_path` alone, so on
+//! installs whose active component directory lives outside `base_path` (e.g.
+//! a managed host where `base_path` is `/htdocs/__app__` but active components
+//! are written under `/srv/htdocs/<managed-root>/...`) operators could not
+//! inspect the path deploy actually writes to. (#5456)
 //!
 //! This module applies the *same* managed-prefix resolution deploy uses, but
 //! at the project layer (no component context). It stays agnostic: the managed
@@ -24,9 +24,9 @@ use crate::core::project::Project;
 ///
 /// Resolution order:
 /// 1. Absolute paths are used verbatim (operators can always target an exact
-///    path such as `/srv/htdocs/wp-content/plugins/foo`).
+///    path such as `/srv/htdocs/<managed-root>/components/foo`).
 /// 2. Relative paths matching an extension-declared managed prefix (e.g.
-///    `wp-content`) resolve through the project's configured `path_roots`,
+///    `<managed-root>`) resolve through the project's configured `path_roots`,
 ///    matching deploy's behavior so the inspectable path agrees with the
 ///    deployed path.
 /// 3. Everything else joins against `base_path` (unchanged legacy behavior).
