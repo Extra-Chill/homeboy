@@ -53,6 +53,13 @@ It reports discovered, exercised, skipped-unsafe, and failed surface counts plus
 top uncovered groups when those fields are available; missing fields are simply
 omitted.
 
+Bench runners that mutate runtime state can report fuzz-safe lifecycle evidence
+under `run_metadata.lifecycle`. The lifecycle result uses
+`homeboy/lifecycle-result/v1` and includes phase statuses plus `snapshot_refs`
+for prepared/seeded runtime snapshots. Core stores the metadata but concrete
+prepare, seed, snapshot, reset, rollback, and teardown implementations remain
+extension-owned. See `docs/architecture/lifecycle-contracts.md`.
+
 `bench` is a sibling of `test`, `lint`, and `build` under homeboy's
 extension capability model. The runner contract, manifest shape, and
 baseline primitive (`homeboy.json` → `baselines.bench`) are shared with

@@ -507,6 +507,7 @@ fn workload_with_trace_metadata() -> WorkloadSpec {
         trace_probes: Vec::new(),
         dependencies: Vec::new(),
         runner_capabilities: Vec::new(),
+        lifecycle: None,
     }
 }
 

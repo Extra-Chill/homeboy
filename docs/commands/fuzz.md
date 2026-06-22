@@ -223,7 +223,10 @@ workloads through `homeboy fuzz run`.
 
 Extensions can also publish generic campaign metadata. Homeboy surfaces these
 fields in `fuzz run` output without interpreting product-specific runner
-details:
+details.
+
+Fuzz workloads can declare a generic lifecycle contract when a mutable runtime
+must be prepared, seeded, snapshotted, reset, rolled back, or torn down safely:
 
 ```json
 {
@@ -235,10 +238,29 @@ details:
     "replay_command": "runner replay {case_artifact}",
     "minimize_command": "runner minimize {case_artifact}",
     "result_schema": "homeboy/fuzz-campaign/v1",
-    "artifact_retention": "persisted-run-artifacts"
+    "artifact_retention": "persisted-run-artifacts",
+    "workloads": [
+      {
+        "id": "parser",
+        "label": "Parser fuzz",
+        "lifecycle": {
+          "schema": "homeboy/lifecycle-contract/v1",
+          "phases": [
+            { "id": "prepare", "phase": "prepare", "extension_hook": "runtime.prepare" },
+            { "id": "snapshot", "phase": "snapshot", "extension_hook": "runtime.snapshot" },
+            { "id": "reset", "phase": "reset", "extension_hook": "runtime.reset" },
+            { "id": "teardown", "phase": "teardown", "extension_hook": "runtime.teardown" }
+          ]
+        }
+      }
+    ]
   }
 }
 ```
+
+When a runner executes lifecycle phases, `run.results.lifecycle.snapshot_refs`
+records the snapshot refs that reviewers and replay tooling can trace. See
+`docs/architecture/lifecycle-contracts.md` for the shared shape.
 
 Rigs can add private fuzz workloads keyed by extension id:
 

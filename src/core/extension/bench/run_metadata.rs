@@ -42,6 +42,7 @@ pub(crate) fn stamp_run_metadata(
                 .to_string(),
             source_revision: source_revision_at(&execution_context.extension_path),
         }),
+        lifecycle: None,
         diagnostics: Vec::new(),
     });
 }

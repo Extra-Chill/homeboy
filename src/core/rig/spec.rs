@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::core::component::ScopedExtensionConfig;
 use crate::core::extension::bench::{BenchGate, BenchGateOp};
+use crate::core::lifecycle::LifecycleContract;
 
 mod check;
 mod pipeline;
@@ -518,6 +519,9 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_capabilities: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleContract>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -693,6 +697,7 @@ mod tests {
             trace_probes: Vec::new(),
             dependencies: Vec::new(),
             runner_capabilities: Vec::new(),
+            lifecycle: None,
         };
 
         assert_eq!(workload.trace_phase_preset("missing"), None);
@@ -861,6 +866,7 @@ mod tests {
             trace_probes: Vec::new(),
             dependencies: Vec::new(),
             runner_capabilities: Vec::new(),
+            lifecycle: None,
         };
 
         assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
@@ -888,6 +894,7 @@ mod tests {
             trace_probes: Vec::new(),
             dependencies: Vec::new(),
             runner_capabilities: Vec::new(),
+            lifecycle: None,
         };
 
         assert_eq!(workload.port_range_size(), Some(8));
@@ -915,6 +922,7 @@ mod tests {
             trace_probes: Vec::new(),
             dependencies: Vec::new(),
             runner_capabilities: Vec::new(),
+            lifecycle: None,
         };
 
         assert_eq!(workload.named_leases(), &["browser-profile".to_string()]);

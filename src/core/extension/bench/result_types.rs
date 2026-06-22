@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::core::finding::HomeboyFinding;
+use crate::core::lifecycle::LifecycleResultMetadata;
 use crate::core::observation::timeline::{
     ObservationEvent, ObservationSpanDefinition, ObservationSpanResult,
 };
@@ -96,6 +97,8 @@ pub struct BenchRunMetadata {
     pub provenance: BenchProvenance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<BenchRunnerMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleResultMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
 }

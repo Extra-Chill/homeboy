@@ -41,8 +41,17 @@ For git sources, `repo.git//subpath` clones the repository root but discovers sp
 | `bench` | object | No | Rig-pinned benchmark component/default-baseline settings. |
 | `bench_workloads` | object | No | Rig-owned out-of-tree benchmark workloads keyed by extension ID. |
 | `trace_workloads` | object | No | Rig-owned out-of-tree trace workloads keyed by extension ID. |
+| `fuzz_workloads` | object | No | Rig-owned out-of-tree fuzz workloads keyed by extension ID. |
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
+
+## Workload Lifecycle Contracts
+
+Workload entries in `bench_workloads`, `trace_workloads`, and `fuzz_workloads`
+can declare optional `lifecycle` metadata using
+`homeboy/lifecycle-contract/v1`. The shared lifecycle vocabulary is `prepare`,
+`seed`, `snapshot`, `reset`, `rollback`, and `teardown`; runtime implementations
+are extension hooks. See `docs/architecture/lifecycle-contracts.md`.
 
 ## Templates And Variants
 

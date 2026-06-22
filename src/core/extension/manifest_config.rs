@@ -1,4 +1,5 @@
 use crate::core::engine::output_parse::ParseSpec;
+use crate::core::lifecycle::LifecycleContract;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -332,4 +333,6 @@ pub struct FuzzWorkloadConfig {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<LifecycleContract>,
 }
