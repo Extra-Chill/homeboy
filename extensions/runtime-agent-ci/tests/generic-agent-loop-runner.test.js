@@ -13,6 +13,45 @@ assert.equal(
   'generic runtime adapter must not export deterministic loop internals'
 );
 
+const genericLoop = genericLoopRunner.runGenericDeterministicLoop({
+  loopId: 'generic-reconcile-loop',
+  maxIterations: 3,
+  state: { accepted: false },
+  buildTask: ({ iteration, results }) => ({
+    iteration,
+    previous_value: results[results.length - 1]?.value || 0,
+  }),
+  executeTask: ({ task }) => ({
+    status: 'succeeded',
+    value: task.previous_value + 1,
+    evidence_refs: [{ kind: 'iteration-output', uri: `https://example.test/evidence/${task.iteration}` }],
+  }),
+  collectResult: ({ outcome }) => outcome,
+  reconcile: ({ state, result }) => ({
+    ...state,
+    accepted: result.value >= 2,
+    latest_value: result.value,
+  }),
+  stopPolicy: ({ state }) => state.accepted
+    ? { stop: true, reason: 'reconcile_criteria_satisfied' }
+    : { stop: false },
+  shouldContinue: ({ state }) => !state.accepted,
+});
+
+assert.equal(genericLoop.schema, 'homeboy/generic-deterministic-loop-output/v1');
+assert.equal(genericLoop.deterministic_loop_schema, 'homeboy/deterministic-loop-result/v1');
+assert.equal(genericLoop.status, 'completed');
+assert.equal(genericLoop.iterations.length, 2);
+assert.equal(genericLoop.tasks[0].previous_value, 0);
+assert.equal(genericLoop.tasks[1].previous_value, 1);
+assert.equal(genericLoop.results[1].value, 2);
+assert.equal(genericLoop.state.accepted, true);
+assert.equal(genericLoop.iterations[0].stop.stop, false);
+assert.equal(genericLoop.iterations[1].stop.reason, 'reconcile_criteria_satisfied');
+assert.equal(genericLoop.evidence_envelope.schema, 'homeboy/generic-deterministic-loop-evidence/v1');
+assert.equal(genericLoop.evidence_envelope.iteration_count, 2);
+assert.equal(genericLoop.evidence.length, 2);
+
 const runtime = { id: 'fixture-runtime', executor: { backend: 'fixture', path: '/unused' } };
 const plan = {
   workload_id: 'fixture-workload',
@@ -66,10 +105,13 @@ assert.equal(result.request.task_id, 'fixture-workload');
 assert.equal(result.outcome.status, 'succeeded');
 assert.equal(result.results.scenarios[0].id, 'fixture-workload');
 assert.equal(result.assertion.completion_outcome_satisfied, true);
-assert.equal(result.loop.schema, 'homeboy/deterministic-loop-result/v1');
+assert.equal(result.loop.schema, 'homeboy/generic-deterministic-loop-output/v1');
+assert.equal(result.loop.deterministic_loop_schema, 'homeboy/deterministic-loop-result/v1');
 assert.equal(result.loop.status, 'completed');
 assert.equal(result.loop.state.status, 'succeeded');
 assert.equal(result.loop.iterations.length, 1);
+assert.equal(result.loop.results.length, 1);
+assert.equal(result.loop.outcome.status, 'succeeded');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-generic-agent-loop-'));
 try {
@@ -144,4 +186,4 @@ process.stdout.write(JSON.stringify({
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 }
 
-process.stdout.write('Generic agent loop runner adapter delegation check passed\n');
+process.stdout.write('Generic agent loop runner behavior checks passed\n');
