@@ -10,6 +10,7 @@ const {
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 const {
   isCodeboxLegacyAgentTaskRunResult,
+  allowLegacyCodeboxResultCompatibility,
   legacyAgentTaskRunEvidenceRefs,
   legacyAgentTaskRunSessionArtifacts,
 } = require('./codebox-legacy-result-adapter');
@@ -40,16 +41,16 @@ function codeboxRunAgentTaskRequestFromTaskInput(taskInput, options = {}) {
 }
 
 function codeboxRunAgentTaskInvocation(options = {}) {
-  const useStableRunAgentTask = Boolean(options.useStableRunAgentTask || options.use_stable_run_agent_task);
-  const input = useStableRunAgentTask
-    ? codeboxRunAgentTaskRequestFromTaskInput(options.taskInput, options)
-    : options.taskInput;
+  const useLegacyAgentTaskRunCompatibility = Boolean(options.useLegacyAgentTaskRunCompatibility || options.use_legacy_agent_task_run_compatibility);
+  const input = useLegacyAgentTaskRunCompatibility
+    ? options.taskInput
+    : codeboxRunAgentTaskRequestFromTaskInput(options.taskInput, options);
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new Error('Codebox run-agent-task invocation requires taskInput.');
   }
 
   const args = [
-    useStableRunAgentTask ? WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND : WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND,
+    useLegacyAgentTaskRunCompatibility ? WP_CODEBOX_LEGACY_AGENT_TASK_RUN_CLI_COMMAND : WP_CODEBOX_RUN_AGENT_TASK_CLI_COMMAND,
     `--input-file=${options.inputFilePlaceholder || '{{input_file}}'}`,
     '--json',
   ];
@@ -64,10 +65,10 @@ function codeboxRunAgentTaskInvocation(options = {}) {
 
   return {
     contract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
-    implementation: useStableRunAgentTask ? 'stable-run-agent-task' : 'legacy-agent-task-run-compat',
+    implementation: useLegacyAgentTaskRunCompatibility ? 'legacy-agent-task-run-compat' : 'stable-run-agent-task',
     input,
     args,
-    result_schema: useStableRunAgentTask ? WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA : WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA,
+    result_schema: useLegacyAgentTaskRunCompatibility ? WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA : WP_CODEBOX_AGENT_TASK_RUN_RESULT_SCHEMA,
     result_key: 'agent_task_run_result',
   };
 }
@@ -89,6 +90,7 @@ module.exports = {
   WP_CODEBOX_RUN_AGENT_TASK_RESULT_SCHEMA,
   codeboxRunAgentTaskInvocation,
   codeboxRunAgentTaskRequestFromTaskInput,
+  allowLegacyCodeboxResultCompatibility,
   isCodeboxLegacyAgentTaskRunResult,
   legacyAgentTaskRunEvidenceRefs,
   legacyAgentTaskRunSessionArtifacts,

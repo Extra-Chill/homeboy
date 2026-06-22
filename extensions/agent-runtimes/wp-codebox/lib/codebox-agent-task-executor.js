@@ -59,6 +59,7 @@ const {
 } = require('./wp-codebox-adapter-contract');
 const {
   WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
+  allowLegacyCodeboxResultCompatibility,
   isCodeboxLegacyAgentTaskRunResult,
   legacyAgentTaskRunEvidenceRefs,
   legacyAgentTaskRunSessionArtifacts,
@@ -2238,8 +2239,8 @@ function normalizeTypedArtifacts(value) {
   return normalizeCodeboxTypedArtifacts(value, { sanitize: sanitizePublicMetadata });
 }
 
-function typedArtifactsFromResult(result) {
-  return typedArtifactsFromCodeboxResult(result, { sanitize: sanitizePublicMetadata });
+function typedArtifactsFromResult(result, options = {}) {
+  return typedArtifactsFromCodeboxResult(result, { sanitize: sanitizePublicMetadata, ...options });
 }
 
 function codeboxAgentResultFromResult(result) {
@@ -2577,8 +2578,8 @@ function outputsWithInputTypedArtifacts(outputs, request) {
   return added ? { ...outputs, typed_artifacts: typedArtifacts } : outputs;
 }
 
-function typedBundleOutputArtifacts(result) {
-  return Object.values(typedArtifactsFromResult(result)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
+function typedBundleOutputArtifacts(result, options = {}) {
+  return Object.values(typedArtifactsFromResult(result, options)).flatMap((typedArtifact) => typedArtifactFileRefs(typedArtifact).map((ref, index) => {
     const fileRef = typeof ref === 'string' ? { path: ref } : ref;
     if (!fileRef || typeof fileRef !== 'object') {
       return null;
@@ -2629,9 +2630,9 @@ function firstPlainObject(...candidates) {
   return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate));
 }
 
-function normalizeOutputs(result, request = null) {
+function normalizeOutputs(result, request = null, options = {}) {
   const workload = agentRuntimeWorkload(result) || {};
-  const typedArtifacts = typedArtifactsFromResult(result);
+  const typedArtifacts = typedArtifactsFromResult(result, options);
   Object.assign(typedArtifacts, transcriptTypedArtifactsFromCodeboxResult(request, result, typedArtifacts));
   if (request) {
     Object.assign(typedArtifacts, replyTypedArtifactsFromResult(request, result, typedArtifacts));
@@ -2784,11 +2785,11 @@ function codeboxRecipeRunSummary(result, options = {}) {
   }
 }
 
-function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
+function normalizeArtifacts(result, runSummary = null, recipeSummary = null, options = {}) {
   const normalizedArtifacts = Array.isArray(runSummary?.artifacts)
     ? runSummary.artifacts.map(artifactFromCodeboxArtifact)
     : [];
-  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
   for (const artifact of artifactResult?.artifactRefs || []) {
     appendUniqueArtifact(normalizedArtifacts, artifactFromCodeboxArtifact(artifact));
   }
@@ -2796,7 +2797,7 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
     recipeSummary.artifacts.map(artifactFromCodeboxArtifact).forEach((artifact) => appendUniqueArtifact(normalizedArtifacts, artifact));
   }
 
-  if (isCodeboxLegacyAgentTaskRunResult(result)) {
+  if (isCodeboxLegacyAgentTaskRunResult(result) && allowLegacyCodeboxResultCompatibility(options)) {
     const artifacts = [...normalizedArtifacts];
     legacyAgentTaskRunSessionArtifacts(result).forEach((artifact) => appendUniqueArtifact(artifacts, artifact));
     if (Array.isArray(result.artifacts)) {
@@ -2809,7 +2810,7 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
       for (const artifact of agentRuntimeBundleArtifacts(result)) {
         appendUniqueArtifact(artifacts, artifact);
       }
-      for (const artifact of typedBundleOutputArtifacts(result)) {
+      for (const artifact of typedBundleOutputArtifacts(result, options)) {
         appendUniqueArtifact(artifacts, artifact);
       }
       if (!recipeSummary) {
@@ -2828,9 +2829,9 @@ function normalizeArtifacts(result, runSummary = null, recipeSummary = null) {
   return mappedArtifacts;
 }
 
-function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) {
-  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
-  if (isCodeboxLegacyAgentTaskRunResult(result)) {
+function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null, options = {}) {
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
+  if (isCodeboxLegacyAgentTaskRunResult(result) && allowLegacyCodeboxResultCompatibility(options)) {
     const refs = legacyAgentTaskRunEvidenceRefs(result);
     for (const artifact of artifactResult?.artifactRefs || []) {
       appendUniqueEvidenceRef(refs, {
@@ -2861,7 +2862,7 @@ function normalizeEvidenceRefs(result, runSummary = null, recipeSummary = null) 
           label: artifact.kind.replace(/^agent-runtime-/, 'Agent runtime ').replace(/-/g, ' '),
         });
       }
-      for (const artifact of typedBundleOutputArtifacts(result)) {
+      for (const artifact of typedBundleOutputArtifacts(result, options)) {
         appendUniqueEvidenceRef(refs, {
           kind: artifact.kind,
           uri: artifact.path || artifact.url,
@@ -2966,8 +2967,8 @@ function agentRuntimeBundleArtifacts(result) {
   return artifacts;
 }
 
-function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null) {
-  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+function codeboxDecisionEvidence(result, runSummary = null, recipeSummary = null, options = {}) {
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
   const agentResult = result.run?.agentResult || result.agentResult || result.agent_result || result.metadata?.recipe_run?.agentResult || result.metadata?.recipe_run?.run?.agentResult || {};
   const completionOutcome = result.completionOutcome || result.completion_outcome || result.metadata?.recipe_run?.completionOutcome || {};
   const runtime = result.run?.runtime || result.metadata?.recipe_run?.run?.runtime || {};
@@ -3064,7 +3065,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     status = localStatus;
   }
   const failureClassification = homeboyFailureClassification(result.failure_classification || recipeSummary?.metadata?.failure_classification || runSummary?.failure_classification, status);
-  const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request), request);
+  const outputs = outputsWithInputTypedArtifacts(normalizeOutputs(result, request, options), request);
   const missingRequiredTypedArtifacts = missingRequiredTypedArtifactDiagnostic(request, outputs);
   const invalidRequiredTypedArtifacts = invalidRequiredTypedArtifactDiagnostic(request, outputs);
   const runtimeFailureDiagnostic = agentRuntimeFailureDiagnostic(result);
@@ -3088,8 +3089,8 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
     integrationContract: WP_CODEBOX_RUN_AGENT_TASK_REQUEST_SCHEMA,
     status,
     summary: missingRequiredTypedArtifacts?.message || invalidRequiredTypedArtifacts?.message || runtimeFailureDiagnostic?.message || recipeSummary?.failure_summary || fallbackRecipeSummary || runSummary?.summary || result.summary || result.message || (status === 'succeeded' ? 'WP Codebox agent task succeeded.' : 'WP Codebox agent task failed.'),
-    artifacts: normalizeArtifacts(result, runSummary, recipeSummary),
-    evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary),
+    artifacts: normalizeArtifacts(result, runSummary, recipeSummary, options),
+    evidenceRefs: normalizeEvidenceRefs(result, runSummary, recipeSummary, options),
     outputs,
     diagnostics: [providerDiagnostic, missingRequiredTypedArtifacts, invalidRequiredTypedArtifacts, runtimeFailureDiagnostic, recipeSummary ? null : recipeRunFailureDiagnostic(recipeRun), ...(recipeSummary?.diagnostics || []), ...(runSummary?.diagnostics || []), ...(result.diagnostics || [])].filter(Boolean).map((diagnostic) => ({
       class: diagnostic.class || diagnostic.kind || 'codebox',
@@ -3100,7 +3101,7 @@ function agentTaskOutcomeFromCodeboxResult(request, result = {}, options = {}) {
       codebox: sanitizePublicMetadata(result.metadata || result),
       codebox_run_result: runSummary ? sanitizePublicMetadata(runSummary) : undefined,
       codebox_recipe_run_summary: recipeSummary ? sanitizePublicMetadata(recipeSummary) : undefined,
-      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary)),
+      decision_evidence: sanitizePublicMetadata(codeboxDecisionEvidence(result, runSummary, recipeSummary, options)),
       artifact_declarations: sanitizePublicMetadata(artifactDeclarationsMetadataFromRequest(request)),
       typed_artifacts: sanitizePublicMetadata(outputs.typed_artifacts || {}),
       sandbox_policy: sanitizePublicMetadata({

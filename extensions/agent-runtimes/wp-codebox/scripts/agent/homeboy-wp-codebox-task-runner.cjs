@@ -2231,7 +2231,7 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     artifactsPath: artifacts,
     previewHold: argValue('--preview-hold'),
     previewPublicUrl: argValue('--preview-public-url'),
-    useStableRunAgentTask,
+    useLegacyAgentTaskRunCompatibility: !useStableRunAgentTask,
   });
   const inputPath = writeJsonFile(
     useStableRunAgentTask ? 'homeboy-wp-codebox-run-agent-task-' : 'homeboy-wp-codebox-agent-task-input-',
@@ -2304,7 +2304,8 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
         secretNames: input.secret_env || [],
       }) : null);
       const callbackPayload = withCallbackDataEnvelope(normalizedPayload, readCallbackData(callbackInput.callback_data));
-      const enrichedPayload = payloadEvidence ? attachFailureEvidence(callbackPayload, payloadEvidence) : callbackPayload;
+      const compatibilityPayload = attachRunAgentTaskCompatibilityMetadata(callbackPayload, invocation);
+      const enrichedPayload = payloadEvidence ? attachFailureEvidence(compatibilityPayload, payloadEvidence) : compatibilityPayload;
       process.stdout.write(`${JSON.stringify(enrichedPayload, null, 2)}\n`);
       return callbackPayload.success === false ? 1 : 0;
     } catch {
@@ -2338,6 +2339,22 @@ function runWpCodeboxParentTask(request, envOverrides = {}) {
     return 1;
   }
   return result.status ?? 1;
+}
+
+function attachRunAgentTaskCompatibilityMetadata(payload, invocation) {
+  if (!payload || typeof payload !== 'object' || invocation.implementation !== 'legacy-agent-task-run-compat') {
+    return payload;
+  }
+  return {
+    ...payload,
+    metadata: {
+      ...(payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata) ? payload.metadata : {}),
+      run_agent_task_compatibility: {
+        legacy_result_normalization: true,
+        implementation: invocation.implementation,
+      },
+    },
+  };
 }
 
 (async () => {

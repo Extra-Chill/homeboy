@@ -8,6 +8,7 @@ const {
   runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
 const {
+  allowLegacyCodeboxResultCompatibility,
   legacyArtifactResultEnvelopeCandidates,
   legacyTypedArtifactCandidatesFromCodeboxResult,
 } = require('./codebox-legacy-result-adapter');
@@ -73,10 +74,14 @@ function normalizeTypedArtifacts(value, options = {}) {
 
 function typedArtifactsFromCodeboxResult(result, options = {}) {
   const workload = options.workload || agentRuntimeWorkload(result) || {};
-  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
   const envelopeArtifacts = typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
   if (Object.keys(envelopeArtifacts).length > 0) {
     return envelopeArtifacts;
+  }
+
+  if (!allowLegacyCodeboxResultCompatibility(options)) {
+    return {};
   }
 
   return Object.assign({}, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, workload)
@@ -84,7 +89,7 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
 }
 
 function caseArtifactIndexFromCodeboxResult(result, options = {}) {
-  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result);
+  const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
   return normalizeCaseArtifactIndex({
     schema: WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
     caseRefs: [
@@ -300,7 +305,7 @@ function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) 
   return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
 }
 
-function artifactResultEnvelopeFromCodeboxResult(result) {
+function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
   const candidates = [
     result,
     result?.artifact_result,
@@ -310,7 +315,7 @@ function artifactResultEnvelopeFromCodeboxResult(result) {
     ...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
     ...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection) : []),
   ];
-  const legacyCandidates = legacyArtifactResultEnvelopeCandidates(result);
+  const legacyCandidates = allowLegacyCodeboxResultCompatibility(options) ? legacyArtifactResultEnvelopeCandidates(result) : [];
   return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
 }
 

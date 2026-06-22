@@ -63,7 +63,7 @@ const runAgentTaskRequirement = provider.upstream_primitive_requirements.find((r
 assert.equal(runAgentTaskRequirement.schema, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(
   provider.upstream_primitive_requirements.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
-  'consume_canonical_envelope_with_legacy_package_fallback'
+  'consume_canonical_envelope_with_explicit_legacy_result_compatibility'
 );
 assert.doesNotMatch(JSON.stringify(provider.provider_runtime_invocation), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, codexSecretEnv);
@@ -216,7 +216,7 @@ assert.deepEqual(customContract.capabilities, ['wordpress_sandbox', 'tool:exampl
 assert.deepEqual(customContract.workspace_tools.readwrite, ['example_workspace_write']);
 assert.deepEqual(customContract.component_path_defaults.contract_slug_map, { 'example-runtime': 'agent_runtime' });
 
-const taskInput = codeboxTaskRequestFromAgentTaskRequest({
+const genericAgentTaskRequest = {
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'generic-wordpress-task-1',
   executor: {
@@ -238,7 +238,8 @@ const taskInput = codeboxTaskRequestFromAgentTaskRequest({
       input: { include_debug: false },
     },
   },
-});
+};
+const taskInput = codeboxTaskRequestFromAgentTaskRequest(genericAgentTaskRequest);
 
 assert.equal(taskInput.schema, 'wp-codebox/task-input/v1');
 assert.equal(taskInput.parent_request.executor.backend, 'codebox');
@@ -258,14 +259,53 @@ assert.equal(
   taskInput.sandbox_tool_policy.tools.some((tool) => tool.id === 'wordpress.read-post'),
   true
 );
-const legacyCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
-assert.equal(legacyCodeboxInvocation.contract, runAgentTaskRequirement.schema);
-assert.equal(legacyCodeboxInvocation.args[0], 'agent-task-run');
-assert.equal(legacyCodeboxInvocation.result_schema, runtimeContractSchemas().agentTask.legacyRunResponse);
-const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput, useStableRunAgentTask: true });
+const stableCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput });
+assert.equal(stableCodeboxInvocation.contract, runAgentTaskRequirement.schema);
 assert.equal(stableCodeboxInvocation.input.schema, runtimeContractSchemas().agentTask.runRequest);
 assert.equal(stableCodeboxInvocation.args[0], 'run-agent-task');
 assert.equal(stableCodeboxInvocation.result_schema, runtimeContractSchemas().agentTask.runResult);
+assert.equal(stableCodeboxInvocation.implementation, 'stable-run-agent-task');
+const legacyCodeboxInvocation = codeboxRunAgentTaskInvocation({ taskInput, useLegacyAgentTaskRunCompatibility: true });
+assert.equal(legacyCodeboxInvocation.args[0], 'agent-task-run');
+assert.equal(legacyCodeboxInvocation.input.schema, 'wp-codebox/task-input/v1');
+assert.equal(legacyCodeboxInvocation.result_schema, runtimeContractSchemas().agentTask.legacyRunResponse);
+assert.equal(legacyCodeboxInvocation.implementation, 'legacy-agent-task-run-compat');
+const stableCodeboxResult = {
+  schema: runtimeContractSchemas().agentTask.runResult,
+  status: 'succeeded',
+  summary: 'Stable Codebox run succeeded.',
+  artifact_result: {
+    schema: runtimeContractSchemas().artifact.resultEnvelope,
+    status: 'created',
+    typed_artifacts: [{ name: 'stable-review', type: 'json', payload: { ok: true } }],
+  },
+};
+const stableCodeboxOutcome = agentTaskOutcomeFromCodeboxResult(genericAgentTaskRequest, stableCodeboxResult);
+assert.equal(stableCodeboxOutcome.status, 'succeeded');
+assert.equal(stableCodeboxOutcome.outputs.typed_artifacts['stable-review'].payload.ok, true);
+const legacyShapedCodeboxResult = {
+  schema: runtimeContractSchemas().agentTask.legacyRunResponse,
+  status: 'succeeded',
+  metadata: {
+    agent_runtime: {
+      result: {
+        schema: runtimeContractSchemas().artifact.resultEnvelope,
+        status: 'created',
+        typed_artifacts: [{ name: 'legacy-review', type: 'json', payload: { ok: true } }],
+      },
+    },
+  },
+};
+assert.equal(artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult), null);
+assert.deepEqual(typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult), {});
+assert.equal(
+  artifactResultEnvelopeFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true }).status,
+  'created'
+);
+assert.equal(
+  typedArtifactsFromCodeboxResult(legacyShapedCodeboxResult, { allowLegacyCodeboxResultCompatibility: true })['legacy-review'].payload.ok,
+  true
+);
 
 const originalToolPolicyEnv = process.env.HOMEBOY_AGENT_TOOL_POLICY_JSON;
 const originalToolRequestSchemaEnv = process.env.HOMEBOY_AGENT_TOOL_REQUEST_SCHEMA;

@@ -16,6 +16,10 @@ function isCodeboxLegacyAgentTaskRunResult(result) {
   return result?.schema === WP_CODEBOX_AGENT_TASK_RUN_RESPONSE_SCHEMA;
 }
 
+function allowLegacyCodeboxResultCompatibility(options = {}) {
+  return Boolean(options.allowLegacyCodeboxResultCompatibility || options.allow_legacy_codebox_result_compatibility);
+}
+
 function legacyAgentTaskRunSessionArtifacts(result = {}) {
   if (!isCodeboxLegacyAgentTaskRunResult(result)) {
     return [];
@@ -107,6 +111,7 @@ function legacyTypedArtifactCandidatesFromCodeboxResult(result, workload = {}) {
 
 module.exports = {
   DEPRECATED_CODEBOX_LEGACY_RESULT_ADAPTER,
+  allowLegacyCodeboxResultCompatibility,
   isCodeboxLegacyAgentTaskRunResult,
   legacyAgentTaskRunEvidenceRefs,
   legacyAgentTaskRunSessionArtifacts,

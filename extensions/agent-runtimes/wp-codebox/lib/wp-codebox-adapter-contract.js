@@ -111,8 +111,8 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     id: 'run-agent-task',
     schema: 'wp-codebox/run-agent-task/v1',
     owner: 'wp-codebox',
-    adapter_behavior: 'prefer_stable_run_agent_task_with_legacy_agent_task_run_fallback',
-    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Until that primitive is present, Homeboy Extensions keeps the legacy agent-task-run CLI compatibility path behind codebox-run-agent-task-contract.js.',
+    adapter_behavior: 'stable_run_agent_task_default_with_explicit_legacy_agent_task_run_compatibility',
+    requirement: 'Accept a Codebox-owned run-agent-task request that wraps the prepared task input and returns the stable agent_task_run_result envelope. Older agent-task-run compatibility is available only when the caller explicitly enables useLegacyAgentTaskRunCompatibility.',
   },
   {
     id: 'provider-credential-boundary',
@@ -146,8 +146,8 @@ const WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS = [
     id: 'artifact-result-envelope',
     schema: WP_CODEBOX_PROVIDER_RUNTIME_RESULT_SCHEMAS.artifact_result_envelope,
     owner: 'wp-codebox',
-    adapter_behavior: 'consume_canonical_envelope_with_legacy_package_fallback',
-    requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Compatibility for older Codebox packages is centralized in codebox-artifact-contract.js.',
+    adapter_behavior: 'consume_canonical_envelope_with_explicit_legacy_result_compatibility',
+    requirement: 'Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Compatibility for older Codebox package result shapes is centralized in codebox-artifact-contract.js and requires allowLegacyCodeboxResultCompatibility.',
   },
   {
     id: 'artifact-apply-execution',
