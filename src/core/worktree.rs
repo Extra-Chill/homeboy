@@ -566,6 +566,15 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut row = queue_row(branch, handle, command, WorktreeQueueCreateStatus::Created);
             row.path = parse_prefixed_line(&stdout, "Path:");
+            let path = row.path.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "dmc_output",
+                    "DMC worktree add succeeded but did not report a Path line",
+                    Some(stdout.to_string()),
+                    None,
+                )
+            })?;
+            record_queued_worktree(&options, branch, &row.handle, path)?;
             rows.push(row);
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -624,6 +633,51 @@ fn queue_row(
         path: None,
         error: None,
     }
+}
+
+fn record_queued_worktree(
+    options: &WorktreeQueueCreateOptions,
+    branch: &str,
+    handle: &str,
+    path: &str,
+) -> Result<()> {
+    let worktree_path = PathBuf::from(path).canonicalize().map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("DMC worktree path {path}")))
+    })?;
+    let source_checkout = component::resolve_target(TargetSpec {
+        component_id: Some(&options.repo),
+        path_override: None,
+        project: None,
+        capability: None,
+        allow_synthetic: false,
+        accept_bare_directory: false,
+        ..TargetSpec::default()
+    })?
+    .git_root
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "repo",
+            "DMC worktree queue source component is not inside a git checkout",
+            Some(options.repo.clone()),
+            None,
+        )
+    })?
+    .canonicalize()
+    .map_err(|err| Error::internal_io(err.to_string(), Some(options.repo.clone())))?;
+    let record = TaskWorktreeRecord {
+        id: handle.to_string(),
+        component_id: options.repo.clone(),
+        source_checkout: source_checkout.to_string_lossy().to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+        base_ref: options.from.clone(),
+        task_url: options.task_url.clone(),
+        run_id: None,
+        cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        state: TaskWorktreeState::Active,
+    };
+    write_record(&metadata_dir()?, &record)
 }
 
 fn dmc_add_command(options: &WorktreeQueueCreateOptions, branch: &str) -> Vec<String> {
@@ -794,6 +848,20 @@ mod tests {
         run_git(temp.path(), &["add", "."]);
         run_git(temp.path(), &["commit", "-q", "-m", "initial"]);
         temp
+    }
+
+    fn write_component_registration(home: &Path, id: &str, local_path: &Path) {
+        let dir = home.join(".config/homeboy/components");
+        fs::create_dir_all(&dir).expect("components dir");
+        fs::write(
+            dir.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": local_path,
+                "remote_path": format!("wp-content/plugins/{id}")
+            })
+            .to_string(),
+        )
+        .expect("component registration");
     }
 
     #[test]
@@ -971,6 +1039,64 @@ mod tests {
                 "--task-ref=Extra-Chill/homeboy#5786",
             ]
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn queue_create_records_successful_dmc_worktree() {
+        use crate::test_support::with_isolated_home;
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|home| {
+            let parent = home.path().join("Developer");
+            let source = parent.join("homeboy");
+            let worktree_path = parent.join("homeboy@cook-one");
+            fs::create_dir_all(&parent).unwrap();
+            fs::create_dir_all(&source).unwrap();
+            run_git(&source, &["init", "-q"]);
+            run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+            run_git(&source, &["config", "user.name", "Homeboy Test"]);
+            fs::write(source.join("README.md"), "initial\n").unwrap();
+            run_git(&source, &["add", "."]);
+            run_git(&source, &["commit", "-q", "-m", "initial"]);
+            write_component_registration(home.path(), "homeboy", &source);
+
+            let dmc = home.path().join("fake-dmc");
+            fs::write(
+                &dmc,
+                format!(
+                    "#!/bin/sh\nmkdir -p '{}'\nprintf 'Path: {}\\n'\n",
+                    worktree_path.display(),
+                    worktree_path.display()
+                ),
+            )
+            .unwrap();
+            let mut perms = fs::metadata(&dmc).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dmc, perms).unwrap();
+
+            let output = queue_create(WorktreeQueueCreateOptions {
+                repo: "homeboy".to_string(),
+                branches: vec!["cook/one".to_string()],
+                from: "origin/main".to_string(),
+                task_url: Some("https://github.com/Extra-Chill/homeboy/issues/5924".to_string()),
+                task_ref: None,
+                dry_run: false,
+                retry_after_seconds: 30,
+                dmc_bin: dmc.display().to_string(),
+            })
+            .unwrap();
+
+            assert_eq!(output.rows[0].status, WorktreeQueueCreateStatus::Created);
+            let record = resolve("homeboy@cook-one").expect("queued worktree record");
+            assert_eq!(record.worktree_path, worktree_path.display().to_string());
+            assert_eq!(record.branch, "cook/one");
+            assert_eq!(record.base_ref, "origin/main");
+            assert_eq!(
+                record.task_url.as_deref(),
+                Some("https://github.com/Extra-Chill/homeboy/issues/5924")
+            );
+        });
     }
 
     #[test]
