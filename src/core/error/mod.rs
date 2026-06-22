@@ -40,6 +40,7 @@ pub enum ErrorCode {
     RigResourceConflict,
     StackNotFound,
     StackApplyConflict,
+    RunnerControllerDisconnected,
 
     SshServerInvalid,
     SshIdentityFileNotFound,
@@ -92,6 +93,7 @@ impl ErrorCode {
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
             ErrorCode::StackNotFound => "stack.not_found",
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
+            ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
 
             ErrorCode::SshServerInvalid => "ssh.server_invalid",
             ErrorCode::SshIdentityFileNotFound => "ssh.identity_file_not_found",
