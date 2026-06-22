@@ -313,8 +313,48 @@ mod tests {
         }));
         assert!(gates.iter().any(|gate| {
             gate.gate_id == "target-coverage-complete"
-                && gate.status == "failed"
-                && gate.observed == 0.0
+                && gate.status == "passed"
+                && gate.observed == 1.0
+        }));
+    }
+
+    #[test]
+    fn fuzz_gate_evaluation_accepts_case_level_fuzz_report_evidence() {
+        let campaign = FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: None,
+            findings: Vec::new(),
+            artifacts: vec![homeboy::core::fuzz::FuzzArtifact {
+                schema: homeboy::core::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
+                id: "external-http-guardrail".to_string(),
+                kind: "fuzz_report".to_string(),
+                artifact: None,
+                metadata: serde_json::Value::Null,
+                extra: std::collections::BTreeMap::new(),
+            }],
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        let gates = evaluate_fuzz_gates(&campaign);
+
+        assert_eq!(gate_status(&gates), "passed");
+        assert!(gates.iter().any(|gate| {
+            gate.gate_id == "has-case-evidence" && gate.status == "passed" && gate.observed == 1.0
         }));
     }
 
