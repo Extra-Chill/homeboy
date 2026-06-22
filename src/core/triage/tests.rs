@@ -249,6 +249,48 @@ mod parsing {
         assert_eq!(parsed, vec![1531, 1538, 1501]);
         assert!(parse_issue_numbers("1531\nabc\n").is_err());
     }
+
+    #[test]
+    fn parse_pr_target_accepts_url_or_number_with_repo() {
+        let from_url =
+            parse_pr_target("https://github.com/Extra-Chill/homeboy/pull/5808", None).unwrap();
+        assert_eq!(from_url.repo.owner, "Extra-Chill");
+        assert_eq!(from_url.repo.repo, "homeboy");
+        assert_eq!(from_url.number, 5808);
+
+        let from_number = parse_pr_target("5808", Some("Extra-Chill/homeboy")).unwrap();
+        assert_eq!(from_number.repo.owner, "Extra-Chill");
+        assert_eq!(from_number.repo.repo, "homeboy");
+        assert_eq!(from_number.number, 5808);
+
+        assert!(parse_pr_target("5808", None).is_err());
+    }
+
+    #[test]
+    fn ci_failure_helpers_classify_and_extract_concise_snippets() {
+        let log = "running cargo test\nthread 'core' panicked\nassertion failed\ntest result: FAILED\nnext line";
+
+        let snippets = extract_failure_snippets(log, 3);
+        assert_eq!(snippets.len(), 2);
+        assert!(snippets[0].text.contains("panicked"));
+        assert_eq!(
+            classify_failure(&["unit", snippets[0].text.as_str()]),
+            "unit-test"
+        );
+
+        assert_eq!(
+            classify_failure(&["cargo fmt --check", "Diff in src/main.rs"]),
+            "fmt"
+        );
+        assert_eq!(
+            detect_baseline_vs_head(&["baseline red but head green"]).as_deref(),
+            Some("baseline-vs-head")
+        );
+        assert_eq!(
+            extract_actions_job_id("https://github.com/o/r/actions/runs/10/job/20"),
+            Some(20)
+        );
+    }
 }
 
 mod pull_requests {
@@ -945,6 +987,8 @@ mod pull_requests {
             base_branch: Some(base_branch.to_string()),
             head_branch: Some(head_branch.to_string()),
             head_repo: Some(head_repo.to_string()),
+            mergeability_state: TriageLandingMergeabilityState::Clean,
+            check_state: TriageLandingCheckState::Clean,
             classification: TriageLandingClassification::CleanMergeable,
             suggested_next_command: format!(
                 "homeboy triage --watch {repo}#{number} --until green-mergeable"
