@@ -14,6 +14,53 @@ fn parsed_cli(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn runner_workload_contract_serializes_versioned_shape() {
+    let contract = parsed_command(&["homeboy", "trace"])
+        .lab_contract()
+        .expect("trace should declare a Lab contract");
+    let workload = contract.runner_workload(
+        "workload-1",
+        "plan-1",
+        RunnerWorkloadAssignment {
+            runner_id: Some("lab-a".to_string()),
+            runner_mode: Some("direct_ssh".to_string()),
+            source: Some("explicit".to_string()),
+        },
+        RunnerWorkloadState {
+            status: "offloaded".to_string(),
+            remote_workspace: Some("/srv/homeboy/work".to_string()),
+            fallback_reason: None,
+        },
+        RunnerWorkloadMutationPolicy {
+            capture_patch: false,
+            mutation_flag: Some("--keep-overlay".to_string()),
+            allow_dirty_lab_workspace: false,
+        },
+        Some("workspace_mapping".to_string()),
+        Some("proof-1".to_string()),
+    );
+
+    let serialized = serde_json::to_value(workload).expect("workload should serialize");
+    assert_eq!(serialized["schema"], RUNNER_WORKLOAD_SCHEMA);
+    assert_eq!(serialized["workload_id"], "workload-1");
+    assert_eq!(serialized["kind"]["command_label"], "trace");
+    assert_eq!(serialized["kind"]["command_family"], "quality");
+    assert_eq!(
+        serialized["workspace_mappings"]["mapping_ref"],
+        "workspace_mapping"
+    );
+    assert_eq!(serialized["required_capabilities"][0]["name"], "playwright");
+    assert_eq!(serialized["required_secrets"]["categories"][0], "trace");
+    assert_eq!(
+        serialized["mutation_policy"]["mutation_flag"],
+        "--keep-overlay"
+    );
+    assert_eq!(serialized["assignment"]["runner_id"], "lab-a");
+    assert_eq!(serialized["state"]["remote_workspace"], "/srv/homeboy/work");
+    assert_eq!(serialized["result_refs"]["proof_id"], "proof-1");
+}
+
+#[test]
 fn test_lab_runner_supported_labels_are_contract_owned() {
     assert_eq!(
         lab_runner_supported_labels().as_slice(),
