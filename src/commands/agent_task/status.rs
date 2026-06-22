@@ -7,6 +7,7 @@
 
 use serde_json::{json, Value};
 
+use homeboy::core::agent_task_service as agent_task_service_direct;
 use homeboy::core::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::core::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::core::agent_tasks::service as agent_task_service;
@@ -34,6 +35,73 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 pub(super) fn list_runs(filter: agent_task_service::AgentTaskDiscoveryFilter) -> CmdResult<Value> {
     let report = agent_task_service::discover_runs(filter)?;
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
+/// `agent-task active`: list queued + running runs, but SEPARATE them into
+/// active / stale / suspect / unreconciled buckets so a stale or orphaned
+/// `running` record (especially a Lab/offloaded run whose runner process died)
+/// is never silently treated as genuinely-active (#5682).
+///
+/// The base discovery report (with per-run liveness, source, last-update age,
+/// and a per-run safe reconcile command) is preserved under `report`, and a
+/// `buckets` view groups run ids by classification for an at-a-glance triage.
+pub(super) fn list_active() -> CmdResult<Value> {
+    let report =
+        agent_task_service::discover_runs(agent_task_service::AgentTaskDiscoveryFilter::Active)?;
+    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+
+    let buckets = active_liveness_buckets(&report);
+    if let Value::Object(map) = &mut value {
+        map.insert("buckets".to_string(), buckets);
+        map.insert(
+            "reconcile_hint".to_string(),
+            json!("run `homeboy agent-task active --reconcile` (or the per-run `commands.reconcile`) to safely cancel stale-running records without manual state edits"),
+        );
+    }
+    Ok((value, 0))
+}
+
+/// `agent-task active --reconcile`: safely cancel stale/suspect/unreconciled
+/// running records through the lifecycle cancel path. With `dry_run`, the
+/// candidates are reported but no record is mutated (#5682).
+pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
+    let report = agent_task_service_direct::reconcile_stale_active_runs(dry_run)?;
+    let exit = if report.failed > 0 { 1 } else { 0 };
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
+}
+
+/// Group active-run ids by liveness classification for a scannable triage view.
+fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport) -> Value {
+    use agent_task_service_direct::AgentTaskLiveness;
+
+    let mut active = Vec::new();
+    let mut stale = Vec::new();
+    let mut suspect = Vec::new();
+    let mut unreconciled = Vec::new();
+
+    for run in &report.runs {
+        let bucket = match run.liveness {
+            Some(AgentTaskLiveness::Active) | None => &mut active,
+            Some(AgentTaskLiveness::Stale) => &mut stale,
+            Some(AgentTaskLiveness::Suspect) => &mut suspect,
+            Some(AgentTaskLiveness::Unreconciled) => &mut unreconciled,
+        };
+        bucket.push(json!({
+            "run_id": run.run_id,
+            "state": run.state,
+            "source": run.source,
+            "last_update": run.last_update,
+            "last_update_age_minutes": run.last_update_age_minutes,
+            "stale_reason": run.stale_reason,
+        }));
+    }
+
+    json!({
+        "active": active,
+        "stale": stale,
+        "suspect": suspect,
+        "unreconciled": unreconciled,
+    })
 }
 
 pub(super) fn logs(args: StatusArgs) -> CmdResult<Value> {

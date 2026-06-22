@@ -55,7 +55,18 @@ pub fn run(args: AgentTaskArgs, global: &GlobalArgs) -> CmdResult<Value> {
             status::list_runs(agent_task_service::AgentTaskDiscoveryFilter::All)
         }
         AgentTaskCommand::Active => {
-            status::list_runs(agent_task_service::AgentTaskDiscoveryFilter::Active)
+            // `Active` is a unit clap variant whose flag surface lives in the
+            // fleet-owned args module; until a typed `--reconcile`/`--dry-run`
+            // flag can be added there, detect them from the raw process args so
+            // the safe stale-run reconcile path is reachable today (#5682).
+            let raw: Vec<String> = std::env::args().collect();
+            let reconcile = raw.iter().any(|arg| arg == "--reconcile");
+            let dry_run = raw.iter().any(|arg| arg == "--dry-run");
+            if reconcile {
+                status::reconcile_active(dry_run)
+            } else {
+                status::list_active()
+            }
         }
         AgentTaskCommand::Latest => {
             status::list_runs(agent_task_service::AgentTaskDiscoveryFilter::Latest)

@@ -39,12 +39,74 @@ pub enum AgentTaskDiscoveryFilter {
     Latest,
 }
 
+/// Number of minutes a `Running` record may go without an `updated_at`
+/// heartbeat before `agent-task active` treats it as suspect even when its
+/// owner process/runner-job liveness cannot be disproven. Lab/offloaded runs
+/// whose runner process died silently surface here so operators can reconcile
+/// them instead of trusting a frozen `running` record indefinitely (#5682).
+const STALE_UPDATE_THRESHOLD_MINUTES: i64 = 30;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskDiscoveryReport {
     pub schema: &'static str,
     pub filter: &'static str,
     pub count: usize,
     pub runs: Vec<AgentTaskDiscoveryRun>,
+    /// Liveness buckets for the `active` filter so operators can separate
+    /// genuinely-active runs from stale/suspect/unreconciled records at a
+    /// glance. Only populated for the `active` filter; `None` elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_summary: Option<AgentTaskLivenessSummary>,
+}
+
+/// Coarse liveness classification for an active (queued/running) run. The
+/// `active` filter separates runs into these buckets so a stale/orphaned
+/// `running` record — especially a Lab/offloaded run whose runner process died
+/// — is never silently treated as genuinely-active (#5682).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLiveness {
+    /// Queued, or running with a verifiable live owner/runner and a fresh heartbeat.
+    Active,
+    /// Running but the lifecycle layer already flagged the record stale
+    /// (owner process gone, runner job unverified, missing runner pid).
+    Stale,
+    /// Running with no disproven liveness, but the last heartbeat is older than
+    /// the staleness threshold — likely orphaned, worth reconciling.
+    Suspect,
+    /// Running with no owner/runner liveness signal at all and no recent
+    /// heartbeat — cannot be confirmed either way without reconciliation.
+    Unreconciled,
+}
+
+impl AgentTaskLiveness {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentTaskLiveness::Active => "active",
+            AgentTaskLiveness::Stale => "stale",
+            AgentTaskLiveness::Suspect => "suspect",
+            AgentTaskLiveness::Unreconciled => "unreconciled",
+        }
+    }
+
+    /// Whether this classification is a candidate for safe reconcile/cancel.
+    fn is_reconcilable(self) -> bool {
+        matches!(
+            self,
+            AgentTaskLiveness::Stale | AgentTaskLiveness::Suspect | AgentTaskLiveness::Unreconciled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AgentTaskLivenessSummary {
+    pub active: usize,
+    pub stale: usize,
+    pub suspect: usize,
+    pub unreconciled: usize,
+    /// Convenience hint: the safe command path to reconcile stale-running
+    /// records without manual state edits.
+    pub reconcile_command: &'static str,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -73,6 +135,20 @@ pub struct AgentTaskDiscoveryRun {
     pub stale_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Liveness classification of this run (active/stale/suspect/unreconciled).
+    /// Populated for the `active` filter; `None` for `all`/`latest` lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<AgentTaskLiveness>,
+    /// Where this run executes: `local`, `remote`, or `runner:<id>`. Lets an
+    /// operator trace the runner process for Lab/offloaded runs.
+    pub source: String,
+    /// Last heartbeat/update timestamp, surfaced so operators can judge
+    /// staleness without opening the full record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<String>,
+    /// Age of `last_update` in minutes at report time, when computable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update_age_minutes: Option<i64>,
     pub commands: AgentTaskDiscoveryCommands,
 }
 
@@ -93,6 +169,11 @@ pub struct AgentTaskDiscoveryCommands {
     pub retry: String,
     pub run_plan: String,
     pub promote: String,
+    /// Safe per-run reconcile/cancel for a stale-running record. Uses the
+    /// lifecycle cancel path (terminates a live owner tree only if present,
+    /// otherwise just marks the orphaned record cancelled) — never a manual
+    /// state edit (#5682).
+    pub reconcile: String,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +238,8 @@ pub fn read_plan(spec: &str) -> Result<AgentTaskPlan> {
 
 pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscoveryReport> {
     let mut records = agent_task_lifecycle::list_records()?;
-    if filter == AgentTaskDiscoveryFilter::Active {
+    let is_active = filter == AgentTaskDiscoveryFilter::Active;
+    if is_active {
         records.retain(|record| {
             matches!(
                 record.state,
@@ -170,7 +252,14 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
         records.truncate(1);
     }
 
-    let runs: Vec<_> = records.into_iter().map(discovery_run).collect();
+    let now = chrono::Utc::now();
+    let runs: Vec<_> = records
+        .into_iter()
+        .map(|record| discovery_run(record, is_active, now))
+        .collect();
+
+    let liveness_summary = is_active.then(|| liveness_summary(&runs));
+
     Ok(AgentTaskDiscoveryReport {
         schema: "homeboy/agent-task-discovery/v1",
         filter: match filter {
@@ -180,10 +269,196 @@ pub fn discover_runs(filter: AgentTaskDiscoveryFilter) -> Result<AgentTaskDiscov
         },
         count: runs.len(),
         runs,
+        liveness_summary,
     })
 }
 
-fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
+fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary {
+    let mut summary = AgentTaskLivenessSummary {
+        reconcile_command: "homeboy agent-task active --reconcile",
+        ..Default::default()
+    };
+    for run in runs {
+        match run.liveness {
+            Some(AgentTaskLiveness::Active) | None => summary.active += 1,
+            Some(AgentTaskLiveness::Stale) => summary.stale += 1,
+            Some(AgentTaskLiveness::Suspect) => summary.suspect += 1,
+            Some(AgentTaskLiveness::Unreconciled) => summary.unreconciled += 1,
+        }
+    }
+    summary
+}
+
+/// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
+/// that was classified non-active, and for the reconcilable ones records the
+/// outcome of the safe cancel attempt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskReconcileReport {
+    pub schema: &'static str,
+    /// `true` when no records were actually mutated (preview mode).
+    pub dry_run: bool,
+    pub considered: usize,
+    pub reconciled: usize,
+    pub failed: usize,
+    pub runs: Vec<AgentTaskReconcileRun>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskReconcileRun {
+    pub run_id: String,
+    pub liveness: AgentTaskLiveness,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    /// `reconciled`, `would-reconcile` (dry run), or `failed`.
+    pub action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Safely reconcile stale/suspect/unreconciled active runs without manual state
+/// edits (#5682). Each candidate is cancelled through the lifecycle cancel path,
+/// which terminates a still-live owner process tree only when one actually
+/// exists and otherwise just marks the orphaned `running` record cancelled —
+/// the exact safe operation an operator would otherwise be tempted to do by
+/// hand-editing run JSON.
+///
+/// Genuinely-active runs (live owner/runner with a fresh heartbeat, or queued
+/// work) are never touched. With `dry_run`, candidates are reported but no
+/// record is mutated so an operator can preview the blast radius first.
+pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
+    let report = discover_runs(AgentTaskDiscoveryFilter::Active)?;
+
+    let mut runs = Vec::new();
+    let mut reconciled = 0usize;
+    let mut failed = 0usize;
+
+    for run in report.runs {
+        let Some(liveness) = run.liveness else {
+            continue;
+        };
+        if !liveness.is_reconcilable() {
+            continue;
+        }
+
+        if dry_run {
+            runs.push(AgentTaskReconcileRun {
+                run_id: run.run_id,
+                liveness,
+                source: run.source,
+                stale_reason: run.stale_reason,
+                action: "would-reconcile",
+                error: None,
+            });
+            continue;
+        }
+
+        let reason = run
+            .stale_reason
+            .clone()
+            .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
+        match agent_task_lifecycle::cancel_run(&run.run_id, Some(&reason)) {
+            Ok(_) => {
+                reconciled += 1;
+                runs.push(AgentTaskReconcileRun {
+                    run_id: run.run_id,
+                    liveness,
+                    source: run.source,
+                    stale_reason: run.stale_reason,
+                    action: "reconciled",
+                    error: None,
+                });
+            }
+            Err(error) => {
+                failed += 1;
+                runs.push(AgentTaskReconcileRun {
+                    run_id: run.run_id,
+                    liveness,
+                    source: run.source,
+                    stale_reason: run.stale_reason,
+                    action: "failed",
+                    error: Some(error.message),
+                });
+            }
+        }
+    }
+
+    Ok(AgentTaskReconcileReport {
+        schema: "homeboy/agent-task-reconcile/v1",
+        dry_run,
+        considered: runs.len(),
+        reconciled,
+        failed,
+        runs,
+    })
+}
+
+/// Classify an active run's liveness from the durable record's already-computed
+/// stale flag plus a heartbeat-age fallback. The lifecycle layer
+/// (`annotate_stale_running`) is authoritative for disproven liveness (dead
+/// owner pid, unverified runner job). This adds a heartbeat-age signal so a
+/// Lab/offloaded run whose runner died silently — leaving liveness merely
+/// *unverifiable* rather than *disproven* — still surfaces as suspect (#5682).
+fn classify_liveness(
+    record: &AgentTaskRunRecord,
+    last_update_age_minutes: Option<i64>,
+) -> AgentTaskLiveness {
+    if record.state != agent_task_lifecycle::AgentTaskRunState::Running {
+        // Queued runs are genuinely pending work, not stale.
+        return AgentTaskLiveness::Active;
+    }
+
+    if metadata_bool(&record.metadata, "stale_running") == Some(true) {
+        return AgentTaskLiveness::Stale;
+    }
+
+    let stale_by_age =
+        last_update_age_minutes.is_some_and(|age| age >= STALE_UPDATE_THRESHOLD_MINUTES);
+
+    let has_owner_signal =
+        record.metadata.get("runner_pid").is_some() || record.metadata.get("runner_id").is_some();
+
+    match (stale_by_age, has_owner_signal) {
+        (true, _) => AgentTaskLiveness::Suspect,
+        (false, true) => AgentTaskLiveness::Active,
+        // No disproven liveness, no recent heartbeat, no owner signal at all:
+        // we genuinely cannot confirm this run either way.
+        (false, false) => AgentTaskLiveness::Unreconciled,
+    }
+}
+
+/// Label where a run executes so an operator can trace the runner process.
+fn run_source(record: &AgentTaskRunRecord) -> String {
+    if let Some(runner_id) =
+        metadata_string(&record.metadata, "runner_id").filter(|id| !id.trim().is_empty())
+    {
+        return format!("runner:{runner_id}");
+    }
+    if record.metadata.get("remote_run_id").is_some()
+        || record.metadata.get("runner_job_id").is_some()
+        || record.metadata.get("job_id").is_some()
+    {
+        return "remote".to_string();
+    }
+    "local".to_string()
+}
+
+/// Age in whole minutes between `timestamp` (RFC3339) and `now`, clamped to
+/// non-negative. `None` when the timestamp is absent or unparseable.
+fn age_minutes(timestamp: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+    let raw = timestamp?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    let minutes = now
+        .signed_duration_since(parsed.with_timezone(&chrono::Utc))
+        .num_minutes();
+    Some(minutes.max(0))
+}
+
+fn discovery_run(
+    record: AgentTaskRunRecord,
+    classify: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AgentTaskDiscoveryRun {
     let plan = agent_task_lifecycle::load_plan(&record.run_id).ok();
     let first_task = plan.as_ref().and_then(|plan| plan.tasks.first());
     let repo = plan
@@ -201,6 +476,11 @@ fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
     let aggregate_path = record.aggregate_path.clone();
     let run_id = record.run_id.clone();
 
+    let last_update = record.updated_at.clone();
+    let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
+    let source = run_source(&record);
+    let liveness = classify.then(|| classify_liveness(&record, last_update_age_minutes));
+
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
         state: record.state,
@@ -217,6 +497,10 @@ fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
         stale: metadata_bool(&record.metadata, "stale_running"),
         stale_reason: metadata_string(&record.metadata, "stale_running_reason"),
         retryable: metadata_bool(&record.metadata, "retryable"),
+        liveness,
+        source,
+        last_update,
+        last_update_age_minutes,
         commands: AgentTaskDiscoveryCommands {
             status: format!("homeboy agent-task status {run_id}"),
             logs: format!("homeboy agent-task logs {run_id}"),
@@ -230,6 +514,7 @@ fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
             promote: aggregate_path
                 .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
                 .unwrap_or_else(|| format!("homeboy agent-task review {run_id}")),
+            reconcile: format!("homeboy agent-task cancel {run_id} --reason stale-running"),
         },
     }
 }
@@ -1177,6 +1462,112 @@ mod tests {
                 Some("runner_job_unverified_after_daemon_restart")
             );
             assert_eq!(run.retryable, Some(true));
+        });
+    }
+
+    #[test]
+    fn discovery_active_classifies_liveness_and_source() {
+        with_isolated_home(|_| {
+            // Queued run: always classified active.
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-queued"))
+                .expect("queued submitted");
+
+            // Stale runner-backed run: lifecycle flags it stale -> Stale.
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-stale"))
+                .expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test("run-live-stale", |record| {
+                record.state = AgentTaskRunState::Running;
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-xyz",
+                });
+            })
+            .expect("stale runner-backed record stored");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+
+            let queued = report
+                .runs
+                .iter()
+                .find(|run| run.run_id == "run-live-queued")
+                .expect("queued listed");
+            assert_eq!(queued.liveness, Some(AgentTaskLiveness::Active));
+            assert_eq!(queued.source, "local");
+
+            let stale = report
+                .runs
+                .iter()
+                .find(|run| run.run_id == "run-live-stale")
+                .expect("stale listed");
+            assert_eq!(stale.liveness, Some(AgentTaskLiveness::Stale));
+            assert_eq!(stale.source, "runner:homeboy-lab");
+
+            let summary = report.liveness_summary.expect("active summary present");
+            assert!(summary.active >= 1);
+            assert_eq!(summary.stale, 1);
+            assert_eq!(
+                summary.reconcile_command,
+                "homeboy agent-task active --reconcile"
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_dry_run_reports_but_does_not_cancel_stale_runs() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-dry"))
+                .expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test("run-reconcile-dry", |record| {
+                record.state = AgentTaskRunState::Running;
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-dry",
+                });
+            })
+            .expect("stale record stored");
+
+            let report = reconcile_stale_active_runs(true).expect("dry run reconciled");
+            assert!(report.dry_run);
+            assert_eq!(report.reconciled, 0);
+            assert_eq!(report.considered, 1);
+            assert_eq!(report.runs[0].action, "would-reconcile");
+
+            // Record must remain running after a dry run.
+            let record = lifecycle_status("run-reconcile-dry").expect("status");
+            assert_eq!(record.state, AgentTaskRunState::Running);
+        });
+    }
+
+    #[test]
+    fn reconcile_cancels_stale_running_record_without_manual_edit() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-live"))
+                .expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test("run-reconcile-live", |record| {
+                record.state = AgentTaskRunState::Running;
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-live",
+                });
+            })
+            .expect("stale record stored");
+
+            let report = reconcile_stale_active_runs(false).expect("reconciled");
+            assert!(!report.dry_run);
+            assert_eq!(report.reconciled, 1);
+            assert_eq!(report.failed, 0);
+            assert_eq!(report.runs[0].action, "reconciled");
+
+            let record = lifecycle_status("run-reconcile-live").expect("status");
+            assert_eq!(record.state, AgentTaskRunState::Cancelled);
+
+            // A genuinely-active run reconcile pass leaves nothing to do.
+            let empty = reconcile_stale_active_runs(false).expect("nothing to reconcile");
+            assert_eq!(empty.considered, 0);
+            assert_eq!(empty.reconciled, 0);
         });
     }
 
