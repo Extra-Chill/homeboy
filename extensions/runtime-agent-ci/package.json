@@ -6,6 +6,7 @@
   "exports": {
     ".": "./index.js",
     "./controller-loop-proof-validator": "./lib/controller-loop-proof-validator.js",
+    "./agent-task-outcome-normalizer": "./lib/agent-task-outcome-normalizer.js",
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js"
@@ -16,7 +17,8 @@
   },
   "scripts": {
     "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",
-    "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs"
+    "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs",
+    "test:agent-task-outcome-normalizer": "node tests/agent-task-outcome-normalizer.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

@@ -25,7 +25,7 @@ const {
 const {
   normalizeAgentTaskOutcome,
   providerFailureClassification,
-} = require('./provider-outcome-normalizer');
+} = require('../../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 const {
   artifactResultEnvelopeFromCodeboxResult,
   artifactNameFromDeclaration,

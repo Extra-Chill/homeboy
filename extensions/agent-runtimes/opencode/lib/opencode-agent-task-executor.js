@@ -11,11 +11,13 @@ const { spawnSync } = require('node:child_process');
 const {
 	AGENT_TASK_REQUEST_SCHEMA,
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-	AGENT_TASK_OUTCOME_SCHEMA,
 	agentTaskProviderContractFields,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
 } = require('../../../runtime-agent-ci/lib/agent-task-provider-contract');
+const {
+	normalizeAgentTaskOutcome,
+} = require('../../../runtime-agent-ci/lib/agent-task-outcome-normalizer');
 
 const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';
@@ -192,21 +194,21 @@ function providerContract(options = {}) {
 }
 
 function outcome(request = {}, values = {}) {
-	return {
-		schema: AGENT_TASK_OUTCOME_SCHEMA,
-		task_id: request.task_id || '',
+	return normalizeAgentTaskOutcome(outcomeRequest(request), values, {
+		provider: OPENCODE_PROVIDER_ID,
+		providerLabel: 'OpenCode agent',
 		status: values.status || 'provider_error',
-		...(values.failure_classification ? { failure_classification: values.failure_classification } : {}),
-		...(values.failure_code ? { failure_code: values.failure_code } : {}),
+		failureClassification: values.failure_classification,
+		failureCode: values.failure_code,
 		summary: values.summary || 'OpenCode agent task executor failed before producing a detailed outcome.',
-		diagnostics: values.diagnostics || [],
 		artifacts: values.artifacts || [],
-		evidence_refs: values.evidence_refs || [],
-		metadata: {
-			provider: OPENCODE_PROVIDER_ID,
-			...(values.metadata || {}),
-		},
-	};
+		evidenceRefs: values.evidence_refs || [],
+		metadata: values.metadata || {},
+	});
+}
+
+function outcomeRequest(request = {}) {
+	return request.task_id ? request : { ...request, task_id: 'unknown-task' };
 }
 
 function validationFailure(request, message) {
