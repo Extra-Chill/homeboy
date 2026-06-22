@@ -1,11 +1,16 @@
 # Lab Command
 
-Compatibility shortcut for Lab routing helpers. Keep using `homeboy lab ...`
-when you already know the shortcut; use [`homeboy runner`](runner.md) for the
-discoverable runner and Lab offload surface.
+Hidden compatibility shortcut for Lab routing helpers. Keep using `homeboy lab
+...` when you already know the shortcut; use [`homeboy runner`](runner.md) for
+the discoverable runner and Lab offload surface.
 
-Inspect and use configured Lab runners for remote benchmark execution and
-managed follow-up work.
+`lab` is intentionally hidden from top-level help. It remains available so older
+automation and operator notes keep working while discoverable guidance lives in
+`runner` docs.
+
+Treat `homeboy lab` as a routing helper, not a benchmark executor. Benchmark
+workloads should start at `homeboy bench`; Lab routing then selects a runner when
+the command and configuration support offload.
 
 ## Synopsis
 

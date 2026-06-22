@@ -15,7 +15,14 @@ homeboy observe <component> --duration 60s --probe '{"type":"http.egress","host"
 
 ## V1 Scope
 
-`observe` is a passive producer. It does not drive a scenario, attach to privileged OS probes, or own target lifecycle.
+`observe` is a passive producer. It samples or tails a system that is already
+running and persists timeline evidence. It does not drive a scenario, assert
+behavior, attach to privileged OS probes, or own target lifecycle.
+
+Use `trace` when Homeboy should execute a declared scenario, collect
+runner-owned artifacts, and evaluate assertions. Use `observe` when the target is
+already live and the goal is to capture supporting evidence before or during a
+manual investigation.
 
 V1 supports:
 

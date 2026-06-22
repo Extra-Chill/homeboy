@@ -12,9 +12,15 @@ homeboy build <project_id> --all --changed-since origin/main
 
 ## Description
 
-Resolves a build command from the component's linked extension and runs it in the component's `local_path`.
+Runs the component's local build quality gate by resolving a build command from
+the component's linked extension and executing it in the component's `local_path`.
 
-Builds are extension-owned. A component links to one build-capable extension, and Homeboy asks that extension for the command to run. One-off shell commands that do not belong in a reusable extension should live in a rig `command` step instead.
+Builds are extension-owned and currently local-only. A component links to one
+build-capable extension, and Homeboy asks that extension for the command to run.
+Use runner or Lab-backed commands such as `test`, `lint`, `audit`, `review`,
+`bench run`, `fuzz run`, and `trace` for portable offload. One-off shell commands
+that do not belong in a reusable extension should live in a rig `command` step
+instead.
 
 ## Path Override
 

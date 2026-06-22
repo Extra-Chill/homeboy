@@ -77,7 +77,7 @@ pub enum Commands {
     Test(test::TestArgs),
     /// Run performance benchmarks for a component
     Bench(bench::BenchArgs),
-    /// Resolve generic fuzz workload contracts for a component
+    /// Run generic fuzz workloads for a component
     Fuzz(fuzz::FuzzArgs),
     /// Capture black-box behavioral traces for a component
     #[command(
@@ -128,7 +128,7 @@ pub enum Commands {
     Issues(issues::IssuesArgs),
     /// Version management for components
     Version(version::VersionArgs),
-    /// Build a component
+    /// Run a local build quality gate for a component
     Build(build::BuildArgs),
     /// Show changes since last version tag
     Changes(changes::ChangesArgs),
