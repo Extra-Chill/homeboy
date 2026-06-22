@@ -41,7 +41,7 @@ async function buildRunnerResult(env) {
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
 	const inputFile = path.join(tempDir, 'agent-task-request.json');
-	fs.writeFileSync(inputFile, `${JSON.stringify(request, null, 2)}\n`);
+	fs.writeFileSync(inputFile, `${JSON.stringify(wpCodeboxRunAgentTaskInput(request), null, 2)}\n`);
 
 	const command = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
 	const args = ['run-agent-task', '--input-file', inputFile, '--json'];
@@ -51,6 +51,29 @@ async function runWpCodeboxAgentTask(request) {
 	});
 
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
+}
+
+function wpCodeboxRunAgentTaskInput(request) {
+	return {
+		schema: 'wp-codebox/run-agent-task/v1',
+		id: request.task_id,
+		goal: request.instructions || 'Run the WordPress fuzz suite and return the declared fuzz artifacts.',
+		agent_workload: {
+			schema: 'wp-codebox/agent-workload/v1',
+			id: request.task_id,
+			goal: request.instructions || 'Run the WordPress fuzz suite and return the declared fuzz artifacts.',
+			agent_runtime: {
+				runtime_task: request.executor?.config?.runtime_task,
+			},
+		},
+		runtime_task: request.executor?.config?.runtime_task,
+		artifact_declarations: request.artifact_declarations,
+		expected_artifacts: request.expected_artifacts,
+		metadata: {
+			...(request.metadata || {}),
+			homeboy_agent_task_request: request,
+		},
+	};
 }
 
 function spawnJson(command, args, options) {
