@@ -445,9 +445,9 @@ defaults them to the current core contract ids.
 Use `homeboy agent-task providers --backend <backend> --validate-readiness` to
 fail fast when the selected backend is registered but its declared runner
 readiness is not usable in the current environment. Lab offload runs this check
-on the selected runner before dispatching `agent-task cook` or `agent-task
-dispatch`, so a missing provider executable/config blocks the run before a
-multi-cell task wave is queued.
+on the selected runner before `agent-task cook` dispatches work internally, so a
+missing provider executable/config blocks the run before a multi-cell task wave
+is queued.
 
 ## Repo-Local Gate Tasks
 

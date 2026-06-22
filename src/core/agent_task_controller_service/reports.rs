@@ -110,9 +110,9 @@ pub struct ControllerListReport {
 
 /// Optional dispatch hook used when a `spawn_task` request asks for `"mode": "dispatch"`.
 ///
-/// The CLI adapter implements this to bridge controller-driven dispatch into the
-/// existing `agent-task dispatch` command. Callers that do not need dispatch
-/// mode can pass [`NoopDispatchHook`].
+/// The CLI adapter implements this to bridge controller-driven work into the
+/// internal dispatch service. Callers that do not need dispatch mode can pass
+/// [`NoopDispatchHook`].
 pub trait ControllerDispatchHook {
     /// Run a dispatch request and return its JSON envelope and process exit code.
     fn dispatch(&self, request: &Value) -> Result<(Value, i32)>;

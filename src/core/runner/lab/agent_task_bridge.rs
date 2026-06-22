@@ -537,7 +537,7 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
 
 pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
-    let action_index = invocation.child_index_matching(&["dispatch", "cook"])?;
+    let action_index = invocation.child_index_matching(&["cook"])?;
     invocation
         .option_value_after(action_index, "--run-id")
         .map(str::to_string)
@@ -556,7 +556,7 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
     preferred: Option<&str>,
 ) -> Option<(Vec<String>, String)> {
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
-    let action_index = invocation.child_index_matching(&["dispatch", "cook"])?;
+    let action_index = invocation.child_index_matching(&["cook"])?;
 
     if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
         return Some((args.to_vec(), run_id));
@@ -572,10 +572,10 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
     Some((out, run_id))
 }
 
-/// Resolves the stable per-run isolation token for an agent-task `dispatch`/`cook`
-/// offload: the explicit `--run-id` when provided, otherwise a freshly generated
-/// run id. Returns `None` for non-dispatch/cook invocations (which already use
-/// unique snapshot workspaces and need no extra isolation).
+/// Resolves the stable per-run isolation token for an agent-task cook offload:
+/// the explicit `--run-id` when provided, otherwise a freshly generated run id.
+/// Returns `None` for other invocations, which already use unique snapshot
+/// workspaces and need no extra isolation.
 pub(super) fn agent_task_dispatch_run_isolation_token(args: &[String]) -> Option<String> {
     if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
         return Some(run_id);
