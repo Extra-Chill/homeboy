@@ -71,6 +71,35 @@ const AGENT_TASK_TOOL_PRESETS = {
   },
 };
 
+const AGENT_TASK_CAPABILITY_BUNDLES = {
+  workspace_readwrite: {
+    tool_presets: ['runner_workspace'],
+    provider_runtime_invocation: {
+      operations: {
+        workspaceCommand: true,
+        workspaceCapture: true,
+      },
+    },
+  },
+  github_publication: {
+    tool_presets: ['publication'],
+    provider_runtime_invocation: {
+      operations: {
+        workspacePublish: true,
+      },
+    },
+  },
+  worktree_pr_iteration: {
+    capability_bundles: ['workspace_readwrite', 'github_publication'],
+    provider_runtime_invocation: {
+      operations: {
+        artifactHandoff: true,
+        toolCallTranscriptRecord: true,
+      },
+    },
+  },
+};
+
 const AGENT_TASK_ARTIFACT_FIELDS = [
   'schema',
   'id',
@@ -170,6 +199,87 @@ function expandAgentTaskToolPresets(presets = [], overrides = {}) {
   return expanded;
 }
 
+function expandAgentTaskCapabilityBundles(bundles = [], overrides = {}) {
+  const expanded = {};
+  const visiting = new Set();
+  for (const bundle of normalizeArray(bundles)) {
+    mergeCapabilityBundle(expanded, bundle, visiting);
+  }
+  mergeCapabilityBundleDefinition(expanded, overrides);
+  return expanded;
+}
+
+function mergeCapabilityBundle(target, bundle, visiting) {
+  const bundleName = typeof bundle === 'string' ? bundle : '';
+  const definition = bundleName ? AGENT_TASK_CAPABILITY_BUNDLES[bundleName] : bundle;
+  if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
+    throw new Error(`Unknown agent task capability bundle: ${bundleName || String(bundle)}`);
+  }
+  if (bundleName) {
+    if (visiting.has(bundleName)) {
+      throw new Error(`Circular agent task capability bundle: ${bundleName}`);
+    }
+    visiting.add(bundleName);
+  }
+  mergeCapabilityBundleDefinition(target, definition, visiting);
+  if (bundleName) {
+    visiting.delete(bundleName);
+  }
+}
+
+function mergeCapabilityBundleDefinition(target, source = {}, visiting = new Set()) {
+  for (const nestedBundle of normalizeArray(source.capability_bundles || source.capabilityBundles)) {
+    mergeCapabilityBundle(target, nestedBundle, visiting);
+  }
+  target.tool_presets = uniqueStrings([
+    ...normalizeArray(target.tool_presets),
+    ...normalizeArray(source.tool_presets || source.toolPresets),
+  ]);
+  target.provider_runtime_invocation = mergeRuntimeInvocationDescriptor(
+    target.provider_runtime_invocation,
+    source.provider_runtime_invocation || source.providerRuntimeInvocation || source.runtime_invocation || source.runtimeInvocation
+  );
+  if (target.tool_presets.length === 0) {
+    delete target.tool_presets;
+  }
+  if (target.provider_runtime_invocation && Object.keys(target.provider_runtime_invocation).length === 0) {
+    delete target.provider_runtime_invocation;
+  }
+  return target;
+}
+
+function mergeRuntimeInvocationDescriptor(current = {}, next = {}) {
+  if (!next || typeof next !== 'object' || Array.isArray(next)) {
+    return current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+  }
+  const operations = mergeRuntimeInvocationOperations(runtimeInvocationOperations(current), runtimeInvocationOperations(next));
+  return {
+    ...(current && typeof current === 'object' && !Array.isArray(current) ? current : {}),
+    ...next,
+    ...(Object.keys(operations).length > 0 ? { operations } : {}),
+  };
+}
+
+function mergeRuntimeInvocationOperations(current = {}, next = {}) {
+  const merged = current && typeof current === 'object' && !Array.isArray(current) ? { ...current } : {};
+  for (const [operation, config] of Object.entries(next && typeof next === 'object' && !Array.isArray(next) ? next : {})) {
+    if (config && typeof config === 'object' && !Array.isArray(config) && merged[operation] && typeof merged[operation] === 'object' && !Array.isArray(merged[operation])) {
+      merged[operation] = { ...merged[operation], ...config };
+    } else {
+      merged[operation] = config;
+    }
+  }
+  return merged;
+}
+
+function runtimeInvocationOperations(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const operations = value.operations || value.provider_operations || value.providerOperations || value.tasks || value.abilities;
+  return operations && typeof operations === 'object' && !Array.isArray(operations) ? operations : {};
+}
+
 function mergeToolPreset(target, source = {}) {
   if (source.workspace_tools) {
     target.workspace_tools = mergeWorkspaceTools(target.workspace_tools, source.workspace_tools);
@@ -226,10 +336,12 @@ module.exports = {
   AGENT_TASK_REDACTED_METADATA_KEYS,
   AGENT_TASK_REQUEST_SCHEMA,
   AGENT_TASK_SECRET_SELECTOR_PATHS,
+  AGENT_TASK_CAPABILITY_BUNDLES,
   AGENT_TASK_TOOL_PRESETS,
   agentTaskArtifactFromRef,
   agentTaskEvidenceRefFromRef,
   agentTaskProviderContractFields,
+  expandAgentTaskCapabilityBundles,
   expandAgentTaskToolPresets,
   extendRedactedMetadataKeys,
   providerDefaultsContract,

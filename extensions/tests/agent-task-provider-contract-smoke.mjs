@@ -15,10 +15,12 @@ const {
 	AGENT_TASK_EVIDENCE_REF_SCHEMA,
 	AGENT_TASK_REDACTED_METADATA_KEYS,
 	AGENT_TASK_SECRET_SELECTOR_PATHS,
+	AGENT_TASK_CAPABILITY_BUNDLES,
 	AGENT_TASK_TOOL_PRESETS,
 	agentTaskArtifactFromRef,
 	agentTaskEvidenceRefFromRef,
 	agentTaskProviderContractFields,
+	expandAgentTaskCapabilityBundles,
 	expandAgentTaskToolPresets,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
@@ -118,6 +120,39 @@ assert.throws(
 	/Unknown agent task tool preset: product_workspace/,
 );
 
+assert.deepEqual(Object.keys(AGENT_TASK_CAPABILITY_BUNDLES), ['workspace_readwrite', 'github_publication', 'worktree_pr_iteration']);
+assert.deepEqual(expandAgentTaskCapabilityBundles(['workspace_readwrite']), {
+	tool_presets: ['runner_workspace'],
+	provider_runtime_invocation: {
+		operations: {
+			workspaceCommand: true,
+			workspaceCapture: true,
+		},
+	},
+});
+assert.deepEqual(expandAgentTaskCapabilityBundles(['worktree_pr_iteration']), {
+	tool_presets: ['runner_workspace', 'publication'],
+	provider_runtime_invocation: {
+		operations: {
+			workspaceCommand: true,
+			workspaceCapture: true,
+			workspacePublish: true,
+			artifactHandoff: true,
+			toolCallTranscriptRecord: true,
+		},
+	},
+});
+assert.deepEqual(expandAgentTaskCapabilityBundles(['github_publication'], {
+	provider_runtime_invocation: { operations: { workspacePublish: { config: { draft: true } } } },
+}), {
+	tool_presets: ['publication'],
+	provider_runtime_invocation: { operations: { workspacePublish: { config: { draft: true } } } },
+});
+assert.throws(
+	() => expandAgentTaskCapabilityBundles(['product_worktree_pr_iteration']),
+	/Unknown agent task capability bundle: product_worktree_pr_iteration/,
+);
+
 const runnerSpec = agentTaskRunnerSpec({
 	backend: 'codebox',
 	runtime: 'wp-codebox',
@@ -138,7 +173,8 @@ assert.deepEqual(agentTaskRequestFromRunnerSpec({ runnerSpec }), {
 		secret_env: ['AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN'],
 		config: { provider: 'codex' },
 	},
-	limits: { task_timeout_seconds: 900 },
+	limits: { timeout_ms: 900000, task_timeout_seconds: 900 },
+	artifact_declarations: [],
 	expected_artifacts: ['patch'],
 });
 assert.equal(validateAgentTaskRunnerSpec(runnerSpec), runnerSpec);

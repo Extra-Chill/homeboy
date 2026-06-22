@@ -13,6 +13,10 @@ const {
   normalizeRuntimeExecutionDescriptor,
 } = require('./generic-agent-task-plan');
 const { normalizeRuntimeId } = require('./runtime-provider-resolver.cjs');
+const {
+  expandAgentTaskCapabilityBundles,
+  expandAgentTaskToolPresets,
+} = require('./agent-task-provider-contract');
 
 const AGENT_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
 const AGENT_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
@@ -96,6 +100,14 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     ability: runtimeExecution?.ability || options.ability || runtimeProfile.runtime_task_ability,
     input: runtimeTaskInput,
   });
+  const requestedCapabilityBundles = options.capabilityBundles || options.capability_bundles || options.config?.capability_bundles || options.config?.capabilityBundles;
+  const requestedProviderRuntimeInvocation = options.providerRuntimeInvocation || options.provider_runtime_invocation || options.runtimeInvocation || options.runtime_invocation || options.config?.provider_runtime_invocation || options.config?.providerRuntimeInvocation || options.config?.runtime_invocation || options.config?.runtimeInvocation;
+  const capabilityExpansion = expandAgentTaskCapabilityBundles(requestedCapabilityBundles || []);
+  const expandedToolPresetTools = expandAgentTaskToolPresets(capabilityExpansion.tool_presets || []);
+  const providerRuntimeInvocation = mergeRuntimeInvocationDescriptors(
+    capabilityExpansion.provider_runtime_invocation,
+    requestedProviderRuntimeInvocation
+  );
   return stripUndefined({
     ...(options.config || {}),
     provider: options.provider,
@@ -111,6 +123,10 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     runtime_task: runtimeTask,
     workload,
     sandbox_tool_policy: toolPolicy,
+    capability_bundles: normalizeArray(requestedCapabilityBundles).length > 0 ? normalizeArray(requestedCapabilityBundles) : undefined,
+    tool_presets: capabilityExpansion.tool_presets,
+    workspace_tools: expandedToolPresetTools.workspace_tools,
+    publication_tools: expandedToolPresetTools.publication_tools,
     ability_tools: options.abilityTools || options.ability_tools,
     ability_requirements: options.abilityRequirements || options.ability_requirements || runtimeProfile.ability_requirements,
     artifact_slots: options.artifactSlots || options.artifact_slots,
@@ -128,10 +144,46 @@ function runtimeAgentCiTaskExecutorConfig(options = {}) {
     runtime_env: options.runtimeEnv || options.runtime_env,
     runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
     runtime_state_mounts: options.runtimeStateMounts || options.runtime_state_mounts,
-    provider_runtime_invocation: options.providerRuntimeInvocation || options.provider_runtime_invocation || options.runtimeInvocation || options.runtime_invocation,
+    provider_runtime_invocation: nonEmptyObject(providerRuntimeInvocation),
     runtime_id: options.runtimeId || options.runtime_id,
     runtime_bin: options.runtimeBin || options.runtime_bin,
   });
+}
+
+function mergeRuntimeInvocationDescriptors(primary = {}, secondary = {}) {
+  const merged = {};
+  for (const descriptor of [primary, secondary]) {
+    if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+      continue;
+    }
+    const existingOperations = merged.operations;
+    Object.assign(merged, descriptor);
+    const operations = mergeRuntimeInvocationOperations(existingOperations, runtimeInvocationOperations(descriptor));
+    if (Object.keys(operations).length > 0) {
+      merged.operations = operations;
+    }
+  }
+  return merged;
+}
+
+function mergeRuntimeInvocationOperations(current = {}, next = {}) {
+  const merged = current && typeof current === 'object' && !Array.isArray(current) ? { ...current } : {};
+  for (const [operation, config] of Object.entries(next && typeof next === 'object' && !Array.isArray(next) ? next : {})) {
+    if (config && typeof config === 'object' && !Array.isArray(config) && merged[operation] && typeof merged[operation] === 'object' && !Array.isArray(merged[operation])) {
+      merged[operation] = { ...merged[operation], ...config };
+    } else {
+      merged[operation] = config;
+    }
+  }
+  return merged;
+}
+
+function runtimeInvocationOperations(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const operations = value.operations || value.provider_operations || value.providerOperations || value.tasks || value.abilities;
+  return operations && typeof operations === 'object' && !Array.isArray(operations) ? operations : {};
 }
 
 function runtimeAgentCiBundleRuntimeExecution(options = {}, input = {}) {
