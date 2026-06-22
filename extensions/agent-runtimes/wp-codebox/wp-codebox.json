@@ -476,8 +476,8 @@
           "id": "artifact-result-envelope",
           "schema": "wp-codebox/artifact-result-envelope/v1",
           "owner": "wp-codebox",
-          "adapter_behavior": "consume_canonical_envelope_with_explicit_legacy_result_compatibility",
-          "requirement": "Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Compatibility for older Codebox package result shapes is centralized in codebox-artifact-contract.js and requires allowLegacyCodeboxResultCompatibility."
+          "adapter_behavior": "consume_canonical_public_envelope_only",
+          "requirement": "Return typed artifacts, evidence refs, and run summaries in stable envelopes so adapters do not parse backend-local artifact layouts. Results that expose private runtime fields without the public envelope fail at the boundary."
         },
         {
           "id": "artifact-apply-execution",

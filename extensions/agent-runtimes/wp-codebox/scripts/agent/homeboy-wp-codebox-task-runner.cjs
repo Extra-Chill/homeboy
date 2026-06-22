@@ -1452,28 +1452,6 @@ function isTranscriptArtifactDeclaration(declaration) {
   return /transcript|conversation|messages/i.test(`${name} ${type} ${schema}`);
 }
 
-function transcriptTypedArtifactsFromAgentResult(input, agentResult, config = {}) {
-  const requiredTranscriptArtifacts = requiredArtifactDeclarations(input, config).filter(isTranscriptArtifactDeclaration);
-  if (requiredTranscriptArtifacts.length === 0) {
-    return {};
-  }
-  const transcriptPath = artifactPath(agentResult?.artifacts?.directory, agentResult?.transcript?.artifact || '');
-  if (!transcriptPath) {
-    return {};
-  }
-  return Object.fromEntries(requiredTranscriptArtifacts
-    .map((declaration) => artifactDeclarationName(declaration))
-    .filter(Boolean)
-    .map((name) => [name, normalizeTypedArtifactEntry(name, {
-      name,
-      type: 'transcript',
-      artifact_schema: agentResult?.transcript?.schema || 'wp-codebox/agent-transcript/v1',
-      file_refs: [{ kind: 'codebox-transcript', path: transcriptPath, mime: 'application/json' }],
-      metadata: agentResult?.transcript || {},
-    })])
-    .filter(([, artifact]) => artifact));
-}
-
 function replyTextFromAgentResult(agentResult) {
   const candidates = [
     agentResult?.result?.reply,
@@ -1616,6 +1594,14 @@ function resultExecutions(result) {
   return [];
 }
 
+function publicArtifactResultPayload(result) {
+  const envelope = plainObject(result?.artifact_result) ? result.artifact_result : (plainObject(result?.artifactResult) ? result.artifactResult : null);
+  if (!envelope || envelope.schema !== 'wp-codebox/artifact-result-envelope/v1' || !plainObject(envelope.result)) {
+    return null;
+  }
+  return envelope.result;
+}
+
 function normalizeAgentTaskRun(input, result) {
   if (!isAgentBundle(input) && !isRuntimeTask(input)) {
     return result;
@@ -1625,14 +1611,13 @@ function normalizeAgentTaskRun(input, result) {
   const execution = executions.find((item) => item?.recipeCommand === 'wp-codebox.agent-sandbox-run') || executions[0] || null;
   const config = isAgentBundle(input) ? agentBundleConfig(input, input.agent_bundle || {}) : parentAgentTaskConfig(input);
   const stdoutWorkload = agentRuntimeWorkloadFromExecutionStdout(execution, config);
-  const fallbackAgentResult = result.metadata?.agent_runtime?.workload || execution?.agentResult || result.run?.agentResult || result.agentResult || result.agent_result || {};
+  const fallbackAgentResult = publicArtifactResultPayload(result) || {};
   let agentResult = hasSemanticWorkload(stdoutWorkload) ? stdoutWorkload : fallbackAgentResult;
   if (plainObject(agentResult)) {
     agentResult = {
       ...agentResult,
       outputs: mergeTypedArtifactOutputs(
         plainObject(agentResult.outputs) ? agentResult.outputs : {},
-        transcriptTypedArtifactsFromAgentResult(input, agentResult, config),
         replyTypedArtifactsFromAgentResult(input, agentResult, config),
       ),
     };
@@ -1649,30 +1634,28 @@ function normalizeAgentTaskRun(input, result) {
     ...(agentRuntimeDiagnostics(agentResult) || []),
   ];
 
+  const artifactResult = plainObject(result.artifact_result)
+    ? {
+        ...result.artifact_result,
+        result: {
+          ...(plainObject(result.artifact_result.result) ? result.artifact_result.result : {}),
+          outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
+        },
+      }
+    : result.artifact_result;
+
   return {
     ...result,
     success,
     status: success ? 'completed' : result.status,
+    artifact_result: artifactResult,
     outputs: plainObject(agentResult.outputs) ? agentResult.outputs : result.outputs,
     summary: success ? 'WP Codebox agent task succeeded.' : (artifactValidation?.message || bundleValidation?.message || runtimeFailure?.message || result.summary || 'WP Codebox agent task failed.'),
     session: result.session ? {
       ...result.session,
       status: success ? 'completed' : 'failed',
     } : result.session,
-    run: {
-      ...(result.run || {}),
-      agentResult,
-    },
     diagnostics,
-    metadata: {
-      ...(result.metadata || {}),
-      agent_runtime: {
-        ...(result.metadata?.agent_runtime || {}),
-        bundle: isAgentBundle(input) ? config : undefined,
-        runtime_task: isRuntimeTask(input) ? runtimeTask(input) : undefined,
-        workload: agentResult,
-      },
-    },
   };
 }
 
