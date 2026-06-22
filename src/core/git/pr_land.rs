@@ -258,7 +258,7 @@ fn land_prs_with_client(
     }
 
     let fleet_status_table = render_fleet_status_table(&items);
-    Ok((PrLandOutput {
+    Ok(PrLandOutput {
         command: "git.pr.land",
         repo: options.repo,
         merge_method: options.merge_method,
@@ -266,7 +266,7 @@ fn land_prs_with_client(
         summary,
         items,
         fleet_status_table,
-    }))
+    })
 }
 
 fn merge_ready_pr(
