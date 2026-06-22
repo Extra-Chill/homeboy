@@ -90,6 +90,8 @@ function wpCodeboxFuzzRunTaskRequest(options = {}) {
 	const input = wpCodeboxFuzzRunInput(options.input || options.abilityInput || options.ability_input || options);
 	return wordpressRuntimeTaskRequest({
 		...options,
+		backend: options.backend || 'codebox',
+		runtime: options.runtime || options.runtimeId || options.runtime_id || 'wp-codebox',
 		taskId: requiredString(options.taskId || options.task_id, 'taskId'),
 		ability: options.ability || DEFAULT_FUZZ_RUN_ABILITY,
 		abilityInput: input,
