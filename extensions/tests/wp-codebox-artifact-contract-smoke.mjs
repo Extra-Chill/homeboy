@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const {
+  WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
   artifactResultEnvelopeFromCodeboxResult,
   artifactRoleFromCodeboxArtifact,
   allowArtifactRoleFallbackCompatibility,
@@ -21,6 +22,11 @@ const {
   typedArtifactsFromCodeboxResult,
   typedArtifactFileRefs,
 } = require(path.join(repoRoot, 'agent-runtimes/wp-codebox/lib/codebox-artifact-contract'));
+const {
+  AGENT_TASK_REQUEST_SCHEMA,
+  WP_CODEBOX_BACKEND,
+  agentTaskOutcomeFromCodeboxResult,
+} = require(path.join(repoRoot, 'agent-runtimes/wp-codebox/lib/codebox-agent-task-executor'));
 
 assert.equal(artifactPath('/tmp/artifacts/', '/files/transcript.json'), '/tmp/artifacts/files/transcript.json');
 assert.equal(artifactPath('', 'files/transcript.json'), '');
@@ -132,6 +138,53 @@ assert.equal(Object.hasOwn(typedArtifactsFromCodeboxResult({
     },
   },
 }), 'legacy'), false);
+
+const runtimeAccessResult = {
+  artifact_result: normalizeArtifactResultEnvelope({
+    schema: 'wp-codebox/artifact-result-envelope/v1',
+    status: 'created',
+    result: {
+      outputs: {
+        preview_materialization: {
+          schema: 'homeboy/preview-materialization-evidence/v1',
+          url: 'https://preview.example.test/',
+          public_url: 'https://public.example.test/',
+          site: {
+            url: 'https://site.example.test/',
+            admin_url: 'https://site.example.test/wp-admin/',
+          },
+          lease: { id: 'lease-1' },
+          reviewer: { id: 'reviewer-1' },
+          status: { state: 'ready' },
+          refs: [{ kind: 'preview', uri: 'https://preview.example.test/', label: 'Preview' }],
+        },
+      },
+    },
+  }),
+};
+const runtimeAccessArtifacts = typedArtifactsFromCodeboxResult(runtimeAccessResult);
+assert.equal(runtimeAccessArtifacts.runtime_access.artifact_schema, WP_CODEBOX_RUNTIME_ACCESS_SCHEMA);
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.schema, WP_CODEBOX_RUNTIME_ACCESS_SCHEMA);
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.preview_url, 'https://preview.example.test/');
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.public_url, 'https://public.example.test/');
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.site_url, 'https://site.example.test/');
+assert.equal(runtimeAccessArtifacts.runtime_access.payload.admin_url, 'https://site.example.test/wp-admin/');
+assert.deepEqual(runtimeAccessArtifacts.runtime_access.payload.lease, { id: 'lease-1' });
+assert.deepEqual(runtimeAccessArtifacts.runtime_access.payload.reviewer, { id: 'reviewer-1' });
+assert.deepEqual(runtimeAccessArtifacts.runtime_access.payload.status, { state: 'ready' });
+assert.deepEqual(runtimeAccessArtifacts.runtime_access.payload.refs, [{ kind: 'preview', uri: 'https://preview.example.test/', label: 'Preview' }]);
+
+const normalizedOutcome = agentTaskOutcomeFromCodeboxResult({
+  schema: AGENT_TASK_REQUEST_SCHEMA,
+  task_id: 'task-runtime-access',
+  instructions: 'Report preview access.',
+  executor: { backend: WP_CODEBOX_BACKEND },
+}, runtimeAccessResult);
+assert.equal(normalizedOutcome.outputs.typed_artifacts.runtime_access.payload.preview_url, 'https://preview.example.test/');
+assert.equal(
+  normalizedOutcome.typed_artifacts.find((artifact) => artifact.name === 'runtime_access')?.artifact_schema,
+  WP_CODEBOX_RUNTIME_ACCESS_SCHEMA
+);
 assert.deepEqual(typedArtifactsFromCodeboxResult({
   metadata: {
     agent_runtime: {

@@ -7,11 +7,17 @@ const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const {
 	runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
+const {
+  allowLegacyCodeboxResultCompatibility,
+  legacyArtifactResultEnvelopeCandidates,
+  legacyTypedArtifactCandidatesFromCodeboxResult,
+} = require('./codebox-legacy-result-adapter');
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 
 const WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA = 'wp-codebox/artifact-declaration/v1';
 const WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA = RUNTIME_CONTRACT_SCHEMAS.artifact.resultEnvelope;
 const WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA = 'wp-codebox/case-artifact-index/v1';
+const WP_CODEBOX_RUNTIME_ACCESS_SCHEMA = 'wp-codebox/runtime-access/v1';
 
 const ARTIFACT_ROLE_FALLBACK_PATTERNS = [
   ['patch', /patch|diff/i],
@@ -82,7 +88,26 @@ function normalizeTypedArtifacts(value, options = {}) {
 
 function typedArtifactsFromCodeboxResult(result, options = {}) {
   const artifactResult = artifactResultEnvelopeFromCodeboxResult(result, options);
-  return typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
+  const typedArtifacts = typedArtifactsFromArtifactResultEnvelope(artifactResult, options);
+  if (allowLegacyCodeboxResultCompatibility(options)) {
+    Object.assign(typedArtifacts, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, legacyWorkloadFromCodeboxResult(result))
+      .map((candidate) => normalizeTypedArtifacts(candidate, options)));
+  }
+  const runtimeAccess = runtimeAccessTypedArtifactFromCodeboxResult(result, artifactResult, options);
+  if (runtimeAccess && !typedArtifacts.runtime_access) {
+    typedArtifacts.runtime_access = runtimeAccess;
+  }
+  return typedArtifacts;
+}
+
+function legacyWorkloadFromCodeboxResult(result = {}) {
+  return firstObject(
+    result?.workload,
+    result?.task_input?.workload,
+    result?.taskInput?.workload,
+    result?.metadata?.workload,
+    result?.metadata?.agent_runtime?.workload,
+  ) || {};
 }
 
 function normalizeWithCoreTypedArtifactNormalizer(normalizer, name, artifact, options = {}) {
@@ -318,12 +343,26 @@ function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) 
   return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
 }
 
-function artifactResultEnvelopeFromCodeboxResult(result) {
-	const candidates = [
-		result,
-		result?.artifact_result,
-	];
-	return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
+  const candidates = [
+    result,
+    result?.artifact_result,
+  ];
+  if (allowLegacyCodeboxResultCompatibility(options)) {
+    candidates.push(
+      result?.artifactResult,
+      ...legacyArtifactResultEnvelopeCandidates(result),
+      ...legacyProjectionArtifactResultEnvelopeCandidates(result),
+    );
+  }
+  return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+}
+
+function legacyProjectionArtifactResultEnvelopeCandidates(result = {}) {
+  return [
+    ...(Array.isArray(result?.projections) ? result.projections : []),
+    ...(Array.isArray(result?.result?.projections) ? result.result.projections : []),
+  ].map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection);
 }
 
 function normalizeCodeboxPublicResultEnvelope(result, options = {}) {
@@ -360,6 +399,10 @@ function normalizeCodeboxPublicResultEnvelope(result, options = {}) {
 
 function firstString(...values) {
 	return values.find((value) => typeof value === 'string' && value.trim() !== '');
+}
+
+function firstObject(...values) {
+  return values.find(plainObject);
 }
 
 function normalizeArtifactResultEnvelope(envelope) {
@@ -499,6 +542,116 @@ function typedArtifactFileRefs(artifact) {
     return artifact.fileRefs;
   }
   return [];
+}
+
+function runtimeAccessTypedArtifactFromCodeboxResult(result, artifactResult, options = {}) {
+  const payload = runtimeAccessPayloadFromCodeboxResult(result, artifactResult);
+  if (!payload) {
+    return null;
+  }
+  return normalizeTypedArtifactEntry('runtime_access', {
+    type: 'json',
+    artifact_schema: WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
+    payload,
+    provenance: {
+      source: 'wp-codebox-runtime-output',
+    },
+  }, options);
+}
+
+function runtimeAccessPayloadFromCodeboxResult(result, artifactResult) {
+  const evidence = runtimeAccessEvidenceCandidates(result, artifactResult)
+    .map(normalizeRuntimeAccessEvidence)
+    .find(Boolean);
+  if (!evidence) {
+    return null;
+  }
+  return cleanObject({
+    schema: WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
+    preview_url: evidence.preview_url,
+    public_url: evidence.public_url,
+    site_url: evidence.site_url,
+    admin_url: evidence.admin_url,
+    lease: evidence.lease,
+    reviewer: evidence.reviewer,
+    status: evidence.status,
+    refs: evidence.refs,
+  });
+}
+
+function runtimeAccessEvidenceCandidates(result, artifactResult) {
+  const payload = plainObject(artifactResult?.result) ? artifactResult.result : {};
+  const outputs = plainObject(payload.outputs) ? payload.outputs : {};
+  const metadata = plainObject(artifactResult?.metadata) ? artifactResult.metadata : {};
+  return [
+    outputs.runtime_access,
+    outputs.runtimeAccess,
+    outputs.preview_materialization,
+    outputs.previewMaterialization,
+    outputs.preview_evidence,
+    outputs.previewEvidence,
+    payload.runtime_access,
+    payload.runtimeAccess,
+    payload.preview_materialization,
+    payload.previewMaterialization,
+    metadata.runtime_access,
+    metadata.runtimeAccess,
+    metadata.preview_materialization,
+    metadata.previewMaterialization,
+    result?.runtime_access,
+    result?.runtimeAccess,
+    result?.preview_materialization,
+    result?.previewMaterialization,
+  ].filter(plainObject);
+}
+
+function normalizeRuntimeAccessEvidence(value) {
+  const site = firstObject(value.site, value.contained_site, value.containedSite);
+  const urls = firstObject(value.urls, value.access_urls, value.accessUrls);
+  const previewUrl = firstString(
+    value.preview_url,
+    value.previewUrl,
+    urls?.preview_url,
+    urls?.previewUrl,
+    value.url,
+    value.open_url,
+    value.openUrl,
+  );
+  const publicUrl = firstString(value.public_url, value.publicUrl, urls?.public_url, urls?.publicUrl);
+  const siteUrl = firstString(value.site_url, value.siteUrl, urls?.site_url, urls?.siteUrl, site?.url, site?.site_url, site?.siteUrl);
+  const adminUrl = firstString(value.admin_url, value.adminUrl, urls?.admin_url, urls?.adminUrl, site?.admin_url, site?.adminUrl);
+  const refs = normalizeRuntimeAccessRefs(value.refs || value.evidence_refs || value.evidenceRefs || value.ref);
+  if (![previewUrl, publicUrl, siteUrl, adminUrl].some(Boolean) && refs.length === 0) {
+    return null;
+  }
+  return cleanObject({
+    preview_url: previewUrl,
+    public_url: publicUrl,
+    site_url: siteUrl,
+    admin_url: adminUrl,
+    lease: firstObject(value.lease, value.preview_lease, value.previewLease, site?.lease),
+    reviewer: firstObject(value.reviewer, value.review, value.viewer),
+    status: firstObject(value.status, value.site_status, value.siteStatus, site?.status),
+    refs,
+  });
+}
+
+function normalizeRuntimeAccessRefs(value) {
+  const refs = Array.isArray(value) ? value : [value];
+  return refs.map((ref) => {
+    if (typeof ref === 'string') {
+      return { kind: 'preview', uri: ref, label: 'Preview' };
+    }
+    if (!plainObject(ref)) {
+      return null;
+    }
+    return cleanObject({
+      kind: ref.kind || ref.type || 'preview',
+      uri: ref.uri || ref.url || ref.href,
+      url: ref.url,
+      label: ref.label || ref.name || 'Preview',
+    });
+  }).filter((ref) => ref && ref.uri);
 }
 
 function artifactNameFromDeclaration(declaration) {
@@ -738,6 +891,7 @@ module.exports = {
   WP_CODEBOX_ARTIFACT_DECLARATION_SCHEMA,
   WP_CODEBOX_ARTIFACT_RESULT_ENVELOPE_SCHEMA,
   WP_CODEBOX_CASE_ARTIFACT_INDEX_SCHEMA,
+  WP_CODEBOX_RUNTIME_ACCESS_SCHEMA,
   artifactResultEnvelopeFromCodeboxResult,
   allowArtifactRoleFallbackCompatibility,
   artifactRoleFromCodeboxArtifact,
