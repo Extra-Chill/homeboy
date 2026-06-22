@@ -392,17 +392,6 @@ fn resolve_default_lab_runner_from_candidates(
     preferred: Option<&str>,
     candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
 ) -> Option<String> {
-    let candidates: Vec<DefaultLabRunnerCandidate> = candidates.into_iter().collect();
-
-    if let Some(preferred) = preferred {
-        let preferred_candidate = candidates
-            .iter()
-            .find(|candidate| candidate.id == preferred)?;
-        if preferred_candidate.readiness().eligible {
-            return Some(preferred_candidate.id.clone());
-        }
-    }
-
     let eligible: Vec<(DefaultLabRunnerCandidate, DefaultLabRunnerReadiness)> = candidates
         .into_iter()
         .filter_map(|candidate| {
@@ -420,6 +409,12 @@ fn resolve_default_lab_runner_from_candidates(
         .filter(|(_, readiness)| readiness.score == best_score)
         .map(|(candidate, _)| candidate)
         .collect();
+
+    if let Some(preferred) = preferred {
+        if let Some(candidate) = best.iter().find(|candidate| candidate.id == preferred) {
+            return Some(candidate.id.clone());
+        }
+    }
 
     (best.len() == 1).then(|| best.into_iter().next().expect("checked len").id)
 }
@@ -1137,7 +1132,7 @@ mod tests {
             Some("lab-b"),
             vec![
                 default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true),
-                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
             ],
         );
 
@@ -1193,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn default_lab_runner_uses_eligible_preferred_runner() {
+    fn default_lab_runner_uses_available_preferred_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
             vec![default_lab_candidate(
@@ -1204,6 +1199,50 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn default_lab_runner_does_not_pin_busy_preferred_runner() {
+        let mut preferred = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        preferred.active_jobs = 4;
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-a"),
+            vec![
+                preferred,
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_does_not_pin_unknown_preferred_runner() {
+        let mut preferred = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        preferred.active_jobs_available = false;
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-a"),
+            vec![
+                preferred,
+                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_falls_back_when_preferred_is_missing() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            Some("lab-missing"),
+            vec![default_lab_candidate(
+                "lab-b",
+                RunnerTunnelMode::DirectSsh,
+                true,
+            )],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-b"));
     }
 
     #[test]

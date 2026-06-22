@@ -2220,7 +2220,6 @@ fn selected_runner_fallback_error(
         "Pass --allow-local-fallback only when local execution is intentional and safe for this controller."
             .to_string(),
     );
-    remediation.push("Use --force-hot to bypass Lab offload selection entirely.".to_string());
 
     Error::validation_invalid_argument(
         "runner",
