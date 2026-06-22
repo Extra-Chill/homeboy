@@ -3991,7 +3991,7 @@ mod tests {
 
     #[test]
     fn provider_preflight_accepts_populated_runtime_component_paths() {
-        let (mut request, provider) = request(
+        let (mut request, _provider) = request(
             "populated-runtime-paths",
             std::env::current_exe()
                 .expect("current exe")
