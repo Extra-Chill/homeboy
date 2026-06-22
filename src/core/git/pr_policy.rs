@@ -78,6 +78,8 @@ pub struct PrPolicyDecision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_next_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub merged: Option<bool>,
 }
 
@@ -218,7 +220,12 @@ pub fn evaluate_merge_policy(options: PrPolicyMergeOptions) -> Result<PrPolicyDe
             ..Default::default()
         },
     );
-    apply_ci_gate(&mut decision, &pr.ci_state, &pr.ci_summary);
+    apply_ci_gate(
+        &mut decision,
+        &pr.ci_state,
+        &pr.ci_summary,
+        &pr.ci_next_action,
+    );
 
     if options.merge && decision.allowed {
         pr_merge(
@@ -239,9 +246,15 @@ pub fn evaluate_merge_policy(options: PrPolicyMergeOptions) -> Result<PrPolicyDe
     Ok(decision)
 }
 
-fn apply_ci_gate(decision: &mut PrPolicyDecision, ci_state: &str, ci_summary: &str) {
+fn apply_ci_gate(
+    decision: &mut PrPolicyDecision,
+    ci_state: &str,
+    ci_summary: &str,
+    ci_next_action: &str,
+) {
     decision.ci_state = Some(ci_state.to_string());
     decision.ci_summary = Some(ci_summary.to_string());
+    decision.ci_next_action = Some(ci_next_action.to_string());
     decision.report = format!(
         "{}\n\nCI status: `{}` - {}.",
         decision.report, ci_state, ci_summary
@@ -410,6 +423,7 @@ fn evaluate_rules(rules: &PrPolicyRules, context: PrPolicyContext) -> PrPolicyDe
         files: context.files,
         ci_state: None,
         ci_summary: None,
+        ci_next_action: None,
         merged: None,
     }
 }
@@ -587,17 +601,20 @@ mod tests {
             files: Vec::new(),
             ci_state: None,
             ci_summary: None,
+            ci_next_action: None,
             merged: None,
         };
 
         apply_ci_gate(
             &mut decision,
             "terminal_green",
-            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+            "1 reported check(s): 1 passed, 0 failed/unknown, 0 queued, 0 running, 0 pending, 0 skipped",
+            "merge_ready",
         );
 
         assert!(decision.allowed);
         assert_eq!(decision.ci_state.as_deref(), Some("terminal_green"));
+        assert_eq!(decision.ci_next_action.as_deref(), Some("merge_ready"));
         assert!(decision.report.contains("CI status: `terminal_green`"));
     }
 
@@ -613,13 +630,15 @@ mod tests {
             files: Vec::new(),
             ci_state: None,
             ci_summary: None,
+            ci_next_action: None,
             merged: None,
         };
 
         apply_ci_gate(
             &mut decision,
             "stale",
-            "1 check(s): 0 terminal-green, 0 failed/unknown, 1 pending",
+            "1 reported check(s): 0 passed, 0 failed/unknown, 0 queued, 0 running, 1 pending, 0 skipped",
+            "wait",
         );
 
         assert!(!decision.allowed);
