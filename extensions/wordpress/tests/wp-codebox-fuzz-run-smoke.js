@@ -157,6 +157,41 @@ assert.equal(jsonWorkloadInput.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadInput.cases[0].artifacts[0].metadata.semantic_key, 'fuzz.suite_result');
 assert.equal(jsonWorkloadInput.metadata.artifacts.expected[0].required, true);
 
+const genericPrimitiveManifest = {
+	schema: 'homeboy/fuzz-workload/v1',
+	id: 'generic-primitive-smoke',
+	label: 'Generic primitive smoke',
+	metadata: {
+		generic_primitive: { command: 'wordpress.fuzz-admin-pages', status: 'preferred' },
+	},
+	workload: {
+		runner: 'wp-codebox',
+		type: 'php',
+		path: '${package.root}/bench/admin-page-coverage.php',
+		entry: 'admin-page-coverage',
+	},
+	cases: [{
+		case_id: 'generic-primitive-smoke:default',
+		artifacts: [{ name: 'admin_page_coverage', path: 'admin-page-coverage/admin_page_coverage.json', required: true }],
+		intent: {
+			schema: 'homeboy/fuzz-workload-intent/v1',
+			type: 'wordpress-plugin-workload',
+			plugin: { activation: 'sample-plugin/sample-plugin.php' },
+			execute: {
+				path: '${package.root}/bench/admin-page-coverage.php',
+				type: 'php',
+				parameters: { safe_methods: 'GET', max_pages: '80', enumerate_menus: 'true' },
+			},
+			collect: [{ artifact: 'admin_page_coverage' }],
+		},
+	}],
+};
+const genericPrimitiveInput = wpCodeboxFuzzSuiteInput({ id: 'generic-primitive-run', homeboyFuzzWorkload: genericPrimitiveManifest });
+assert.equal(genericPrimitiveInput.cases[0].target.entrypoint, 'wordpress.fuzz-admin-pages');
+assert.deepEqual(genericPrimitiveInput.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(genericPrimitiveInput.cases[0].phases.action, [{ command: 'wordpress.fuzz-admin-pages', args: ['safe_methods=GET', 'max_pages=80', 'enumerate_menus=true'] }]);
+assert.deepEqual(genericPrimitiveInput.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=admin_page_coverage'] }]);
+
 const planWorkloadManifest = {
 	schema: 'homeboy/fuzz-workload/v1',
 	id: 'plan-workload-smoke',
