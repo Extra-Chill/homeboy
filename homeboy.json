@@ -816,8 +816,6 @@
         "structural::src/core/server/client.rs::HighItemCount",
         "structural::src/core/triage.rs::GodFile",
         "structural::src/core/triage/tests.rs::GodFile",
-        "structural::src/core/tunnel.rs::GodFile",
-        "structural::src/core/tunnel.rs::HighItemCount",
         "structural::src/core/upgrade/runners.rs::GodFile",
         "structural::src/core/upgrade/runners.rs::HighItemCount",
         "structural::src/core/worktree.rs::HighItemCount",
