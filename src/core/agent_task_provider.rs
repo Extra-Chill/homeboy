@@ -781,7 +781,7 @@ impl AgentTaskProviderCatalog {
             let refreshed = discover_provider_catalog();
             let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(refreshed.clone()));
             *catalog.write().expect("provider catalog lock") = refreshed.clone();
-            return refreshed;
+            refreshed
         }
         #[cfg(test)]
         {

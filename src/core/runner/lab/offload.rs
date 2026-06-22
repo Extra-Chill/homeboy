@@ -833,7 +833,7 @@ fn prepare_lab_offload_workspace_stage(
                 .inputs(
                     PlanValues::new().json("count", at_file_specs.len()).json(
                         "files",
-                        &at_file_specs
+                        at_file_specs
                             .iter()
                             .map(|spec| {
                                 serde_json::json!({
@@ -1824,6 +1824,7 @@ fn lab_materialization_proof_metadata(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn runner_workload_metadata(
     plan: &HomeboyPlan,
     contract: &LabOffloadCommand,
@@ -1924,14 +1925,6 @@ impl LabOffloadWorkspaceModePolicy {
             Self::RunnerResident => "runner_resident",
         }
     }
-}
-
-fn passive_wp_codebox_version() -> Option<String> {
-    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
