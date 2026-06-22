@@ -498,6 +498,7 @@ fn component_deploy_result(id: &str) -> ComponentDeployResult {
         warnings: Vec::new(),
         error: None,
         artifact_path: Some("target/dist/homeboy.tar.gz".to_string()),
+        artifact_source: None,
         artifact_inputs: Vec::new(),
         remote_path: Some("/srv/homeboy".to_string()),
         build_exit_code: None,
