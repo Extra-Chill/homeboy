@@ -10,6 +10,7 @@ const {
   buildGenericAgentLoopRequest,
   runDeterministicLoop,
   runGenericAgentLoop,
+  validateGenericAgentLoopOutcomeContract,
 } = require(path.join(repoRoot, 'runtime-agent-ci'));
 
 const runtimeProfile = {
@@ -30,11 +31,14 @@ const plan = {
   prompt: 'Materialize the fixture.',
   runtime_task: { ability: 'example/run-task', input: { prompt: 'Cook.' } },
   artifact_declarations: [{ name: 'fixture-result', required: true }],
+  required_evidence_refs: [{ kind: 'pull_request' }],
+  required_runtime_capabilities: ['structured_outcome'],
   time_budget_ms: 120000,
   success_requires_pr: false,
 };
 const runtime = {
   id: 'example-runtime',
+  capabilities: ['structured_outcome'],
   executor: { backend: 'fake-provider', path: '/not-called' },
   manifest: {},
 };
@@ -63,6 +67,8 @@ const loop = runGenericAgentLoop({
       task_id: providerRequest.task_id,
       status: 'succeeded',
       summary: 'Fixture provider completed.',
+      artifacts: [{ id: 'fixture-result', kind: 'typed-json', artifact_schema: 'example/fixture-result/v1' }],
+      evidence_refs: [{ kind: 'pull_request', uri: 'https://github.com/example/project/pull/123', label: 'PR' }],
       metadata: {
         agent_loop_results: {
           scenarios: [{
@@ -86,6 +92,7 @@ const adapterLoop = runGenericAgentLoop({
   plan: { ...plan, workload_id: 'codebox-loop', success_requires_pr: true },
   runtime: {
     id: 'wp-codebox',
+    capabilities: ['structured_outcome'],
     executor: { backend: 'codebox', path: '/not-called' },
     manifest: {
       agent_loop: {
@@ -102,6 +109,8 @@ const adapterLoop = runGenericAgentLoop({
     schema: 'homeboy/agent-task-outcome/v1',
     task_id: 'codebox-loop',
     status: 'succeeded',
+    artifacts: [{ id: 'fixture-result', kind: 'typed-json', artifact_schema: 'example/fixture-result/v1' }],
+    evidence_refs: [{ kind: 'pull_request', uri: 'https://github.com/example/project/pull/123', label: 'PR' }],
     metadata: {
       codebox: {
         raw: {
@@ -158,6 +167,57 @@ assert.equal(retryHookCalls, 2);
 assert.deepEqual(
   deterministicLoop.iterations.map((iteration) => iteration.artifacts[0].name),
   ['packet-1', 'packet-2']
+);
+
+const contractRequest = {
+  task_id: 'contract-loop',
+  expected_artifacts: ['fixture-result'],
+  artifact_declarations: [{ name: 'fixture-result', required: true, kind: 'typed-json', artifact_schema: 'example/fixture-result/v1' }],
+};
+const contractOutcome = {
+  schema: 'homeboy/agent-task-outcome/v1',
+  task_id: 'contract-loop',
+  status: 'succeeded',
+  artifacts: [{ id: 'fixture-result', kind: 'typed-json', artifact_schema: 'example/fixture-result/v1' }],
+  evidence_refs: [{ kind: 'pull_request', uri: 'https://github.com/example/project/pull/123' }],
+};
+
+assert.deepEqual(
+  validateGenericAgentLoopOutcomeContract({
+    request: contractRequest,
+    outcome: contractOutcome,
+    plan: { required_evidence_refs: [{ kind: 'pull_request' }] },
+  }),
+  { artifact_count: 1, evidence_ref_count: 1 }
+);
+assert.throws(
+  () => validateGenericAgentLoopOutcomeContract({
+    request: contractRequest,
+    outcome: { ...contractOutcome, artifacts: [] },
+  }),
+  /missing expected artifact fixture-result/
+);
+assert.throws(
+  () => validateGenericAgentLoopOutcomeContract({
+    request: contractRequest,
+    outcome: { ...contractOutcome, artifacts: [{ id: 'fixture-result', kind: 'text', artifact_schema: 'example\/fixture-result\/v1' }] },
+  }),
+  /expected kind typed-json, got text/
+);
+assert.throws(
+  () => validateGenericAgentLoopOutcomeContract({
+    request: contractRequest,
+    outcome: { ...contractOutcome, artifacts: [{ id: 'fixture-result', kind: 'typed-json', artifact_schema: 'example\/other\/v1' }] },
+  }),
+  /expected schema example\/fixture-result\/v1, got example\/other\/v1/
+);
+assert.throws(
+  () => validateGenericAgentLoopOutcomeContract({
+    request: contractRequest,
+    outcome: { ...contractOutcome, evidence_refs: [{ kind: 'pull_request', uri: 'http://localhost:8888/pr/123' }] },
+    plan: { required_evidence_refs: [{ kind: 'pull_request' }] },
+  }),
+  /local-only/
 );
 
 console.log('generic agent loop runner smoke passed');

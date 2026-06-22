@@ -8,6 +8,7 @@ const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 function buildGenericAgentLoopRequest(options = {}) {
   const plan = requiredObject(options.plan, 'plan');
   const runtime = requiredObject(options.runtime, 'runtime');
+  assertGenericAgentLoopRuntimeContract(plan, runtime);
   const configPath = options.configPath || options.config_path || '';
   const taskId = plan.task_id || plan.workload_id || 'generic-agent-loop';
   const runtimeComponents = optionalObject(plan.runtime_components);
@@ -56,8 +57,16 @@ function runGenericAgentLoop(options = {}) {
   const request = options.request || buildGenericAgentLoopRequest(options);
   const execute = options.execute || executeRuntimeProvider;
   const outcome = normalizeOutcome(execute({ ...options, request, runtime }), request);
+  const validationPolicy = options.validationPolicy || options.validation_policy || {};
+  validateGenericAgentLoopOutcomeContract({
+    request,
+    outcome,
+    runtime,
+    plan: options.plan || {},
+    validationPolicy,
+  });
   const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
-  const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, options.validationPolicy || options.validation_policy || {});
+  const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, validationPolicy);
   return { request, outcome, results, assertion };
 }
 
@@ -147,6 +156,85 @@ function assertGenericAgentLoopOutcome(results, validationPolicy = {}) {
   throw new Error(`scenario ${assertion.scenario_id} expected opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=${jobStatus} success_status=${successStatus} completion_outcome_satisfied=${completionOutcomeSatisfied ? 'true' : 'false'} no_changes_allowed=${noChangesAllowed ? 'true' : 'false'}`);
 }
 
+function assertGenericAgentLoopRuntimeContract(plan = {}, runtime = {}) {
+  const runtimeProfileId = requiredStringValue(plan.runtime_profile || plan.profile, 'runtime_profile');
+  const runtimeProfiles = optionalObject(plan.runtime_profiles || plan.runtimeProfiles);
+  if (!runtimeProfiles[runtimeProfileId]) {
+    throw new Error(`runtime profile ${runtimeProfileId} is not declared in runtime_profiles.`);
+  }
+
+  const requiredCapabilities = normalizeArray(plan.required_runtime_capabilities || plan.required_capabilities);
+  if (requiredCapabilities.length === 0) {
+    return { runtime_profile: runtimeProfileId, missing_capabilities: [] };
+  }
+
+  const capabilities = runtimeCapabilities(runtime, plan);
+  const missing = requiredCapabilities.filter((capability) => !capabilities.has(capability));
+  if (missing.length > 0) {
+    throw new Error(`runtime ${runtime.id || '(unknown)'} is missing required capabilities: ${missing.join(', ')}`);
+  }
+  return { runtime_profile: runtimeProfileId, missing_capabilities: [] };
+}
+
+function validateGenericAgentLoopOutcomeContract(options = {}) {
+  const request = requiredObject(options.request, 'request');
+  const outcome = requiredObject(options.outcome, 'outcome');
+  const plan = optionalObject(options.plan);
+  const validationPolicy = optionalObject(options.validationPolicy || options.validation_policy);
+  const declarations = normalizeArtifactDeclarations(request.artifact_declarations || plan.artifact_declarations);
+  const artifacts = normalizeArray(outcome.artifacts);
+  const evidenceRefs = normalizeArray(outcome.evidence_refs || outcome.evidence);
+  const errors = [];
+
+  for (const expected of normalizeArray(request.expected_artifacts)) {
+    if (!findArtifactByName(artifacts, expected)) {
+      errors.push(`missing expected artifact ${expected}`);
+    }
+  }
+
+  for (const declaration of declarations) {
+    if (!declaration.required) {
+      continue;
+    }
+    const artifact = findArtifactByName(artifacts, declaration.name);
+    if (!artifact) {
+      errors.push(`missing declared artifact ${declaration.name}`);
+      continue;
+    }
+    if (declaration.kind && artifactKind(artifact) !== declaration.kind) {
+      errors.push(`artifact ${declaration.name} expected kind ${declaration.kind}, got ${artifactKind(artifact) || '(missing)'}`);
+    }
+    if (declaration.schema && artifactSchema(artifact) !== declaration.schema) {
+      errors.push(`artifact ${declaration.name} expected schema ${declaration.schema}, got ${artifactSchema(artifact) || '(missing)'}`);
+    }
+  }
+
+  const requiredEvidenceRefs = normalizeEvidenceRequirements(validationPolicy.required_evidence_refs || plan.required_evidence_refs);
+  for (const requirement of requiredEvidenceRefs) {
+    const ref = findEvidenceRef(evidenceRefs, requirement);
+    if (!ref) {
+      errors.push(`missing required evidence ref ${requirement.name || requirement.kind || requirement.url || requirement.uri || '(unnamed)'}`);
+      continue;
+    }
+    const localOnly = localOnlyReviewerEvidence(ref);
+    if (localOnly) {
+      errors.push(`evidence ref ${evidenceRefLabel(ref)} is local-only: ${localOnly}`);
+    }
+  }
+
+  for (const ref of evidenceRefs) {
+    const localOnly = localOnlyReviewerEvidence(ref);
+    if (localOnly) {
+      errors.push(`evidence ref ${evidenceRefLabel(ref)} is local-only: ${localOnly}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`generic agent loop contract validation failed: ${errors.join('; ')}`);
+  }
+  return { artifact_count: artifacts.length, evidence_ref_count: evidenceRefs.length };
+}
+
 function writeGenericAgentLoopArtifacts(options = {}) {
   if (options.outcomeFile) {
     writeJsonFile(options.outcomeFile, options.outcome);
@@ -165,6 +253,87 @@ function expectedArtifactsFromPlan(plan) {
     .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true)
     .map((declaration) => declaration.name || declaration.id || '')
     .filter(Boolean);
+}
+
+function normalizeArtifactDeclarations(value) {
+  return normalizeArray(value)
+    .filter((declaration) => declaration && typeof declaration === 'object')
+    .map((declaration) => compactObject({
+      name: declaration.name || declaration.id,
+      required: declaration.required === true,
+      kind: declaration.kind || declaration.type || declaration.artifact_kind || declaration.artifactKind,
+      schema: declaration.artifact_schema || declaration.artifactSchema || declaration.payload_schema || declaration.payloadSchema,
+    }))
+    .filter((declaration) => declaration.name);
+}
+
+function normalizeEvidenceRequirements(value) {
+  return normalizeArray(value)
+    .map((requirement) => typeof requirement === 'string' ? { name: requirement } : requirement)
+    .filter((requirement) => requirement && typeof requirement === 'object' && !Array.isArray(requirement));
+}
+
+function findArtifactByName(artifacts, name) {
+  return normalizeArray(artifacts).find((artifact) => artifact && typeof artifact === 'object' && (
+    artifact.name === name || artifact.id === name || artifact.role === name
+  ));
+}
+
+function findEvidenceRef(evidenceRefs, requirement) {
+  return normalizeArray(evidenceRefs).find((ref) => ref && typeof ref === 'object' && (
+    (requirement.name && (ref.name === requirement.name || ref.id === requirement.name || ref.label === requirement.name))
+    || (requirement.kind && ref.kind === requirement.kind)
+    || (requirement.url && evidenceRefUrl(ref) === requirement.url)
+    || (requirement.uri && evidenceRefUrl(ref) === requirement.uri)
+  ));
+}
+
+function artifactKind(artifact) {
+  return artifact.kind || artifact.type || artifact.artifact_kind || artifact.artifactKind || '';
+}
+
+function artifactSchema(artifact) {
+  return artifact.artifact_schema || artifact.artifactSchema || artifact.payload_schema || artifact.payloadSchema || artifact.schema || '';
+}
+
+function evidenceRefLabel(ref) {
+  return ref.name || ref.id || ref.label || ref.kind || evidenceRefUrl(ref) || '(unnamed)';
+}
+
+function evidenceRefUrl(ref) {
+  return ref.url || ref.uri || ref.href || ref.path || '';
+}
+
+function localOnlyReviewerEvidence(ref) {
+  const url = evidenceRefUrl(ref);
+  if (!url || typeof url !== 'string') {
+    return '';
+  }
+  if (/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::|\/|$)/i.test(url)) {
+    return url;
+  }
+  if (/^file:\/\//i.test(url) || /^\/Users\//.test(url) || /^\/private\//.test(url) || /^\/tmp\//.test(url)) {
+    return url;
+  }
+  return '';
+}
+
+function runtimeCapabilities(runtime = {}, plan = {}) {
+  const capabilities = new Set(normalizeArray(runtime.capabilities));
+  for (const capability of normalizeArray(runtime.manifest?.capabilities)) {
+    capabilities.add(capability);
+  }
+  const executors = normalizeArray(runtime.manifest?.agent_task_executors);
+  const backend = runtime.executor?.backend || plan.backend || plan.runtime_backend;
+  const runtimeId = runtime.id || plan.runtime_id || plan.runtime;
+  for (const executor of executors) {
+    if ((!backend || executor.backend === backend) && (!runtimeId || !executor.runtime_id || executor.runtime_id === runtimeId)) {
+      for (const capability of normalizeArray(executor.capabilities)) {
+        capabilities.add(capability);
+      }
+    }
+  }
+  return capabilities;
 }
 
 function runtimeTaskOptions(plan) {
@@ -244,6 +413,13 @@ function requiredObject(value, name) {
   return value;
 }
 
+function requiredStringValue(value, name) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${name} is required.`);
+  }
+  return value;
+}
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -254,8 +430,10 @@ function nonEmpty(value) {
 
 module.exports = {
   assertGenericAgentLoopOutcome,
+  assertGenericAgentLoopRuntimeContract,
   buildGenericAgentLoopRequest,
   materializeGenericAgentLoopResults,
   runGenericAgentLoop,
+  validateGenericAgentLoopOutcomeContract,
   writeGenericAgentLoopArtifacts,
 };

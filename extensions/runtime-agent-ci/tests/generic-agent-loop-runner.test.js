@@ -15,6 +15,7 @@ const plan = {
   workload_id: 'fixture-workload',
   target_repo: 'Extra-Chill/example',
   component_path: '/workspace/example',
+  runtime_profile: 'runtime-agent-ci',
   runtime_profiles: {
     'runtime-agent-ci': {
       id: 'runtime-agent-ci',
