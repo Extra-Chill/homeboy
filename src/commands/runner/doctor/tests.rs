@@ -31,6 +31,16 @@ fn doctor_options_default_to_general_read_only_scope() {
 }
 
 #[test]
+fn shell_path_expr_expands_runner_home_relative_paths() {
+    assert_eq!(
+        common::shell_path_expr("~/.cache/homeboy/source"),
+        "\"${HOME}\"/'.cache/homeboy/source'"
+    );
+    assert_eq!(common::shell_path_expr("~"), "\"${HOME}\"");
+    assert_eq!(common::shell_path_expr("/tmp/source"), "'/tmp/source'");
+}
+
+#[test]
 fn doctor_output_omits_empty_repairs() {
     let (report, _) = run("local").expect("local doctor report");
     let value = serde_json::to_value(report).expect("serialize report");

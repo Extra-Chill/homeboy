@@ -101,7 +101,7 @@ pub fn plan_managed_runner_source_sync(
 /// caller can surface a clear error rather than silently leaving a drifted
 /// checkout in place.
 fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str>) -> String {
-    let quoted_path = sq(path);
+    let quoted_path = shell_path_expr(path);
     let mut script = String::new();
     script.push_str("set -e\n");
     script.push_str(&format!("dir={quoted_path}\n"));
@@ -193,6 +193,21 @@ fn sq(value: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+/// Render a shell expression for manifest-declared runner paths. Manifests are
+/// runner-side contracts, so leading `~` must resolve against the runner user,
+/// not the machine that planned the sync.
+fn shell_path_expr(path: &str) -> String {
+    if path == "~" {
+        return "\"${HOME}\"".to_string();
+    }
+
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("\"${{HOME}}\"/{}", sq(rest));
+    }
+
+    sq(path)
 }
 
 #[cfg(test)]
@@ -326,6 +341,26 @@ mod tests {
     fn sq_escapes_embedded_single_quotes() {
         assert_eq!(sq("a'b"), "'a'\\''b'");
         assert_eq!(sq("/plain/path"), "'/plain/path'");
+    }
+
+    #[test]
+    fn script_expands_runner_home_relative_paths() {
+        let plan =
+            plan_managed_runner_source_sync(&source("src", "~/.cache/homeboy/runtime/source"))
+                .expect("plan");
+
+        assert!(plan
+            .script
+            .contains("dir=\"${HOME}\"/'.cache/homeboy/runtime/source'"));
+        assert!(!plan.script.contains("dir='~/.cache"));
+    }
+
+    #[test]
+    fn script_expands_bare_runner_home_path() {
+        let plan = plan_managed_runner_source_sync(&source("src", "~")).expect("plan");
+
+        assert!(plan.script.contains("dir=\"${HOME}\""));
+        assert!(!plan.script.contains("dir='~'"));
     }
 
     #[test]
