@@ -349,12 +349,15 @@ fn is_framework_entry_point(name: &str, fp: &FileFingerprint, audit_config: &Aud
 }
 
 fn is_runtime_entrypoint_file(fp: &FileFingerprint, audit_config: &AuditConfig) -> bool {
+    // Runtime entry-point base types and markers are extension-provided so core
+    // stays ecosystem-agnostic. A language extension declares the base classes
+    // (`runtime_entrypoint_extends`) and content markers
+    // (`runtime_entrypoint_markers`) that designate runtime-dispatched files.
     let extends = fp.extends.as_deref().unwrap_or("");
-    extends.ends_with("WP_CLI_Command")
-        || audit_config
-            .runtime_entrypoint_extends
-            .iter()
-            .any(|expected| extends.ends_with(expected))
+    audit_config
+        .runtime_entrypoint_extends
+        .iter()
+        .any(|expected| extends.ends_with(expected))
         || audit_config
             .runtime_entrypoint_markers
             .iter()
@@ -1140,7 +1143,11 @@ class EmailCommand {
     }
 
     #[test]
-    fn wp_cli_command_base_suppresses_public_subcommand_methods() {
+    fn configured_command_base_class_suppresses_public_subcommand_methods() {
+        // A runtime command base class (e.g. a CLI framework's command base)
+        // is recognized only when the owning extension declares it via
+        // `runtime_entrypoint_extends` — core no longer hardcodes any specific
+        // ecosystem's base class.
         let mut command_fp = make_fingerprint(
             "inc/Cli/Commands/EmailCommand.php",
             vec!["test_connection"],
@@ -1149,13 +1156,13 @@ class EmailCommand {
             vec![],
         );
         command_fp.language = Language::Php;
-        command_fp.extends = Some("WP_CLI_Command".to_string());
-        command_fp.content = r#"<?php
-class EmailCommand extends WP_CLI_Command {
+        command_fp.extends = Some("RuntimeCliCommand".to_string());
+        command_fp.content = r#"<?
+class EmailCommand extends RuntimeCliCommand {
     /**
      * ## EXAMPLES
      *
-     *     wp sampleplugin email test-connection
+     *     app sampleplugin email test-connection
      *
      * @subcommand test-connection
      */
@@ -1164,14 +1171,19 @@ class EmailCommand extends WP_CLI_Command {
 "#
         .to_string();
 
-        let findings = analyze_dead_code(&[&command_fp], &[]);
+        let config = AuditConfig {
+            runtime_entrypoint_extends: vec!["RuntimeCliCommand".to_string()],
+            ..Default::default()
+        };
+
+        let findings = analyze_dead_code_with_config(&[&command_fp], &[], &config);
         let unreferenced: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.kind == AuditFinding::UnreferencedExport)
             .collect();
         assert!(
             unreferenced.is_empty(),
-            "WP-CLI command methods are runtime subcommands, got: {:?}",
+            "configured command base subcommands are runtime entry points, got: {:?}",
             unreferenced
                 .iter()
                 .map(|f| &f.description)
