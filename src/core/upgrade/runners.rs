@@ -1667,7 +1667,8 @@ fn runner_upgrade_summary(entry: &RunnerUpgradeEntry) -> String {
 mod tests {
     use super::*;
     use crate::core::runner::{
-        RunnerExecMode, RunnerExecOutput, RunnerSessionState, RunnerStaleDaemonWarning,
+        RunnerActiveJobState, RunnerExecMode, RunnerExecOutput, RunnerSessionState,
+        RunnerStaleDaemonWarning,
     };
     use crate::core::server::RunnerSettings;
     use std::cell::RefCell;
@@ -2904,6 +2905,9 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
     }
@@ -2924,6 +2928,9 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
             session_path: "/tmp/homeboy-runner-session.json".to_string(),
         })
     }

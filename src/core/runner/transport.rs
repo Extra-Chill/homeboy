@@ -69,7 +69,9 @@ pub(crate) fn select_runner_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::runner::session::{RunnerSessionRole, RunnerSessionState};
+    use crate::core::runner::session::{
+        RunnerActiveJobState, RunnerSessionRole, RunnerSessionState,
+    };
 
     fn runner(kind: RunnerKind) -> Runner {
         Runner {
@@ -95,6 +97,9 @@ mod tests {
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             active_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
             session_path: "/tmp/session.json".to_string(),
         }
     }

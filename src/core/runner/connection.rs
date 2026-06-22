@@ -16,7 +16,8 @@ use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
 use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
+    RunnerActiveJobState, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
     RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
     RunnerStatusReport, RunnerTunnelMode,
 };
@@ -259,16 +260,24 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected);
-    // Active-job enrichment is best-effort: a status read must not hard-fail
-    // when the runner daemon or reverse broker is momentarily unreachable.
-    // Degrade to an empty job list so callers still receive session state.
-    let active_jobs = if connected {
+    let active_job_source = session.as_ref().and_then(active_runner_job_source);
+    let (active_jobs, active_job_state, active_job_error) = if connected {
         match session.as_ref() {
-            Some(session) => active_runner_jobs(runner_id, session).unwrap_or_default(),
-            None => Vec::new(),
+            Some(session) => match active_runner_jobs(runner_id, session) {
+                Ok(jobs) => (jobs, RunnerActiveJobState::Available, None),
+                Err(err) => (
+                    Vec::new(),
+                    RunnerActiveJobState::Unavailable,
+                    Some(RunnerActiveJobError {
+                        code: err.code.as_str().to_string(),
+                        message: err.message,
+                    }),
+                ),
+            },
+            None => (Vec::new(), RunnerActiveJobState::NotQueried, None),
         }
     } else {
-        Vec::new()
+        (Vec::new(), RunnerActiveJobState::NotQueried, None)
     };
     let active_job_count = active_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
@@ -281,8 +290,21 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_jobs,
         active_runner_jobs,
         active_job_count,
+        active_job_state,
+        active_job_source,
+        active_job_error,
         session_path: session_path.display().to_string(),
     })
+}
+
+fn active_runner_job_source(session: &RunnerSession) -> Option<RunnerActiveJobSource> {
+    if session.local_url.is_some() {
+        Some(RunnerActiveJobSource::DirectDaemon)
+    } else if session.mode == RunnerTunnelMode::Reverse && session.broker_url.is_some() {
+        Some(RunnerActiveJobSource::ReverseBroker)
+    } else {
+        None
+    }
 }
 
 fn active_runner_jobs(
@@ -300,7 +322,9 @@ fn active_runner_jobs(
             .ok_or_else(|| Error::internal_unexpected("daemon jobs response missing data.body"))?
     } else if session.mode == RunnerTunnelMode::Reverse {
         let Some(broker_url) = session.broker_url.as_deref() else {
-            return Ok(Vec::new());
+            return Err(Error::internal_unexpected(format!(
+                "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
+            )));
         };
         broker_http::get_json(
             &client,
@@ -310,7 +334,9 @@ fn active_runner_jobs(
             None,
         )?
     } else {
-        return Ok(Vec::new());
+        return Err(Error::internal_unexpected(format!(
+            "runner `{runner_id}` is connected but has no active-job status endpoint"
+        )));
     };
     let jobs: Vec<ActiveRunnerJobSummary> = serde_json::from_value(
         body.get("active_runner_jobs")
@@ -1233,8 +1259,62 @@ mod tests {
     }
 
     #[test]
+    fn status_marks_connected_reverse_active_jobs_unavailable_without_broker_url() {
+        test_support::with_isolated_home(|_| {
+            crate::core::runner::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false)
+                .expect("create runner");
+            let mut session = reverse_controller_session();
+            session.broker_url = None;
+            write_session(&session).expect("write session");
+
+            let report = status("homeboy-lab").expect("status");
+
+            assert!(report.connected);
+            assert_eq!(report.active_job_count, 0);
+            assert_eq!(report.active_jobs, Vec::new());
+            assert_eq!(report.active_runner_jobs, Vec::new());
+            assert_eq!(report.active_job_state, RunnerActiveJobState::Unavailable);
+            assert_eq!(report.active_job_source, None);
+            let error = report.active_job_error.expect("active job error");
+            assert_eq!(error.code, "internal.unexpected");
+            assert!(error.message.contains("no broker URL"));
+        });
+    }
+
+    #[test]
+    fn active_runner_job_source_maps_direct_and_reverse_endpoints() {
+        let mut direct = reverse_controller_session();
+        direct.mode = RunnerTunnelMode::DirectSsh;
+        direct.role = RunnerSessionRole::Controller;
+        direct.local_url = Some("http://127.0.0.1:49153".to_string());
+        direct.broker_url = None;
+        assert_eq!(
+            active_runner_job_source(&direct),
+            Some(RunnerActiveJobSource::DirectDaemon)
+        );
+
+        let reverse = reverse_controller_session();
+        assert_eq!(
+            active_runner_job_source(&reverse),
+            Some(RunnerActiveJobSource::ReverseBroker)
+        );
+    }
+
+    #[test]
     fn reverse_controller_session_requires_fresh_heartbeat() {
-        let mut session = RunnerSession {
+        let mut session = reverse_controller_session();
+
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Connected);
+
+        session.last_seen_at = Some((Utc::now() - chrono::Duration::seconds(120)).to_rfc3339());
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
+
+        session.last_seen_at = None;
+        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
+    }
+
+    fn reverse_controller_session() -> RunnerSession {
+        RunnerSession {
             runner_id: "homeboy-lab".to_string(),
             mode: RunnerTunnelMode::Reverse,
             role: RunnerSessionRole::Controller,
@@ -1252,14 +1332,6 @@ mod tests {
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),
             last_seen_at: Some(Utc::now().to_rfc3339()),
-        };
-
-        assert_eq!(session_state(Some(&session)), RunnerSessionState::Connected);
-
-        session.last_seen_at = Some((Utc::now() - chrono::Duration::seconds(120)).to_rfc3339());
-        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
-
-        session.last_seen_at = None;
-        assert_eq!(session_state(Some(&session)), RunnerSessionState::Recorded);
+        }
     }
 }

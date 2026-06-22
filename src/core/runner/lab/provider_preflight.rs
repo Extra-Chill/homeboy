@@ -32,8 +32,8 @@ use crate::core::{Error, Result};
 
 use super::super::command_path::preflight_remote_argv_path_translation;
 use super::super::{
-    connect, disconnect, exec, status, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerTunnelMode,
+    connect, disconnect, exec, status, RunnerActiveJobState, RunnerCapabilityPreflight,
+    RunnerExecOptions, RunnerStatusReport, RunnerTunnelMode,
 };
 use super::offload::runner_homeboy_daemon_display;
 
@@ -282,7 +282,8 @@ fn probe_agent_task_providers_on_runner(
 }
 
 fn runner_provider_refresh_is_safe(status: &RunnerStatusReport) -> bool {
-    status.active_jobs.is_empty()
+    status.active_job_state == RunnerActiveJobState::Available
+        && status.active_jobs.is_empty()
         && status
             .session
             .as_ref()

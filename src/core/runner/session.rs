@@ -70,6 +70,27 @@ pub enum RunnerSessionState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerActiveJobState {
+    Available,
+    Unavailable,
+    NotQueried,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerActiveJobSource {
+    DirectDaemon,
+    ReverseBroker,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerActiveJobError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerSession {
     pub runner_id: String,
     #[serde(default = "default_tunnel_mode")]
@@ -346,6 +367,11 @@ pub struct RunnerStatusReport {
     pub active_runner_jobs: Vec<RunnerJob>,
     #[serde(default)]
     pub active_job_count: usize,
+    pub active_job_state: RunnerActiveJobState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_source: Option<RunnerActiveJobSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_error: Option<RunnerActiveJobError>,
     pub session_path: String,
 }
 

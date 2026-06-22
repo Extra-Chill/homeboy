@@ -2,7 +2,9 @@ use super::super::lab_selection::{
     prepare_lab_runner_for_offload_with, LabRunnerPreparation, LabRunnerSelection,
 };
 use super::*;
-use crate::core::runner::{RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode};
+use crate::core::runner::{
+    RunnerActiveJobState, RunnerConnectReport, RunnerStatusReport, RunnerTunnelMode,
+};
 
 use super::super::session::RunnerStaleDaemonWarning;
 
@@ -26,6 +28,9 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -86,6 +91,9 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -119,6 +127,9 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -157,6 +168,9 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -205,6 +219,9 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -240,6 +257,9 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -280,6 +300,9 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -332,6 +355,9 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 active_jobs: Vec::new(),
                 active_runner_jobs: Vec::new(),
                 active_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
