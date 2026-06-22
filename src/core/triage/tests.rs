@@ -498,6 +498,30 @@ mod pull_requests {
             classify_landing_pr("OPEN", None, None, Some("UNKNOWN")),
             TriageLandingClassification::BaselineRedInconclusive
         );
+        assert_eq!(
+            landing_mergeability_state(Some("CLEAN")),
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("DIRTY")),
+            TriageLandingMergeabilityState::Conflicting
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNKNOWN")),
+            TriageLandingMergeabilityState::Unknown
+        );
+        assert_eq!(
+            landing_mergeability_state(Some("UNSTABLE")),
+            TriageLandingMergeabilityState::Unstable
+        );
+        assert_eq!(
+            landing_check_state(Some("PENDING")),
+            TriageLandingCheckState::Pending
+        );
+        assert_eq!(
+            landing_check_state(Some("FAILURE")),
+            TriageLandingCheckState::Failed
+        );
     }
 
     #[test]
@@ -529,6 +553,11 @@ mod pull_requests {
             item.classification,
             TriageLandingClassification::CleanMergeable
         );
+        assert_eq!(
+            item.mergeability_state,
+            TriageLandingMergeabilityState::Clean
+        );
+        assert_eq!(item.check_state, TriageLandingCheckState::Clean);
         assert_eq!(item.head_branch.as_deref(), Some("cook/ready"));
         assert_eq!(
             item.suggested_next_command,

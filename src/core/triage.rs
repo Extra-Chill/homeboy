@@ -85,8 +85,15 @@ pub struct TriageLandingSummary {
     pub total: usize,
     pub merged: usize,
     pub clean_mergeable: usize,
+    pub mergeability_clean: usize,
+    pub mergeability_conflicting: usize,
+    pub mergeability_unknown: usize,
+    pub mergeability_unstable: usize,
     pub conflict_repair_needed: usize,
+    pub checks_clean: usize,
     pub checks_pending: usize,
+    pub checks_failed: usize,
+    pub checks_unknown: usize,
     pub baseline_red_inconclusive: usize,
     pub candidate_red: usize,
     pub unknown: usize,
@@ -101,6 +108,8 @@ pub struct TriageLandingPr {
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_branch: Option<String>,
+    pub mergeability_state: TriageLandingMergeabilityState,
+    pub check_state: TriageLandingCheckState,
     pub classification: TriageLandingClassification,
     pub suggested_next_command: String,
     #[serde(flatten)]
@@ -119,6 +128,26 @@ pub enum TriageLandingClassification {
     BaselineRedInconclusive,
     CandidateRed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageLandingMergeabilityState {
+    Clean,
+    Conflicting,
+    Unknown,
+    Unstable,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriageLandingCheckState {
+    Clean,
+    Pending,
+    Failed,
+    Unknown,
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1214,10 +1243,34 @@ fn raw_pr_to_landing_pr(item: RawPr, repo: &GitHubRepo, drilldown: bool) -> Tria
         url: item.url,
         state: item.state,
         head_branch: non_empty(item.head_ref_name),
+        mergeability_state: landing_mergeability_state(signals.merge_state.as_deref()),
+        check_state: landing_check_state(signals.checks.as_deref()),
         classification,
         suggested_next_command: landing_next_command(classification, repo, item.number),
         signals,
         check_failures,
+    }
+}
+
+fn landing_mergeability_state(merge_state: Option<&str>) -> TriageLandingMergeabilityState {
+    match merge_state {
+        Some("CLEAN") => TriageLandingMergeabilityState::Clean,
+        Some("DIRTY" | "BEHIND" | "BLOCKED" | "HAS_HOOKS") => {
+            TriageLandingMergeabilityState::Conflicting
+        }
+        Some("UNKNOWN") | None => TriageLandingMergeabilityState::Unknown,
+        Some("UNSTABLE") => TriageLandingMergeabilityState::Unstable,
+        Some(_) => TriageLandingMergeabilityState::Other,
+    }
+}
+
+fn landing_check_state(checks: Option<&str>) -> TriageLandingCheckState {
+    match checks {
+        Some("SUCCESS") => TriageLandingCheckState::Clean,
+        Some("PENDING") => TriageLandingCheckState::Pending,
+        Some("FAILURE") => TriageLandingCheckState::Failed,
+        None => TriageLandingCheckState::Unknown,
+        Some(_) => TriageLandingCheckState::Other,
     }
 }
 
@@ -1294,13 +1347,27 @@ fn summarize_landing(items: &[TriageLandingPr]) -> TriageLandingSummary {
         ..Default::default()
     };
     for item in items {
+        match item.mergeability_state {
+            TriageLandingMergeabilityState::Clean => summary.mergeability_clean += 1,
+            TriageLandingMergeabilityState::Conflicting => summary.mergeability_conflicting += 1,
+            TriageLandingMergeabilityState::Unknown => summary.mergeability_unknown += 1,
+            TriageLandingMergeabilityState::Unstable => summary.mergeability_unstable += 1,
+            TriageLandingMergeabilityState::Other => {}
+        }
+        match item.check_state {
+            TriageLandingCheckState::Clean => summary.checks_clean += 1,
+            TriageLandingCheckState::Pending => summary.checks_pending += 1,
+            TriageLandingCheckState::Failed => summary.checks_failed += 1,
+            TriageLandingCheckState::Unknown => summary.checks_unknown += 1,
+            TriageLandingCheckState::Other => {}
+        }
         match item.classification {
             TriageLandingClassification::Merged => summary.merged += 1,
             TriageLandingClassification::CleanMergeable => summary.clean_mergeable += 1,
             TriageLandingClassification::ConflictRepairNeeded => {
                 summary.conflict_repair_needed += 1
             }
-            TriageLandingClassification::ChecksPending => summary.checks_pending += 1,
+            TriageLandingClassification::ChecksPending => {}
             TriageLandingClassification::BaselineRedInconclusive => {
                 summary.baseline_red_inconclusive += 1
             }
