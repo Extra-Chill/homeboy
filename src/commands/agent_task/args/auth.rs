@@ -22,7 +22,21 @@ pub enum AgentTaskAuthCommand {
 
 #[derive(Args, Debug)]
 pub struct AgentTaskAuthStatusArgs {
-    /// Secret environment variable name to check without exposing its value. Repeatable.
+    /// Executor backend whose required secrets to report. Defaults to the same
+    /// backend cook/dispatch would use when omitted.
+    #[arg(long = "backend", value_name = "BACKEND")]
+    pub backend: Option<String>,
+
+    /// Provider id to disambiguate when more than one provider exists for the backend.
+    #[arg(
+        long = "selector",
+        visible_alias = "provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub selector: Option<String>,
+
+    /// Secret environment variable name to check without exposing its value.
+    /// Repeatable. When omitted, the selected backend's required secrets are used.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
 }
