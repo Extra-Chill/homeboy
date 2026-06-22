@@ -365,6 +365,20 @@ fn run_fuzz_extension_script(
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
     let execution_context =
         extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    if execution_context.script_path.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "fuzz.extension_script",
+            format!(
+                "Extension '{}' declares fuzz manifest support but no fuzz runner script",
+                execution_context.extension_id
+            ),
+            Some(execution_context.extension_id),
+            None,
+        )
+        .with_hint(
+            "Add fuzz.extension_script to execute workloads, or use `homeboy fuzz list` for manifest-only discovery",
+        ));
+    }
     let mut runner = ExtensionRunner::for_context(execution_context)
         .component(ctx.component.clone())
         .settings(&args.setting_args.setting)

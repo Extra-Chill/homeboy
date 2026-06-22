@@ -44,6 +44,7 @@ Extension manifests define extension metadata, runtime behavior, platform behavi
 - **`executable`** (object): Standalone tool runtime, inputs, output schema
 - **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
+- **`fuzz`** (object): Declares fuzz workload metadata and, optionally, a runner script
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`
 - **`hooks`** (object): Lifecycle hooks (pre/post version bump, deploy, release)
@@ -208,6 +209,32 @@ Known sidecar names default to these run-directory paths when `path` is omitted:
 ### Inspection Behavior
 
 Core exposes declared sidecars through manifest inspection, including `homeboy extension show <id>` JSON output. Consumers that need machine-readable output should require the matching declaration before relying on a sidecar.
+
+## Fuzz Capability
+
+Extensions declare fuzz workload metadata with a top-level `fuzz` capability block. The block is first-class manifest support even when it only declares workloads. Execution remains opt-in: `extension_script` must be present before Homeboy can run a fuzz workload through an extension runner.
+
+```json
+{
+  "fuzz": {
+    "workloads": [
+      {
+        "id": "parser",
+        "label": "Parser fuzz",
+        "description": "Parser corpus and generated input workload"
+      }
+    ]
+  }
+}
+```
+
+### Fuzz Fields
+
+- **`fuzz.extension_script`** (string): Optional script path, relative to the extension directory, that executes a selected fuzz workload. Omit this for manifest-only workload discovery.
+- **`fuzz.workloads`** (array): Declarative workload entries surfaced by `homeboy fuzz list` and downstream rig/workload tooling.
+- **`fuzz.workloads[].id`** (string): Stable workload identifier.
+- **`fuzz.workloads[].label`** (string): Optional human-readable workload label.
+- **`fuzz.workloads[].description`** (string): Optional workload description.
 
 ## Audit Configuration
 
