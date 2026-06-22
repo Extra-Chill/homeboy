@@ -140,11 +140,14 @@ fn command_failed(results: &Map<String, Value>, command: &str) -> bool {
     results
         .get(command)
         .and_then(Value::as_str)
-        .is_some_and(is_failure_status)
+        .is_some_and(is_attention_status)
 }
 
-fn is_failure_status(status: &str) -> bool {
-    matches!(status, "fail" | "error")
+fn is_attention_status(status: &str) -> bool {
+    matches!(
+        status,
+        "fail" | "error" | "baseline_red" | "baseline-red" | "inconclusive"
+    )
 }
 
 fn command_reported(results: &Map<String, Value>, command: &str) -> bool {
@@ -166,7 +169,7 @@ fn failed_commands(results: &Map<String, Value>) -> Vec<String> {
         .filter_map(|(name, status)| {
             status
                 .as_str()
-                .filter(|value| is_failure_status(value))
+                .filter(|value| is_attention_status(value))
                 .map(|_| name.clone())
         })
         .collect::<Vec<_>>();
@@ -444,7 +447,7 @@ fn render_failure_origin_section(out: &mut String, context: &FailureDigestContex
             Err(error) => {
                 let _ = writeln!(
                     out,
-                    "- `{}`: **indeterminate** (head artifact unavailable: {})",
+                    "- `{}`: **inconclusive** (head artifact unavailable: {})",
                     command, error
                 );
                 continue;
@@ -455,7 +458,7 @@ fn render_failure_origin_section(out: &mut String, context: &FailureDigestContex
         else {
             let _ = writeln!(
                 out,
-                "- `{}`: **indeterminate** (baseline artifact unavailable)",
+                "- `{}`: **inconclusive** (baseline artifact unavailable)",
                 command
             );
             continue;
@@ -465,7 +468,7 @@ fn render_failure_origin_section(out: &mut String, context: &FailureDigestContex
             Err(error) => {
                 let _ = writeln!(
                     out,
-                    "- `{}`: **indeterminate** (baseline artifact `{}` unavailable: {})",
+                    "- `{}`: **inconclusive** (baseline artifact `{}` unavailable: {})",
                     command,
                     baseline_path.display(),
                     error
@@ -476,7 +479,7 @@ fn render_failure_origin_section(out: &mut String, context: &FailureDigestContex
 
         let head_failures = failure_fingerprints(&head);
         let baseline_failures = failure_fingerprints(&baseline);
-        let classification = classify_failure_origin(&head_failures, &baseline_failures);
+        let classification = classify_failure_origin(&head_failures, &baseline_failures, &baseline);
         let _ = writeln!(
             out,
             "- `{}`: **{}** (head: {}, baseline: {}, shared: {})",
@@ -486,6 +489,7 @@ fn render_failure_origin_section(out: &mut String, context: &FailureDigestContex
             baseline_failures.len(),
             head_failures.intersection(&baseline_failures).count()
         );
+        render_baseline_evidence(out, &command, &baseline_path, &baseline);
     }
     out.push('\n');
 }
@@ -515,7 +519,8 @@ fn baseline_command_paths(output_dir: &Path, command: &str) -> Vec<PathBuf> {
 enum FailureOriginClassification {
     BranchIntroduced,
     BaselinePresent,
-    Indeterminate,
+    BaselineRed,
+    Inconclusive,
 }
 
 impl FailureOriginClassification {
@@ -523,7 +528,8 @@ impl FailureOriginClassification {
         match self {
             Self::BranchIntroduced => "branch-introduced",
             Self::BaselinePresent => "baseline-present",
-            Self::Indeterminate => "indeterminate",
+            Self::BaselineRed => "baseline-red",
+            Self::Inconclusive => "inconclusive",
         }
     }
 }
@@ -531,16 +537,118 @@ impl FailureOriginClassification {
 fn classify_failure_origin(
     head: &BTreeSet<String>,
     baseline: &BTreeSet<String>,
+    baseline_artifact: &Value,
 ) -> FailureOriginClassification {
+    if baseline.is_empty() && baseline_artifact_reports_failure(baseline_artifact) {
+        return FailureOriginClassification::BaselineRed;
+    }
     if head.is_empty() || baseline.is_empty() {
-        return FailureOriginClassification::Indeterminate;
+        return FailureOriginClassification::Inconclusive;
     }
     if head.is_subset(baseline) {
         FailureOriginClassification::BaselinePresent
     } else if head.is_disjoint(baseline) {
         FailureOriginClassification::BranchIntroduced
     } else {
-        FailureOriginClassification::Indeterminate
+        FailureOriginClassification::Inconclusive
+    }
+}
+
+fn baseline_artifact_reports_failure(value: &Value) -> bool {
+    let root = value.as_object().cloned().unwrap_or_default();
+    if root.get("success").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    let (data, error) = envelope_parts(Some(value.clone()));
+    !error.is_empty()
+        || data.get("passed").and_then(Value::as_bool) == Some(false)
+        || string_value(&data, "status").is_some_and(|status| is_attention_status(&status))
+        || data
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+}
+
+fn render_baseline_evidence(out: &mut String, command: &str, path: &Path, baseline: &Value) {
+    let (data, error) = envelope_parts(Some(baseline.clone()));
+    let command_line = baseline_command_line(&data, &error).unwrap_or_else(|| {
+        format!(
+            "baseline {} command not recorded; inspect `{}`",
+            command,
+            path.display()
+        )
+    });
+    let _ = writeln!(out, "  - Baseline command: `{}`", command_line);
+    let _ = writeln!(out, "  - Baseline artifact: `{}`", path.display());
+
+    let evidence = baseline_evidence_refs(&data, &error);
+    if !evidence.is_empty() {
+        let _ = writeln!(out, "  - Baseline evidence: {}", evidence.join(", "));
+    }
+}
+
+fn baseline_command_line(data: &Map<String, Value>, error: &Map<String, Value>) -> Option<String> {
+    for map in [data, error] {
+        for key in ["baseline_command", "command_line", "command", "cmd"] {
+            if let Some(value) = string_value(map, key) {
+                return Some(value);
+            }
+        }
+        let details = object_value(map, "details");
+        for key in ["baseline_command", "command_line", "command", "cmd"] {
+            if let Some(value) = string_value(&details, key) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn baseline_evidence_refs(data: &Map<String, Value>, error: &Map<String, Value>) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    collect_artifact_refs(data, &mut refs);
+    collect_artifact_refs(error, &mut refs);
+    collect_path_refs(data, &mut refs);
+    collect_path_refs(error, &mut refs);
+    refs.into_iter().collect()
+}
+
+fn collect_artifact_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
+    for key in ["artifacts", "artifact_refs"] {
+        if let Some(items) = map.get(key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(text) = item.as_str() {
+                    refs.insert(format!("`{text}`"));
+                    continue;
+                }
+                if let Some(obj) = item.as_object() {
+                    let label = string_value(obj, "label")
+                        .or_else(|| string_value(obj, "name"))
+                        .unwrap_or_else(|| "artifact".to_string());
+                    if let Some(path) = string_value(obj, "path") {
+                        refs.insert(format!("{} `{}`", label, path));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_path_refs(map: &Map<String, Value>, refs: &mut BTreeSet<String>) {
+    for key in [
+        "log_path",
+        "stderr_path",
+        "stdout_path",
+        "summary_path",
+        "manifest_path",
+    ] {
+        if let Some(path) = string_value(map, key) {
+            refs.insert(format!("{} `{}`", key, path));
+        }
+    }
+    let details = object_value(map, "details");
+    if !details.is_empty() {
+        collect_path_refs(&details, refs);
     }
 }
 
