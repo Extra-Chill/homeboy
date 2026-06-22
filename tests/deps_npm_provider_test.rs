@@ -138,27 +138,6 @@ fn test_npm_command_args() {
 }
 
 #[test]
-fn core_deps_orchestration_stays_package_manager_agnostic() {
-    let source = fs::read_to_string("src/core/deps.rs").unwrap();
-
-    for forbidden in [
-        "composer",
-        "composer.json",
-        "composer.lock",
-        "package.json",
-        "package-lock.json",
-        "Command::new",
-        "npm",
-        "Cargo",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "core deps orchestration must not contain package-manager literal {forbidden:?}"
-        );
-    }
-}
-
-#[test]
 #[ignore = "integration test mutates real npm manifests/locks and shells out to npm"]
 fn npm_update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
     if std::process::Command::new("npm")

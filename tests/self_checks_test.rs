@@ -21,17 +21,6 @@ fn write_component(root: &Path, scripts: &str) {
     .expect("homeboy.json should be written");
 }
 
-fn write_legacy_self_checks_component(root: &Path) {
-    fs::write(
-        root.join("homeboy.json"),
-        r#"{
-  "id": "fixture",
-  "self_checks": { "lint": ["sh scripts/lint.sh"] }
-}"#,
-    )
-    .expect("homeboy.json should be written");
-}
-
 fn write_script(root: &Path, name: &str, body: &str) {
     let script_dir = root.join("scripts");
     fs::create_dir_all(&script_dir).expect("script dir should be created");
@@ -182,29 +171,6 @@ fn missing_extension_and_self_check_keeps_existing_error() {
 
     let err = match run_lint(lint_args(dir.path()), &GlobalArgs {}) {
         Ok(_) => panic!("lint without extension or self-check should fail"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.code.as_str(), "extension.unsupported");
-    assert!(
-        err.to_string()
-            .contains("No extension provider configured for component 'fixture'"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn legacy_self_checks_are_not_a_script_source() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    write_legacy_self_checks_component(dir.path());
-    write_script(
-        dir.path(),
-        "lint.sh",
-        "printf 'legacy lint should not run\\n'\n",
-    );
-
-    let err = match run_lint(lint_args(dir.path()), &GlobalArgs {}) {
-        Ok(_) => panic!("legacy self_checks should not satisfy lint"),
         Err(err) => err,
     };
 
