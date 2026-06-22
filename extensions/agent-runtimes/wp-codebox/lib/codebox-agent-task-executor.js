@@ -1767,7 +1767,7 @@ function defaultWorkspaceMounts(workspaceRoot, request, config, inputs, options)
       source: workspaceRoot,
       target: workspaceTarget,
       mode: workspaceMode(request, config, inputs),
-      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot) },
+      metadata: { kind: WP_CODEBOX_WORKSPACE_MOUNT_KIND, workspace_slug: workspaceSlug(workspaceRoot), workspaceRef: path.basename(workspaceRoot) },
     },
   ];
 }
