@@ -537,6 +537,8 @@ mod tests {
                 "loop_id": "example/join",
                 "config_version": "v1",
                 "artifacts": [{ "artifact_id": "page_blocks", "kind": "json" }],
+                "gates": [{ "gate_id": "review" }],
+                "metrics": [{ "metric_id": "fallback_blocks" }],
                 "workflows": [
                     {
                         "workflow_id": "build_page",
@@ -557,6 +559,26 @@ mod tests {
 
         assert!(report.valid, "{report:?}");
         assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn proof_validation_rejects_undeclared_materialized_controller_gate() {
+        let report = validate_proof_value(json!({
+            "schema": "homeboy/agent-task-loop-spec-materialization/v1",
+            "spec": {
+                "loop_id": "example/join",
+                "config_version": "v1",
+                "workflows": [{
+                    "workflow_id": "publish_site",
+                    "prompt": "publish site",
+                    "gates": ["review"]
+                }]
+            }
+        }));
+
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics[0].code, "invalid_controller_loop_spec");
+        assert!(report.diagnostics[0].message.contains("workflows[0].gates"));
     }
 
     #[test]

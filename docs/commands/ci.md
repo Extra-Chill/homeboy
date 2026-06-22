@@ -52,6 +52,26 @@ homeboy ci autofix --path /path/to/repo \
 
 `--dry-run` classifies the changes and resolves the push target without committing or pushing. The JSON output uses command `ci.autofix` and includes `push_target`, the `route` (`direct-drift` or `autofix-branch`), `changed_files`, `committed`, and a machine-readable `status` (`pushed`, `no-changes`, `push-failed`, or `dry-run`).
 
+## Differential Gate Classification
+
+```sh
+homeboy ci differential-gate \
+  --baseline-command 'cargo fmt --check' --baseline-exit-code 1 \
+  --baseline-evidence 'FMT SUMMARY: 7 files need formatting' \
+  --head-command 'homeboy test homeboy --changed-since origin/main' --head-exit-code 0
+```
+
+`ci differential-gate` lets CI wrappers classify baseline-vs-PR outcomes without
+collapsing a red baseline into a PR-head failure. When the baseline command exits
+non-zero, the command reports `status: "baseline_red"`, `passed: true`, and exits
+0 so branch protection can treat the result as inconclusive instead of a
+candidate regression. When the baseline passes and the head command fails, it
+reports `status: "failed"` and exits non-zero, preserving true PR regressions.
+
+Pass the exact baseline/head commands and any available log excerpts or artifact
+refs through `--baseline-evidence` / `--head-evidence` so failure comments can
+show the baseline command and supporting evidence.
+
 ## Manifest Shape
 
 Extensions can declare CI profiles with a `ci` block:
@@ -86,6 +106,11 @@ Supported fidelity values are `local-equivalent`, `local-partial`, `remote-only`
 The JSON output uses command `ci.list` and includes an `inventory` object with `profiles`, `jobs`, and `discovered_jobs`.
 
 `ci run` uses command `ci.run` and includes the selected job/profile, per-job command output, per-job `ci_context`, per-job exit codes, and an aggregate `success` / `exit_code`.
+
+`ci differential-gate` uses command `ci.differential-gate` and includes the
+machine-readable `status` (`passed`, `failed`, or `baseline_red`), `passed`, a
+human conclusion, and baseline/head command, exit-code, pass/fail, and evidence
+fields.
 
 Command-native CI reproduction also includes `ci_context` when a CI selector is used. `homeboy lint --ci-job <ID>`, `homeboy test --ci-job <ID>`, and `homeboy bench --ci-profile <ID>` preserve the normal command output shape and add the selected job's mapping metadata:
 

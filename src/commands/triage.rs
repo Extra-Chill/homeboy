@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::triage::{
-    self, TriageCommandOutput, TriageOptions, TriageTarget, TriageWatchOptions,
+    self, CiFailureTriageOptions, TriageCommandOutput, TriageLandingOptions, TriageOptions,
+    TriageTarget, TriageWatchOptions,
 };
 use homeboy::core::Error;
 use std::path::PathBuf;
@@ -91,6 +92,8 @@ pub struct TriageArgs {
 
 #[derive(Subcommand, Debug)]
 enum TriageCommand {
+    /// Summarize latest failed GitHub Actions checks for one pull request.
+    CiFailure(CiFailureArgs),
     /// Triage one registered component.
     ///
     /// When `--path <CHECKOUT>` is supplied, the registry is bypassed and the
@@ -113,6 +116,65 @@ enum TriageCommand {
     Rig { rig_id: String },
     /// Triage every configured project, rig, and registered component once per repo.
     Workspace,
+    /// Summarize mergeability and check blockers for a PR landing fleet.
+    Landing {
+        /// PR numbers, owner/repo#number refs, or GitHub PR URLs.
+        pr_refs: Vec<String>,
+
+        /// Resolve bare PR numbers against this GitHub repo (`owner/name` or URL).
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+
+        /// Include open PRs whose source branch matches this pattern. Repeatable.
+        #[arg(long, value_name = "PATTERN")]
+        branch: Vec<String>,
+
+        /// Include PRs linked to this issue number in each resolved repo. Repeatable.
+        #[arg(long, value_name = "NUMBER")]
+        source_issue: Vec<u64>,
+
+        /// Preserve supplied PR order and emit dependent-branch rebase plans.
+        #[arg(long)]
+        ordered: bool,
+
+        /// Landing scope: project id.
+        #[arg(long, conflicts_with_all = ["fleet", "component", "path", "workspace"])]
+        project: Option<String>,
+
+        /// Landing scope: fleet id.
+        #[arg(long, conflicts_with_all = ["project", "component", "path", "workspace"])]
+        fleet: Option<String>,
+
+        /// Landing scope: registered component id.
+        #[arg(long, conflicts_with_all = ["project", "fleet", "path", "workspace"])]
+        component: Option<String>,
+
+        /// Landing scope: checkout path, bypassing the registry.
+        #[arg(long, conflicts_with_all = ["project", "fleet", "component", "workspace"])]
+        path: Option<String>,
+
+        /// Landing scope: all configured workspace repos. This is the default when no scope is supplied.
+        #[arg(long, conflicts_with_all = ["project", "fleet", "component", "path"])]
+        workspace: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+struct CiFailureArgs {
+    /// Pull request number or GitHub PR URL.
+    target: String,
+
+    /// GitHub repository in owner/repo or host/owner/repo form. Required when TARGET is a number.
+    #[arg(long)]
+    repo: Option<String>,
+
+    /// Maximum failed checks to fetch logs for.
+    #[arg(long, default_value_t = 5)]
+    max_checks: usize,
+
+    /// Context lines per snippet around detected failure lines.
+    #[arg(long, default_value_t = 8)]
+    snippet_lines: usize,
 }
 
 pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCommandOutput> {
@@ -143,7 +205,46 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
     issue_numbers.sort_unstable();
     issue_numbers.dedup();
 
-    let target = match args.command.unwrap_or(TriageCommand::Workspace) {
+    let command = args.command.unwrap_or(TriageCommand::Workspace);
+
+    if let TriageCommand::CiFailure(args) = command {
+        let output = triage::ci_failure(CiFailureTriageOptions {
+            target: args.target,
+            repo: args.repo,
+            max_checks: args.max_checks,
+            snippet_lines: args.snippet_lines,
+        })?;
+        return Ok((TriageCommandOutput::CiFailure(output), 0));
+    }
+
+    if let TriageCommand::Landing {
+        pr_refs,
+        repo,
+        branch,
+        source_issue,
+        ordered,
+        project,
+        fleet,
+        component,
+        path,
+        workspace: _,
+    } = command
+    {
+        let target = resolve_landing_target(project, fleet, component, path)?;
+        let output = triage::landing(TriageLandingOptions {
+            target,
+            repo,
+            pr_refs,
+            branch_patterns: branch,
+            source_issues: source_issue,
+            ordered,
+            drilldown: args.drilldown,
+            limit: args.limit,
+        })?;
+        return Ok((TriageCommandOutput::Landing(output), 0));
+    }
+
+    let target = match command {
         TriageCommand::Component { component_id, path } => {
             resolve_component_target(component_id, path)?
         }
@@ -151,6 +252,8 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
         TriageCommand::Fleet { fleet_id } => TriageTarget::Fleet(fleet_id),
         TriageCommand::Rig { rig_id } => TriageTarget::Rig(rig_id),
         TriageCommand::Workspace => TriageTarget::Workspace,
+        TriageCommand::CiFailure(_) => unreachable!("ci-failure handled above"),
+        TriageCommand::Landing { .. } => unreachable!("landing handled above"),
     };
 
     let include_issues = args.issues || !args.prs || !issue_numbers.is_empty();
@@ -177,6 +280,30 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
         TriageCommandOutput::Report(triage::run(target, options)?),
         0,
     ))
+}
+
+fn resolve_landing_target(
+    project: Option<String>,
+    fleet: Option<String>,
+    component: Option<String>,
+    path: Option<String>,
+) -> Result<TriageTarget, Error> {
+    if let Some(project) = project {
+        return Ok(TriageTarget::Project(project));
+    }
+    if let Some(fleet) = fleet {
+        return Ok(TriageTarget::Fleet(fleet));
+    }
+    if let Some(component) = component {
+        return Ok(TriageTarget::Component(component));
+    }
+    if let Some(path) = path {
+        return Ok(TriageTarget::Path {
+            path,
+            component_id: None,
+        });
+    }
+    Ok(TriageTarget::Workspace)
 }
 
 fn parse_watch_duration(name: &str, raw: &str) -> Result<std::time::Duration, Error> {
@@ -315,6 +442,46 @@ mod tests {
         assert_eq!(cli.args.timeout, "5m");
         assert_eq!(cli.args.poll_interval, "30s");
         assert!(cli.args.command.is_none());
+    }
+
+    #[test]
+    fn ci_failure_accepts_pr_number_and_repo() {
+        let cli = TestCli::parse_from([
+            "triage",
+            "ci-failure",
+            "5808",
+            "--repo",
+            "Extra-Chill/homeboy",
+            "--max-checks",
+            "2",
+        ]);
+
+        match cli.args.command {
+            Some(TriageCommand::CiFailure(args)) => {
+                assert_eq!(args.target, "5808");
+                assert_eq!(args.repo.as_deref(), Some("Extra-Chill/homeboy"));
+                assert_eq!(args.max_checks, 2);
+            }
+            other => panic!("expected CiFailure subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn landing_ordered_flag_parses() {
+        let cli = TestCli::parse_from([
+            "triage",
+            "landing",
+            "42",
+            "43",
+            "--repo",
+            "Extra-Chill/homeboy",
+            "--ordered",
+        ]);
+
+        match cli.args.command {
+            Some(TriageCommand::Landing { ordered, .. }) => assert!(ordered),
+            other => panic!("expected Landing subcommand, got {other:?}"),
+        }
     }
 
     #[test]

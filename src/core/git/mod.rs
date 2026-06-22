@@ -11,7 +11,9 @@ mod operations_changes;
 mod operations_commit;
 mod operations_push;
 mod operations_tags;
+mod pr_land;
 mod pr_policy;
+mod pr_refresh;
 mod primitives;
 mod primitives_query;
 
@@ -32,13 +34,18 @@ pub use commits::{
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
-    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_merge,
-    pr_view, GithubFindItem, GithubFindOutput, GithubIssueOutput, GithubPrOutput, GithubPrView,
-    IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
-    IssueFindOptions, IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions,
-    PrState,
+    issue_edit, issue_find, pr_create, pr_edit, pr_files, pr_find, pr_find_by_commit, pr_fleet,
+    pr_merge, pr_readiness, pr_reconcile_mergeability, pr_view, GithubFindItem, GithubFindOutput,
+    GithubIssueOutput, GithubPrOutput, GithubPrReadinessOutput, GithubPrView, IssueCloseOptions,
+    IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions,
+    IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrMergeReadiness,
+    PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrReadinessBlocker, PrState,
 };
 pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
+pub use github_types::{
+    GithubPrCheckRollup, GithubPrFleetItem, GithubPrFleetOutput, GithubPrFleetSummary,
+    PrFleetOptions,
+};
 pub use operation_output::GitOutput;
 pub use operations::{
     cherry_pick, cherry_pick_at, execute_git_for_release, fetch_and_fast_forward,
@@ -58,9 +65,13 @@ pub use operations_tags::{
     is_ancestor, remote_branch_commit, remote_tag_commit, short_head_revision_at, tag, tag_at,
     tag_exists_locally, tag_exists_on_remote,
 };
+pub use pr_land::{land_prs, PrLandOptions, PrLandOutput, PrLandRefreshHelper};
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
+};
+pub use pr_refresh::{
+    pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,
 };
 pub use primitives::{
     clone_repo, clone_repo_at_ref, commit_staged_with_author, get_component_path_prefix,
@@ -165,6 +176,28 @@ pub(crate) fn resolve_target(
     Ok((
         target.component_id,
         target.source_path.to_string_lossy().to_string(),
+    ))
+}
+
+/// Resolve a target, run a single `git` invocation against it, and wrap the
+/// result in a [`GitOutput`].
+///
+/// This is the shared spine for the simple "resolve → run one git command →
+/// report" operations (`status`, `pull`, `tag`, …). Each caller only differs
+/// by the argument vector and the `operation` label, so they delegate here
+/// instead of repeating the resolve / `execute_git` / `map_err` / `from_output`
+/// dance.
+pub(crate) fn run_resolved_git(
+    component_id: Option<&str>,
+    path_override: Option<&str>,
+    operation: &str,
+    args: &[&str],
+) -> crate::core::error::Result<operation_output::GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
+    let output = execute_git(&path, args)
+        .map_err(|e| crate::core::error::Error::git_command_failed(e.to_string()))?;
+    Ok(operation_output::GitOutput::from_output(
+        id, path, operation, output,
     ))
 }
 

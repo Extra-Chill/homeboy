@@ -5,9 +5,13 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>]
+homeboy fuzz validate <results-file>
+homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
+homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 ```
 
 ## Description
@@ -57,15 +61,128 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
 
-`homeboy fuzz replay` is not exposed until Homeboy owns a generic replay
-executor. Persist replay commands in the campaign contract when a runner can
-replay a case; otherwise `campaign_contract.unsupported` names `replay_command`
-and callers should use the originating fuzz runner's documented replay surface.
+`homeboy fuzz plan --inventory <path>`, `homeboy fuzz run --inventory <path>`,
+and `homeboy fuzz report --inventory <path>`
+accept a `homeboy/fuzz-target-inventory/v1` JSON file with discovered
+`surfaces`, `targets`, `workloads`, and `seeds`. Homeboy validates the inventory,
+merges it with the generated target inventory and declared workload metadata,
+embeds it in generated result envelope metadata when reporting, and exposes the
+path to runners as `HOMEBOY_FUZZ_INVENTORY_FILE`. The inventory contract is
+product-neutral; product-specific details belong in `metadata` or flattened extra
+fields on the inventory items.
+
+Operations keep the free-form `kind` string for product-owned semantics and can
+also carry a canonical `family` for cross-runner coverage reporting. When
+`family` is omitted, Homeboy normalizes known neutral kinds and HTTP-style verbs
+to families such as `read`, `create`, `update`, `delete`, `list`, `search`,
+`navigate`, `render`, `query`, `load`, `submit`, `block_render`, and
+`performance_probe`. Unknown `kind` values remain valid and are preserved without
+a canonical family.
+
+```json
+{
+  "id": "endpoint-list",
+  "kind": "GET",
+  "family": "read"
+}
+```
+
+Campaigns can include a product-neutral coverage summary:
+
+```json
+{
+  "schema": "homeboy/fuzz-campaign/v1",
+  "id": "campaign-1",
+  "safety_class": "read_only",
+  "coverage_summary": {
+    "schema": "homeboy/fuzz-coverage-summary/v1",
+    "declared_targets": 2,
+    "executable_targets": 2,
+    "proven_targets": 2,
+    "declared_operations": 4,
+    "executable_operations": 4,
+    "proven_operations": 4,
+    "skipped_targets": [
+      { "id": "target-3", "reason": "auth_required" }
+    ],
+    "surface_summaries": [
+      {
+        "id": "surface-a",
+        "kind": "api",
+        "declared_targets": 2,
+        "executable_targets": 2,
+        "proven_targets": 2,
+        "declared_operations": 3,
+        "executable_operations": 3,
+        "proven_operations": 3
+      }
+    ],
+    "kind_summaries": [
+      {
+        "id": "read",
+        "kind": "operation_kind",
+        "declared_targets": 1,
+        "executable_targets": 1,
+        "proven_targets": 1,
+        "declared_operations": 2,
+        "executable_operations": 2,
+        "proven_operations": 2
+      }
+    ],
+    "artifact_ids": ["coverage-report"]
+  }
+}
+```
+
+Coverage summaries can include selector breakdowns in `surface_summaries` and
+`kind_summaries`. Each selector row uses the same declared, executable, proven,
+and skipped-count shape as the aggregate summary, allowing gates and reports to
+show which surface or operation kind is incomplete without embedding any
+product-specific taxonomy.
+
+Use standardized skip reason codes when a declared target or operation is not
+executable in the current campaign: `unsafe`, `destructive`, `auth_required`,
+`unavailable`, `legacy`, `unsupported`, and `config_required`. The codes are
+reported in `coverage_completeness.skipped_reason_counts` for `fuzz validate`
+and `fuzz report`, including per-selector counts for `surface_summaries` and
+`kind_summaries`.
+
+`homeboy fuzz replay` resolves replay metadata from a product-neutral campaign
+or result envelope artifact. Pass a `homeboy/fuzz-campaign/v1` or
+`homeboy/fuzz-result-envelope/v1` JSON file as the positional argument, or pass
+it with `--artifact <path>` and use the positional argument as the case id:
+
+```bash
+homeboy fuzz replay fuzz-results.json --case-id case-1
+homeboy fuzz replay case-1 --artifact fuzz-results.json
+```
+
+Replay currently returns a validated `dry_run` contract rather than executing a
+runner. The output includes the campaign/envelope ids, selected case id, matching
+`replay` metadata when present, passthrough args, and environment variables for
+the originating extension-owned replay runner:
+
+```text
+HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE
+HOMEBOY_FUZZ_REPLAY_CASE_ID
+HOMEBOY_FUZZ_REPLAY_ID
+HOMEBOY_FUZZ_REPLAY_SEED
+HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID
+HOMEBOY_FUZZ_RUN_ID
+```
+
+Homeboy does not fake replay execution without a resolved component/extension
+context. Extension scripts own concrete replay execution.
 
 Full-coverage claims need persisted proof artifacts. A neutral coverage summary
 can report declared, executable, and proven counts; operation totals; skipped
 reason codes; and case/manifest artifacts. Treat missing `proven` counts or
 missing coverage/case artifacts as incomplete evidence, not as full coverage.
+`homeboy fuzz validate` and `homeboy fuzz report` evaluate coverage completeness
+gates from `coverage_summary`: `target-coverage-complete` and
+`operation-coverage-complete` pass only when every declared target/operation is
+proven, or when the summary explicitly declares zero targets/operations. Missing
+`coverage_summary` fails those completeness gates.
 
 Fuzz workloads do not have a benchmark fallback. If `homeboy fuzz run` cannot
 execute the selected workload, fix the fuzz runner, rig declaration, or Lab
@@ -140,8 +257,8 @@ Rigs can add private fuzz workloads keyed by extension id:
 
 ## Output
 
-`list` and `run` return JSON envelopes with stable `variant` values: `list` and
-`run`.
+`contract`, `list`, `plan`, `run`, `validate`, `report`, and `replay` return
+JSON envelopes with stable `variant` values.
 
 `run.execution.results_file` is the path advertised to the runner through
 `HOMEBOY_FUZZ_RESULTS_FILE`. `run.results` is present only when the runner wrote

@@ -1,5 +1,6 @@
 use super::super::lab_args::{
-    lab_offload_source_path, rewrite_lab_offload_args, EXPLICIT_PASSTHROUGH_SENTINEL,
+    lab_offload_source_path, rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args,
+    EXPLICIT_PASSTHROUGH_SENTINEL,
 };
 
 fn args(items: &[&str]) -> Vec<String> {
@@ -30,6 +31,60 @@ fn rewrites_lab_offload_path_and_strips_runner_and_output_flags() {
             "--path",
             "/home/user/Developer/project",
             "--json-summary",
+        ])
+    );
+}
+
+#[test]
+fn strips_controller_artifact_root_from_lab_offload_command() {
+    let input = args(&[
+        "homeboy",
+        "fuzz",
+        "run",
+        "--path",
+        "/Users/user/Developer/project",
+        "--artifact-root",
+        "/var/folders/local-homeboy-artifacts",
+        "--workload",
+        "smoke",
+        "--artifact-root=/tmp/also-local",
+    ]);
+
+    assert_eq!(
+        rewrite_lab_offload_args(&input, "/home/user/Developer/project", &[]),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "fuzz",
+            "run",
+            "--path",
+            "/home/user/Developer/project",
+            "--workload",
+            "smoke",
+        ])
+    );
+}
+
+#[test]
+fn strips_controller_artifact_root_from_runner_resident_command() {
+    let input = args(&[
+        "homeboy",
+        "agent-task",
+        "status",
+        "agent-task-123",
+        "--artifact-root",
+        "/var/folders/local-homeboy-artifacts",
+        "--artifact-root=/tmp/also-local",
+    ]);
+
+    assert_eq!(
+        rewrite_runner_resident_lab_offload_args(&input),
+        args(&[
+            "homeboy",
+            "--force-hot",
+            "agent-task",
+            "status",
+            "agent-task-123",
         ])
     );
 }

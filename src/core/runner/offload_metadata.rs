@@ -1,3 +1,4 @@
+use crate::command_contract::RunnerWorkload;
 use crate::core::execution_contract::EXECUTION_CONTRACT;
 use crate::core::gate::{collect_plan_gate_results, HomeboyGateResult};
 use crate::core::plan::{HomeboyPlan, PlanStepStatus};
@@ -37,6 +38,31 @@ pub fn lab_offload_metadata_with_workspace_mapping(
     fallback_reason: Option<&str>,
     workspace_mapping: Option<&serde_json::Value>,
 ) -> serde_json::Value {
+    lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+        plan,
+        source,
+        runner_id,
+        runner_mode,
+        status,
+        remote_workspace,
+        fallback_reason,
+        workspace_mapping,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+    plan: &HomeboyPlan,
+    source: &str,
+    runner_id: Option<&str>,
+    runner_mode: Option<&str>,
+    status: &str,
+    remote_workspace: Option<&str>,
+    fallback_reason: Option<&str>,
+    workspace_mapping: Option<&serde_json::Value>,
+    runner_workload: Option<&RunnerWorkload>,
+) -> serde_json::Value {
     let sync_mode = plan_step_input_string(plan, "lab.sync_workspace", "mode");
     let gate_results = collect_plan_gate_results(plan);
     let proof = plan.proof.clone().or_else(|| {
@@ -67,6 +93,7 @@ pub fn lab_offload_metadata_with_workspace_mapping(
         "proof": proof,
         "patch_captured": plan_has_step(plan, "lab.apply_patch"),
         "workspace_mapping": workspace_mapping,
+        "runner_workload": runner_workload,
     })
 }
 
@@ -156,7 +183,13 @@ pub fn capture_lab_offload_subprocess_metadata(metadata: serde_json::Value) {
 mod tests {
     use super::{
         lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
+        lab_offload_metadata_with_workspace_mapping_and_runner_workload,
         LAB_OFFLOAD_METADATA_SCHEMA,
+    };
+    use crate::command_contract::{
+        RunnerWorkload, RunnerWorkloadAssignment, RunnerWorkloadCommandFamily, RunnerWorkloadKind,
+        RunnerWorkloadMutationPolicy, RunnerWorkloadResultRefs, RunnerWorkloadSecrets,
+        RunnerWorkloadState, RunnerWorkloadWorkspaceMappings, RUNNER_WORKLOAD_SCHEMA,
     };
     use crate::core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
     use crate::core::plan::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanValues};
@@ -305,6 +338,74 @@ mod tests {
         );
 
         assert_eq!(metadata["workspace_mapping"], mapping);
+    }
+
+    #[test]
+    fn lab_offload_metadata_records_runner_workload_when_supplied() {
+        let plan = lab_plan();
+        let workload = RunnerWorkload {
+            schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+            workload_id: "workload-1".to_string(),
+            kind: RunnerWorkloadKind {
+                command_label: "lint".to_string(),
+                command_family: RunnerWorkloadCommandFamily::Quality,
+            },
+            workspace_mappings: RunnerWorkloadWorkspaceMappings {
+                source_path_mode: "cwd_or_path_flag".to_string(),
+                workspace_mode_policy: "changed_since_git_else_snapshot".to_string(),
+                mapping_ref: Some("workspace_mapping".to_string()),
+            },
+            required_capabilities: Vec::new(),
+            required_secrets: RunnerWorkloadSecrets {
+                categories: Vec::new(),
+            },
+            mutation_policy: RunnerWorkloadMutationPolicy {
+                capture_patch: false,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+            },
+            assignment: RunnerWorkloadAssignment {
+                runner_id: Some("lab".to_string()),
+                runner_mode: Some("direct_ssh".to_string()),
+                source: Some("explicit".to_string()),
+            },
+            state: RunnerWorkloadState {
+                status: "offloaded".to_string(),
+                remote_workspace: Some("/srv/homeboy/app".to_string()),
+                fallback_reason: None,
+            },
+            result_refs: RunnerWorkloadResultRefs {
+                plan_id: plan.id.clone(),
+                proof_id: None,
+                workspace_mapping_ref: Some("workspace_mapping".to_string()),
+            },
+        };
+
+        let metadata = lab_offload_metadata_with_workspace_mapping_and_runner_workload(
+            &plan,
+            "explicit",
+            Some("lab"),
+            Some("direct_ssh"),
+            "offloaded",
+            Some("/srv/homeboy/app"),
+            None,
+            None,
+            Some(&workload),
+        );
+
+        assert_eq!(
+            metadata["runner_workload"]["schema"],
+            RUNNER_WORKLOAD_SCHEMA
+        );
+        assert_eq!(metadata["runner_workload"]["workload_id"], "workload-1");
+        assert_eq!(
+            metadata["runner_workload"]["kind"]["command_family"],
+            "quality"
+        );
+        assert_eq!(
+            metadata["runner_workload"]["assignment"]["runner_id"],
+            "lab"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::core::stream_capture::StreamCaptureMetadata;
 
 use super::effect::remote_version_after_deploy_effect;
 use super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
+use super::orchestration_tag_checkout::deploy_tag_for_version;
 use super::path_roots::{component_remote_path, resolve_effective_remote_path};
 use super::planning::{calculate_directory_size, format_bytes};
 use super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
@@ -72,6 +73,7 @@ pub(super) struct PreparedComponentDeploy {
     pub cleanup_local_artifact: bool,
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn prepare_component_deploy(
     component: &Component,
     config: &DeployConfig,
@@ -86,22 +88,33 @@ pub(super) fn prepare_component_deploy(
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
     let release_artifact: Option<PathBuf> =
-        if should_try_download_release_artifact(component, config, is_git_deploy, is_file_deploy) {
-            match try_download_release_artifact(component) {
-                Ok(path) => path,
-                Err(error) => {
-                    return Err(failed_component_deploy_result(
-                        component,
-                        base_path,
-                        local_version,
-                        remote_version,
-                        None,
-                        error,
-                    ));
+        match release_artifact_plan(component, config, is_git_deploy, is_file_deploy) {
+            ReleaseArtifactPlan::Reuse { tag, .. } => {
+                match try_download_release_artifact(component, &tag) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return Err(failed_component_deploy_result(
+                            component,
+                            base_path,
+                            local_version,
+                            remote_version,
+                            None,
+                            error,
+                        ));
+                    }
                 }
             }
-        } else {
-            None
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                if config.dry_run {
+                    log_status!(
+                        "deploy",
+                        "Local rebuild planned for '{}': {}",
+                        component.id,
+                        reason
+                    );
+                }
+                None
+            }
         };
 
     let cleanup_generated_artifacts = !is_git_deploy
@@ -265,20 +278,70 @@ pub(super) fn execute_preflighted_component_deploy(
     execute_artifact_deploy(prepared, ctx, base_path, project)
 }
 
+pub(super) enum ReleaseArtifactPlan {
+    Reuse { url: String, tag: String },
+    LocalBuild { reason: String },
+}
+
+pub(super) fn release_artifact_plan(
+    component: &Component,
+    config: &DeployConfig,
+    is_git_deploy: bool,
+    is_file_deploy: bool,
+) -> ReleaseArtifactPlan {
+    if is_git_deploy {
+        return local_release_artifact_plan("component uses deploy_strategy 'git'");
+    }
+    if is_file_deploy {
+        return local_release_artifact_plan("component uses deploy_strategy 'file'");
+    }
+    if config.head {
+        return local_release_artifact_plan("--head deploys the current checkout");
+    }
+    if config.tagged {
+        return local_release_artifact_plan("--tagged forces a local tag build");
+    }
+    if config.skip_build {
+        return local_release_artifact_plan("build is skipped by caller");
+    }
+    let Some(remote_url) = component.remote_url.as_ref() else {
+        return local_release_artifact_plan("component has no remote_url for release asset lookup");
+    };
+    let Some(github) = release_download::parse_github_url(remote_url) else {
+        return local_release_artifact_plan("component remote_url is not a GitHub repository URL");
+    };
+    let Some(artifact_name) = release_download::resolve_artifact_name(component) else {
+        return local_release_artifact_plan(
+            "component has no build_artifact filename for release asset lookup",
+        );
+    };
+    let Some(tag) = deploy_release_tag(component, config) else {
+        return local_release_artifact_plan("no version tag found for release asset lookup");
+    };
+
+    ReleaseArtifactPlan::Reuse {
+        url: github.release_artifact_url(&tag, &artifact_name),
+        tag,
+    }
+}
+
+fn local_release_artifact_plan(reason: impl Into<String>) -> ReleaseArtifactPlan {
+    ReleaseArtifactPlan::LocalBuild {
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
 fn should_try_download_release_artifact(
     component: &Component,
     config: &DeployConfig,
     is_git_deploy: bool,
     is_file_deploy: bool,
 ) -> bool {
-    !is_git_deploy
-        && !is_file_deploy
-        && !config.head
-        && !config.tagged
-        && !config.skip_build
-        && component.artifact_inputs.is_empty()
-        && release_download::supports_release_deploy(component)
-        && !release_download::has_mutable_package_dependencies(component)
+    matches!(
+        release_artifact_plan(component, config, is_git_deploy, is_file_deploy),
+        ReleaseArtifactPlan::Reuse { .. }
+    )
 }
 
 fn failed_component_deploy_result(
@@ -512,6 +575,7 @@ fn failed_preflight_file_artifact_result(
         .with_build_exit_code(build_exit_code)
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_preflight_file_artifact(
     component: &Component,
     base_path: &str,
@@ -549,6 +613,8 @@ fn validate_preflight_file_artifact(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 fn resolve_preflight_artifact_path(
     component: &Component,
     config: &DeployConfig,
@@ -1130,13 +1196,14 @@ fn cleanup_empty_artifact_dirs(local_path: &Path, start_dir: Option<&Path>) {
     }
 }
 
-/// Try to download a release artifact from GitHub for the component's latest tag.
+/// Try to download a release artifact from GitHub for the selected deploy tag.
 ///
 /// Returns `Ok(Some(path))` if successful and `Ok(None)` for normal download misses
 /// that should fall back to local build. Validation failures are returned as deploy
 /// errors so invalid artifacts never reach remote install.
 fn try_download_release_artifact(
     component: &Component,
+    tag: &str,
 ) -> std::result::Result<Option<PathBuf>, String> {
     let Some(remote_url) = component.remote_url.as_ref() else {
         return Ok(None);
@@ -1148,10 +1215,6 @@ fn try_download_release_artifact(
         return Ok(None);
     };
 
-    let Some(tag) = git::get_latest_tag(&component.local_path).ok().flatten() else {
-        return Ok(None);
-    };
-
     log_status!(
         "deploy",
         "Attempting to download release artifact for '{}' tag {} from GitHub...",
@@ -1159,7 +1222,7 @@ fn try_download_release_artifact(
         tag
     );
 
-    match release_download::download_release_artifact(&github, &tag, &artifact_name) {
+    match release_download::download_release_artifact(&github, tag, &artifact_name) {
         Ok(path) => Ok(Some(path)),
         Err(e) => {
             if e.code == crate::core::error::ErrorCode::ValidationInvalidArgument {
@@ -1175,6 +1238,14 @@ fn try_download_release_artifact(
             Ok(None)
         }
     }
+}
+
+fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<String> {
+    if let Some(version) = config.expected_version.as_deref() {
+        return Some(deploy_tag_for_version(component, version));
+    }
+
+    git::get_latest_tag(&component.local_path).ok().flatten()
 }
 
 /// Clean up build dependencies from component's local_path after successful deploy.
@@ -1272,9 +1343,10 @@ fn cleanup_build_dependencies(
 mod tests {
     use super::{
         artifact_requires_component_extract_command, bound_captured_read,
-        cleanup_deploy_build_artifact, failed_component_deploy_result,
+        cleanup_deploy_build_artifact, failed_component_deploy_result, release_artifact_plan,
         resolve_preflight_artifact_path, should_try_download_release_artifact,
-        validate_predeploy_artifact_version, ARTIFACT_VERSION_READ_LIMIT_BYTES,
+        validate_predeploy_artifact_version, ReleaseArtifactPlan,
+        ARTIFACT_VERSION_READ_LIMIT_BYTES,
     };
     use crate::core::component::{ArtifactInput, Component, VersionTarget};
     use crate::core::deploy::types::DeployConfig;
@@ -1471,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn mutable_package_dependencies_skip_release_artifact_download() {
+    fn mutable_package_dependencies_still_try_release_artifact_download() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             temp.path().join("package.json"),
@@ -1499,19 +1571,19 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
-            expected_version: None,
+            expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
             tagged: false,
         };
 
-        assert!(!should_try_download_release_artifact(
+        assert!(should_try_download_release_artifact(
             &component, &config, false, false
         ));
     }
 
     #[test]
-    fn registry_package_dependencies_allow_release_artifact_download() {
+    fn registry_package_dependencies_allow_release_artifact_download_for_expected_version() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             temp.path().join("package.json"),
@@ -1539,7 +1611,7 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
-            expected_version: None,
+            expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
             tagged: false,
@@ -1551,7 +1623,47 @@ mod tests {
     }
 
     #[test]
-    fn artifact_inputs_skip_release_artifact_download() {
+    fn release_artifact_plan_uses_expected_version_tag_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "example".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig {
+            component_ids: Vec::new(),
+            all: false,
+            outdated: false,
+            behind_upstream: false,
+            dry_run: false,
+            check: false,
+            force: false,
+            skip_build: false,
+            keep_deps: false,
+            expected_version: Some("1.2.3".to_string()),
+            no_pull: false,
+            head: false,
+            tagged: false,
+        };
+
+        match release_artifact_plan(&component, &config, false, false) {
+            ReleaseArtifactPlan::Reuse { url, tag } => {
+                assert_eq!(tag, "v1.2.3");
+                assert_eq!(
+                    url,
+                    "https://github.com/example/example/releases/download/v1.2.3/example.zip"
+                );
+            }
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                panic!("expected release reuse plan, got local build: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn artifact_inputs_still_try_release_artifact_download() {
         let component = Component {
             id: "example".to_string(),
             remote_url: Some("https://github.com/example/example".to_string()),
@@ -1574,13 +1686,13 @@ mod tests {
             force: false,
             skip_build: false,
             keep_deps: false,
-            expected_version: None,
+            expected_version: Some("1.2.3".to_string()),
             no_pull: false,
             head: false,
             tagged: false,
         };
 
-        assert!(!should_try_download_release_artifact(
+        assert!(should_try_download_release_artifact(
             &component, &config, false, false
         ));
     }

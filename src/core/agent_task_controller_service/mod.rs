@@ -69,7 +69,13 @@ use pr_ownership::*;
 pub use reports::*;
 pub use request::*;
 pub use spec::*;
-use spec_compile::*;
+pub(crate) use spec_compile::validate_loop_spec;
+use spec_compile::{
+    compile_loop_spec_policy, compile_loop_spec_workflows, controller_spec_homeboy_plan,
+    merge_policy_into_event_payload, reconcile_repo_loop_spec_actions, repo_loop_spec_fingerprint,
+    repo_loop_spec_fingerprint_from_metadata, set_repo_loop_spec_metadata,
+    RepoLoopSpecReconciliation, REPO_LOOP_SPEC_ACTION_REASON, REPO_LOOP_SPEC_WORKFLOW_REASON,
+};
 
 /// Create a new durable controller record.
 pub fn init(request: ControllerInitRequest) -> Result<AgentTaskLoopControllerRecord> {

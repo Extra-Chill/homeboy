@@ -81,15 +81,6 @@ impl PhaseTimingReport {
         self.spans.is_empty()
     }
 
-    /// Total wall-clock recorded across phases that ran (`ok` + `failed`).
-    ///
-    /// Phases nest in many workflows, so this is an upper-bound sum rather than
-    /// a strict end-to-end duration; callers that need a true total should
-    /// record an explicit top-level phase.
-    pub fn total_ms(&self) -> f64 {
-        self.spans.iter().filter_map(|span| span.duration_ms).sum()
-    }
-
     /// Look up a recorded span by id.
     pub fn span(&self, id: &str) -> Option<&PhaseSpan> {
         self.spans.iter().find(|span| span.id == id)
@@ -100,8 +91,9 @@ impl PhaseTimingReport {
 ///
 /// The timer is the generic primitive every hot command can reuse. It records
 /// durations the moment a phase completes, so partial data survives an early
-/// return or a hard failure mid-workflow — call `record_failed` (or use a
-/// [`PhaseGuard`]) so timing is still finalized on the error path.
+/// return or a hard failure mid-workflow — call `record_failed` so timing is
+/// still finalized on the error path, or use a [`PhaseGuard`] to finalize an
+/// `ok` span automatically on scope exit.
 #[derive(Debug, Clone, Default)]
 pub struct PhaseTimer {
     spans: Vec<PhaseSpan>,
@@ -159,14 +151,13 @@ impl PhaseTimer {
 
     /// Start a scoped phase guard. The guard records the phase on drop, so an
     /// early return or panic between `start` and the end of the scope still
-    /// finalizes timing. The phase is recorded as `ok` unless explicitly marked
-    /// failed (see [`PhaseGuard::mark_failed`]).
+    /// finalizes timing. The phase is recorded as `ok`, or dropped without
+    /// recording via [`PhaseGuard::disarm`].
     pub fn start(&mut self, id: impl Into<String>) -> PhaseGuard<'_> {
         PhaseGuard {
             timer: self,
             id: id.into(),
             started: Instant::now(),
-            status: PhaseStatus::Ok,
             disarmed: false,
         }
     }
@@ -196,26 +187,18 @@ impl PhaseTimer {
 /// RAII scope that records a phase span when dropped.
 ///
 /// Guarantees timing is finalized even on an early return or a panic — the key
-/// requirement for the error path. Defaults to `ok`; call [`mark_failed`] to
-/// record the phase as failed instead, or [`disarm`] to drop without recording.
+/// requirement for the error path. Records the phase as `ok` on drop, or
+/// drops without recording via [`disarm`].
 ///
-/// [`mark_failed`]: PhaseGuard::mark_failed
 /// [`disarm`]: PhaseGuard::disarm
 pub struct PhaseGuard<'a> {
     timer: &'a mut PhaseTimer,
     id: String,
     started: Instant,
-    status: PhaseStatus,
     disarmed: bool,
 }
 
 impl PhaseGuard<'_> {
-    /// Mark the in-flight phase as failed; it will be recorded as `failed`
-    /// (with its duration) when the guard is dropped.
-    pub fn mark_failed(&mut self) {
-        self.status = PhaseStatus::Failed;
-    }
-
     /// Drop the guard without recording a span (e.g. the phase was skipped
     /// after the guard was created).
     pub fn disarm(mut self) {
@@ -230,11 +213,8 @@ impl Drop for PhaseGuard<'_> {
         }
         let elapsed = self.started.elapsed();
         let id = std::mem::take(&mut self.id);
-        match self.status {
-            PhaseStatus::Failed => self.timer.record_failed(id, elapsed),
-            // Skipped never carries a duration; a guard always timed work.
-            _ => self.timer.record_ok(id, elapsed),
-        }
+        // A guard always timed work, so it records an `ok` span on drop.
+        self.timer.record_ok(id, elapsed);
     }
 }
 
@@ -313,17 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn guard_can_be_marked_failed() {
-        let mut timer = PhaseTimer::new();
-        {
-            let mut guard = timer.start("execute");
-            guard.mark_failed();
-        }
-        let report = timer.into_report();
-        assert_eq!(report.spans[0].status, PhaseStatus::Failed);
-    }
-
-    #[test]
     fn disarmed_guard_records_nothing() {
         let mut timer = PhaseTimer::new();
         timer.start("execute").disarm();
@@ -331,14 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn report_total_and_lookup() {
+    fn report_span_lookup() {
         let mut timer = PhaseTimer::new();
         timer.record_ok("resolve", Duration::from_millis(2));
         timer.record_ok("execute", Duration::from_millis(3));
         timer.record_skipped("report");
         let report = timer.into_report();
 
-        assert!((report.total_ms() - 5.0).abs() < 1.0);
         assert!(report.span("resolve").is_some());
         assert!(report.span("missing").is_none());
         assert_eq!(report.span("report").unwrap().status, PhaseStatus::Skipped);

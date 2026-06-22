@@ -9,10 +9,12 @@
 use serde_json::Value;
 
 use crate::core::agent_task::{
-    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
+    AgentTaskComponentContract, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy,
+    AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
+    AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::core::agent_task_config_materialization::materialize_provider_config_refs;
+use crate::core::agent_task_prompts;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskRetryPolicy};
 use crate::core::agent_task_secrets::validate_secret_env;
@@ -78,8 +80,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let provider_config =
+    let mut provider_config =
         dispatch_provider_config(request, &repo, workspace_target.as_ref(), &client_context)?;
+    let component_contracts = dispatch_component_contracts(&provider_config, &client_context)?;
+    promote_component_contracts_to_provider_config(&mut provider_config, &component_contracts);
     let secret_env = dispatch_secret_env(request, &provider_config);
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
@@ -139,7 +143,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                     &repo,
                 ),
             },
-            component_contracts: Vec::new(),
+            component_contracts: component_contracts.clone(),
             policy: AgentTaskPolicy {
                 read: "workspace".to_string(),
                 write: "patch".to_string(),
@@ -499,6 +503,56 @@ fn dispatch_provider_config(
     Ok(config)
 }
 
+fn dispatch_component_contracts(
+    provider_config: &Value,
+    client_context: &Value,
+) -> Result<Vec<AgentTaskComponentContract>> {
+    let mut contracts = Vec::new();
+    collect_component_contracts_from_value(provider_config, "provider-config", &mut contracts)?;
+    collect_component_contracts_from_value(client_context, "client-context", &mut contracts)?;
+    if let Some(inputs) = client_context.get("inputs") {
+        collect_component_contracts_from_value(inputs, "client-context.inputs", &mut contracts)?;
+    }
+    Ok(contracts)
+}
+
+fn collect_component_contracts_from_value(
+    value: &Value,
+    label: &str,
+    contracts: &mut Vec<AgentTaskComponentContract>,
+) -> Result<()> {
+    for key in ["component_contracts", "runtime_component_contracts"] {
+        let Some(raw) = value.get(key) else {
+            continue;
+        };
+        let mut parsed: Vec<AgentTaskComponentContract> = serde_json::from_value(raw.clone())
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    format!("{label}.{key}"),
+                    format!("agent-task dispatch {label}.{key} must be an array of component contracts: {error}"),
+                    Some(raw.to_string()),
+                    None,
+                )
+            })?;
+        contracts.append(&mut parsed);
+    }
+    Ok(())
+}
+
+fn promote_component_contracts_to_provider_config(
+    provider_config: &mut Value,
+    component_contracts: &[AgentTaskComponentContract],
+) {
+    if component_contracts.is_empty() {
+        return;
+    }
+    let Some(map) = provider_config.as_object_mut() else {
+        return;
+    };
+    map.entry("component_contracts".to_string())
+        .or_insert_with(|| serde_json::to_value(component_contracts).unwrap_or(Value::Null));
+}
+
 fn dispatch_secret_env(request: &AgentTaskDispatchRequest, provider_config: &Value) -> Vec<String> {
     let mut names = request.secret_env.clone();
     names.extend(provider_config_secret_env(provider_config));
@@ -532,6 +586,10 @@ fn provider_config_secret_env(provider_config: &Value) -> Vec<String> {
 }
 
 fn read_text_spec(spec: &str, label: &str) -> Result<String> {
+    if let Some(prompt) = agent_task_prompts::resolve_stored_prompt_ref(spec)? {
+        return Ok(prompt);
+    }
+
     config::read_json_spec_to_string(spec).map_err(|error| {
         Error::internal_unexpected(format!(
             "failed to read agent-task dispatch {label} input: {error}"
@@ -701,6 +759,30 @@ mod tests {
         assert!(!serialized.contains("kimaki"));
         assert!(!serialized.contains("channel"));
         assert!(!serialized.contains("thread"));
+    }
+
+    #[test]
+    fn builds_dispatch_plan_from_stored_prompt_ref() {
+        with_isolated_home(|_| {
+            crate::core::agent_task_prompts::save_prompt(
+                "review-fix",
+                "# Review fix\nCook from stored markdown.\n",
+            )
+            .expect("save prompt");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("prompt:review-fix".to_string()),
+                repo: Some("homeboy".to_string()),
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("dispatch plan");
+
+            assert_eq!(plan.tasks.len(), 1);
+            assert_eq!(
+                plan.tasks[0].instructions,
+                "# Review fix\nCook from stored markdown.\n"
+            );
+        });
     }
 
     #[test]
@@ -1040,6 +1122,76 @@ mod tests {
 
         assert_eq!(err.details["field"], "workspace");
         assert!(err.message.contains("dispatch workspace"));
+    }
+
+    #[test]
+    fn dispatch_plan_promotes_runtime_component_contracts_from_client_context_inputs() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with runtime components.".to_string()),
+            core: DispatchCoreInputs {
+                client_context: Some(
+                    serde_json::json!({
+                        "schema": "homeboy/repo-loop-workflow-context/v1",
+                        "inputs": {
+                            "runtime_component_contracts": [{
+                                "slug": "agents-api",
+                                "path": "components/agents-api",
+                                "loadAs": "plugin",
+                                "activate": true,
+                                "opaque": { "preserve": "yes" }
+                            }]
+                        }
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        let contracts = &plan.tasks[0].component_contracts;
+        assert_eq!(contracts.len(), 1);
+        assert_eq!(contracts[0].slug.as_deref(), Some("agents-api"));
+        assert_eq!(contracts[0].path.as_deref(), Some("components/agents-api"));
+        assert_eq!(contracts[0].load_as.as_deref(), Some("plugin"));
+        assert_eq!(contracts[0].activate, Some(true));
+        assert_eq!(contracts[0].extra["opaque"]["preserve"], "yes");
+        assert_eq!(
+            plan.tasks[0].executor.config["component_contracts"][0]["path"],
+            "components/agents-api"
+        );
+    }
+
+    #[test]
+    fn dispatch_plan_accepts_component_contracts_from_provider_config() {
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook with provider runtime components.".to_string()),
+            core: DispatchCoreInputs {
+                provider_config: Some(
+                    serde_json::json!({
+                        "component_contracts": [{
+                            "slug": "runtime-helper",
+                            "path": "/opt/runtime-helper",
+                            "loadAs": "mu-plugin",
+                            "activate": false,
+                            "opaque_provider_hint": { "preserved": true }
+                        }]
+                    })
+                    .to_string(),
+                ),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
+        let contract = &plan.tasks[0].component_contracts[0];
+        assert_eq!(contract.slug.as_deref(), Some("runtime-helper"));
+        assert_eq!(contract.path.as_deref(), Some("/opt/runtime-helper"));
+        assert_eq!(contract.load_as.as_deref(), Some("mu-plugin"));
+        assert_eq!(contract.activate, Some(false));
+        assert_eq!(contract.extra["opaque_provider_hint"]["preserved"], true);
     }
 
     struct NoopExecutor;

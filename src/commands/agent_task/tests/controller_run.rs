@@ -1,6 +1,7 @@
 //! Agent-task command controller run/run-next execution tests.
 
 use super::support::*;
+use crate::core::agent_task::AgentTaskTypedArtifact;
 
 #[test]
 fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
@@ -73,6 +74,132 @@ fn controller_run_next_executes_spawn_task_plan_and_records_dedupe_lineage() {
             json!("/tmp/homeboy-lab-artifacts/controller-run-next")
         );
     });
+}
+
+#[test]
+fn controller_dispatch_runtime_component_contracts_reach_spawned_agent_task_request() {
+    with_temp_home(|| {
+        let observed_request = Arc::new(Mutex::new(None));
+        let mut controller = agent_task_loop_controller::create_controller(
+            "loop-controller-runtime-components",
+            "repair",
+            "v1",
+        )
+        .expect("controller created");
+        controller.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "workflow:generation".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "dispatch": {
+                        "prompt": "Run the generic workflow.",
+                        "backend": "fixture",
+                        "client_context": json!({
+                            "schema": "homeboy/repo-loop-workflow-context/v1",
+                            "workflow_id": "generation",
+                            "inputs": {
+                                "runtime_component_contracts": [{
+                                    "slug": "agents-api",
+                                    "path": "runtime/agents-api",
+                                    "loadAs": "plugin",
+                                    "activate": true,
+                                    "opaque": { "source": "workflow-input" }
+                                }]
+                            }
+                        }).to_string()
+                    }
+                }),
+            },
+            "repo loop spec workflow",
+        );
+        agent_task_loop_controller::write_controller(&controller).expect("controller written");
+
+        let (value, exit_code) = controller_run_next_with_executor(
+            "loop-controller-runtime-components".to_string(),
+            ArtifactCapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect("controller action executed");
+
+        let observed = observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("provider saw request");
+
+        assert_eq!(exit_code, 0, "{value:#}");
+        assert_eq!(observed.component_contracts.len(), 1);
+        assert_eq!(
+            observed.component_contracts[0].slug.as_deref(),
+            Some("agents-api")
+        );
+        assert_eq!(
+            observed.component_contracts[0].path.as_deref(),
+            Some("runtime/agents-api")
+        );
+        assert_eq!(
+            observed.component_contracts[0].load_as.as_deref(),
+            Some("plugin")
+        );
+        assert_eq!(observed.component_contracts[0].activate, Some(true));
+        assert_eq!(
+            observed.component_contracts[0].extra["opaque"]["source"],
+            "workflow-input"
+        );
+    });
+}
+
+#[derive(Clone, Default)]
+struct ArtifactCapturingExecutor {
+    observed_request: Arc<Mutex<Option<AgentTaskRequest>>>,
+}
+
+impl AgentTaskExecutorAdapter for ArtifactCapturingExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        *self
+            .observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("ok".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: vec![
+                AgentTaskTypedArtifact {
+                    name: "patch".to_string(),
+                    artifact_type: Some("diff".to_string()),
+                    artifact_schema: None,
+                    payload: json!({ "content": "diff --git a/README.md b/README.md" }),
+                    artifact: None,
+                    metadata: Value::Null,
+                },
+                AgentTaskTypedArtifact {
+                    name: "transcript".to_string(),
+                    artifact_type: Some("text".to_string()),
+                    artifact_schema: None,
+                    payload: json!({ "content": "ok" }),
+                    artifact: None,
+                    metadata: Value::Null,
+                },
+            ],
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
 }
 
 #[test]

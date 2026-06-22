@@ -6,7 +6,8 @@ use homeboy::core::cleanup::{
 };
 use homeboy::core::worktree::{
     self, CleanupPolicy, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
-    WorktreeListOutput, WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeListOutput, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use super::CmdResult;
@@ -38,6 +39,32 @@ enum WorktreeCommand {
         /// Cleanup policy for lifecycle cleanup
         #[arg(long, value_enum)]
         cleanup_policy: Option<CliCleanupPolicy>,
+    },
+    /// Create multiple DMC worktrees one-at-a-time with lock-aware queue status JSON
+    QueueCreate {
+        /// DMC workspace repo handle, e.g. homeboy
+        repo: String,
+        /// Branch to create. Repeat for fanout batches.
+        #[arg(long = "branch", value_name = "BRANCH", required = true)]
+        branches: Vec<String>,
+        /// Base ref for each worktree branch
+        #[arg(long = "from", default_value = "origin/main")]
+        from: String,
+        /// Task or issue URL associated with these worktrees
+        #[arg(long)]
+        task_url: Option<String>,
+        /// Short task reference recorded by DMC, e.g. Extra-Chill/homeboy#5786
+        #[arg(long)]
+        task_ref: Option<String>,
+        /// Print the queue plan/status without creating worktrees
+        #[arg(long)]
+        dry_run: bool,
+        /// Suggested orchestrator wait when DMC reports an active lock but no retry-after value
+        #[arg(long, default_value_t = 60)]
+        retry_after_seconds: u64,
+        /// Executable used for DMC calls. Defaults to `studio`.
+        #[arg(long, default_value = "studio")]
+        dmc_bin: String,
     },
     /// List persisted task worktrees
     List,
@@ -84,6 +111,7 @@ impl From<CliCleanupPolicy> for CleanupPolicy {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorktreeOutput {
     Create(WorktreeCreateOutput),
+    QueueCreate(WorktreeQueueCreateOutput),
     List(WorktreeListOutput),
     Status(WorktreeStatusOutput),
     Remove(WorktreeRemoveOutput),
@@ -113,6 +141,25 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             task_url,
             run_id,
             cleanup_policy: cleanup_policy.map(Into::into),
+        })?),
+        WorktreeCommand::QueueCreate {
+            repo,
+            branches,
+            from,
+            task_url,
+            task_ref,
+            dry_run,
+            retry_after_seconds,
+            dmc_bin,
+        } => WorktreeOutput::QueueCreate(worktree::queue_create(WorktreeQueueCreateOptions {
+            repo,
+            branches,
+            from,
+            task_url,
+            task_ref,
+            dry_run,
+            retry_after_seconds,
+            dmc_bin,
         })?),
         WorktreeCommand::List => WorktreeOutput::List(worktree::list()?),
         WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),

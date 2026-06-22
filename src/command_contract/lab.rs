@@ -16,6 +16,8 @@ use crate::core::engine::execution_context::{self, ResolveOptions};
 use crate::core::extension::ExtensionCapability;
 use std::collections::BTreeSet;
 
+pub const RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
+
 /// Routing-policy flags shared by every Lab command representation
 /// (`LabCommandContract`, `LabRoutePlan`, `LabOffloadCommand`). These four
 /// booleans travel together as one cohesive policy as a command is resolved
@@ -75,6 +77,82 @@ pub enum LabWorkspaceModePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabCommandRequiredTool {
     Playwright,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkload {
+    pub schema: String,
+    pub workload_id: String,
+    pub kind: RunnerWorkloadKind,
+    pub workspace_mappings: RunnerWorkloadWorkspaceMappings,
+    pub required_capabilities: Vec<RunnerWorkloadCapability>,
+    pub required_secrets: RunnerWorkloadSecrets,
+    pub mutation_policy: RunnerWorkloadMutationPolicy,
+    pub assignment: RunnerWorkloadAssignment,
+    pub state: RunnerWorkloadState,
+    pub result_refs: RunnerWorkloadResultRefs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadKind {
+    pub command_label: String,
+    pub command_family: RunnerWorkloadCommandFamily,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerWorkloadCommandFamily {
+    AgentTask,
+    Quality,
+    Workspace,
+    Service,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadWorkspaceMappings {
+    pub source_path_mode: String,
+    pub workspace_mode_policy: String,
+    pub mapping_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadCapability {
+    pub name: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadSecrets {
+    pub categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadMutationPolicy {
+    pub capture_patch: bool,
+    pub mutation_flag: Option<String>,
+    pub allow_dirty_lab_workspace: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadAssignment {
+    pub runner_id: Option<String>,
+    pub runner_mode: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadState {
+    pub status: String,
+    pub remote_workspace: Option<String>,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunnerWorkloadResultRefs {
+    pub plan_id: String,
+    pub proof_id: Option<String>,
+    pub workspace_mapping_ref: Option<String>,
 }
 
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
@@ -480,6 +558,69 @@ pub(super) fn apply_lab_contract_to_descriptor(
 }
 
 impl LabCommandContract {
+    pub fn runner_workload(
+        &self,
+        workload_id: impl Into<String>,
+        plan_id: impl Into<String>,
+        assignment: RunnerWorkloadAssignment,
+        state: RunnerWorkloadState,
+        mutation_policy: RunnerWorkloadMutationPolicy,
+        workspace_mapping_ref: Option<String>,
+        proof_id: Option<String>,
+    ) -> RunnerWorkload {
+        RunnerWorkload {
+            schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
+            workload_id: workload_id.into(),
+            kind: RunnerWorkloadKind {
+                command_label: self.hot_label.to_string(),
+                command_family: RunnerWorkloadCommandFamily::from_command_label(self.hot_label),
+            },
+            workspace_mappings: RunnerWorkloadWorkspaceMappings {
+                source_path_mode: self.source_path_mode.label().to_string(),
+                workspace_mode_policy: self.workspace_mode_policy.label().to_string(),
+                mapping_ref: workspace_mapping_ref.clone(),
+            },
+            required_capabilities: self.required_capabilities(),
+            required_secrets: RunnerWorkloadSecrets {
+                categories: self.required_secret_categories(),
+            },
+            mutation_policy,
+            assignment,
+            state,
+            result_refs: RunnerWorkloadResultRefs {
+                plan_id: plan_id.into(),
+                proof_id,
+                workspace_mapping_ref,
+            },
+        }
+    }
+
+    fn required_capabilities(&self) -> Vec<RunnerWorkloadCapability> {
+        let mut capabilities = Vec::new();
+        if self.routing_policy.requires_extension_parity {
+            capabilities.push(RunnerWorkloadCapability {
+                name: "extension_parity".to_string(),
+                required: true,
+            });
+        }
+        for tool in self.extra_required_tools {
+            capabilities.push(RunnerWorkloadCapability {
+                name: tool.label().to_string(),
+                required: true,
+            });
+        }
+        capabilities
+    }
+
+    fn required_secret_categories(&self) -> Vec<String> {
+        match self.hot_label {
+            label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
+            TRACE_LAB_LABEL => vec!["trace".to_string()],
+            label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn portable(
         hot_label: &'static str,
         mutation_flag: Option<&'static str>,
@@ -589,6 +730,47 @@ impl LabCommandContract {
     pub(crate) const fn release_gate(mut self) -> Self {
         self.routing_policy.release_gate = true;
         self
+    }
+}
+
+impl LabSourcePathMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CwdOrPathFlag => "cwd_or_path_flag",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+impl LabWorkspaceModePolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ChangedSinceGitElseSnapshot => "changed_since_git_else_snapshot",
+            Self::Git => "git",
+            Self::GitCheckoutRequired => "git_checkout_required",
+            Self::RunnerResident => "runner_resident",
+        }
+    }
+}
+
+impl LabCommandRequiredTool {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Playwright => "playwright",
+        }
+    }
+}
+
+impl RunnerWorkloadCommandFamily {
+    pub(crate) fn from_command_label(label: &str) -> Self {
+        match label {
+            label if label.starts_with("agent-task") => Self::AgentTask,
+            LINT_LAB_LABEL | TEST_LAB_LABEL | AUDIT_LAB_LABEL | REVIEW_LAB_LABEL
+            | BENCH_LAB_LABEL | FUZZ_LAB_LABEL | TRACE_LAB_LABEL => Self::Quality,
+            REFACTOR_LAB_LABEL | RIG_CHECK_LAB_LABEL => Self::Workspace,
+            label if label.starts_with("tunnel") => Self::Service,
+            _ => Self::Unknown,
+        }
     }
 }
 

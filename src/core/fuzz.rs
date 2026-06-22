@@ -26,11 +26,19 @@ pub const FUZZ_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-artifact/v1";
 pub const FUZZ_THRESHOLD_SCHEMA: &str = "homeboy/fuzz-threshold/v1";
 pub const FUZZ_PROVENANCE_SCHEMA: &str = "homeboy/fuzz-provenance/v1";
 pub const FUZZ_REPLAY_SCHEMA: &str = "homeboy/fuzz-replay/v1";
+pub const FUZZ_COVERAGE_SUMMARY_SCHEMA: &str = "homeboy/fuzz-coverage-summary/v1";
 pub const FUZZ_TARGET_INVENTORY_SCHEMA: &str = "homeboy/fuzz-target-inventory/v1";
 pub const FUZZ_EXECUTION_REQUEST_SCHEMA: &str = "homeboy/fuzz-execution-request/v1";
 pub const FUZZ_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/fuzz-result-envelope/v1";
 pub const FUZZ_REQUIRED_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-required-artifact/v1";
 pub const FUZZ_GATE_SCHEMA: &str = "homeboy/fuzz-gate/v1";
+pub const FUZZ_SKIP_REASON_UNSAFE: &str = "unsafe";
+pub const FUZZ_SKIP_REASON_DESTRUCTIVE: &str = "destructive";
+pub const FUZZ_SKIP_REASON_AUTH_REQUIRED: &str = "auth_required";
+pub const FUZZ_SKIP_REASON_UNAVAILABLE: &str = "unavailable";
+pub const FUZZ_SKIP_REASON_LEGACY: &str = "legacy";
+pub const FUZZ_SKIP_REASON_UNSUPPORTED: &str = "unsupported";
+pub const FUZZ_SKIP_REASON_CONFIG_REQUIRED: &str = "config_required";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FuzzCoreContract {
@@ -40,7 +48,11 @@ pub struct FuzzCoreContract {
     pub version: u32,
     pub schemas: FuzzContractSchemas,
     pub safety_classes: Vec<FuzzSafetyClass>,
+    #[serde(default = "default_fuzz_operation_families")]
+    pub operation_families: Vec<FuzzOperationFamily>,
     pub finding_statuses: Vec<FuzzFindingStatus>,
+    #[serde(default = "standardized_fuzz_skip_reason_codes")]
+    pub skip_reason_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +69,7 @@ pub struct FuzzContractSchemas {
     pub threshold: String,
     pub provenance: String,
     pub replay: String,
+    pub coverage_summary: String,
     pub target_inventory: String,
     pub execution_request: String,
     pub result_envelope: String,
@@ -71,6 +84,24 @@ pub enum FuzzSafetyClass {
     Idempotent,
     IsolatedMutation,
     Destructive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FuzzOperationFamily {
+    Read,
+    Create,
+    Update,
+    Delete,
+    List,
+    Search,
+    Navigate,
+    Render,
+    Query,
+    Load,
+    Submit,
+    BlockRender,
+    PerformanceProbe,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,6 +154,8 @@ pub struct FuzzOperation {
     pub id: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<FuzzOperationFamily>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -134,10 +167,33 @@ impl FuzzOperation {
     fn normalize(&mut self) -> std::result::Result<(), String> {
         self.id = required_trimmed("operation.id", &self.id)?;
         self.kind = required_trimmed("operation.kind", &self.kind)?;
+        if self.family.is_none() {
+            self.family = canonical_operation_family(&self.kind);
+        }
         self.target_id = normalize_optional_string(self.target_id.take());
         self.label = normalize_optional_string(self.label.take());
         self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
         Ok(())
+    }
+}
+
+pub fn canonical_operation_family(kind: &str) -> Option<FuzzOperationFamily> {
+    let normalized = kind.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match normalized.as_str() {
+        "get" | "read" => Some(FuzzOperationFamily::Read),
+        "post" | "create" => Some(FuzzOperationFamily::Create),
+        "put" | "patch" | "update" => Some(FuzzOperationFamily::Update),
+        "delete" => Some(FuzzOperationFamily::Delete),
+        "list" => Some(FuzzOperationFamily::List),
+        "search" => Some(FuzzOperationFamily::Search),
+        "navigate" => Some(FuzzOperationFamily::Navigate),
+        "render" => Some(FuzzOperationFamily::Render),
+        "query" => Some(FuzzOperationFamily::Query),
+        "load" => Some(FuzzOperationFamily::Load),
+        "submit" => Some(FuzzOperationFamily::Submit),
+        "block_render" => Some(FuzzOperationFamily::BlockRender),
+        "performance_probe" => Some(FuzzOperationFamily::PerformanceProbe),
+        _ => None,
     }
 }
 
@@ -157,6 +213,21 @@ pub struct FuzzTarget {
     pub metadata: Value,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl FuzzTarget {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_TARGET_SCHEMA);
+        require_schema(&self.schema, FUZZ_TARGET_SCHEMA, "fuzz target")?;
+        self.id = required_trimmed("target.id", &self.id)?;
+        self.kind = required_trimmed("target.kind", &self.kind)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.locator = normalize_optional_string(self.locator.take());
+        for operation in &mut self.operations {
+            operation.normalize()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -207,6 +278,19 @@ pub struct FuzzWorkload {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl FuzzWorkload {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_WORKLOAD_SCHEMA);
+        require_schema(&self.schema, FUZZ_WORKLOAD_SCHEMA, "fuzz workload")?;
+        self.id = required_trimmed("workload.id", &self.id)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.surface_ids = normalize_string_vec(std::mem::take(&mut self.surface_ids));
+        self.operations = normalize_string_vec(std::mem::take(&mut self.operations));
+        self.seed_ids = normalize_string_vec(std::mem::take(&mut self.seed_ids));
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzCampaign {
     #[serde(default = "fuzz_campaign_schema")]
@@ -229,6 +313,8 @@ pub struct FuzzCampaign {
     pub seeds: Vec<FuzzSeed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<FuzzCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_summary: Option<FuzzCoverageSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FuzzFinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -292,6 +378,19 @@ pub struct FuzzSeed {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl FuzzSeed {
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_SEED_SCHEMA);
+        require_schema(&self.schema, FUZZ_SEED_SCHEMA, "fuzz seed")?;
+        self.id = required_trimmed("seed.id", &self.id)?;
+        self.kind = required_trimmed("seed.kind", &self.kind)?;
+        self.label = normalize_optional_string(self.label.take());
+        self.value = normalize_optional_string(self.value.take());
+        self.tags = normalize_string_vec(std::mem::take(&mut self.tags));
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzCoverage {
     #[serde(default = "fuzz_coverage_schema")]
@@ -323,6 +422,77 @@ pub struct FuzzCoverageGap {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCoverageSummary {
+    #[serde(default = "fuzz_coverage_summary_schema")]
+    pub schema: String,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_targets: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_operations: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_summaries: Vec<FuzzCoverageGroupSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kind_summaries: Vec<FuzzCoverageGroupSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCoverageGroupSummary {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_targets: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_operations: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzCoverageSkip {
+    pub id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+pub fn standardized_fuzz_skip_reason_codes() -> Vec<String> {
+    [
+        FUZZ_SKIP_REASON_UNSAFE,
+        FUZZ_SKIP_REASON_DESTRUCTIVE,
+        FUZZ_SKIP_REASON_AUTH_REQUIRED,
+        FUZZ_SKIP_REASON_UNAVAILABLE,
+        FUZZ_SKIP_REASON_LEGACY,
+        FUZZ_SKIP_REASON_UNSUPPORTED,
+        FUZZ_SKIP_REASON_CONFIG_REQUIRED,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -471,6 +641,42 @@ pub struct FuzzTargetInventory {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl FuzzTargetInventory {
+    pub fn from_value(value: Value) -> std::result::Result<Self, String> {
+        let mut inventory: Self = serde_json::from_value(value).map_err(|err| err.to_string())?;
+        inventory.normalize()?;
+        Ok(inventory)
+    }
+
+    fn normalize(&mut self) -> std::result::Result<(), String> {
+        self.schema = trim_or_default(&self.schema, FUZZ_TARGET_INVENTORY_SCHEMA);
+        require_schema(
+            &self.schema,
+            FUZZ_TARGET_INVENTORY_SCHEMA,
+            "fuzz target inventory",
+        )?;
+        if self.version != FUZZ_CONTRACT_VERSION {
+            return Err(format!(
+                "fuzz target inventory version must be {FUZZ_CONTRACT_VERSION}"
+            ));
+        }
+        self.id = required_trimmed("inventory.id", &self.id)?;
+        for surface in &mut self.surfaces {
+            surface.normalize()?;
+        }
+        for target in &mut self.targets {
+            target.normalize()?;
+        }
+        for workload in &mut self.workloads {
+            workload.normalize()?;
+        }
+        for seed in &mut self.seeds {
+            seed.normalize()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FuzzExecutionRequest {
     #[serde(default = "fuzz_execution_request_schema")]
@@ -571,6 +777,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             threshold: FUZZ_THRESHOLD_SCHEMA.to_string(),
             provenance: FUZZ_PROVENANCE_SCHEMA.to_string(),
             replay: FUZZ_REPLAY_SCHEMA.to_string(),
+            coverage_summary: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             target_inventory: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
             execution_request: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
             result_envelope: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
@@ -583,13 +790,33 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             FuzzSafetyClass::IsolatedMutation,
             FuzzSafetyClass::Destructive,
         ],
+        operation_families: default_fuzz_operation_families(),
         finding_statuses: vec![
             FuzzFindingStatus::Open,
             FuzzFindingStatus::Confirmed,
             FuzzFindingStatus::Mitigated,
             FuzzFindingStatus::Suppressed,
         ],
+        skip_reason_codes: standardized_fuzz_skip_reason_codes(),
     }
+}
+
+fn default_fuzz_operation_families() -> Vec<FuzzOperationFamily> {
+    vec![
+        FuzzOperationFamily::Read,
+        FuzzOperationFamily::Create,
+        FuzzOperationFamily::Update,
+        FuzzOperationFamily::Delete,
+        FuzzOperationFamily::List,
+        FuzzOperationFamily::Search,
+        FuzzOperationFamily::Navigate,
+        FuzzOperationFamily::Render,
+        FuzzOperationFamily::Query,
+        FuzzOperationFamily::Load,
+        FuzzOperationFamily::Submit,
+        FuzzOperationFamily::BlockRender,
+        FuzzOperationFamily::PerformanceProbe,
+    ]
 }
 
 pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
@@ -614,6 +841,68 @@ pub fn parse_fuzz_results_file(path: &Path) -> Result<FuzzCampaign> {
         ));
     }
     Ok(campaign)
+}
+
+pub fn parse_fuzz_target_inventory_file(path: &Path) -> Result<FuzzTargetInventory> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    let value: Value = serde_json::from_str(&contents).map_err(|err| {
+        Error::validation_invalid_json(
+            err,
+            Some(format!(
+                "parse fuzz target inventory file {}",
+                path.display()
+            )),
+            Some(contents.clone()),
+        )
+    })?;
+    FuzzTargetInventory::from_value(value).map_err(|message| {
+        Error::validation_invalid_argument(
+            "inventory",
+            message,
+            Some(path.display().to_string()),
+            None,
+        )
+    })
+}
+
+pub fn merge_fuzz_target_inventory(
+    base: &mut FuzzTargetInventory,
+    mut discovered: FuzzTargetInventory,
+) {
+    base.surfaces.append(&mut discovered.surfaces);
+    base.targets.append(&mut discovered.targets);
+    base.workloads.append(&mut discovered.workloads);
+    base.seeds.append(&mut discovered.seeds);
+    if base.provenance.is_none() {
+        base.provenance = discovered.provenance;
+    }
+    merge_metadata(&mut base.metadata, discovered.metadata);
+    base.extra.append(&mut discovered.extra);
+}
+
+fn merge_metadata(base: &mut Value, discovered: Value) {
+    if discovered.is_null() {
+        return;
+    }
+    if base.is_null() {
+        *base = discovered;
+        return;
+    }
+    match (base, discovered) {
+        (Value::Object(base_map), Value::Object(incoming_map)) => {
+            for (key, value) in incoming_map {
+                base_map.entry(key).or_insert(value);
+            }
+        }
+        (base, incoming) => {
+            let previous = std::mem::take(base);
+            *base = serde_json::json!({
+                "homeboy_metadata": previous,
+                "merged_inventory_metadata": incoming,
+            });
+        }
+    }
 }
 
 pub fn default_fuzz_required_artifacts() -> Vec<FuzzRequiredArtifact> {
@@ -648,6 +937,17 @@ pub fn default_fuzz_required_artifacts() -> Vec<FuzzRequiredArtifact> {
             ),
             acceptable_artifact_kinds: vec!["json".to_string(), "artifact".to_string()],
         },
+        FuzzRequiredArtifact {
+            schema: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
+            id: "coverage-summary".to_string(),
+            kind: "coverage_summary".to_string(),
+            required: true,
+            description: Some(
+                "Target and operation coverage summary with declared, executable, and proven counts"
+                    .to_string(),
+            ),
+            acceptable_artifact_kinds: vec!["json".to_string()],
+        },
     ]
 }
 
@@ -673,6 +973,32 @@ pub fn default_fuzz_gates() -> Vec<FuzzGate> {
             unit: Some("count".to_string()),
             description: Some(
                 "Result envelope links at least one case-level proof artifact".to_string(),
+            ),
+        },
+        FuzzGate {
+            schema: FUZZ_GATE_SCHEMA.to_string(),
+            id: "target-coverage-complete".to_string(),
+            kind: "coverage_completeness".to_string(),
+            metric: "target_coverage_ratio".to_string(),
+            operator: FuzzThresholdOperator::GreaterThanOrEqual,
+            value: 1.0,
+            unit: Some("ratio".to_string()),
+            description: Some(
+                "Coverage summary proves every declared target, or explicitly declares zero targets"
+                    .to_string(),
+            ),
+        },
+        FuzzGate {
+            schema: FUZZ_GATE_SCHEMA.to_string(),
+            id: "operation-coverage-complete".to_string(),
+            kind: "coverage_completeness".to_string(),
+            metric: "operation_coverage_ratio".to_string(),
+            operator: FuzzThresholdOperator::GreaterThanOrEqual,
+            value: 1.0,
+            unit: Some("ratio".to_string()),
+            description: Some(
+                "Coverage summary proves every declared operation, or explicitly declares zero operations"
+                    .to_string(),
             ),
         },
     ]
@@ -732,6 +1058,10 @@ fn fuzz_provenance_schema() -> String {
 
 fn fuzz_replay_schema() -> String {
     FUZZ_REPLAY_SCHEMA.to_string()
+}
+
+fn fuzz_coverage_summary_schema() -> String {
+    FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string()
 }
 
 fn fuzz_target_inventory_schema() -> String {
@@ -815,6 +1145,10 @@ mod tests {
         assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
         assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
         assert_eq!(
+            contract.schemas.coverage_summary,
+            FUZZ_COVERAGE_SUMMARY_SCHEMA
+        );
+        assert_eq!(
             contract.schemas.target_inventory,
             FUZZ_TARGET_INVENTORY_SCHEMA
         );
@@ -834,7 +1168,54 @@ mod tests {
         assert!(contract
             .safety_classes
             .contains(&FuzzSafetyClass::IsolatedMutation));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::Read));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::PerformanceProbe));
         assert!(contract.finding_statuses.contains(&FuzzFindingStatus::Open));
+        assert!(contract
+            .skip_reason_codes
+            .contains(&FUZZ_SKIP_REASON_AUTH_REQUIRED.to_string()));
+    }
+
+    #[test]
+    fn core_contract_deserializes_without_operation_families() {
+        let contract: FuzzCoreContract = serde_json::from_value(json!({
+            "schema": FUZZ_CORE_CONTRACT_SCHEMA,
+            "version": FUZZ_CONTRACT_VERSION,
+            "schemas": {
+                "surface": FUZZ_SURFACE_SCHEMA,
+                "target": FUZZ_TARGET_SCHEMA,
+                "workload": FUZZ_WORKLOAD_SCHEMA,
+                "campaign": FUZZ_CAMPAIGN_SCHEMA,
+                "case": FUZZ_CASE_SCHEMA,
+                "seed": FUZZ_SEED_SCHEMA,
+                "coverage": FUZZ_COVERAGE_SCHEMA,
+                "finding": FUZZ_FINDING_SCHEMA,
+                "artifact": FUZZ_ARTIFACT_SCHEMA,
+                "threshold": FUZZ_THRESHOLD_SCHEMA,
+                "provenance": FUZZ_PROVENANCE_SCHEMA,
+                "replay": FUZZ_REPLAY_SCHEMA,
+                "coverage_summary": FUZZ_COVERAGE_SUMMARY_SCHEMA,
+                "target_inventory": FUZZ_TARGET_INVENTORY_SCHEMA,
+                "execution_request": FUZZ_EXECUTION_REQUEST_SCHEMA,
+                "result_envelope": FUZZ_RESULT_ENVELOPE_SCHEMA,
+                "required_artifact": FUZZ_REQUIRED_ARTIFACT_SCHEMA,
+                "gate": FUZZ_GATE_SCHEMA
+            },
+            "safety_classes": ["read_only"],
+            "finding_statuses": ["open"]
+        }))
+        .expect("old contract payload");
+
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::Read));
+        assert!(contract
+            .operation_families
+            .contains(&FuzzOperationFamily::BlockRender));
     }
 
     #[test]
@@ -846,10 +1227,19 @@ mod tests {
             artifact.schema == FUZZ_REQUIRED_ARTIFACT_SCHEMA && artifact.id == "result-envelope"
         }));
         assert!(artifacts.iter().any(|artifact| artifact.id == "case-log"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.id == "coverage-summary"));
         assert!(gates
             .iter()
             .any(|gate| gate.schema == FUZZ_GATE_SCHEMA && gate.id == "no-open-findings"));
         assert!(gates.iter().any(|gate| gate.id == "has-case-evidence"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.id == "target-coverage-complete"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.id == "operation-coverage-complete"));
     }
 
     #[test]
@@ -879,8 +1269,84 @@ mod tests {
             Some("https://example.test/resource")
         );
         assert_eq!(surface.operations[0].tags, vec!["stable"]);
+        assert_eq!(
+            surface.operations[0].family,
+            Some(FuzzOperationFamily::Read)
+        );
         assert_eq!(surface.inputs[0].constraints, vec!["max:64"]);
         assert_eq!(surface.extra["owner"], "extension");
+    }
+
+    #[test]
+    fn operation_deserializes_old_payload_and_preserves_custom_kind() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "custom-1", "kind": "domain_specific_probe" }
+            ]
+        }))
+        .expect("surface contract");
+
+        assert_eq!(surface.operations[0].kind, "domain_specific_probe");
+        assert_eq!(surface.operations[0].family, None);
+    }
+
+    #[test]
+    fn operation_normalizes_canonical_families_from_kind() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "read-1", "kind": " GET " },
+                { "id": "create-1", "kind": "post" },
+                { "id": "update-1", "kind": "PATCH" },
+                { "id": "delete-1", "kind": "delete" },
+                { "id": "block-render-1", "kind": "block-render" },
+                { "id": "performance-1", "kind": "performance probe" }
+            ]
+        }))
+        .expect("surface contract");
+
+        let families: Vec<Option<FuzzOperationFamily>> = surface
+            .operations
+            .iter()
+            .map(|operation| operation.family)
+            .collect();
+
+        assert_eq!(
+            families,
+            vec![
+                Some(FuzzOperationFamily::Read),
+                Some(FuzzOperationFamily::Create),
+                Some(FuzzOperationFamily::Update),
+                Some(FuzzOperationFamily::Delete),
+                Some(FuzzOperationFamily::BlockRender),
+                Some(FuzzOperationFamily::PerformanceProbe),
+            ]
+        );
+        assert_eq!(surface.operations[0].kind, "GET");
+    }
+
+    #[test]
+    fn operation_preserves_declared_canonical_family() {
+        let surface = FuzzSurface::from_value(json!({
+            "id": "surface-1",
+            "kind": "api",
+            "safety_class": "read_only",
+            "operations": [
+                { "id": "custom-search", "kind": "bespoke_lookup", "family": "search" }
+            ]
+        }))
+        .expect("surface contract");
+
+        assert_eq!(surface.operations[0].kind, "bespoke_lookup");
+        assert_eq!(
+            surface.operations[0].family,
+            Some(FuzzOperationFamily::Search)
+        );
     }
 
     #[test]
@@ -901,6 +1367,7 @@ mod tests {
                 operations: vec![FuzzOperation {
                     id: "operation-1".to_string(),
                     kind: "read".to_string(),
+                    family: Some(FuzzOperationFamily::Read),
                     target_id: Some("target-1".to_string()),
                     label: None,
                     tags: Vec::new(),
@@ -965,6 +1432,50 @@ mod tests {
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }],
+            coverage_summary: Some(FuzzCoverageSummary {
+                schema: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                declared_targets: 1,
+                executable_targets: 1,
+                proven_targets: 1,
+                declared_operations: 1,
+                executable_operations: 1,
+                proven_operations: 1,
+                skipped_targets: Vec::new(),
+                skipped_operations: Vec::new(),
+                surface_summaries: vec![FuzzCoverageGroupSummary {
+                    id: "surface-1".to_string(),
+                    kind: "api".to_string(),
+                    label: Some("API".to_string()),
+                    declared_targets: 1,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 1,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: Vec::new(),
+                    skipped_operations: Vec::new(),
+                    metadata: Value::Null,
+                    extra: BTreeMap::new(),
+                }],
+                kind_summaries: vec![FuzzCoverageGroupSummary {
+                    id: "read".to_string(),
+                    kind: "operation_kind".to_string(),
+                    label: None,
+                    declared_targets: 1,
+                    executable_targets: 1,
+                    proven_targets: 1,
+                    declared_operations: 1,
+                    executable_operations: 1,
+                    proven_operations: 1,
+                    skipped_targets: Vec::new(),
+                    skipped_operations: Vec::new(),
+                    metadata: Value::Null,
+                    extra: BTreeMap::new(),
+                }],
+                artifact_ids: vec!["artifact-1".to_string()],
+                metadata: Value::Null,
+                extra: BTreeMap::new(),
+            }),
             findings: vec![FuzzFinding {
                 schema: FUZZ_FINDING_SCHEMA.to_string(),
                 id: "finding-1".to_string(),
@@ -1036,6 +1547,15 @@ mod tests {
         assert_eq!(value["cases"][0]["schema"], FUZZ_CASE_SCHEMA);
         assert_eq!(value["seeds"][0]["schema"], FUZZ_SEED_SCHEMA);
         assert_eq!(value["coverage"][0]["schema"], FUZZ_COVERAGE_SCHEMA);
+        assert_eq!(
+            value["coverage_summary"]["schema"],
+            FUZZ_COVERAGE_SUMMARY_SCHEMA
+        );
+        assert_eq!(
+            value["coverage_summary"]["surface_summaries"][0]["id"],
+            "surface-1"
+        );
+        assert_eq!(value["coverage_summary"]["kind_summaries"][0]["id"], "read");
         assert_eq!(value["findings"][0]["schema"], FUZZ_FINDING_SCHEMA);
         assert_eq!(value["artifacts"][0]["schema"], FUZZ_ARTIFACT_SCHEMA);
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);
@@ -1062,5 +1582,81 @@ mod tests {
 
         assert_eq!(parsed.id, "campaign-1");
         assert_eq!(parsed.safety_class, FuzzSafetyClass::ReadOnly);
+    }
+
+    #[test]
+    fn parse_fuzz_target_inventory_file_reads_and_normalizes_inventory_contract() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("fuzz-inventory.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema": FUZZ_TARGET_INVENTORY_SCHEMA,
+                "id": " discovered ",
+                "surfaces": [{
+                    "id": " api ",
+                    "kind": " rest ",
+                    "safety_class": "read_only"
+                }],
+                "targets": [{
+                    "id": " target-1 ",
+                    "kind": " endpoint "
+                }],
+                "workloads": [{
+                    "id": " workload-1 ",
+                    "safety_class": "read_only",
+                    "surface_ids": [" api ", " "]
+                }],
+                "seeds": [{
+                    "id": " seed-1 ",
+                    "kind": " literal ",
+                    "tags": [" stable ", " "]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write fuzz inventory");
+
+        let parsed = parse_fuzz_target_inventory_file(&path).expect("parse fuzz inventory");
+
+        assert_eq!(parsed.id, "discovered");
+        assert_eq!(parsed.surfaces[0].id, "api");
+        assert_eq!(parsed.targets[0].kind, "endpoint");
+        assert_eq!(parsed.workloads[0].surface_ids, vec!["api"]);
+        assert_eq!(parsed.seeds[0].tags, vec!["stable"]);
+    }
+
+    #[test]
+    fn merge_fuzz_target_inventory_appends_discovered_contract_sections() {
+        let mut base = FuzzTargetInventory {
+            schema: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
+            version: FUZZ_CONTRACT_VERSION,
+            id: "base".to_string(),
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            seeds: Vec::new(),
+            provenance: None,
+            metadata: json!({ "declared_workloads": [] }),
+            extra: BTreeMap::new(),
+        };
+        let discovered = FuzzTargetInventory::from_value(json!({
+            "schema": FUZZ_TARGET_INVENTORY_SCHEMA,
+            "id": "discovered",
+            "surfaces": [{
+                "id": "api",
+                "kind": "rest",
+                "safety_class": "read_only"
+            }],
+            "metadata": { "producer": "runner" }
+        }))
+        .expect("inventory contract");
+
+        merge_fuzz_target_inventory(&mut base, discovered);
+
+        assert_eq!(base.id, "base");
+        assert_eq!(base.surfaces.len(), 1);
+        assert_eq!(base.metadata["declared_workloads"], json!([]));
+        assert_eq!(base.metadata["producer"], "runner");
     }
 }
