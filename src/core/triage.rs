@@ -738,6 +738,12 @@ fn extract_failure_snippets(log: &str, context_lines: usize) -> Vec<CiFailureSni
         }
         let start = index.saturating_sub(context_lines / 2);
         let end = (index + (context_lines / 2) + 1).min(lines.len());
+        if snippets
+            .last()
+            .is_some_and(|snippet| start < snippet.line_end)
+        {
+            continue;
+        }
         snippets.push(CiFailureSnippet {
             line_start: start + 1,
             line_end: end,
