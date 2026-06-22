@@ -710,6 +710,39 @@ fn test_lab_command_contracts_cover_hot_commands() {
 }
 
 #[test]
+fn command_portability_contract_exposes_delegated_lab_descriptors() {
+    for args in [
+        ["homeboy", "bench"].as_slice(),
+        ["homeboy", "lint"].as_slice(),
+        ["homeboy", "trace"].as_slice(),
+        ["homeboy", "rig", "check", "studio"].as_slice(),
+        [
+            "homeboy",
+            "tunnel",
+            "preview-consumer",
+            "run",
+            "--config",
+            "preview-consumer.json",
+            "--preview-public-url",
+            "https://preview.example.test/",
+        ]
+        .as_slice(),
+    ] {
+        let command = parsed_command(args);
+        assert_eq!(
+            command.portability_contract().lab_command(),
+            command.lab_contract(),
+            "portability descriptor diverged for {args:?}"
+        );
+    }
+
+    assert!(parsed_command(&["homeboy", "bench", "list"])
+        .portability_contract()
+        .lab_command()
+        .is_none());
+}
+
+#[test]
 fn agent_task_git_checkout_policy_uses_default_backend_when_backend_is_omitted() {
     let command = parsed_command(&[
         "homeboy",
