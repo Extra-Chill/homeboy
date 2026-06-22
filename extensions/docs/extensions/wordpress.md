@@ -102,6 +102,19 @@ that still consume `wp-codebox/task-input/v1`. Select it with
 `request_kind: "wp-codebox"` flag. New callers should prefer the generic
 agent-task request schema and make runtime selection outside the adapter.
 
+## Product Adapter Boundaries
+
+Generic WordPress helpers keep default profiling and helper manifests scoped to
+WordPress itself. Product-specific helpers are exposed behind explicit adapter
+declarations so callers opt in when they need product semantics:
+
+- `getWordPressHelperManifest().productAdapters.woocommerce.helpers` exposes
+  WooCommerce bench fixture helper paths.
+- `WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS.woocommerce` declares the
+  WooCommerce Store API waterfall group and marks it first-party only when the
+  caller passes `productAdapters: ["woocommerce"]` (or the equivalent adapter
+  object) to `summarizeThirdPartyWaterfall()`.
+
 ## WordPress Hook Surface Discovery
 
 `wordpress-hook-surface-discovery` statically extracts literal WordPress

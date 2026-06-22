@@ -13,47 +13,11 @@ const {
 	WORDPRESS_CRUD_OPERATION_SCHEMA,
 	normalizeWordPressCrudOperation,
 } = require('./wordpress-generic-fuzz-primitives');
+const {
+	WORDPRESS_SURFACE_COLLECTION_KEYS,
+	wordpressSurfaceTypeFromCollectionKey,
+} = require('./wordpress-surface-types');
 
-const SURFACE_COLLECTION_KEYS = [
-	'surfaces',
-	'hooks',
-	'cron',
-	'cron_events',
-	'cronEvents',
-	'capabilities',
-	'database',
-	'db',
-	'databaseTables',
-	'database_tables',
-	'dbQueries',
-	'db_queries',
-	'options',
-	'post_types',
-	'postTypes',
-	'taxonomies',
-	'media',
-	'users',
-	'roles',
-	'blocks',
-	'frontend',
-	'frontendUrls',
-	'frontend_urls',
-	'admin',
-	'adminPages',
-	'admin_pages',
-	'ajax',
-	'actions',
-	'ajaxActions',
-	'ajax_actions',
-	'externalHttp',
-	'external_http',
-	'http',
-	'httpRequests',
-	'http_requests',
-	'rest',
-	'restRoutes',
-	'routes',
-];
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
@@ -89,7 +53,7 @@ function collectWordPressFuzzPlanSurfaces(input = {}) {
 	}
 
 	const surfaces = [];
-	for (const key of SURFACE_COLLECTION_KEYS) {
+	for (const key of WORDPRESS_SURFACE_COLLECTION_KEYS) {
 		if (key === 'surfaces') {
 			appendSurfaceMap(surfaces, input.surfaces, undefined);
 			continue;
@@ -144,45 +108,7 @@ function surfaceFromValue(value, defaultType) {
 }
 
 function surfaceTypeFromCollectionKey(key) {
-	return {
-		hooks: 'hook',
-		cron: 'cron-event',
-		cron_events: 'cron-event',
-		cronEvents: 'cron-event',
-		capabilities: 'capability',
-		database: 'database-table',
-		db: 'database-table',
-		databaseTables: 'database-table',
-		database_tables: 'database-table',
-		dbQueries: 'db-query',
-		db_queries: 'db-query',
-		options: 'option',
-		post_types: 'post-type',
-		postTypes: 'post-type',
-		taxonomies: 'taxonomy',
-		media: 'media',
-		users: 'user',
-		roles: 'role',
-		blocks: 'block',
-		frontend: 'frontend-url',
-		frontendUrls: 'frontend-url',
-		frontend_urls: 'frontend-url',
-		admin: 'admin-page',
-		adminPages: 'admin-page',
-		admin_pages: 'admin-page',
-		ajax: 'ajax-action',
-		actions: 'ajax-action',
-		ajaxActions: 'ajax-action',
-		ajax_actions: 'ajax-action',
-		externalHttp: 'external-http',
-		external_http: 'external-http',
-		http: 'external-http',
-		httpRequests: 'external-http',
-		http_requests: 'external-http',
-		rest: 'rest-route',
-		restRoutes: 'rest-route',
-		routes: 'rest-route',
-	}[key];
+	return wordpressSurfaceTypeFromCollectionKey(key);
 }
 
 function targetFromSurface(surface, options = {}) {
