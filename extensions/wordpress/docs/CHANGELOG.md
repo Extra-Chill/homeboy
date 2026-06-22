@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.14] - 2026-06-22
+
+### Changed
+- Add manifest runtime invocation contract
+
 ## [3.12.13] - 2026-06-22
 
 ### Changed
