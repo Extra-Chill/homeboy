@@ -207,13 +207,9 @@ fn runs_rig_and_bench_output_variants_have_unambiguous_contracts() {
                 json!({ "command": "runs.latest-finding", "run": {}, "finding": {} }),
             ),
             variant_contract(
-                "bench_history",
-                json!({ "command": "bench.history", "component_id": "homeboy", "runs": [] }),
-            ),
-            variant_contract(
                 "bench_compare",
                 json!({
-                    "command": "bench.compare",
+                    "command": "runs.bench-compare",
                     "from_run": {},
                     "to_run": {},
                     "comparisons": [],

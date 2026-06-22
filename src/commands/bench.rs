@@ -470,11 +470,18 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
             }
             BenchCommand::List(list_args) => run_list(list_args),
             BenchCommand::History(history_args) => {
-                let (output, exit_code) = runs::bench_history(
-                    &history_args.component,
-                    history_args.scenario_id.as_deref(),
-                    history_args.rig.as_deref(),
-                    history_args.limit,
+                let (output, exit_code) = runs::list_runs(
+                    runs::RunsListArgs {
+                        runner: None,
+                        kind: Some("bench".to_string()),
+                        component_id: Some(history_args.component.clone()),
+                        rig: history_args.rig.clone(),
+                        scenario_id: history_args.scenario_id.clone(),
+                        status: None,
+                        limit: history_args.limit,
+                        include_active_runner_jobs: false,
+                    },
+                    "runs.list",
                 )?;
                 Ok((BenchOutput::Observation(output), exit_code))
             }
@@ -489,16 +496,17 @@ pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> 
                         fields: distribution_args.fields.clone(),
                         limit: distribution_args.limit,
                     },
-                    "bench.distribution",
+                    "runs.distribution",
                 )?;
                 Ok((BenchOutput::Observation(output), exit_code))
             }
             BenchCommand::Compare(compare_args) => {
-                let (output, exit_code) = runs::bench_compare(
-                    &compare_args.from_run,
-                    &compare_args.to_run,
-                    &compare_args.metrics,
-                )?;
+                let (output, exit_code) =
+                    runs::bench_compare_from_args(runs::RunsBenchCompareArgs {
+                        from_run: compare_args.from_run.clone(),
+                        to_run: compare_args.to_run.clone(),
+                        metrics: compare_args.metrics.clone(),
+                    })?;
                 Ok((BenchOutput::Observation(output), exit_code))
             }
         };

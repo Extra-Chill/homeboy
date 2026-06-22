@@ -1,19 +1,22 @@
 use std::collections::BTreeMap;
 
+use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{RunDetail, RunSummary};
+use super::RunSummary;
 
-#[derive(Serialize)]
-pub struct BenchHistoryOutput {
-    pub command: &'static str,
-    pub component_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rig_id: Option<String>,
-    pub runs: Vec<RunDetail>,
+#[derive(Args, Clone)]
+pub struct RunsBenchCompareArgs {
+    /// Earlier benchmark run ID
+    #[arg(long = "from-run")]
+    pub from_run: String,
+    /// Later benchmark run ID
+    #[arg(long = "to-run")]
+    pub to_run: String,
+    /// Metric to include. Repeat to compare multiple metrics. Defaults to all shared numeric metrics.
+    #[arg(long = "metric")]
+    pub metrics: Vec<String>,
 }
 
 #[derive(Serialize)]
