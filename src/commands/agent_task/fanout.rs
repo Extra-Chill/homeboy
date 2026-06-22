@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use homeboy::core::agent_tasks::batch;
 use homeboy::core::agent_tasks::dispatch_service::{
     self, AgentTaskDispatchCommand, DispatchCoreInputs,
 };
@@ -19,8 +20,9 @@ use homeboy::core::{config, Error, Result};
 
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
+    AgentTaskFanoutInputArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutSubmitBatchArgs,
 };
 use super::command_json_value;
 
@@ -31,6 +33,9 @@ pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
             Ok((command_json_value(plan)?, 0))
         }
         AgentTaskFanoutCommand::Submit(submit_args) => submit_batch_cook_fanout(submit_args),
+        AgentTaskFanoutCommand::SubmitBatch(submit_args) => submit_fanout_batch(submit_args),
+        AgentTaskFanoutCommand::Status(status_args) => batch_status(status_args),
+        AgentTaskFanoutCommand::Artifacts(status_args) => batch_artifacts(status_args),
         AgentTaskFanoutCommand::RunPlan(run_args) => run_batch_cook_fanout(run_args),
     }
 }
@@ -68,6 +73,28 @@ fn submit_batch_cook_fanout(args: AgentTaskFanoutSubmitArgs) -> CmdResult<Value>
         }),
         0,
     ))
+}
+
+fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value> {
+    let plan = load_fanout_agent_task_plan(&args.input)?;
+    let record = batch::submit_plan_batch(&plan, args.batch_id.as_deref())?;
+    let batch_id = record.batch_id.clone();
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-batch-submit-result/v1",
+            "batch": record,
+            "commands": batch_commands(&batch_id),
+        }),
+        0,
+    ))
+}
+
+fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
+    Ok((command_json_value(batch::status(&args.batch_id)?)?, 0))
+}
+
+fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
+    Ok((command_json_value(batch::artifacts(&args.batch_id)?)?, 0))
 }
 
 fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
@@ -123,6 +150,12 @@ fn run_batch_cook_fanout(args: AgentTaskFanoutRunPlanArgs) -> CmdResult<Value> {
         }),
         if failed == 0 { 0 } else { 1 },
     ))
+}
+
+fn load_fanout_agent_task_plan(
+    args: &AgentTaskFanoutInputArgs,
+) -> Result<homeboy::core::agent_tasks::scheduler::AgentTaskPlan> {
+    agent_task_service::read_plan(&args.input)
 }
 
 fn load_batch_cook_fanout_plan(args: &AgentTaskFanoutInputArgs) -> Result<BatchCookFanoutPlan> {
@@ -466,6 +499,14 @@ fn default_ai_tool() -> String {
 
 fn default_ai_used_for() -> String {
     "Drafted implementation and tests; Chris reviews and owns the change.".to_string()
+}
+
+fn batch_commands(batch_id: &str) -> Value {
+    serde_json::json!({
+        "status": format!("homeboy agent-task fanout status {batch_id}"),
+        "artifacts": format!("homeboy agent-task fanout artifacts {batch_id}"),
+        "run_next": "homeboy agent-task run-next"
+    })
 }
 
 #[cfg(test)]

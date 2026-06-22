@@ -40,12 +40,35 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
 
+### Durable Fanout Batches
+
+Use `agent-task fanout submit-batch` when a caller has many independent tasks and
+needs durable lifecycle records for every child run. Homeboy persists one parent
+batch record plus one queued `agent-task` run per packet/task, so callers can
+drive execution with `agent-task run-next` or existing runner/lab queue loops and
+later reconcile status/artifacts without in-process Promise fanout or manual
+collation.
+
+```bash
+homeboy agent-task fanout submit-batch --input @packets.json --batch-id audit-wave-1
+homeboy agent-task run-next
+homeboy agent-task fanout status audit-wave-1
+homeboy agent-task fanout artifacts audit-wave-1
+```
+
+`submit-batch` is intentionally provider-neutral: packets still carry ordinary
+`AgentTaskRequest` executor contracts, and child runs use the existing
+`agent-task` lifecycle. Dependent workflow plans are rejected because their
+ordering and output bindings belong in the existing single-run `fanout submit` /
+`run-plan` scheduler path.
+
 ### Cook/Review
 
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
 | `fanout plan\|submit\|run-plan` | Normalize, inspect, or run a batch of independent cooks, each with its own worktree/branch/PR. |
+| `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |

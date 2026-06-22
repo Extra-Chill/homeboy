@@ -24,13 +24,13 @@ pub mod tool;
 
 pub use args::{
     ActiveArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskCommand,
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
     AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskDoctorArgs, AgentTaskFanoutArgs,
-    AgentTaskFanoutCommand, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
+    AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand, AgentTaskFanoutInputArgs,
+    AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
+    AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, FinalizePrArgs, GateFeedbackArgs, LatestArgs,
     ListArgs, PromoteArgs, ProvidersArgs, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs,
