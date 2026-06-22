@@ -22,10 +22,10 @@ const RECORD_SEP: char = '\x1f'; // ASCII Unit Separator — separates commits
 pub struct MonorepoContext {
     /// The git repository root path.
     pub git_root: String,
-    /// Relative path from git root to the component (e.g. "wordpress").
+    /// Relative path from git root to the component (e.g. "api-client").
     pub path_prefix: String,
-    /// Tag prefix for this component (e.g. "wordpress"), used to create
-    /// tags like `wordpress-v1.0.0`.
+    /// Tag prefix for this component (e.g. "api-client"), used to create
+    /// tags like `api-client-v1.0.0`.
     pub tag_prefix: String,
 }
 
@@ -47,7 +47,7 @@ impl MonorepoContext {
     }
 
     /// Format a version as a component-scoped tag name.
-    /// e.g. "1.2.3" -> "wordpress-v1.2.3"
+    /// e.g. "1.2.3" -> "api-client-v1.2.3"
     pub fn format_tag(&self, version: &str) -> String {
         format!("{}-v{}", self.tag_prefix, version)
     }

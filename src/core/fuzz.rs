@@ -26,6 +26,7 @@ pub const FUZZ_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-artifact/v1";
 pub const FUZZ_THRESHOLD_SCHEMA: &str = "homeboy/fuzz-threshold/v1";
 pub const FUZZ_PROVENANCE_SCHEMA: &str = "homeboy/fuzz-provenance/v1";
 pub const FUZZ_REPLAY_SCHEMA: &str = "homeboy/fuzz-replay/v1";
+pub const FUZZ_COVERAGE_SUMMARY_SCHEMA: &str = "homeboy/fuzz-coverage-summary/v1";
 pub const FUZZ_TARGET_INVENTORY_SCHEMA: &str = "homeboy/fuzz-target-inventory/v1";
 pub const FUZZ_EXECUTION_REQUEST_SCHEMA: &str = "homeboy/fuzz-execution-request/v1";
 pub const FUZZ_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/fuzz-result-envelope/v1";
@@ -57,6 +58,7 @@ pub struct FuzzContractSchemas {
     pub threshold: String,
     pub provenance: String,
     pub replay: String,
+    pub coverage_summary: String,
     pub target_inventory: String,
     pub execution_request: String,
     pub result_envelope: String,
@@ -229,6 +231,8 @@ pub struct FuzzCampaign {
     pub seeds: Vec<FuzzSeed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<FuzzCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_summary: Option<FuzzCoverageSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FuzzFinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -323,6 +327,36 @@ pub struct FuzzCoverageGap {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FuzzCoverageSummary {
+    #[serde(default = "fuzz_coverage_summary_schema")]
+    pub schema: String,
+    pub declared_targets: u64,
+    pub executable_targets: u64,
+    pub proven_targets: u64,
+    pub declared_operations: u64,
+    pub executable_operations: u64,
+    pub proven_operations: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_targets: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_operations: Vec<FuzzCoverageSkip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FuzzCoverageSkip {
+    pub id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -571,6 +605,7 @@ pub fn fuzz_core_contract() -> FuzzCoreContract {
             threshold: FUZZ_THRESHOLD_SCHEMA.to_string(),
             provenance: FUZZ_PROVENANCE_SCHEMA.to_string(),
             replay: FUZZ_REPLAY_SCHEMA.to_string(),
+            coverage_summary: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
             target_inventory: FUZZ_TARGET_INVENTORY_SCHEMA.to_string(),
             execution_request: FUZZ_EXECUTION_REQUEST_SCHEMA.to_string(),
             result_envelope: FUZZ_RESULT_ENVELOPE_SCHEMA.to_string(),
@@ -648,6 +683,17 @@ pub fn default_fuzz_required_artifacts() -> Vec<FuzzRequiredArtifact> {
             ),
             acceptable_artifact_kinds: vec!["json".to_string(), "artifact".to_string()],
         },
+        FuzzRequiredArtifact {
+            schema: FUZZ_REQUIRED_ARTIFACT_SCHEMA.to_string(),
+            id: "coverage-summary".to_string(),
+            kind: "coverage_summary".to_string(),
+            required: true,
+            description: Some(
+                "Target and operation coverage summary with declared, executable, and proven counts"
+                    .to_string(),
+            ),
+            acceptable_artifact_kinds: vec!["json".to_string()],
+        },
     ]
 }
 
@@ -673,6 +719,32 @@ pub fn default_fuzz_gates() -> Vec<FuzzGate> {
             unit: Some("count".to_string()),
             description: Some(
                 "Result envelope links at least one case-level proof artifact".to_string(),
+            ),
+        },
+        FuzzGate {
+            schema: FUZZ_GATE_SCHEMA.to_string(),
+            id: "target-coverage-complete".to_string(),
+            kind: "coverage_completeness".to_string(),
+            metric: "target_coverage_ratio".to_string(),
+            operator: FuzzThresholdOperator::GreaterThanOrEqual,
+            value: 1.0,
+            unit: Some("ratio".to_string()),
+            description: Some(
+                "Coverage summary proves every declared target, or explicitly declares zero targets"
+                    .to_string(),
+            ),
+        },
+        FuzzGate {
+            schema: FUZZ_GATE_SCHEMA.to_string(),
+            id: "operation-coverage-complete".to_string(),
+            kind: "coverage_completeness".to_string(),
+            metric: "operation_coverage_ratio".to_string(),
+            operator: FuzzThresholdOperator::GreaterThanOrEqual,
+            value: 1.0,
+            unit: Some("ratio".to_string()),
+            description: Some(
+                "Coverage summary proves every declared operation, or explicitly declares zero operations"
+                    .to_string(),
             ),
         },
     ]
@@ -732,6 +804,10 @@ fn fuzz_provenance_schema() -> String {
 
 fn fuzz_replay_schema() -> String {
     FUZZ_REPLAY_SCHEMA.to_string()
+}
+
+fn fuzz_coverage_summary_schema() -> String {
+    FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string()
 }
 
 fn fuzz_target_inventory_schema() -> String {
@@ -815,6 +891,10 @@ mod tests {
         assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
         assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
         assert_eq!(
+            contract.schemas.coverage_summary,
+            FUZZ_COVERAGE_SUMMARY_SCHEMA
+        );
+        assert_eq!(
             contract.schemas.target_inventory,
             FUZZ_TARGET_INVENTORY_SCHEMA
         );
@@ -846,10 +926,19 @@ mod tests {
             artifact.schema == FUZZ_REQUIRED_ARTIFACT_SCHEMA && artifact.id == "result-envelope"
         }));
         assert!(artifacts.iter().any(|artifact| artifact.id == "case-log"));
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.id == "coverage-summary"));
         assert!(gates
             .iter()
             .any(|gate| gate.schema == FUZZ_GATE_SCHEMA && gate.id == "no-open-findings"));
         assert!(gates.iter().any(|gate| gate.id == "has-case-evidence"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.id == "target-coverage-complete"));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.id == "operation-coverage-complete"));
     }
 
     #[test]
@@ -965,6 +1054,20 @@ mod tests {
                 metadata: Value::Null,
                 extra: BTreeMap::new(),
             }],
+            coverage_summary: Some(FuzzCoverageSummary {
+                schema: FUZZ_COVERAGE_SUMMARY_SCHEMA.to_string(),
+                declared_targets: 1,
+                executable_targets: 1,
+                proven_targets: 1,
+                declared_operations: 1,
+                executable_operations: 1,
+                proven_operations: 1,
+                skipped_targets: Vec::new(),
+                skipped_operations: Vec::new(),
+                artifact_ids: vec!["artifact-1".to_string()],
+                metadata: Value::Null,
+                extra: BTreeMap::new(),
+            }),
             findings: vec![FuzzFinding {
                 schema: FUZZ_FINDING_SCHEMA.to_string(),
                 id: "finding-1".to_string(),
@@ -1036,6 +1139,10 @@ mod tests {
         assert_eq!(value["cases"][0]["schema"], FUZZ_CASE_SCHEMA);
         assert_eq!(value["seeds"][0]["schema"], FUZZ_SEED_SCHEMA);
         assert_eq!(value["coverage"][0]["schema"], FUZZ_COVERAGE_SCHEMA);
+        assert_eq!(
+            value["coverage_summary"]["schema"],
+            FUZZ_COVERAGE_SUMMARY_SCHEMA
+        );
         assert_eq!(value["findings"][0]["schema"], FUZZ_FINDING_SCHEMA);
         assert_eq!(value["artifacts"][0]["schema"], FUZZ_ARTIFACT_SCHEMA);
         assert_eq!(value["thresholds"][0]["schema"], FUZZ_THRESHOLD_SCHEMA);

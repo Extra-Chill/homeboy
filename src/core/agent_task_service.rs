@@ -67,6 +67,12 @@ pub struct AgentTaskDiscoveryRun {
     pub runner_job_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
     pub commands: AgentTaskDiscoveryCommands,
 }
 
@@ -208,6 +214,9 @@ fn discovery_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
         runner_job_id: metadata_string(&record.metadata, "runner_job_id")
             .or_else(|| metadata_string(&record.metadata, "job_id")),
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
+        stale: metadata_bool(&record.metadata, "stale_running"),
+        stale_reason: metadata_string(&record.metadata, "stale_running_reason"),
+        retryable: metadata_bool(&record.metadata, "retryable"),
         commands: AgentTaskDiscoveryCommands {
             status: format!("homeboy agent-task status {run_id}"),
             logs: format!("homeboy agent-task logs {run_id}"),
@@ -257,6 +266,10 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
+    metadata.get(key).and_then(Value::as_bool)
 }
 
 pub fn run_cook_loop<E>(
@@ -1131,6 +1144,39 @@ mod tests {
             assert!(run_ids.contains(&"run-active-queued"));
             assert!(run_ids.contains(&"run-active-running"));
             assert!(!run_ids.contains(&"run-active-complete"));
+        });
+    }
+
+    #[test]
+    fn discovery_active_marks_runner_backed_running_run_as_stale_retryable() {
+        with_isolated_home(|_| {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-runner-stale"))
+                .expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test("run-runner-stale", |record| {
+                record.state = AgentTaskRunState::Running;
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({
+                    "runner_id": "homeboy-lab",
+                    "runner_job_id": "job-123",
+                });
+            })
+            .expect("running runner-backed record stored");
+
+            let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+            let run = report
+                .runs
+                .iter()
+                .find(|run| run.run_id == "run-runner-stale")
+                .expect("runner-backed run listed");
+
+            assert_eq!(run.runner_id.as_deref(), Some("homeboy-lab"));
+            assert_eq!(run.runner_job_id.as_deref(), Some("job-123"));
+            assert_eq!(run.stale, Some(true));
+            assert_eq!(
+                run.stale_reason.as_deref(),
+                Some("runner_job_unverified_after_daemon_restart")
+            );
+            assert_eq!(run.retryable, Some(true));
         });
     }
 

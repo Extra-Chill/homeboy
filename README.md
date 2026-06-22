@@ -341,6 +341,12 @@ gathers attention reports across components, projects, fleets, rigs, or the
 whole workspace. Snapshot report mode is read-only; watch mode only mutates
 GitHub when `--auto-merge` is explicitly passed.
 
+PR items include a `ci_readiness` JSON summary when GitHub exposes check rollup
+data. The summary groups queued, pending, running, failed, skipped, and passed
+checks by required, optional, or unknown requirement status, includes failure
+URLs, reports the oldest pending check duration when timestamps are available,
+and emits next steps for the merge path.
+
 ```bash
 homeboy deps status my-project
 homeboy deps update vendor/package my-project --to '^1.2'
