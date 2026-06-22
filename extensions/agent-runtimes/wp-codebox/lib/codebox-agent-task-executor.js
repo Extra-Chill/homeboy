@@ -142,6 +142,7 @@ const WP_CODEBOX_RUNTIME_GAP_TRACKERS = [
     needed_primitive: 'WP Codebox should export a stable typed-artifact DTO normalizer compatible with Homeboy agent-task typed artifact declarations, including file_refs/fileRefs and artifact_schema/artifactSchema aliases while allowing caller-owned metadata redaction policy.',
   },
 ];
+const WP_CODEBOX_BUILTIN_ARTIFACT_DECLARATION_NAMES = new Set(['patch', 'agent_result', 'transcript']);
 
 function assertAgentTaskRequest(request) {
   if (!request || request.schema !== AGENT_TASK_REQUEST_SCHEMA) {
@@ -328,7 +329,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
   let components = runtimeComponentPaths(config, { ...defaults, ...runtimeOptions, componentContracts });
   const agentBundles = firstDefined(inputs.agent_bundles, inputs.agentBundles, config.agent_bundles, config.agentBundles, runtimeOptions.agentBundles, []);
   const structuredArtifacts = firstDefined(inputs.structured_artifacts, inputs.structuredArtifacts, config.structured_artifacts, config.structuredArtifacts, runtimeOptions.structuredArtifacts, []);
-  const artifactDeclarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions);
+  const artifactDeclarations = codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, inputs, runtimeOptions));
   const homeboyToolPolicy = homeboyAgentToolPolicy();
   const allowedTools = allowedToolsFromAgentTaskRequest(request, config, inputs, runtimeOptions, defaults);
   const sandboxToolPolicy = sandboxToolPolicyFromAgentTaskRequest(config, inputs, runtimeOptions, defaults, allowedTools, homeboyToolPolicy);
@@ -376,7 +377,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     target,
     workspace_materialization: workspaceMaterialization,
     allowed_tools: sandboxAllowedTools || [],
-    expected_artifacts: request.expected_artifacts || [],
+    expected_artifacts: expectedArtifactsForCodeboxTask(request, artifactDeclarations),
     artifact_declarations: artifactDeclarations,
     policy: request.policy || {},
     context,
@@ -441,6 +442,26 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
     agent_bundle: agentBundle,
     parent_request: request,
   };
+}
+
+function expectedArtifactsForCodeboxTask(request, artifactDeclarations = []) {
+  const declarationNames = artifactDeclarations
+    .filter((declaration) => declaration && declaration.required === true)
+    .map((declaration) => typedArtifactNameFromDeclaration(declaration))
+    .filter(Boolean);
+  if (declarationNames.length > 0) {
+    return Array.from(new Set(declarationNames));
+  }
+  return normalizeArray(request.expected_artifacts);
+}
+
+function codeboxTaskArtifactDeclarations(artifactDeclarations = []) {
+  const declarations = normalizeArray(artifactDeclarations);
+  const taskSpecificDeclarations = declarations.filter((declaration) => {
+    const name = typedArtifactNameFromDeclaration(declaration);
+    return name && !WP_CODEBOX_BUILTIN_ARTIFACT_DECLARATION_NAMES.has(name);
+  });
+  return taskSpecificDeclarations.length > 0 ? taskSpecificDeclarations : declarations;
 }
 
 function runtimeOptionsFromExecutorConfig(config = {}, options = {}) {
@@ -757,7 +778,7 @@ function genericAbilityRuntimeTask(request, config, inputs) {
 }
 
 function agentBundleRuntimeTaskInputWithArtifactOutputs(input, request, config, inputs) {
-  const declarations = artifactDeclarationsFromAgentTaskRequest(request, config, inputs)
+  const declarations = codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, inputs))
     .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
   if (declarations.length === 0) {
     return input;
@@ -2366,7 +2387,7 @@ function typedArtifactNameFromDeclaration(declaration) {
 
 function requiredArtifactDeclarationsFromRequest(request) {
   const config = request.executor?.config || {};
-  return artifactDeclarationsFromAgentTaskRequest(request, config, request.inputs || {})
+  return codeboxTaskArtifactDeclarations(artifactDeclarationsFromAgentTaskRequest(request, config, request.inputs || {}))
     .filter((declaration) => declaration && typeof declaration === 'object' && declaration.required === true && typedArtifactNameFromDeclaration(declaration));
 }
 

@@ -639,8 +639,8 @@ const providerAndControllerArtifactsTaskInput = codeboxTaskRequestFromAgentTaskR
     ability_request: { name: 'agents/run-runtime-package' },
   },
 });
-assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['patch', 'concept_packet']);
-assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['patch', 'concept_packet']);
+assert.deepEqual(providerAndControllerArtifactsTaskInput.artifact_declarations.map((declaration) => declaration.name), ['concept_packet']);
+assert.deepEqual(providerAndControllerArtifactsTaskInput.runtime_task.input.required_artifacts, ['concept_packet']);
 assert.equal(
   providerAndControllerArtifactsTaskInput.runtime_task.input.engine_data_outputs.concept_packet,
   'metadata.engine_data.outputs.typed_artifacts.concept_packet.payload'
@@ -650,11 +650,15 @@ const placeholderArtifactOutcome = agentTaskOutcomeFromCodeboxResult({
   schema: 'homeboy/agent-task-request/v1',
   task_id: 'placeholder-artifact-task-1',
   executor: { backend: 'codebox', config: { provider: 'openai' } },
-  artifact_declarations: [{
-    name: 'concept_packet',
-    artifact_schema: 'wp-site-generator/ConceptPacket/v1',
-    required: true,
-  }],
+  artifact_declarations: [
+    { name: 'patch', required: true },
+    { name: 'agent_result', required: true },
+    {
+      name: 'concept_packet',
+      artifact_schema: 'wp-site-generator/ConceptPacket/v1',
+      required: true,
+    },
+  ],
 }, {
   success: true,
   status: 'completed',

@@ -575,7 +575,16 @@ assert.deepEqual(codeboxRequest.agent_bundle, {});
 const artifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
   task_id: 'artifact-declaration-task-123',
+  expected_artifacts: ['patch', 'transcript'],
   artifact_declarations: [{
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'patch',
+    required: true,
+  }, {
+    schema: 'wp-codebox/artifact-declaration/v1',
+    name: 'transcript',
+    required: true,
+  }, {
     schema: 'homeboy/agent-task-artifact-declaration/v1',
     name: 'analysis_report',
     type: 'AnalysisReport',
@@ -584,10 +593,12 @@ const artifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
     required: true,
   }],
 });
+assert.equal(artifactDeclarationRequest.artifact_declarations.length, 1);
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].schema, 'wp-codebox/artifact-declaration/v1');
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].name, 'analysis_report');
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].path, 'artifacts/analysis-report.json');
 assert.equal(artifactDeclarationRequest.artifact_declarations[0].required, true);
+assert.deepEqual(artifactDeclarationRequest.expected_artifacts, ['analysis_report']);
 
 const legacyArtifactDeclarationRequest = codeboxTaskRequestFromAgentTaskRequest({
   ...request,
