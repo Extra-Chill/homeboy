@@ -551,7 +551,9 @@ mod provider_config_candidate_paths_tests {
         provider_config_extra_workspaces, rig_component_path_env_extra_workspaces_from_entries,
         workspace_mapping_entries_for_git_dependency,
     };
-    use crate::core::runner::{RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode};
+    use crate::core::runner::{
+        ByteFileCounts, RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode,
+    };
 
     fn git(path: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -1028,8 +1030,10 @@ mod provider_config_candidate_paths_tests {
             used_pinned_ref: false,
             dirty_overlay: false,
             sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-            files: 7,
-            bytes: 42,
+            counts: ByteFileCounts {
+                files: 7,
+                bytes: 42,
+            },
         };
 
         let entries =

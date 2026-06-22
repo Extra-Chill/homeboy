@@ -117,7 +117,7 @@ pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerTransport};
 pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::{
-    sync_workspace, RunnerWorkspaceCurrentSummary, RunnerWorkspaceSyncMode,
+    sync_workspace, ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 

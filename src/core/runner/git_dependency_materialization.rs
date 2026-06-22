@@ -8,7 +8,7 @@ use crate::core::error::{Error, Result};
 use super::{
     workspace::{
         canonical_workspace_path, effective_snapshot_excludes, git_output, local_snapshot_stats,
-        materialize_snapshot, snapshot_identity, DEFAULT_EXCLUDES,
+        materialize_snapshot, snapshot_identity, ByteFileCounts, DEFAULT_EXCLUDES,
     },
     Runner, RunnerWorkspaceSyncMode,
 };
@@ -40,8 +40,8 @@ pub(crate) struct RunnerGitDependencyMaterializationOutput {
     /// a clean checkout at HEAD. Makes bench artifact provenance explicit.
     pub dirty_overlay: bool,
     pub sync_mode: RunnerWorkspaceSyncMode,
-    pub files: usize,
-    pub bytes: u64,
+    #[serde(flatten)]
+    pub counts: ByteFileCounts,
 }
 
 #[derive(Debug, Clone)]
@@ -118,8 +118,7 @@ pub(crate) fn materialize_git_dependency(
         used_pinned_ref: freshness.used_pinned_ref,
         dirty_overlay,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-        files: stats.files,
-        bytes: stats.bytes,
+        counts: stats,
     })
 }
 
