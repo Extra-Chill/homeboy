@@ -159,6 +159,7 @@ fn core_deps_orchestration_stays_package_manager_agnostic() {
 }
 
 #[test]
+#[ignore = "integration test mutates real npm manifests/locks and shells out to npm"]
 fn npm_update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
     if std::process::Command::new("npm")
         .arg("--version")

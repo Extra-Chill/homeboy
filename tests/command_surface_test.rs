@@ -1,10 +1,11 @@
 use clap::{CommandFactory, Parser};
 use homeboy::cli_surface::{
     command_surface_from_with_depth, current_command_safety_manifest, current_command_surface, Cli,
-    CommandSafetyEntry, Commands,
+    CommandSafetyEntry, CommandSafetyManifest, Commands,
 };
 use std::collections::BTreeSet;
 use std::fs;
+use std::sync::OnceLock;
 
 #[test]
 fn command_surface_tracks_representative_live_and_removed_paths() {
@@ -119,8 +120,8 @@ fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
         .expect("hidden list --json should parse");
     assert!(matches!(cli.command, Commands::List { json: true }));
 
-    let value = serde_json::to_value(current_command_safety_manifest())
-        .expect("safety manifest should serialize");
+    let value =
+        serde_json::to_value(command_safety_manifest()).expect("safety manifest should serialize");
     assert_eq!(value["commands"][0]["path"].as_array().unwrap().len(), 1);
     assert!(value["commands"]
         .as_array()
@@ -140,7 +141,7 @@ fn hidden_list_json_flag_exposes_recursive_safety_manifest() {
 
 #[test]
 fn command_index_matches_top_level_command_surface() {
-    let manifest = current_command_safety_manifest();
+    let manifest = command_safety_manifest();
     let documented = documented_command_index_entries();
 
     let extension_commands = BTreeSet::from(["cargo".to_string(), "wp".to_string()]);
@@ -174,7 +175,7 @@ fn command_index_matches_top_level_command_surface() {
 
 #[test]
 fn command_safety_manifest_docs_paths_match_command_docs() {
-    let manifest = current_command_safety_manifest();
+    let manifest = command_safety_manifest();
     let hidden_top_level_commands = BTreeSet::from(["lab", "list"]);
 
     for entry in &manifest.commands {
@@ -211,7 +212,7 @@ fn command_safety_manifest_docs_paths_match_command_docs() {
 
 #[test]
 fn visible_safety_manifest_entries_advertise_live_command_docs() {
-    let manifest = current_command_safety_manifest();
+    let manifest = command_safety_manifest();
 
     for entry in all_safety_entries(&manifest.commands) {
         if entry.hidden {
@@ -239,7 +240,7 @@ fn visible_safety_manifest_entries_advertise_live_command_docs() {
 
 #[test]
 fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
-    let manifest = current_command_safety_manifest();
+    let manifest = command_safety_manifest();
     let explicit_no_apply_surface = BTreeSet::from([
         "file mkdir".to_string(),
         "file rename".to_string(),
@@ -298,7 +299,7 @@ fn command_docs_files_match_command_index_snapshot() {
     // top-level command exposed by the safety manifest must be both indexed and
     // backed by a docs file. This anchors the assertion to real product
     // behavior rather than to fixture-only set arithmetic.
-    let manifest = current_command_safety_manifest();
+    let manifest = command_safety_manifest();
     let live_top_level: BTreeSet<String> = manifest
         .commands
         .iter()
@@ -580,6 +581,11 @@ fn documented_command_index_entries() -> BTreeSet<String> {
         .filter_map(|rest| rest.split(']').next())
         .map(str::to_string)
         .collect()
+}
+
+fn command_safety_manifest() -> &'static CommandSafetyManifest {
+    static MANIFEST: OnceLock<CommandSafetyManifest> = OnceLock::new();
+    MANIFEST.get_or_init(current_command_safety_manifest)
 }
 
 fn documented_command_doc_files() -> BTreeSet<String> {

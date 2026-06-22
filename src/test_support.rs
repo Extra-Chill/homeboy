@@ -8,6 +8,7 @@ pub(crate) struct HomeGuard {
     prior_artifact_root: Option<String>,
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
+    prior_no_update_check: Option<String>,
     dir: TempDir,
     _runtime_dir: TempDir,
     /// Held alongside `dir` so the short invocation runtime tempdir is
@@ -61,10 +62,12 @@ impl HomeGuard {
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
             std::env::var(crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+        let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
         let dir = TempDir::new().expect("home tempdir");
         std::env::set_var("HOME", dir.path());
         std::env::set_var("XDG_DATA_HOME", dir.path().join(".local").join("share"));
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
+        std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         let runtime_dir = TempDir::new().expect("runtime tempdir");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", runtime_dir.path());
         crate::core::set_artifact_root_override(None);
@@ -84,6 +87,7 @@ impl HomeGuard {
             prior_artifact_root,
             prior_runtime_tmpdir,
             prior_invocation_runtime,
+            prior_no_update_check,
             dir,
             _runtime_dir: runtime_dir,
             _inv_dir: Some(inv_dir),
@@ -138,6 +142,10 @@ impl Drop for HomeGuard {
             None => std::env::remove_var(
                 crate::core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
             ),
+        }
+        match &self.prior_no_update_check {
+            Some(value) => std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", value),
+            None => std::env::remove_var("HOMEBOY_NO_UPDATE_CHECK"),
         }
         crate::core::defaults::reset_config_cache_for_test();
         crate::commands::utils::entity_suggest::reset_entity_suggestion_cache_for_test();

@@ -510,6 +510,7 @@ fn deps_orchestration_stays_package_manager_agnostic() {
 }
 
 #[test]
+#[ignore = "integration test mutates real composer manifests/locks and shells out to composer"]
 fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
     if std::process::Command::new("composer")
         .arg("--version")
