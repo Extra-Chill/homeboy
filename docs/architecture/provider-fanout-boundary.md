@@ -1,7 +1,7 @@
 # Provider fanout boundary
 
 Homeboy core owns durable orchestration and provider-neutral evidence. Runtime
-providers own backend-specific fanout execution. The seam is the
+providers own backend-specific execution details. The seam is the
 `AgentTaskRequest`/`AgentTaskOutcome` adapter boundary.
 
 ## Ownership map
@@ -20,18 +20,17 @@ Homeboy submits provider-neutral `AgentTaskRequest` tasks to an executor provide
 The provider may translate the task into any backend-specific single-task or
 fanout request, but Homeboy core does not depend on provider runtime field names.
 
-Homeboy's first-class fanout primitive is `AgentTaskFanoutPlan`, which wraps
-generic `AgentTaskRequest` tasks with a Homeboy-owned fanout id and one of two
-provider-neutral planes:
+The public operator meaning of `agent-task fanout` is batch cook: many
+independent cooks, each with its own worktree/branch and its own PR
+finalization. Generic provider-neutral fanout scheduling remains an internal
+implementation seam for adapters and schedulers that need it; it is not the
+public CLI contract.
 
-- `isolated_tasks` for many isolated execution units scheduled under one fanout
-  id.
-- `workflow` for dependent task steps inside one logical execution unit.
-
-The fanout scheduler lowers both planes into `AgentTaskPlan`, reuses the generic
-agent-task scheduler for concurrency, retry, timeout, dependency, and
-backpressure behavior, then emits `AgentTaskFanoutAggregate` with the normalized
-schedule aggregate plus the generic reconciliation report.
+Public batch-cook fanout lowers each cook into the normal cook-loop path, so
+Homeboy owns dispatch, promotion, deterministic gates, commit/push, and PR
+finalization per cook. Provider adapters still receive one normalized
+`AgentTaskRequest` at a time and return one normalized `AgentTaskOutcome` at a
+time.
 
 The provider returns a normalized `AgentTaskOutcome`:
 
