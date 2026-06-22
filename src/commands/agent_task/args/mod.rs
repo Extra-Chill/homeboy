@@ -9,6 +9,7 @@
 //! commands own long-running loop state.
 
 use clap::{Args, Subcommand, ValueEnum};
+use homeboy::core::agent_task_service::AgentTaskDiscoveryOptions;
 use homeboy::core::agent_tasks::gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 
 use super::super::agent_task_dispatch::DispatchArgs;
@@ -138,11 +139,11 @@ pub enum AgentTaskCommand {
     /// Lifecycle: read durable agent-task run status.
     Status(StatusArgs),
     /// Lifecycle: list durable agent-task runs, newest first.
-    List,
+    List(ListArgs),
     /// Lifecycle: list queued and running durable agent-task runs, newest first.
-    Active,
+    Active(ActiveArgs),
     /// Lifecycle: show the latest durable agent-task run.
-    Latest,
+    Latest(LatestArgs),
     /// Lifecycle: read durable agent-task run scheduler events.
     Logs(StatusArgs),
     /// Lifecycle: list artifacts and evidence refs recorded for a completed run.
@@ -178,6 +179,53 @@ pub enum AgentTaskCommand {
     /// Internal bridge for provider-runtime agent tool requests.
     #[command(hide = true)]
     Tool(AgentTaskToolArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Maximum number of durable runs to return.
+    #[arg(long = "limit", value_name = "N")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args, Debug)]
+pub struct ActiveArgs {
+    /// Maximum number of active durable runs to return.
+    #[arg(long = "limit", value_name = "N")]
+    pub limit: Option<usize>,
+
+    /// Cancel stale/suspect/unreconciled active runs through the lifecycle path.
+    #[arg(long = "reconcile")]
+    pub reconcile: bool,
+
+    /// Report reconcile candidates without cancelling durable run records.
+    #[arg(long = "dry-run", requires = "reconcile")]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct LatestArgs {
+    /// Maximum number of latest durable runs to return.
+    #[arg(long = "limit", value_name = "N")]
+    pub limit: Option<usize>,
+}
+
+impl From<ListArgs> for AgentTaskDiscoveryOptions {
+    fn from(args: ListArgs) -> Self {
+        AgentTaskDiscoveryOptions { limit: args.limit }
+    }
+}
+
+impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
+    fn from(args: ActiveArgs) -> Self {
+        AgentTaskDiscoveryOptions { limit: args.limit }
+    }
+}
+
+impl From<LatestArgs> for AgentTaskDiscoveryOptions {
+    fn from(args: LatestArgs) -> Self {
+        AgentTaskDiscoveryOptions { limit: args.limit }
+    }
 }
 
 /// Shared deterministic verification gate flags. Flattened into every

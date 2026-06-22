@@ -505,9 +505,9 @@ impl Commands {
                     // lives on the runner, so `--runner <id> agent-task
                     // list/active/latest` must resolve against that runner to
                     // make discovery consistent with status/logs/etc (#5681).
-                    | agent_task::AgentTaskCommand::List
-                    | agent_task::AgentTaskCommand::Active
-                    | agent_task::AgentTaskCommand::Latest,
+                    | agent_task::AgentTaskCommand::List(_)
+                    | agent_task::AgentTaskCommand::Active(_)
+                    | agent_task::AgentTaskCommand::Latest(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:

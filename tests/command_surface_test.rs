@@ -54,6 +54,88 @@ fn agent_task_prompt_store_commands_parse() {
 }
 
 #[test]
+fn agent_task_discovery_commands_use_typed_args() {
+    let list = Cli::try_parse_from(["homeboy", "agent-task", "list", "--limit", "5"])
+        .expect("agent-task list --limit should parse");
+    let active = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "active",
+        "--limit=7",
+        "--reconcile",
+        "--dry-run",
+    ])
+    .expect("agent-task active typed flags should parse");
+    let latest = Cli::try_parse_from(["homeboy", "agent-task", "latest", "--limit", "1"])
+        .expect("agent-task latest --limit should parse");
+
+    match list.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::List(args) => {
+                assert_eq!(args.limit, Some(5));
+            }
+            other => panic!("expected agent-task list, got {other:?}"),
+        },
+        other => panic!("expected agent-task command, got {other:?}"),
+    }
+
+    match active.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::Active(args) => {
+                assert_eq!(args.limit, Some(7));
+                assert!(args.reconcile);
+                assert!(args.dry_run);
+            }
+            other => panic!("expected agent-task active, got {other:?}"),
+        },
+        other => panic!("expected agent-task command, got {other:?}"),
+    }
+
+    match latest.command {
+        Commands::AgentTask(args) => match args.command {
+            homeboy::commands::agent_task::AgentTaskCommand::Latest(args) => {
+                assert_eq!(args.limit, Some(1));
+            }
+            other => panic!("expected agent-task latest, got {other:?}"),
+        },
+        other => panic!("expected agent-task command, got {other:?}"),
+    }
+
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--dry-run"]).is_err());
+}
+
+#[test]
+fn agent_task_discovery_help_documents_typed_flags() {
+    let mut root = Cli::command();
+    let agent_task = root
+        .find_subcommand_mut("agent-task")
+        .expect("agent-task command");
+
+    let list_help = agent_task
+        .find_subcommand_mut("list")
+        .expect("agent-task list command")
+        .render_long_help()
+        .to_string();
+    assert!(list_help.contains("--limit <N>"));
+
+    let active_help = agent_task
+        .find_subcommand_mut("active")
+        .expect("agent-task active command")
+        .render_long_help()
+        .to_string();
+    assert!(active_help.contains("--limit <N>"));
+    assert!(active_help.contains("--reconcile"));
+    assert!(active_help.contains("--dry-run"));
+
+    let latest_help = agent_task
+        .find_subcommand_mut("latest")
+        .expect("agent-task latest command")
+        .render_long_help()
+        .to_string();
+    assert!(latest_help.contains("--limit <N>"));
+}
+
+#[test]
 fn agent_task_tool_bridge_stays_hidden_but_parseable() {
     let surface = current_command_surface();
 

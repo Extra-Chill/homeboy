@@ -220,6 +220,23 @@ fn test_supports_lab_runner() {
         parsed_command(&["homeboy", "agent-task", "review", "agent-task-123"])
             .supports_lab_runner()
     );
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "list", "--limit", "5"]).supports_lab_runner()
+    );
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "active", "--limit", "5"]).supports_lab_runner()
+    );
+    assert!(parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "active",
+        "--reconcile",
+        "--dry-run"
+    ])
+    .supports_lab_runner());
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "latest", "--limit", "1"]).supports_lab_runner()
+    );
     assert!(parsed_command(&["homeboy", "agent-task", "providers"]).supports_lab_runner());
     assert!(parsed_command(&[
         "homeboy",

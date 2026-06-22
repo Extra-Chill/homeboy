@@ -28,9 +28,9 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `run-next` | Claim and execute the oldest queued durable run. |
 | `submit` | Persist an agent-task plan and return a durable run id without executing it. |
 | `status <run-id>` | Read durable run status. |
-| `list` | List durable runs, newest first. |
-| `active` | List queued and running durable runs, newest first. |
-| `latest` | Show the latest durable run. |
+| `list [--limit <n>]` | List durable runs, newest first. |
+| `active [--limit <n>] [--reconcile [--dry-run]]` | List queued and running durable runs, newest first, or reconcile stale active records. |
+| `latest [--limit <n>]` | Show the latest durable run. |
 | `logs <run-id>` | Read durable run scheduler events. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
@@ -38,6 +38,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `fanout plan\|submit\|run-plan` | Compile, persist, or run generic provider-neutral fanout inputs. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
+
+`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
 
 ### Cook/Review
 
