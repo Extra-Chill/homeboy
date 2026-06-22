@@ -265,6 +265,94 @@ fn controller_run_from_spec_persists_dispatch_defaults_for_generated_actions() {
 }
 
 #[test]
+fn controller_run_from_spec_preserves_runtime_execution_and_components() {
+    with_temp_home(|| {
+        let observed_request = Arc::new(Mutex::new(None));
+        let (value, exit_code) = controller_run_from_spec_with_test_executor(
+            AgentTaskControllerRunFromSpecArgs {
+                spec: serde_json::to_string(&json!({
+                    "loop_id": "run-from-spec-runtime-execution-loop",
+                    "workflows": [{
+                        "workflow_id": "store-idea",
+                        "prompt": "Generate a concept packet.",
+                        "runtime_execution": {
+                            "kind": "bundle",
+                            "ability": "runtime-package/run",
+                            "input": {
+                                "package": { "source": "bundles/store-idea-agent" },
+                                "workflow": { "id": "store-idea-artifact-flow" },
+                                "input": { "wait_for_completion": true }
+                            }
+                        },
+                        "emits": ["concept_packet"]
+                    }],
+                    "artifacts": [{
+                        "artifact_id": "concept_packet",
+                        "kind": "wp-site-generator/ConceptPacket/v1",
+                        "required": true
+                    }]
+                }))
+                .expect("spec json"),
+                inputs: Some(
+                    serde_json::to_string(&json!({
+                        "inputs": {
+                            "runtime_config": {
+                                "component_contracts": [{
+                                    "slug": "agents-api",
+                                    "path": "runtime/agents-api",
+                                    "loadAs": "plugin",
+                                    "activate": true
+                                }]
+                            }
+                        }
+                    }))
+                    .expect("inputs json"),
+                ),
+                policy_results: Vec::new(),
+                max_actions: 1,
+                dispatch_backend: Some("fixture".to_string()),
+                dispatch_selector: None,
+                dispatch_model: None,
+                dispatch_provider_config: None,
+            },
+            CapturingExecutor {
+                observed_request: Arc::clone(&observed_request),
+            },
+        )
+        .expect("run from spec");
+
+        let observed = observed_request
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("provider saw request");
+
+        assert_eq!(exit_code, 1, "{value:#}");
+        assert_eq!(
+            observed.inputs["runtime_task"]["ability"],
+            "runtime-package/run"
+        );
+        assert_eq!(
+            observed.inputs["runtime_task"]["input"]["package"]["source"],
+            "bundles/store-idea-agent"
+        );
+        assert_eq!(observed.component_contracts.len(), 1);
+        assert_eq!(
+            observed.component_contracts[0].slug.as_deref(),
+            Some("agents-api")
+        );
+        assert_eq!(
+            observed.component_contracts[0].path.as_deref(),
+            Some("runtime/agents-api")
+        );
+        assert_eq!(
+            value["materialization"]["spec"]["workflows"][0]["runtime_execution"]["ability"],
+            "runtime-package/run"
+        );
+    });
+}
+
+#[test]
 fn controller_run_from_spec_rejects_unbounded_zero_max_actions() {
     with_temp_home(|| {
         let error = controller_run_from_spec_with_test_executor(

@@ -116,7 +116,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 config: provider_config.clone(),
             },
             instructions,
-            inputs: Value::Null,
+            inputs: dispatch_request_inputs(&client_context),
             source_refs,
             workspace: AgentTaskWorkspace {
                 mode: AgentTaskWorkspaceMode::Existing,
@@ -514,6 +514,10 @@ fn dispatch_component_contracts(
         collect_component_contracts_from_value(inputs, "client-context.inputs", &mut contracts)?;
     }
     Ok(contracts)
+}
+
+fn dispatch_request_inputs(client_context: &Value) -> Value {
+    client_context.get("inputs").cloned().unwrap_or(Value::Null)
 }
 
 fn collect_component_contracts_from_value(

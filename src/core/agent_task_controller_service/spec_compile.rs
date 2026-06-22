@@ -647,8 +647,64 @@ pub(super) fn workflow_client_context(
         "dependencies": select_by_id(&spec.dependencies, &workflow.dependencies, |dependency| &dependency.dependency_id),
         "gates": select_by_id(&spec.gates, &workflow.gates, |gate| &gate.gate_id),
         "metrics": select_by_id(&spec.metrics, &workflow.metrics, |metric| &metric.metric_id),
-        "inputs": workflow.inputs,
+        "inputs": workflow_context_inputs(workflow),
     }))
+}
+
+fn workflow_context_inputs(workflow: &AgentTaskRepoLoopSpecWorkflow) -> Value {
+    let mut inputs = match workflow.inputs.clone() {
+        Value::Object(map) => map,
+        Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("workflow_inputs".to_string(), other);
+            map
+        }
+    };
+
+    if let Some(runtime_task) = runtime_task_from_workflow_execution(&workflow.runtime_execution) {
+        inputs
+            .entry("runtime_task".to_string())
+            .or_insert(runtime_task);
+    }
+
+    if let Some(component_contracts) = inputs
+        .get("runtime_config")
+        .and_then(|runtime_config| runtime_config.get("component_contracts"))
+        .cloned()
+    {
+        inputs
+            .entry("runtime_component_contracts".to_string())
+            .or_insert(component_contracts);
+    }
+
+    Value::Object(inputs)
+}
+
+fn runtime_task_from_workflow_execution(runtime_execution: &Value) -> Option<Value> {
+    let execution = runtime_execution.as_object()?;
+    let ability = execution.get("ability")?.as_str()?.trim();
+    if ability.is_empty() {
+        return None;
+    }
+
+    let mut runtime_task = serde_json::Map::new();
+    runtime_task.insert("ability".to_string(), Value::String(ability.to_string()));
+    runtime_task.insert(
+        "input".to_string(),
+        execution
+            .get("input")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+    );
+    if let Some(kind) = execution
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
+    {
+        runtime_task.insert("kind".to_string(), Value::String(kind.to_string()));
+    }
+    Some(Value::Object(runtime_task))
 }
 
 pub(super) fn workflow_homeboy_plan(

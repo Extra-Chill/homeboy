@@ -108,6 +108,7 @@ fn from_spec_dispatch_defaults_fall_back_to_current_git_checkout() {
             dependencies: Vec::new(),
             gates: Vec::new(),
             metrics: Vec::new(),
+            runtime_execution: Value::Null,
             inputs: Value::Null,
         },
     );
