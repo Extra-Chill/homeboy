@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.38] - 2026-06-22
+
+### Changed
+- Prefer cached WP Codebox CLI for fuzz runs
+
 ## [3.12.37] - 2026-06-22
 
 ### Fixed
