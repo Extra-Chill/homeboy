@@ -708,6 +708,7 @@ mod tests {
         assert_eq!(outcome, None);
     }
 
+    #[test]
     fn agent_task_doctor_runner_option_routes_locally() {
         let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         let normalized = vec![
