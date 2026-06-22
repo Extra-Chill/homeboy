@@ -19,6 +19,10 @@ use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
 use super::{CmdResult, GlobalArgs};
+use crate::command_contract::{
+    CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
+    TRACE_LAB_LABEL,
+};
 
 mod aggregate;
 #[cfg(test)]
@@ -261,6 +265,19 @@ impl TraceArgs {
     pub fn is_compare_target_run(&self) -> bool {
         self.comp.component.as_deref() == Some("compare")
             && (self.baseline_target.is_some() || self.candidate.is_some())
+    }
+
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        let mut contract = LabCommandContract::portable_workload(
+            TRACE_LAB_LABEL,
+            self.keep_overlay.then_some("--keep-overlay"),
+            false,
+            LAB_TRACE_EXTRA_TOOLS,
+        );
+        if self.is_compare_target_run() {
+            contract.workspace_mode_policy = LabWorkspaceModePolicy::Git;
+        }
+        CommandPortabilityContract::lab(contract)
     }
 }
 

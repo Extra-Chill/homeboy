@@ -21,8 +21,8 @@ use super::utils::args::{
 };
 use super::{runs, CmdResult, GlobalArgs};
 use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-    BENCH_LAB_LABEL,
+    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
+    LabCommandContract, BENCH_LAB_LABEL,
 };
 
 mod default_baseline;
@@ -85,6 +85,10 @@ impl BenchArgs {
                 &[],
             )
         })
+    }
+
+    pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
+        CommandPortabilityContract::lab_optional(self.lab_contract())
     }
 
     pub fn is_lab_offload_command(&self) -> bool {
