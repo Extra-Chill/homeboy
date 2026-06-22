@@ -6,6 +6,7 @@ use std::process::Command;
 
 use crate::core::error::{Error, Result};
 
+use super::super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
 use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubPrOutput, GithubPrView, PrCreateOptions, PrEditOptions,
     PrFindOptions, PrMergeOptions,
@@ -341,18 +342,22 @@ pub fn pr_merge(component_id: Option<&str>, options: PrMergeOptions) -> Result<G
     let (id, repo) = resolve_component_github(component_id, options.path.as_deref())?;
     ensure_gh_ready()?;
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "merge".into(),
-        options.number.to_string(),
-        "-R".into(),
-        repo_flag,
-        format!("--{}", method),
-    ];
-    if options.delete_branch {
-        args.push("--delete-branch".into());
+    let branch_to_delete = if options.delete_branch {
+        let view = pr_view(Some(&id), options.number, options.path.clone())?;
+        (view.head_repository.as_deref() == Some(repo_flag.as_str()) && !view.head.is_empty())
+            .then_some(view.head)
+    } else {
+        None
+    };
+
+    run_gh(&pr_merge_api_args(&repo_flag, options.number, &method))?;
+
+    let mut warnings = Vec::new();
+    if let Some(branch) = branch_to_delete {
+        if let Err(error) = run_gh(&delete_branch_ref_api_args(&repo_flag, &branch)) {
+            warnings.push(format!("failed to delete branch {branch}: {error}"));
+        }
     }
-    run_gh(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -361,6 +366,7 @@ pub fn pr_merge(component_id: Option<&str>, options: PrMergeOptions) -> Result<G
         success: true,
         number: Some(options.number),
         state: Some("merged".to_string()),
+        warnings,
         ..Default::default()
     })
 }
