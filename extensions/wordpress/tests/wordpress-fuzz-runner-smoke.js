@@ -74,6 +74,7 @@ assert.equal(result.workload_id, 'workload-from-env');
 assert.equal(result.seed, 'seed-123');
 assert.equal(result.max_duration_seconds, 30);
 assert.equal(result.wp_codebox_input.schema, 'wp-codebox/fuzz-suite/v1');
+assert.equal(result.wp_codebox_input.goal, 'Run WordPress fuzz suite workload-from-env and return the declared fuzz artifacts.');
 assert.equal(result.wp_codebox_input.cases[0].target_id, 'rest-posts');
 assert.equal(result.wp_codebox_task_request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
 assert.equal(result.wp_codebox_plan_recipe.fuzzRun, undefined);
@@ -121,6 +122,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 		assert.equal(request.executor.backend, 'codebox');
 		assert.equal(request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
 		assert.equal(request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
+		assert.equal(request.executor.config.runtime_task.input.goal, 'Run WordPress fuzz suite generic-wordpress-workload and return the declared fuzz artifacts.');
 		assert.equal(request.executor.config.runtime_task.input.cases[0].target_id, 'rest-posts');
 		return {
 			json: {
