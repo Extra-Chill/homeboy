@@ -49,11 +49,12 @@ pub use super::runner::{
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerArtifactRef,
     RunnerCapabilityPreflight, RunnerConnectReport, RunnerDisconnectReport, RunnerExecDiagnostics,
     RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerFailureKind, RunnerHandoff,
-    RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerRequiredTool, RunnerResourceMetrics,
-    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec,
-    RunnerStaleDaemonWarning, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
-    RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
+    RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerNamedWorkspaceLease, RunnerRequiredTool, RunnerResourceMetrics, RunnerResult,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
+    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 

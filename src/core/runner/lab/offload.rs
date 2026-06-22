@@ -1007,22 +1007,6 @@ fn run_lab_offload_inner(
         ));
     }
 
-    if request.capture_patch && status_tunnel_mode(&runner_status) == RunnerTunnelMode::Reverse {
-        let reason =
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string();
-        plan = with_step(
-            plan,
-            PlanStep::builder(
-                "lab.mutation_return",
-                "lab.mutation_return",
-                PlanStepStatus::Missing,
-            )
-            .skip_reason(reason.clone())
-            .build(),
-        );
-        return mutation_return_unavailable_outcome(plan, &selection, &runner_status, reason);
-    }
-
     let runner_workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace_root",
@@ -2098,31 +2082,6 @@ fn append_runner_failure_context_summary(
         context.runner_id,
         context.reason
     ));
-}
-
-fn mutation_return_unavailable_outcome(
-    plan: HomeboyPlan,
-    selection: &LabRunnerSelection,
-    runner_status: &RunnerStatusReport,
-    reason: String,
-) -> Result<LabOffloadOutcome> {
-    match selection.source {
-        LabRunnerSelectionSource::Default => Ok(automatic_capability_fallback(
-            plan,
-            &selection.runner_id,
-            runner_status,
-            reason,
-        )),
-        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-            "runner",
-            reason,
-            Some(selection.runner_id.clone()),
-            Some(vec![
-                "Use --force-hot to run the command locally until reverse Lab mutation return is supported."
-                    .to_string(),
-            ]),
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -3225,61 +3184,6 @@ mod tests {
     }
 
     #[test]
-    fn mutation_return_gap_falls_back_for_default_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let outcome = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        )
-        .expect("default runner falls back");
-
-        let LabOffloadOutcome::RunLocal {
-            messages, metadata, ..
-        } = outcome
-        else {
-            panic!("expected local fallback");
-        };
-        assert!(messages[0].contains("running locally"));
-        assert_eq!(metadata.expect("metadata")["status"], "fallback");
-    }
-
-    #[test]
-    fn mutation_return_gap_rejects_explicit_reverse_runner() {
-        let plan = base_lab_plan(Some(&portable_lab_command("audit")));
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let status = reverse_status("lab");
-
-        let result = mutation_return_unavailable_outcome(
-            plan,
-            &selection,
-            &status,
-            "Lab offload cannot yet return source-tree mutations from reverse runners".to_string(),
-        );
-        let Err(err) = result else {
-            panic!("expected explicit runner rejection");
-        };
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err
-            .message
-            .contains("cannot yet return source-tree mutations"));
-        assert_eq!(err.details["id"], "lab");
-    }
-
-    #[test]
     fn apply_patch_step_accepts_noop_mutation_return() {
         let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
 
@@ -3318,6 +3222,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: Some(CommandCaptureMetadata {
@@ -3364,6 +3269,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,
@@ -3409,6 +3315,7 @@ mod tests {
             job_events: None,
             mirror_run_id: Some("runner-exec-lab-default-job-123".to_string()),
             patch: None,
+            mutation_artifacts: None,
             artifacts: Vec::new(),
             metrics: None,
             capture: None,

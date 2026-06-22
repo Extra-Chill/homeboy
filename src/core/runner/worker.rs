@@ -377,6 +377,7 @@ fn run_once_output(
                 stdout: None,
                 stderr: Some(err.to_string()),
                 patch: None,
+                mutation_artifacts: None,
                 data: Some(json!({
                     "error": err.to_string(),
                 })),
@@ -438,22 +439,24 @@ fn remote_runner_result_from_exec_output(
     exit_code: i32,
 ) -> RemoteRunnerJobResult {
     let patch = exec_output.patch.clone();
+    let mutation_artifacts = exec_output.mutation_artifacts.clone();
     let mut data = json!({
         "mode": exec_output.mode,
         "remote_cwd": exec_output.remote_cwd,
     });
-    // Reverse workers currently execute through the local process seam. That
-    // seam cannot create mutation artifacts by itself, but preserving this
-    // generic patch/artifact envelope lets future daemon-equivalent worker
-    // runtimes report mutations without provider-specific parsing here.
     if let Some(patch) = patch.clone() {
         data["patch"] = patch;
+    }
+    if let Some(mutation_artifacts) = mutation_artifacts.clone() {
+        data["mutation_artifacts"] =
+            serde_json::to_value(&mutation_artifacts).unwrap_or(serde_json::Value::Null);
     }
     RemoteRunnerJobResult {
         exit_code,
         stdout: Some(exec_output.stdout),
         stderr: Some(exec_output.stderr),
         patch,
+        mutation_artifacts,
         data: Some(data),
         artifacts: exec_output.artifacts,
         metrics: exec_output.metrics,
@@ -731,6 +734,20 @@ mod tests {
                     "patch_artifact_id": "patch.diff",
                     "modified_files": ["src/lib.rs"],
                 })),
+                mutation_artifacts: Some(crate::core::runner::RunnerMutationArtifacts {
+                    patch_ref: Some(crate::core::runner::RunnerArtifactRef {
+                        artifact_id: "patch.diff".to_string(),
+                        name: Some("patch.diff".to_string()),
+                        path: Some("/srv/workspace/.homeboy/patch.diff".to_string()),
+                        url: None,
+                        mime: Some("text/x-diff".to_string()),
+                        size_bytes: Some(42),
+                        sha256: Some("abc123".to_string()),
+                        transport: None,
+                    }),
+                    file_bundle_ref: None,
+                    operation_log_ref: None,
+                }),
                 artifacts: vec![JobArtifactMetadata {
                     id: "patch.diff".to_string(),
                     name: Some("patch.diff".to_string()),
@@ -760,6 +777,14 @@ mod tests {
             "src/lib.rs"
         );
         assert_eq!(result.artifacts[0].id, "patch.diff");
+        assert_eq!(
+            result
+                .mutation_artifacts
+                .as_ref()
+                .and_then(|artifacts| artifacts.patch_ref.as_ref())
+                .map(|artifact| artifact.artifact_id.as_str()),
+            Some("patch.diff")
+        );
     }
 
     #[test]
