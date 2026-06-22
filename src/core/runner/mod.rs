@@ -102,6 +102,7 @@ pub use offload_changed_since::{
 pub use offload_metadata::{
     capture_lab_offload_subprocess_metadata, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping,
+    lab_offload_metadata_with_workspace_mapping_and_runner_workload,
 };
 pub use resource_metrics::RunnerResourceMetrics;
 pub use session::{
