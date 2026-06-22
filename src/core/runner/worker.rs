@@ -1,7 +1,9 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, RecvTimeoutError, Sender},
     Arc,
 };
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -100,7 +102,7 @@ fn run_reverse_worker_with_stop(
         ));
     }
     if options.loop_mode {
-        run_loop(options, stop, std::thread::sleep)
+        run_loop(options, stop, thread::sleep)
     } else {
         run_once_output(options, 1, 0, 0, false)
     }
@@ -302,6 +304,7 @@ fn run_once_output(
         &options.runner_id,
         &claim.job,
     )?;
+    let _heartbeat = start_claim_heartbeat(&client, &options, &claim.job)?;
     // Remote capability-parity preflight: validate that this runner can satisfy
     // the claimed job's top-level command (and any required paths) before
     // starting execution, so a missing tool fails before remote dispatch instead
@@ -668,6 +671,97 @@ fn finish_job(
             Some("parse finished reverse runner job".to_string()),
         )
     })
+}
+
+fn renew_claim(
+    client: &Client,
+    broker_url: &str,
+    token: Option<&str>,
+    runner_id: &str,
+    job: &Job,
+    lease_ms: u64,
+) -> Result<Job> {
+    let claim_id = remote_runner_claim_id(job)?;
+    let data = broker_http::post_json(
+        client,
+        broker_url,
+        &format!("/runner/jobs/{}/heartbeat", job.id),
+        json!({
+            "runner_id": runner_id,
+            "claim_id": claim_id,
+            "lease_ms": lease_ms.max(1),
+        }),
+        "renew reverse runner claim",
+        token,
+    )?;
+    serde_json::from_value(data["job"].clone()).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("parse reverse runner heartbeat job".to_string()),
+        )
+    })
+}
+
+fn start_claim_heartbeat(
+    client: &Client,
+    options: &ReverseRunnerWorkerOptions,
+    job: &Job,
+) -> Result<ClaimHeartbeat> {
+    remote_runner_claim_id(job)?;
+    let (stop, stopped) = mpsc::channel();
+    let client = client.clone();
+    let broker_url = options.broker_url.clone();
+    let broker_token = options.broker_token.clone();
+    let runner_id = options.runner_id.clone();
+    let job = job.clone();
+    let lease_ms = options.lease_ms.max(1);
+    let interval = Duration::from_millis((lease_ms / 2).max(1));
+    let handle = thread::spawn(move || loop {
+        match stopped.recv_timeout(interval) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Err(err) = renew_claim(
+            &client,
+            &broker_url,
+            broker_token.as_deref(),
+            &runner_id,
+            &job,
+            lease_ms,
+        ) {
+            eprintln!(
+                "{}",
+                json!({
+                    "command": "runner.work",
+                    "event": "claim_heartbeat_failed",
+                    "runner_id": runner_id,
+                    "broker_url": broker_url,
+                    "job_id": job.id,
+                    "error": err.to_string(),
+                })
+            );
+        }
+    });
+    Ok(ClaimHeartbeat {
+        stop: Some(stop),
+        handle: Some(handle),
+    })
+}
+
+struct ClaimHeartbeat {
+    stop: Option<Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for ClaimHeartbeat {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn cancelled_job_snapshot(

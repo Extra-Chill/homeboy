@@ -216,10 +216,17 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             command: job.command.clone(),
             cwd: job.cwd.clone(),
             source: job.source.clone(),
-            lifecycle_owner: if job.source == "broker" {
-                RunnerLifecycleOwner::Broker
-            } else {
-                RunnerLifecycleOwner::Controller
+            lifecycle_owner: match crate::core::api_jobs::RunnerJobSource::from_metadata(
+                &job.source,
+            )
+            .lifecycle_owner()
+            {
+                crate::core::api_jobs::RunnerJobLifecycleOwner::Broker => {
+                    RunnerLifecycleOwner::Broker
+                }
+                crate::core::api_jobs::RunnerJobLifecycleOwner::Controller => {
+                    RunnerLifecycleOwner::Controller
+                }
             },
             started_at_ms: Some(job.started_at_ms),
             updated_at_ms: Some(job.updated_at_ms),

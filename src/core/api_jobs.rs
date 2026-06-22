@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -140,6 +141,74 @@ pub struct ActiveRunnerJobSummary {
     pub active_child_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_cell_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerJobSource {
+    Broker,
+    Daemon,
+    #[serde(rename = "runner-daemon")]
+    RunnerDaemon,
+    #[serde(rename = "direct-daemon")]
+    DirectDaemon,
+    #[serde(rename = "reverse-broker")]
+    ReverseBroker,
+    Unknown,
+}
+
+impl RunnerJobSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Broker => "broker",
+            Self::Daemon => "daemon",
+            Self::RunnerDaemon => "runner-daemon",
+            Self::DirectDaemon => "direct-daemon",
+            Self::ReverseBroker => "reverse-broker",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_metadata(value: &str) -> Self {
+        match value {
+            "broker" => Self::Broker,
+            "daemon" => Self::Daemon,
+            "runner-daemon" | "runner_daemon" => Self::RunnerDaemon,
+            "direct-daemon" | "direct_daemon" => Self::DirectDaemon,
+            "reverse-broker" | "reverse_broker" => Self::ReverseBroker,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn lifecycle_owner(self) -> RunnerJobLifecycleOwner {
+        match self {
+            Self::Broker | Self::ReverseBroker => RunnerJobLifecycleOwner::Broker,
+            _ => RunnerJobLifecycleOwner::Controller,
+        }
+    }
+}
+
+impl fmt::Display for RunnerJobSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerJobLifecycleOwner {
+    Broker,
+    Controller,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRunnerJobRunSummary {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub started_at: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub status_note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -571,6 +640,60 @@ fn active_runner_job_summary(
             .and_then(|metadata| metadata.get("active_cell_count"))
             .and_then(Value::as_u64),
     }
+}
+
+pub fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> ActiveRunnerJobRunSummary {
+    let active_child_count = optional_count(job.active_child_count);
+    let active_cell_count = optional_count(job.active_cell_count);
+    let durable_run_id = job.durable_run_id.as_deref().unwrap_or("unknown");
+    let command = format!(
+        "{} [source={}, kind={}, runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
+        job.command,
+        job.source,
+        job.kind,
+        job.runner_id,
+        job.job_id,
+        durable_run_id,
+        job.elapsed_ms,
+        active_child_count,
+        active_cell_count
+    );
+    let status_note = format!(
+        "active runner job: source={} kind={} runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
+        job.source,
+        job.kind,
+        job.runner_id,
+        job.job_id,
+        durable_run_id,
+        job.elapsed_ms,
+        active_child_count,
+        active_cell_count
+    );
+
+    ActiveRunnerJobRunSummary {
+        id: job
+            .durable_run_id
+            .clone()
+            .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
+        kind: job.kind,
+        status: job.status.run_status_label().to_string(),
+        started_at: ms_to_rfc3339(job.started_at_ms),
+        command,
+        cwd: job.cwd,
+        status_note,
+    }
+}
+
+fn optional_count(count: Option<u64>) -> String {
+    count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
 }
 
 fn runner_job_lifecycle_state(job: &Job) -> &'static str {

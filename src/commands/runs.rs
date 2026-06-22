@@ -33,7 +33,7 @@ use homeboy::core::observation::{ArtifactRecord, ObservationStore, RunListFilter
 use homeboy::core::runners::RunnerArtifactRef;
 use homeboy::core::validation_progress::{ValidationCommandSummary, ValidationProgressLedger};
 use homeboy::core::Error;
-use homeboy::core::{api_jobs::ActiveRunnerJobSummary, runners as runner};
+use homeboy::core::{api_jobs, runners as runner};
 
 use super::{CmdResult, GlobalArgs};
 pub use bench::{bench_compare, bench_history, BenchCompareOutput, BenchHistoryOutput};
@@ -510,57 +510,22 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
         .collect()
 }
 
-fn active_runner_job_run_summary(job: ActiveRunnerJobSummary) -> RunSummary {
+fn active_runner_job_run_summary(job: api_jobs::ActiveRunnerJobSummary) -> RunSummary {
+    let summary = api_jobs::active_runner_job_run_summary(job);
     RunSummary {
-        id: job
-            .durable_run_id
-            .clone()
-            .unwrap_or_else(|| format!("runner-job-{}", job.job_id)),
-        kind: job.kind.clone(),
-        status: job.status.run_status_label().to_string(),
-        started_at: ms_to_rfc3339(job.started_at_ms),
+        id: summary.id,
+        kind: summary.kind,
+        status: summary.status,
+        started_at: summary.started_at,
         finished_at: None,
         component_id: None,
         rig_id: None,
         git_sha: None,
-        command: Some(format!(
-            "{} [source={}, kind={}, runner={}, job={}, durable_run={}, elapsed_ms={}, active_child_count={}, active_cell_count={}]",
-            job.command,
-            job.source,
-            job.kind,
-            job.runner_id,
-            job.job_id,
-            job.durable_run_id.as_deref().unwrap_or("unknown"),
-            job.elapsed_ms,
-            optional_count(job.active_child_count),
-            optional_count(job.active_cell_count)
-        )),
-        cwd: job.cwd,
-        status_note: Some(format!(
-            "active runner job: source={} kind={} runner={} job={} durable_run={} elapsed_ms={} active_child_count={} active_cell_count={}",
-            job.source,
-            job.kind,
-            job.runner_id,
-            job.job_id,
-            job.durable_run_id.as_deref().unwrap_or("unknown"),
-            job.elapsed_ms,
-            optional_count(job.active_child_count),
-            optional_count(job.active_cell_count)
-        )),
+        command: Some(summary.command),
+        cwd: summary.cwd,
+        status_note: Some(summary.status_note),
         artifact_index: None,
     }
-}
-
-fn optional_count(count: Option<u64>) -> String {
-    count
-        .map(|count| count.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn ms_to_rfc3339(ms: u64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339()
 }
 
 fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
