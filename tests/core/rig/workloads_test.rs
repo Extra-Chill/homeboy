@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::core::rig::spec::RigSpec;
 use crate::core::rig::{
-    check_groups_for_extension_workloads, extension_ids_for_workloads,
+    check_groups_for_extension_workloads, extension_ids_for_workloads, extension_workload_inputs,
     runner_capabilities_for_extension, trace_dependencies_for_extension,
     workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
 };
@@ -160,6 +160,51 @@ fn test_fuzz_workloads_for_extension_filters_and_expands_paths() {
         ]
     );
     assert!(workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "missing").is_empty());
+}
+
+#[test]
+fn test_fuzz_workload_inputs_include_paths_and_invocation_requirements() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "plugin-fuzz",
+            "fuzz_workloads": {
+                "extension-a": [
+                    {
+                        "path": "${package.root}/fuzz/parser.json",
+                        "port_range_size": 4,
+                        "named_leases": ["browser-profile"]
+                    },
+                    {
+                        "path": "${package.root}/fuzz/rest.json",
+                        "port_range_size": 2,
+                        "named_leases": ["browser-profile", "network-proxy"]
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+    let package = PathBuf::from("/tmp/homeboy-rigs/plugin-fuzz");
+
+    let inputs = extension_workload_inputs(
+        &rig_spec,
+        RigWorkloadKind::Fuzz,
+        Some(&package),
+        "extension-a",
+    );
+
+    assert_eq!(
+        inputs.workload_paths,
+        vec![
+            PathBuf::from("/tmp/homeboy-rigs/plugin-fuzz/fuzz/parser.json"),
+            PathBuf::from("/tmp/homeboy-rigs/plugin-fuzz/fuzz/rest.json"),
+        ]
+    );
+    assert_eq!(inputs.invocation_requirements.port_range_size, Some(4));
+    assert_eq!(
+        inputs.invocation_requirements.named_leases,
+        vec!["browser-profile".to_string(), "network-proxy".to_string()]
+    );
 }
 
 #[test]

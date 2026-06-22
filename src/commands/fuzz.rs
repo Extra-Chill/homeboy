@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::component::{Component, ScopedExtensionConfig};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
@@ -838,8 +839,16 @@ fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
         args.run_id.clone(),
         args.inventory.as_deref(),
     )?;
+    let invocation_requirements =
+        fuzz_invocation_requirements(rig_context.as_ref(), ctx.extension_id.as_deref());
     let run_dir = RunDir::create()?;
-    let runner_output = run_fuzz_extension_script(&ctx, &args, selected_workload, &run_dir)?;
+    let runner_output = run_fuzz_extension_script(
+        &ctx,
+        &args,
+        selected_workload,
+        invocation_requirements,
+        &run_dir,
+    )?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let results = if results_path.exists() {
         Some(parse_fuzz_results_file(&results_path)?)
@@ -1211,6 +1220,7 @@ fn run_fuzz_extension_script(
     ctx: &execution_context::ExecutionContext,
     args: &FuzzRunArgs,
     workload: Option<&FuzzWorkloadOutput>,
+    invocation_requirements: InvocationRequirements,
     run_dir: &RunDir,
 ) -> homeboy::core::Result<homeboy::core::extension::RunnerOutput> {
     let execution_context =
@@ -1235,6 +1245,7 @@ fn run_fuzz_extension_script(
         .settings_json(&args.setting_args.setting_json)
         .path_override(args.comp.path.clone())
         .with_run_dir(run_dir)
+        .invocation_requirements(invocation_requirements)
         .script_args(&args.args);
 
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
@@ -1419,16 +1430,12 @@ fn fuzz_workloads(
         })
         .collect();
 
-    if let (Some(context), Some(extension_id)) = (rig_context, extension_id) {
+    if let Some(extension_id) = extension_id {
         workloads.extend(
-            rig::workload_path_expansions_for_extension(
-                &context.spec,
-                rig::RigWorkloadKind::Fuzz,
-                context.package_root.as_deref(),
-                extension_id,
-            )
-            .into_iter()
-            .map(|expansion| fuzz_workload_from_path(extension_id, &expansion.expanded_path)),
+            fuzz_rig_workload_inputs(rig_context, Some(extension_id))
+                .workload_paths
+                .into_iter()
+                .map(|path| fuzz_workload_from_path(extension_id, &path)),
         );
     }
 
@@ -1449,6 +1456,32 @@ fn fuzz_workloads(
     }
 
     workloads
+}
+
+fn fuzz_invocation_requirements(
+    rig_context: Option<&FuzzRigContext>,
+    extension_id: Option<&str>,
+) -> InvocationRequirements {
+    fuzz_rig_workload_inputs(rig_context, extension_id).invocation_requirements
+}
+
+fn fuzz_rig_workload_inputs(
+    rig_context: Option<&FuzzRigContext>,
+    extension_id: Option<&str>,
+) -> rig::RigExtensionWorkloadInputs {
+    let Some((context, extension_id)) = rig_context.zip(extension_id) else {
+        return rig::RigExtensionWorkloadInputs {
+            workload_paths: Vec::new(),
+            invocation_requirements: InvocationRequirements::default(),
+        };
+    };
+
+    rig::extension_workload_inputs(
+        &context.spec,
+        rig::RigWorkloadKind::Fuzz,
+        context.package_root.as_deref(),
+        extension_id,
+    )
 }
 
 fn fuzz_workload_from_path(extension_id: &str, path: &Path) -> FuzzWorkloadOutput {
