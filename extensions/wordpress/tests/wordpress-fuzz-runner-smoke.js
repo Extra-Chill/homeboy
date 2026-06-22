@@ -200,12 +200,16 @@ if (!request.extra_plugins?.some((plugin) => plugin.slug === 'wp-codebox' && plu
 }
 process.stdout.write(JSON.stringify({
   success: true,
-  result: {
-    schema: 'wp-codebox/fuzz-suite-result/v1',
-    request_id: request.id,
-    status: 'succeeded',
-    artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
-    coverage_summary: { surface_count: 1, exercised_count: 1 }
+  agent_task_result: {
+    raw: {
+      result: {
+        schema: 'wp-codebox/fuzz-suite-result/v1',
+        request_id: request.id,
+        status: 'succeeded',
+        artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+        coverage_summary: { surface_count: 1, exercised_count: 1 }
+      }
+    }
   }
 }));
 `);
