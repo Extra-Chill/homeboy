@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.29] - 2026-06-22
+
+### Changed
+- Use focused WP Codebox entrypoints
+
 ## [3.12.28] - 2026-06-22
 
 ### Changed
