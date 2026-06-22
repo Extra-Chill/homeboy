@@ -168,7 +168,7 @@ pub const COMMAND_REGISTRY: &[CommandRegistryEntry] = &[
     command_registry_entry("git", CommandJsonFamily::Ops),
     command_registry_entry("issues", CommandJsonFamily::Ops),
     command_registry_entry("version", CommandJsonFamily::Workspace),
-    command_registry_entry("build", CommandJsonFamily::Quality),
+    command_registry_entry("build", CommandJsonFamily::Workspace),
     command_registry_entry("changes", CommandJsonFamily::Workspace),
     command_registry_entry("release", CommandJsonFamily::Workspace),
     command_registry_entry("report", CommandJsonFamily::Workspace),
