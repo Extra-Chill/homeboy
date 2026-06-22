@@ -21,7 +21,7 @@ try {
   if (errorMessage) {
     throw new Error(`scenario ${process.env.FLOW_SLUG} completed with error_message=${errorMessage}`);
   }
-  if (successStatus === 'pr_opened' || completionOutcomeSatisfied || (successStatus === 'no_changes' && noChangesAllowed)) {
+  if (successStatus === 'pr_opened' || completionOutcomeSatisfied || (['no_changes', 'no_op'].includes(successStatus) && noChangesAllowed)) {
     process.exit(0);
   }
   throw new Error(`scenario ${process.env.FLOW_SLUG} expected opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=${jobStatus} success_status=${successStatus} completion_outcome_satisfied=${completionOutcomeSatisfied ? 'true' : 'false'} no_changes_allowed=${noChangesAllowed ? 'true' : 'false'}`);

@@ -11,3 +11,4 @@ Object.assign(module.exports, require('./lib/preview-materialization'));
 Object.assign(module.exports, require('./lib/controller-loop-proof-validator'));
 Object.assign(module.exports, require('./lib/bounded-production-loop-runner'));
 Object.assign(module.exports, require('./lib/workspace-publication-lifecycle.cjs'));
+Object.assign(module.exports, require('./lib/agent-task-outcome-normalizer'));

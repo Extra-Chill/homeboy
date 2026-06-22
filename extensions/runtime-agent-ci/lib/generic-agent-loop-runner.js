@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { runDeterministicLoop } = require('./deterministic-loop-runner');
+const { runBoundedProductionLoop } = require('./bounded-production-loop-runner');
+const { validateControllerLoopProof } = require('./controller-loop-proof-validator');
 const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 
 function buildGenericAgentLoopRequest(options = {}) {
@@ -85,8 +87,18 @@ function runGenericAgentLoop(options = {}) {
     validationPolicy,
   });
   const results = materializeGenericAgentLoopResults(outcome, { ...options, runtime });
+  const productionProof = buildBoundedProductionProof({ request, outcome, plan: options.plan || {}, validationPolicy });
+  const controllerProofValidation = validateControllerLoopProof({
+    spec: buildControllerLoopProofSpec({ request, plan: options.plan || {}, validationPolicy }),
+    proof: productionProof,
+    policy: controllerProofPolicy(validationPolicy, options.plan || {}),
+  });
+  attachFullRunProofValidation(results, { productionProof, controllerProofValidation });
   const assertion = options.validate === false ? null : assertGenericAgentLoopOutcome(results, validationPolicy);
-  return { request, outcome, results, assertion, loop };
+  if (options.validate !== false && !controllerProofValidation.valid) {
+    throw new Error(`controller loop proof validation failed: ${controllerProofValidation.failures.map((item) => item.message).join('; ')}`);
+  }
+  return { request, outcome, results, assertion, loop, productionProof, controllerProofValidation };
 }
 
 function runGenericDeterministicLoop(options = {}) {
@@ -420,10 +432,126 @@ function assertGenericAgentLoopOutcome(results, validationPolicy = {}) {
   if (errorMessage) {
     throw new Error(`scenario ${assertion.scenario_id} completed with error_message=${errorMessage}`);
   }
-  if (successStatus === 'pr_opened' || completionOutcomeSatisfied || (successStatus === 'no_changes' && noChangesAllowed)) {
+  if (successStatus === 'pr_opened' || completionOutcomeSatisfied || (['no_changes', 'no_op'].includes(successStatus) && noChangesAllowed)) {
     return assertion;
   }
   throw new Error(`scenario ${assertion.scenario_id} expected opened PR, satisfied completion outcome, or allowed no-changes result, got job_status=${jobStatus} success_status=${successStatus} completion_outcome_satisfied=${completionOutcomeSatisfied ? 'true' : 'false'} no_changes_allowed=${noChangesAllowed ? 'true' : 'false'}`);
+}
+
+function buildBoundedProductionProof(options = {}) {
+  const request = requiredObject(options.request, 'request');
+  const outcome = requiredObject(options.outcome, 'outcome');
+  const plan = optionalObject(options.plan);
+  const validationPolicy = optionalObject(options.validationPolicy || options.validation_policy);
+  const proofPolicy = controllerProofPolicy(validationPolicy, plan);
+  return runBoundedProductionLoop({
+    loopId: `${request.task_id}-bounded-production-proof`,
+    maxIterations: positiveInteger(proofPolicy.max_iterations) || 1,
+    executeIteration: () => outcome,
+    acceptedStatuses: normalizeArray(proofPolicy.accepted_statuses).length > 0
+      ? proofPolicy.accepted_statuses
+      : ['accepted', 'succeeded', 'passed', 'no_op'],
+    artifactRequirements: artifactRequirementsForProof(request, plan, proofPolicy),
+    evidenceRequirements: evidenceRequirementsForProof(validationPolicy, plan, proofPolicy),
+    previewRequirement: proofPolicy.preview_required === true || proofPolicy.require_preview === true,
+    publicationEvidenceRequirement: proofPolicy.publication_required === true || proofPolicy.require_publication === true || proofPolicy.pr_required === true || proofPolicy.require_pr === true,
+  });
+}
+
+function buildControllerLoopProofSpec(options = {}) {
+  const request = requiredObject(options.request, 'request');
+  const plan = optionalObject(options.plan);
+  const validationPolicy = optionalObject(options.validationPolicy || options.validation_policy);
+  const proofPolicy = controllerProofPolicy(validationPolicy, plan);
+  return {
+    schema: 'homeboy/full-run-controller-loop-proof-spec/v1',
+    artifacts: artifactDeclarationsForControllerProof(request, plan, proofPolicy),
+    required_evidence: evidenceRequirementsForProof(validationPolicy, plan, proofPolicy),
+    policy: {
+      ...proofPolicy,
+      allowed_statuses: normalizeArray(proofPolicy.allowed_statuses).length > 0 ? proofPolicy.allowed_statuses : ['succeeded'],
+      allowed_stop_reasons: normalizeArray(proofPolicy.allowed_stop_reasons).length > 0 ? proofPolicy.allowed_stop_reasons : ['accepted'],
+      max_iterations: positiveInteger(proofPolicy.max_iterations) || 1,
+      publication_evidence: proofPolicy.publication_evidence || proofPolicy.pr_evidence || { kind: 'publication' },
+    },
+  };
+}
+
+function controllerProofPolicy(validationPolicy = {}, plan = {}) {
+  return {
+    ...optionalObject(plan.controller_loop_proof),
+    ...optionalObject(plan.controller_loop_proof_policy),
+    ...optionalObject(validationPolicy.controller_loop_proof),
+    ...optionalObject(validationPolicy.controller_loop_proof_policy),
+  };
+}
+
+function artifactRequirementsForProof(request, plan, proofPolicy) {
+  const expected = normalizeArray(request.expected_artifacts).map((name) => ({ name }));
+  const declared = artifactDeclarationsForControllerProof(request, plan, proofPolicy)
+    .filter((declaration) => declaration.required)
+    .map((declaration) => ({ name: declaration.id, kind: declaration.kind, role: declaration.role }));
+  return [...expected, ...declared];
+}
+
+function artifactDeclarationsForControllerProof(request, plan, proofPolicy) {
+  const declarations = normalizeArtifactDeclarations([
+    ...normalizeArray(request.artifact_declarations),
+    ...normalizeArray(plan.artifact_declarations),
+    ...normalizeArray(proofPolicy.artifacts || proofPolicy.artifact_declarations),
+  ]);
+  return declarations.map((declaration) => ({
+    id: declaration.name,
+    required: declaration.required,
+    kind: declaration.kind,
+    reviewer_facing: declaration.reviewer_facing,
+    durable_url_required: declaration.durable_url_required,
+  }));
+}
+
+function evidenceRequirementsForProof(validationPolicy, plan, proofPolicy) {
+  return normalizeEvidenceRequirements([
+    ...normalizeArray(plan.required_evidence_refs || plan.required_evidence),
+    ...normalizeArray(validationPolicy.required_evidence_refs || validationPolicy.required_evidence),
+    ...normalizeArray(proofPolicy.required_evidence_refs || proofPolicy.required_evidence),
+  ]);
+}
+
+function attachFullRunProofValidation(results, proof) {
+  const scenario = normalizeArray(results?.scenarios)[0];
+  if (!scenario || typeof scenario !== 'object') {
+    return;
+  }
+  scenario.metadata = {
+    ...optionalObject(scenario.metadata),
+    bounded_production_loop_proof: compactProductionProof(proof.productionProof),
+    controller_loop_proof_validation: proof.controllerProofValidation,
+  };
+}
+
+function compactProductionProof(proof) {
+  return {
+    schema: proof.schema,
+    loop_id: proof.loop_id,
+    status: proof.status,
+    stop_reason: proof.stop_reason,
+    max_iterations: proof.max_iterations,
+    iteration_count: proof.iteration_count,
+    validation_failures: proof.validation_failures,
+    evidence_envelope: proof.evidence_envelope,
+    iterations: normalizeArray(proof.iterations).map((iteration) => ({
+      schema: iteration.schema,
+      loop_id: iteration.loop_id,
+      iteration: iteration.iteration,
+      result: iteration.result,
+      artifacts: iteration.artifacts,
+      evidence_refs: iteration.evidence_refs,
+      validation_failures: iteration.validation_failures,
+      accepted: iteration.accepted,
+      repair: iteration.repair,
+      fanout: iteration.fanout,
+    })),
+  };
 }
 
 function assertGenericAgentLoopRuntimeContract(plan = {}, runtime = {}) {
@@ -484,18 +612,6 @@ function validateGenericAgentLoopOutcomeContract(options = {}) {
     const ref = findEvidenceRef(evidenceRefs, requirement);
     if (!ref) {
       errors.push(`missing required evidence ref ${requirement.name || requirement.kind || requirement.url || requirement.uri || '(unnamed)'}`);
-      continue;
-    }
-    const localOnly = localOnlyReviewerEvidence(ref);
-    if (localOnly) {
-      errors.push(`evidence ref ${evidenceRefLabel(ref)} is local-only: ${localOnly}`);
-    }
-  }
-
-  for (const ref of evidenceRefs) {
-    const localOnly = localOnlyReviewerEvidence(ref);
-    if (localOnly) {
-      errors.push(`evidence ref ${evidenceRefLabel(ref)} is local-only: ${localOnly}`);
     }
   }
 
@@ -533,6 +649,8 @@ function normalizeArtifactDeclarations(value) {
       required: declaration.required === true,
       kind: declaration.kind || declaration.type || declaration.artifact_kind || declaration.artifactKind,
       schema: declaration.artifact_schema || declaration.artifactSchema || declaration.payload_schema || declaration.payloadSchema,
+      reviewer_facing: declaration.reviewer_facing,
+      durable_url_required: declaration.durable_url_required,
     }))
     .filter((declaration) => declaration.name);
 }
@@ -566,26 +684,8 @@ function artifactSchema(artifact) {
   return artifact.artifact_schema || artifact.artifactSchema || artifact.payload_schema || artifact.payloadSchema || artifact.schema || '';
 }
 
-function evidenceRefLabel(ref) {
-  return ref.name || ref.id || ref.label || ref.kind || evidenceRefUrl(ref) || '(unnamed)';
-}
-
 function evidenceRefUrl(ref) {
   return ref.url || ref.uri || ref.href || ref.path || '';
-}
-
-function localOnlyReviewerEvidence(ref) {
-  const url = evidenceRefUrl(ref);
-  if (!url || typeof url !== 'string') {
-    return '';
-  }
-  if (/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::|\/|$)/i.test(url)) {
-    return url;
-  }
-  if (/^file:\/\//i.test(url) || /^\/Users\//.test(url) || /^\/private\//.test(url) || /^\/tmp\//.test(url)) {
-    return url;
-  }
-  return '';
 }
 
 function runtimeCapabilities(runtime = {}, plan = {}) {
