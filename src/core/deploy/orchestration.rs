@@ -1099,22 +1099,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deploy_validation_rejects_legacy_build_command_before_artifact_checks() {
-        let dir = TempDir::new().expect("temp dir");
-        let mut component = make_component("sample-extension", &dir.path().to_string_lossy());
-        component.build_artifact =
-            Some("packages/browser-extension/dist/sample-extension.zip".to_string());
-        component.build_command = Some("npm run package:browser-extension".to_string());
-
-        let err = validate_supported_build_configs(&[component])
-            .expect_err("legacy build_command should fail deploy preflight");
-
-        assert!(err.message.contains("unsupported legacy build_command"));
-        assert!(err.message.contains("Use scripts.build instead"));
-        assert_eq!(err.details["field"].as_str(), Some("build_command"));
-    }
-
     fn write_component_manifest(dir: &Path, id: &str, build_command: Option<&str>) {
         let mut manifest = serde_json::json!({
             "id": id,

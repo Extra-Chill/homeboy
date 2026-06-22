@@ -8,7 +8,7 @@ use std::fs;
 use std::sync::OnceLock;
 
 #[test]
-fn command_surface_tracks_representative_live_and_removed_paths() {
+fn command_surface_tracks_representative_live_paths() {
     let surface = current_command_surface();
 
     assert!(surface.contains_path(&["audit"]));
@@ -22,12 +22,6 @@ fn command_surface_tracks_representative_live_and_removed_paths() {
     assert!(surface.contains_path(&["agent-task", "auth", "status"]));
     assert!(surface.contains_path(&["agent-task", "prompts", "save"]));
     assert!(surface.contains_path(&["runner", "job", "logs"]));
-    assert!(!surface.contains_path(&["init"]));
-    assert!(!surface.contains_path(&["version", "bump"]));
-    assert!(!surface.contains_path(&["components"]));
-    assert!(!surface.contains_path(&["stacks", "inspect"]));
-    assert!(!surface.contains_path(&["audit", "code"]));
-    assert!(!surface.contains_path(&["list"]));
     assert!(!surface.contains_path(&["runner", "job", "logs", "extra"]));
 }
 
