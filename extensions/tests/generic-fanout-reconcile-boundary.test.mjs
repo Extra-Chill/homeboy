@@ -15,6 +15,7 @@ const runner = require(path.join(repoRoot, 'runtime-agent-ci/lib/fanout-reconcil
 
 assert.equal(typeof runtimeAgentCi.createGenericFanoutReconcilePlan, 'function');
 assert.equal(typeof runtimeAgentCi.createGenericFanoutReconcileResult, 'function');
+assert.equal(typeof runtimeAgentCi.validateControllerLoopProof, 'function');
 assert.equal(typeof runtimeAgentCi.createFanoutReconcilePlan, 'function');
 assert.equal(runtimeAgentCi.createGenericFanoutReconcilePlan, genericWorkflow.createGenericFanoutReconcilePlan);
 assert.equal(runtimeAgentCi.createFanoutReconcilePlan, runner.createFanoutReconcilePlan);
@@ -34,14 +35,18 @@ assert.deepEqual(
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'runtime-agent-ci/package.json'), 'utf8'));
 assert.equal(packageJson.main, 'index.js');
+assert.equal(packageJson.exports['./controller-loop-proof-validator'], './lib/controller-loop-proof-validator.js');
 assert.equal(packageJson.exports['./fanout-reconcile-runner'], './lib/fanout-reconcile-runner.js');
 assert.equal(packageJson.exports['./generic-fanout-reconcile-workflow'], './lib/generic-fanout-reconcile-workflow.js');
+assert.equal(packageJson.bin['homeboy-controller-loop-proof-validate'], './scripts/homeboy-controller-loop-proof-validate.cjs');
 assert.equal(packageJson.bin['homeboy-generic-fanout-reconcile'], './scripts/homeboy-generic-fanout-reconcile.cjs');
 
 const runtimeSources = [
   'runtime-agent-ci/index.js',
+  'runtime-agent-ci/lib/controller-loop-proof-validator.js',
   'runtime-agent-ci/lib/fanout-reconcile-runner.js',
   'runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js',
+  'runtime-agent-ci/scripts/homeboy-controller-loop-proof-validate.cjs',
   'runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs',
 ];
 const sourceViolations = runtimeSources.filter((relativePath) => /wordpress|wp-codebox|Codebox/.test(

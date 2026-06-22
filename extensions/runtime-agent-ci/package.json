@@ -5,14 +5,17 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./controller-loop-proof-validator": "./lib/controller-loop-proof-validator.js",
     "./bounded-production-loop-runner": "./lib/bounded-production-loop-runner.js",
     "./fanout-reconcile-runner": "./lib/fanout-reconcile-runner.js",
     "./generic-fanout-reconcile-workflow": "./lib/generic-fanout-reconcile-workflow.js"
   },
   "bin": {
+    "homeboy-controller-loop-proof-validate": "./scripts/homeboy-controller-loop-proof-validate.cjs",
     "homeboy-generic-fanout-reconcile": "./scripts/homeboy-generic-fanout-reconcile.cjs"
   },
   "scripts": {
+    "test:controller-loop-proof-validator": "node ../tests/controller-loop-proof-validator.test.mjs",
     "test:generic-fanout-reconcile-boundary": "node ../tests/generic-fanout-reconcile-boundary.test.mjs"
   },
   "engines": {
