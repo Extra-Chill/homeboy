@@ -19,10 +19,8 @@ set -euo pipefail
 #
 # Optional:
 #   HOMEBOY_SETTINGS_JSON  - JSON payload from homeboy with release.version,
-#                            release.tag, and release.component_id. Not parsed
-#                            here because build.sh derives names from
-#                            HOMEBOY_COMPONENT_ID and plugin/theme headers
-#                            directly. The publish step consumes the tag.
+#                            release.tag, release.component_id, and any dynamic
+#                            settings. Invalid or missing JSON is treated as {}.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -37,6 +35,22 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "Error: jq is required to emit release artifact JSON" >&2
   exit 1
 fi
+
+COMPONENT_SETTINGS_JSON="{}"
+if [[ -f homeboy.json ]]; then
+  COMPONENT_SETTINGS_JSON="$(jq -c '.extensions.wordpress.settings // {} | if type == "object" then . else {} end' homeboy.json 2>/dev/null || printf '{}')"
+fi
+
+SETTINGS_JSON="$(jq -cn \
+  --argjson component "${COMPONENT_SETTINGS_JSON}" \
+  --arg payload "${HOMEBOY_SETTINGS_JSON:-}" \
+  '
+    def object_or_empty($value):
+      try ($value | fromjson | if type == "object" then . else {} end) catch {};
+
+    $component + object_or_empty($payload)
+  ')"
+export HOMEBOY_SETTINGS_JSON="${SETTINGS_JSON}"
 
 # Resolve the component slug the way build.sh does (so the ZIP path matches).
 COMPONENT_SLUG="${HOMEBOY_COMPONENT_ID:-}"
@@ -85,9 +99,7 @@ echo "Built ${ARTIFACT_PATH}" >&2
 # this action; standalone dry-runs fall back to the on-disk header so the
 # check still validates build output against source.
 EXPECTED_VERSION=""
-if [[ -n "${HOMEBOY_SETTINGS_JSON:-}" ]]; then
-  EXPECTED_VERSION="$(echo "${HOMEBOY_SETTINGS_JSON}" | jq -r '.release.version // empty')"
-fi
+EXPECTED_VERSION="$(echo "${HOMEBOY_SETTINGS_JSON}" | jq -r '.release.version // empty')"
 if [[ -z "${EXPECTED_VERSION}" ]]; then
   for candidate in *.php; do
     [[ -f "${candidate}" ]] || continue

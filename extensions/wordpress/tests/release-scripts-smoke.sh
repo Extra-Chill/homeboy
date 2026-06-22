@@ -69,10 +69,24 @@ STUB_GH
 chmod +x "${STUB_BIN_DIR}/gh"
 
 # ---------------------------------------------------------------------------
-# package.sh: emits artifact JSON when build/<slug>.zip exists.
+# package.sh: emits artifact JSON and forwards component WordPress settings
+# when build/<slug>.zip exists.
 # ---------------------------------------------------------------------------
 mkdir -p build
 echo "fake-zip-bytes" > build/test-plugin.zip
+cat > homeboy.json <<'JSON'
+{
+  "id": "test-plugin",
+  "extensions": {
+    "wordpress": {
+      "settings": {
+        "build_nested_packages": false,
+        "package_artifacts": ["runtime/packages/*.zip"]
+      }
+    }
+  }
+}
+JSON
 
 # Replace the real build script with a no-op so we don't actually run the
 # WordPress build harness (which needs composer, node, plugin headers, …).
@@ -81,6 +95,10 @@ trap 'rm -rf "${WORK_DIR}" "${PACKAGE_SCRIPT_DIR}"' EXIT
 mkdir -p "${PACKAGE_SCRIPT_DIR}/scripts/build" "${PACKAGE_SCRIPT_DIR}/scripts/release"
 cat > "${PACKAGE_SCRIPT_DIR}/scripts/build/build.sh" <<'STUB'
 #!/usr/bin/env bash
+if ! printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -e '.build_nested_packages == false' >/dev/null; then
+  echo "stub build did not receive build_nested_packages=false: ${HOMEBOY_SETTINGS_JSON:-}" >&2
+  exit 1
+fi
 echo "stub build" >&2
 STUB
 chmod +x "${PACKAGE_SCRIPT_DIR}/scripts/build/build.sh"
@@ -100,6 +118,21 @@ elif ! echo "${stub_output}" | jq -e '.[0].type == "wordpress-zip"' >/dev/null 2
   failures=$((failures + 1))
 else
   echo "OK: package.sh emits expected artifact JSON"
+fi
+
+set +e
+invalid_settings_output="$(HOMEBOY_COMPONENT_ID=test-plugin HOMEBOY_SETTINGS_JSON='not json' "${PACKAGE_SCRIPT_DIR}/scripts/release/package.sh" 2>/dev/null)"
+invalid_settings_status=$?
+set -e
+
+if [[ ${invalid_settings_status} -ne 0 ]]; then
+  echo "FAIL: package.sh did not fall back safely for invalid HOMEBOY_SETTINGS_JSON" >&2
+  failures=$((failures + 1))
+elif ! echo "${invalid_settings_output}" | jq -e '.[0].path == "build/test-plugin.zip"' >/dev/null 2>&1; then
+  echo "FAIL: package.sh invalid-settings fallback produced unexpected JSON; got: ${invalid_settings_output}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: package.sh falls back safely for invalid HOMEBOY_SETTINGS_JSON"
 fi
 
 # ---------------------------------------------------------------------------
@@ -170,7 +203,7 @@ mkdir -p "${HAPPY_DIR}/build"
 python3 -c "
 import zipfile
 with zipfile.ZipFile('${HAPPY_DIR}/build/happy-plugin.zip', 'w') as z:
-  z.writestr('happy-plugin/happy-plugin.php', '<?php // happy plugin')
+  z.writestr('happy-plugin/happy-plugin.php', '<?php\n/**\n * Plugin Name: Happy Plugin\n * Version: 1.0.0\n */')
   z.writestr('happy-plugin/readme.txt', 'happy plugin readme')
 "
 
@@ -219,7 +252,7 @@ JSON
 python3 -c "
 import zipfile
 with zipfile.ZipFile('${BRANCH_DIR}/build/happy-plugin.zip', 'w') as z:
-  z.writestr('happy-plugin/happy-plugin.php', '<?php // happy plugin')
+  z.writestr('happy-plugin/happy-plugin.php', '<?php\n/**\n * Plugin Name: Happy Plugin\n * Version: 1.0.0\n */')
   z.writestr('happy-plugin/readme.txt', 'happy plugin readme')
 "
 
