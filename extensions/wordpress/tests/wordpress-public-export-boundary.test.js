@@ -27,6 +27,8 @@ assert.equal(typeof wordpress.createWordPressHookFuzzPlan, 'function');
 assert.equal(typeof wordpress.normalizeWordPressSurfaceDiscovery, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFuzzPlan, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFuzzResult, 'function');
+assert.equal(typeof wordpress.normalizeWordPressSurfaceType, 'function');
+assert.equal(typeof wordpress.normalizeWordPressRuntimeSurfaceType, 'function');
 assert.equal(typeof wordpress.normalizeWordPressCrudOperation, 'function');
 assert.equal(typeof wordpress.normalizeWordPressFixturePersona, 'function');
 assert.equal(typeof wordpress.normalizeWordPressPerformanceObservation, 'function');
