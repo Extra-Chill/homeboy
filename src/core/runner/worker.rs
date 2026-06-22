@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::core::api_jobs::{
-    Job, JobStatus, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    Job, JobArtifactMetadata, JobStatus, RemoteRunnerJobClaim, RemoteRunnerJobRequest,
+    RemoteRunnerJobResult,
 };
 use crate::core::error::{Error, Result};
 
@@ -380,7 +381,9 @@ fn run_once_output(
                 data: Some(json!({
                     "error": err.to_string(),
                 })),
+                observation_run_ids: Vec::new(),
                 artifacts: Vec::new(),
+                artifact_refs: Vec::new(),
                 metrics: None,
                 capture: None,
             })?;
@@ -449,13 +452,36 @@ fn remote_runner_result_from_exec_output(
     if let Some(patch) = patch.clone() {
         data["patch"] = patch;
     }
+    if let Some(mirror_run_id) = exec_output.mirror_run_id.clone() {
+        data["mirror_run_id"] = json!(mirror_run_id);
+    }
     RemoteRunnerJobResult {
         exit_code,
         stdout: Some(exec_output.stdout),
         stderr: Some(exec_output.stderr),
         patch,
         data: Some(data),
+        observation_run_ids: exec_output.mirror_run_id.into_iter().collect(),
         artifacts: exec_output.artifacts,
+        artifact_refs: exec_output
+            .runner_result
+            .map(|result| {
+                result
+                    .artifact_refs
+                    .into_iter()
+                    .map(|artifact| JobArtifactMetadata {
+                        id: artifact.artifact_id,
+                        name: artifact.name,
+                        path: artifact.path,
+                        url: artifact.url,
+                        mime: artifact.mime,
+                        size_bytes: artifact.size_bytes,
+                        sha256: artifact.sha256,
+                        metadata: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         metrics: exec_output.metrics,
         capture: exec_output.capture,
     }
