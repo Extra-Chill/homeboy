@@ -14,7 +14,7 @@ use homeboy::core::extension::trace::{
     TraceSpanDefinition,
 };
 use homeboy::core::extension::ExtensionCapability;
-use homeboy::core::observation::{ActiveObservation, NewRunRecord, ObservationStore};
+use homeboy::core::observation::{ActiveObservation, NewRunRecord};
 use homeboy::core::rig::{self, RigSpec};
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};

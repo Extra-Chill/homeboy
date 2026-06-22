@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::redaction::RedactionPolicy;
-use homeboy::core::runner::{RunnerActiveJobSource, RunnerActiveJobState};
+use homeboy::core::runner::RunnerActiveJobState;
 use homeboy::core::runners::{
     self as runner, runner_job_log_snapshot, ReverseRunnerConnectOptions,
     ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, Runner, RunnerConnectReport,
@@ -1826,6 +1826,7 @@ fn secret_env_reference_output(reference: RunnerSecretEnvRef) -> RunnerSecretEnv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy::core::runner::RunnerActiveJobSource;
 
     fn runner_with_env(id: &str) -> Runner {
         Runner {
