@@ -36,6 +36,21 @@ const runtimeProfile = {
   runtime_task_ability: 'example/run-task',
   runtime_bundle_ability: 'runtime/run-agent-bundle',
   runtime_workflow_ability: 'runtime/execute-workflow',
+  capabilities: ['ability_execution', 'agent_bundle_execution', 'workflow_execution'],
+  runtime_execution_contracts: {
+    ability: {
+      ability_field: 'runtime_task_ability',
+      required_capabilities: ['ability_execution'],
+    },
+    bundle: {
+      ability_field: 'runtime_bundle_ability',
+      required_capabilities: ['agent_bundle_execution'],
+    },
+    workflow: {
+      ability_field: 'runtime_workflow_ability',
+      required_capabilities: ['workflow_execution'],
+    },
+  },
   component_path_defaults: {
     contract_slug_map: { 'example-runtime': 'agent_runtime' },
     path_aliases: { agent_runtime: ['contract:agent_runtime'] },
@@ -157,6 +172,40 @@ const genericWorkflowConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
 assert.equal(genericWorkflowConfig.runtime_task.ability, 'runtime/execute-workflow');
 assert.deepEqual(genericWorkflowConfig.runtime_task.input.workflow, { path: '.ci/workflows/materialize.json' });
 assert.equal(genericWorkflowConfig.runtime_task.input.dry_run, true);
+
+const directAbilityConfig = runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+  runtimeProfile: runtimeProfile.id,
+  runtimeProfiles: { [runtimeProfile.id]: runtimeProfile },
+  runtimeExecution: {
+    kind: 'ability',
+    ability: 'example/direct-operation',
+    input: { dry_run: false },
+  },
+});
+
+assert.deepEqual(directAbilityConfig.runtime_task, { ability: 'example/direct-operation', input: { dry_run: false } });
+
+assert.throws(
+  () => runtimeAgentCi.runtimeAgentCiTaskExecutorConfig({
+    runtimeProfile: 'limited-runtime',
+    runtimeProfiles: {
+      'limited-runtime': {
+        id: 'limited-runtime',
+        runtime_task_ability: 'example/run-task',
+        runtime_bundle_ability: 'runtime/run-agent-bundle',
+        capabilities: ['ability_execution'],
+        runtime_execution_contracts: {
+          bundle: {
+            ability_field: 'runtime_bundle_ability',
+            required_capabilities: ['agent_bundle_execution'],
+          },
+        },
+      },
+    },
+    runtimeExecution: { kind: 'bundle', source: 'bundles/example' },
+  }),
+  /runtime_execution kind bundle requires unsupported provider capabilities: agent_bundle_execution/
+);
 
 const genericRequest = runtimeAgentCi.runtimeAgentCiAbilityTaskRequest({
   taskId: 'task-1',

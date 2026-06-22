@@ -87,13 +87,61 @@ function normalizeRuntimeExecutionDescriptor(descriptor, runtimeProfile = {}) {
 }
 
 function abilityForRuntimeExecutionKind(kind, runtimeProfile = {}) {
-  if (kind === 'bundle') {
-    return runtimeProfile.runtime_bundle_ability || runtimeProfile.runtime_task_ability;
+  const contract = runtimeExecutionContract(kind, runtimeProfile);
+  const ability = contract?.ability || abilityFromRuntimeExecutionContract(contract, runtimeProfile);
+  if (ability) {
+    assertRuntimeExecutionContractCapabilities(kind, contract, runtimeProfile);
+    return ability;
   }
-  if (kind === 'workflow') {
-    return runtimeProfile.runtime_workflow_ability || runtimeProfile.runtime_task_ability;
+  if (kind === 'ability') {
+    return runtimeProfile.runtime_task_ability;
   }
-  return runtimeProfile.runtime_task_ability;
+  throw new Error(`runtime_execution kind ${kind} is not supported by runtime profile ${runtimeProfile.id || '(unknown)'}.`);
+}
+
+function abilityFromRuntimeExecutionContract(contract, runtimeProfile = {}) {
+  const field = contract?.ability_field || contract?.abilityField;
+  if (typeof field !== 'string' || field.trim() === '') {
+    return '';
+  }
+  return runtimeProfile[field] || '';
+}
+
+function assertRuntimeExecutionContractCapabilities(kind, contract, runtimeProfile) {
+  const requiredCapabilities = normalizeArray(contract.required_capabilities || contract.requiredCapabilities || contract.capabilities);
+  if (requiredCapabilities.length === 0) {
+    return;
+  }
+  const capabilities = normalizeArray(runtimeProfile.capabilities || runtimeProfile.provider_capabilities || runtimeProfile.providerCapabilities);
+  const missing = requiredCapabilities.filter((capability) => !capabilities.includes(capability));
+  if (missing.length > 0) {
+    throw new Error(`runtime_execution kind ${kind} requires unsupported provider capabilities: ${missing.join(', ')}.`);
+  }
+}
+
+function runtimeExecutionContract(kind, runtimeProfile = {}) {
+  const normalizedKind = String(kind || '').trim();
+  if (!normalizedKind) {
+    return null;
+  }
+  const contracts = runtimeProfile.execution_contracts || runtimeProfile.runtime_execution_contracts || runtimeProfile.runtime_execution_kinds || {};
+  const contract = contracts[normalizedKind];
+  if (typeof contract === 'string') {
+    return { kind: normalizedKind, ability: contract };
+  }
+  if (contract && typeof contract === 'object' && !Array.isArray(contract)) {
+    return { kind: normalizedKind, ...contract };
+  }
+  if (normalizedKind === 'bundle' && runtimeProfile.runtime_bundle_ability) {
+    return { kind: normalizedKind, ability: runtimeProfile.runtime_bundle_ability };
+  }
+  if (normalizedKind === 'workflow' && runtimeProfile.runtime_workflow_ability) {
+    return { kind: normalizedKind, ability: runtimeProfile.runtime_workflow_ability };
+  }
+  if (normalizedKind === 'ability' && runtimeProfile.runtime_task_ability) {
+    return { kind: normalizedKind, ability: runtimeProfile.runtime_task_ability };
+  }
+  return null;
 }
 
 function runtimeExecutionInput(descriptor, kind) {
@@ -152,4 +200,5 @@ module.exports = {
   genericAgentTaskRequest,
   genericAgentTaskRunnerSpec,
   normalizeRuntimeExecutionDescriptor,
+  runtimeExecutionContract,
 };
