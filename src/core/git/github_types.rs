@@ -69,6 +69,7 @@ pub struct GithubPrView {
     pub merge_state: Option<String>,
     pub ci_state: String,
     pub ci_summary: String,
+    pub ci_next_action: String,
 }
 
 /// Result of a find-many operation (list of matches).
