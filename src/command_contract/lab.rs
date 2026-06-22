@@ -100,6 +100,17 @@ pub struct RunnerWorkload {
     pub result_refs: RunnerWorkloadResultRefs,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerWorkloadInput {
+    pub workload_id: String,
+    pub plan_id: String,
+    pub assignment: RunnerWorkloadAssignment,
+    pub state: RunnerWorkloadState,
+    pub mutation_policy: RunnerWorkloadMutationPolicy,
+    pub workspace_mapping_ref: Option<String>,
+    pub proof_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunnerWorkloadKind {
     pub command_label: String,
@@ -505,9 +516,9 @@ impl Commands {
                     // lives on the runner, so `--runner <id> agent-task
                     // list/active/latest` must resolve against that runner to
                     // make discovery consistent with status/logs/etc (#5681).
-                    | agent_task::AgentTaskCommand::List
-                    | agent_task::AgentTaskCommand::Active
-                    | agent_task::AgentTaskCommand::Latest,
+                    | agent_task::AgentTaskCommand::List(_)
+                    | agent_task::AgentTaskCommand::Active(_)
+                    | agent_task::AgentTaskCommand::Latest(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -672,19 +683,10 @@ impl LabCommandContract {
         }
     }
 
-    pub fn runner_workload(
-        &self,
-        workload_id: impl Into<String>,
-        plan_id: impl Into<String>,
-        assignment: RunnerWorkloadAssignment,
-        state: RunnerWorkloadState,
-        mutation_policy: RunnerWorkloadMutationPolicy,
-        workspace_mapping_ref: Option<String>,
-        proof_id: Option<String>,
-    ) -> RunnerWorkload {
+    pub fn runner_workload(&self, input: RunnerWorkloadInput) -> RunnerWorkload {
         RunnerWorkload {
             schema: RUNNER_WORKLOAD_SCHEMA.to_string(),
-            workload_id: workload_id.into(),
+            workload_id: input.workload_id,
             kind: RunnerWorkloadKind {
                 command_label: self.hot_label.to_string(),
                 command_family: RunnerWorkloadCommandFamily::from_command_label(self.hot_label),
@@ -692,19 +694,19 @@ impl LabCommandContract {
             workspace_mappings: RunnerWorkloadWorkspaceMappings {
                 source_path_mode: self.source_path_mode.label().to_string(),
                 workspace_mode_policy: self.workspace_mode_policy.label().to_string(),
-                mapping_ref: workspace_mapping_ref.clone(),
+                mapping_ref: input.workspace_mapping_ref.clone(),
             },
             required_capabilities: self.required_capabilities(),
             required_secrets: RunnerWorkloadSecrets {
                 categories: self.required_secret_categories(),
             },
-            mutation_policy,
-            assignment,
-            state,
+            mutation_policy: input.mutation_policy,
+            assignment: input.assignment,
+            state: input.state,
             result_refs: RunnerWorkloadResultRefs {
-                plan_id: plan_id.into(),
-                proof_id,
-                workspace_mapping_ref,
+                plan_id: input.plan_id,
+                proof_id: input.proof_id,
+                workspace_mapping_ref: input.workspace_mapping_ref,
             },
         }
     }

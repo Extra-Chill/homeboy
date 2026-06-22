@@ -628,6 +628,12 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.output_notes =
                 "applies a selected patch artifact into a managed worktree unless --dry-run is passed";
         }
+        ["agent-task", "active"] => {
+            metadata.mutates = true;
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.output_notes =
+                "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed";
+        }
         ["db", "delete-row"] | ["db", "drop-table"] => {
             metadata.mutates = true;
             metadata.operator = true;
