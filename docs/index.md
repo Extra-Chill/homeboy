@@ -75,6 +75,7 @@ Internal system architecture and internals:
 Guides for contributing to Homeboy:
 
 - [Architecture overview](developer-guide/architecture-overview.md) - System architecture
+- [Architecture cleanup map](developer-guide/architecture-cleanup-map.md) - Core/command boundary cleanup map and compatibility-removal inventory
 - [Config directory structure](developer-guide/config-directory.md) - File organization
 - [Error handling patterns](developer-guide/error-handling.md) - Error recovery strategies
 
