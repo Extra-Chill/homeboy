@@ -13,10 +13,6 @@ const { spawn } = require('node:child_process');
  * Internal dependencies
  */
 const {
-	codeboxRunAgentTaskInvocation,
-	codeboxTaskRequestFromAgentTaskRequest,
-} = require('../../../agent-runtimes/wp-codebox');
-const {
 	buildWordPressFuzzRunnerResult,
 	readWordPressFuzzRunnerEnv,
 	runWordPressFuzzRunnerResult,
@@ -27,17 +23,19 @@ const {
 	wpCodeboxFuzzSuiteAbility,
 	wpCodeboxRuntimeContractManifest,
 } = require('../../lib/wp-codebox-fuzz-run');
+if (require.main === module) {
+	main().catch((error) => {
+		process.stderr.write(`${error.message}\n`);
+		process.exit(1);
+	});
+}
 
-
-(async () => {
+async function main() {
 	const env = readWordPressFuzzRunnerEnv();
 	const result = await buildRunnerResult(env);
 	writeHomeboyFuzzResultsFile(env.resultsFile, result.homeboy_fuzz_campaign);
 	process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-})().catch((error) => {
-	process.stderr.write(`${error.message}\n`);
-	process.exit(1);
-});
+}
 
 async function buildRunnerResult(env) {
 	if (process.env.HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH === '0') {
@@ -142,11 +140,36 @@ function shouldFallbackToRunAgentTask(error) {
 }
 
 function wpCodeboxRunAgentTaskInvocation(request) {
+	const {
+		codeboxRunAgentTaskInvocation,
+		codeboxTaskRequestFromAgentTaskRequest,
+	} = requireWpCodeboxRuntime();
 	const taskInput = codeboxTaskRequestFromAgentTaskRequest(request);
 	return codeboxRunAgentTaskInvocation({
 		taskInput,
 		taskId: request.task_id,
 	});
+}
+
+function requireWpCodeboxRuntime(options = {}) {
+	return require(resolveWpCodeboxRuntimePath(options));
+}
+
+function resolveWpCodeboxRuntimePath(options = {}) {
+	const env = options.env || process.env;
+	const candidates = [];
+	if (env.HOMEBOY_EXTENSION_PATH) {
+		candidates.push(path.resolve(env.HOMEBOY_EXTENSION_PATH, '..', '..', 'agent-runtimes', 'wp-codebox'));
+	}
+	candidates.push(path.resolve(__dirname, '..', '..', '..', 'agent-runtimes', 'wp-codebox'));
+
+	for (const candidate of candidates) {
+		if (fs.existsSync(path.join(candidate, 'index.js'))) {
+			return candidate;
+		}
+	}
+
+	return candidates[0];
 }
 
 function wpCodeboxInvocationArgs(invocation, inputFile) {
@@ -261,3 +284,7 @@ function findFuzzSuiteResult(value) {
 	}
 	return null;
 }
+
+module.exports = {
+	resolveWpCodeboxRuntimePath,
+};
