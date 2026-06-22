@@ -81,6 +81,7 @@ function wordpressRuntimeTaskRequest(options = {}) {
 		cwd: options.cwd,
 		repo: options.repo,
 		workspace: options.workspace,
+		goal: options.goal || options.instructions || instructionsForAbility(ability),
 		instructions: options.instructions || instructionsForAbility(ability),
 		inputs: stripUndefined({
 			...(options.inputs || {}),

@@ -369,7 +369,7 @@ function codeboxTaskRequestFromAgentTaskRequest(request, options = {}) {
 
   return {
     schema: WP_CODEBOX_TASK_REQUEST_SCHEMA,
-    goal: request.instructions,
+    goal: request.goal || request.instructions,
     target,
     workspace_materialization: workspaceMaterialization,
     allowed_tools: sandboxAllowedTools || [],
