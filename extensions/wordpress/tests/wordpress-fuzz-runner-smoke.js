@@ -184,6 +184,44 @@ assert.equal(
 	'/runner/components/sample-plugin'
 );
 
+const genericPrimitiveResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'generic-primitive-run',
+		rigId: 'sample-rig',
+		runtimeContext: {
+			components: {
+				'sample-plugin': { path: '/runner/components/sample-plugin' },
+			},
+		},
+	},
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'generic-primitive-workload',
+		label: 'Generic primitive workload',
+		metadata: {
+			generic_primitive: { command: 'wordpress.fuzz-admin-pages', status: 'preferred' },
+		},
+		target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
+		workload: {
+			runner: 'wp-codebox',
+			type: 'php',
+			path: '${package.root}/bench/admin-page-coverage.php',
+			entry: 'admin-page-coverage',
+		},
+		cases: [{
+			case_id: 'generic-primitive-workload:default',
+			artifacts: [{ name: 'admin_page_coverage', path: 'admin-page-coverage/admin_page_coverage.json', required: true }],
+			intent: {
+				plugin: { activation: 'sample-plugin/sample-plugin.php' },
+				execute: { path: '${package.root}/bench/admin-page-coverage.php', type: 'php', parameters: { safe_methods: 'GET', max_pages: '80' } },
+				collect: [{ artifact: 'admin_page_coverage' }],
+			},
+		}],
+	},
+});
+assert.deepEqual(genericPrimitiveResult.wp_codebox_input.cases[0].phases.action, [{ command: 'wordpress.fuzz-admin-pages', args: ['safe_methods=GET', 'max_pages=80'] }]);
+
 let dispatchedRequest;
 const dispatchPromise = runWordPressFuzzRunnerResult({
 	env: {

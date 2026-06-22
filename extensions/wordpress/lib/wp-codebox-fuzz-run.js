@@ -260,10 +260,11 @@ function homeboyFuzzWorkloadCaseToWpCodeboxCase(entry = {}, manifest = {}, index
 	const intent = objectOrUndefined(entry.intent) || {};
 	const execute = objectOrUndefined(intent.execute) || {};
 	const artifacts = normalizeHomeboyFuzzCaseArtifacts(entry, manifest);
+	const command = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest) || 'wordpress.run-workload';
 	return stripUndefined({
 		id: caseId,
 		case_id: caseId,
-		target: { kind: 'runtime', id: 'wordpress.run-workload', entrypoint: 'wordpress.run-workload' },
+		target: { kind: 'runtime', id: command, entrypoint: command },
 		description: entry.description || manifest.label,
 		input: stripUndefined({
 			path: execute.path || manifest.workload?.path,
@@ -289,18 +290,26 @@ function homeboyFuzzWorkloadCasePhases(entry = {}, manifest = {}, intent = {}, a
 	const execute = objectOrUndefined(intent.execute) || {};
 	const activation = intent.plugin?.activation;
 	const path = execute.path || manifest.workload?.path;
+	const genericCommand = homeboyFuzzWorkloadGenericPrimitiveCommand(manifest);
 	const setup = typeof activation === 'string' && activation.trim() !== ''
 		? [{ command: 'wordpress.ensure-plugin-active', args: [`plugin=${activation}`] }]
 		: undefined;
-	const action = typeof path === 'string' && path.trim() !== ''
-		? [{ command: 'wordpress.run-workload', args: [`path=${path}`] }]
-		: [];
+	const action = typeof genericCommand === 'string'
+		? [{ command: genericCommand, args: homeboyFuzzCommandArgs(objectOrUndefined(execute.parameters) || {}) }]
+		: typeof path === 'string' && path.trim() !== ''
+			? [{ command: 'wordpress.run-workload', args: [`path=${path}`] }]
+			: [];
 	const collect = normalizeArray(intent.collect).length > 0 ? normalizeArray(intent.collect) : artifacts.map((artifact) => ({ artifact: artifact.name }));
 	const assert = collect
 		.map((item) => item?.artifact)
 		.filter(Boolean)
 		.map((artifact) => ({ command: 'wordpress.collect-workload-result', args: [`artifact=${artifact}`] }));
 	return stripUndefined({ setup, action, assert: assert.length > 0 ? assert : undefined });
+}
+
+function homeboyFuzzWorkloadGenericPrimitiveCommand(manifest = {}) {
+	const command = manifest.metadata?.generic_primitive?.command || manifest.metadata?.genericPrimitive?.command;
+	return typeof command === 'string' && command.trim() !== '' ? command.trim() : undefined;
 }
 
 function normalizeHomeboyFuzzCaseArtifacts(entry = {}, manifest = {}) {
