@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const TYPED_ARTIFACT_SCHEMA = 'homeboy/agent-task-typed-artifact/v1';
 const {
-  runtimeContractSchemas,
+	runtimeContractSchemas,
 } = require('./wp-codebox-runtime-contract-source');
 const RUNTIME_CONTRACT_SCHEMAS = runtimeContractSchemas();
 
@@ -318,20 +318,12 @@ function typedArtifactsFromArtifactResultEnvelope(artifactResult, options = {}) 
   return Object.assign({}, ...candidates.map((candidate) => normalizeTypedArtifacts(candidate, options)));
 }
 
-function artifactResultEnvelopeFromCodeboxResult(result, options = {}) {
-  const candidates = [
-    result,
-    result?.artifact_result,
-  ];
-  const legacyCandidates = allowLegacyCodeboxResultCompatibility(options) ? [
-    result?.artifactResult,
-    result?.metadata?.artifact_result,
-    result?.metadata?.artifactResult,
-		...(Array.isArray(result?.projections) ? result.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
-		...(Array.isArray(result?.metadata?.projections) ? result.metadata.projections.map((projection) => projection?.envelope || projection?.artifact_result || projection?.artifactResult || projection) : []),
-		...legacyArtifactResultEnvelopeCandidates(result),
-	] : [];
-	return [...candidates, ...legacyCandidates].map(normalizeArtifactResultEnvelope).find(Boolean) || null;
+function artifactResultEnvelopeFromCodeboxResult(result) {
+	const candidates = [
+		result,
+		result?.artifact_result,
+	];
+	return candidates.map(normalizeArtifactResultEnvelope).find(Boolean) || null;
 }
 
 function normalizeCodeboxPublicResultEnvelope(result, options = {}) {
