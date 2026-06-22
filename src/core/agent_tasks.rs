@@ -18,7 +18,7 @@
 //! - [`finalization`]: PR finalization contracts and backends.
 //! - [`gate`]: gate report contracts and visibility/reveal policies.
 //! - [`lifecycle`]: durable run record lifecycle helpers.
-//! - [`loop_controller`]: cook/agent-task loop controller state contracts.
+//! - [`loop_controller`]: durable agent-task loop controller state contracts.
 //! - [`promotion`]: promotion-report contracts and entry points.
 //! - [`provider`]: executor provider contracts used by extensions.
 //! - [`scheduler`]: scheduling/plan/concurrency primitives.
@@ -214,7 +214,7 @@ pub mod lifecycle {
     };
 }
 
-/// Cook/agent-task loop controller state, events, and policy.
+/// Durable agent-task loop controller state, events, and policy.
 pub mod loop_controller {
     pub use super::super::agent_task_loop_controller::{
         apply_external_event, controller_status, controller_status_diagnostics,
@@ -318,10 +318,10 @@ pub mod secrets {
 pub mod service {
     pub use super::super::agent_task_service::{
         aggregate_exit_code, artifacts, cancel, discover_runs, logs, normalize_plan_workspaces,
-        promotion_source, read_plan, resume, retry, run_cook_loop, run_loaded_plan, run_next,
-        run_submitted, status, submit_plan_spec, AgentTaskDiscoveryCommands,
-        AgentTaskDiscoveryCounts, AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport,
-        AgentTaskDiscoveryRun, AgentTaskLoopAttemptReport, AgentTaskLoopReport,
-        AgentTaskLoopServiceOptions, AgentTaskRetryServiceResult, AgentTaskRunResult,
+        promotion_source, read_plan, resume, retry, run_cook, run_loaded_plan, run_next,
+        run_submitted, status, submit_plan_spec, AgentTaskCookAttemptReport, AgentTaskCookReport,
+        AgentTaskCookServiceOptions, AgentTaskDiscoveryCommands, AgentTaskDiscoveryCounts,
+        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskDiscoveryRun,
+        AgentTaskRetryServiceResult, AgentTaskRunResult,
     };
 }

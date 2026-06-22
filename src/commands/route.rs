@@ -129,15 +129,6 @@ fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
                 + usize::from(args.prompt.is_some())
                 + usize::from(args.core.tasks_json.is_some()),
         ),
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::Loop(args),
-        }) => (
-            "agent-task loop local fanout",
-            args.dispatch.concurrency,
-            args.dispatch.tasks.len()
-                + usize::from(args.dispatch.prompt.is_some())
-                + usize::from(args.dispatch.core.tasks_json.is_some()),
-        ),
         _ => return None,
     };
 

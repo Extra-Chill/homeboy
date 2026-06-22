@@ -122,9 +122,9 @@ pub struct AgentTaskArgs {
 pub enum AgentTaskCommand {
     /// Readiness: run the one-command cook readiness repair chain and return a single ready/blocked verdict.
     Doctor(AgentTaskDoctorArgs),
-    /// Cook loop: sync a workspace when needed, dispatch an agent task, and return the durable run id.
+    /// Cook: run one workspace task through the patch handoff workflow.
     Cook(DispatchArgs),
-    /// Cook loop: dispatch, promote, verify, retry red gates, and finalize.
+    /// Loop: operate a durable multi-agent loop with on/off and resume controls.
     Loop(AgentTaskLoopArgs),
     /// Lifecycle: build and queue agent tasks without hand-authored provider JSON.
     Dispatch(DispatchArgs),
@@ -367,63 +367,99 @@ pub struct CompileLoopArgs {
 
 #[derive(Args, Debug)]
 pub struct AgentTaskLoopArgs {
-    #[command(flatten)]
-    pub dispatch: DispatchArgs,
+    #[command(subcommand)]
+    pub command: AgentTaskLoopCommand,
+}
 
-    /// Repo-cooking goal. Alias for the dispatch prompt when --prompt is omitted.
-    #[arg(long, value_name = "TEXT")]
-    pub goal: Option<String>,
+#[derive(Subcommand, Debug)]
+pub enum AgentTaskLoopCommand {
+    /// Define or update a durable loop from a repo-authored multi-agent spec.
+    Define(AgentTaskLoopDefineArgs),
+    /// Read durable loop state, revolution counters, pending handoffs, and diagnostics.
+    Status(AgentTaskLoopStatusArgs),
+    /// Turn a durable loop on and execute pending handoffs until it stops or hits its revolution limit.
+    Resume(AgentTaskLoopResumeArgs),
+    /// Turn a durable loop off without deleting its state.
+    Stop(AgentTaskLoopStatusArgs),
+}
 
-    /// Target managed worktree handle where candidate patches are promoted.
-    #[arg(long, value_name = "HANDLE")]
-    pub to_worktree: String,
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopDefineArgs {
+    /// Repo loop spec JSON, @file, or - for stdin.
+    #[arg(value_name = "SPEC")]
+    pub spec: String,
 
-    /// External workspace provider command. When omitted, HOMEBOY_AGENT_TASK_PROMOTION_COMMAND is used.
-    #[arg(long, value_name = "COMMAND")]
-    pub provider_command: Option<String>,
+    /// Define the loop in the on state so resume may execute handoffs.
+    #[arg(long, conflicts_with = "off")]
+    pub on: bool,
 
-    #[command(flatten)]
-    pub gates: VerifyGateArgs,
+    /// Define the loop in the off state; state is persisted but handoffs are not resumed.
+    #[arg(long, conflicts_with = "on")]
+    pub off: bool,
 
-    /// Maximum cook-loop gate attempts, including the first candidate.
-    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
-    pub max_attempts: u32,
+    /// Maximum revolutions before resume stops the loop.
+    #[arg(long = "revolution-limit", value_name = "N")]
+    pub revolution_limit: Option<u32>,
 
-    /// Stop after the first green promotion without committing, pushing, or opening/updating a PR.
-    #[arg(long = "no-finalize")]
-    pub no_finalize: bool,
+    /// Execute pending handoffs after defining the loop. Requires --on.
+    #[arg(long)]
+    pub resume: bool,
 
-    /// PR base branch used by finalization.
-    #[arg(long, default_value = "main", value_name = "BRANCH")]
-    pub base: String,
+    /// Executor backend to use for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
 
-    /// PR head branch. Defaults to the current branch in the promoted worktree.
-    #[arg(long, value_name = "BRANCH")]
-    pub head: Option<String>,
-
-    /// PR title. Defaults to a title derived from --repo or --task-url.
-    #[arg(long, value_name = "TEXT")]
-    pub title: Option<String>,
-
-    /// Commit message for the verified candidate changes.
-    #[arg(long, value_name = "TEXT")]
-    pub commit_message: Option<String>,
-
-    /// Protected branch that may not be finalized directly. Repeatable.
-    #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
-    pub protected_branches: Vec<String>,
-
-    /// AI tool disclosure line for the PR body.
-    #[arg(long, default_value = "OpenCode (GPT-5.5)", value_name = "TEXT")]
-    pub ai_tool: String,
-
-    /// AI assistance scope for the PR body.
+    /// Provider id to use for loop-spawned dispatch actions when the action omits one.
     #[arg(
-        long,
-        default_value = "Drafted implementation and tests; Chris reviews and owns the change.",
-        value_name = "TEXT"
+        long = "dispatch-selector",
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
     )]
-    pub ai_used_for: String,
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopStatusArgs {
+    /// Durable loop id returned by `agent-task loop define`.
+    pub loop_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskLoopResumeArgs {
+    /// Durable loop id returned by `agent-task loop define`.
+    pub loop_id: String,
+
+    /// Override the persisted maximum revolutions before resume stops the loop.
+    #[arg(long = "revolution-limit", value_name = "N")]
+    pub revolution_limit: Option<u32>,
+
+    /// Executor backend to use for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-backend", value_name = "BACKEND")]
+    pub dispatch_backend: Option<String>,
+
+    /// Provider id to use for loop-spawned dispatch actions when the action omits one.
+    #[arg(
+        long = "dispatch-selector",
+        visible_alias = "dispatch-provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub dispatch_selector: Option<String>,
+
+    /// Model override to use for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-model", value_name = "MODEL")]
+    pub dispatch_model: Option<String>,
+
+    /// Provider config JSON, @file, or - for loop-spawned dispatch actions when the action omits one.
+    #[arg(long = "dispatch-provider-config", value_name = "JSON")]
+    pub dispatch_provider_config: Option<String>,
 }
 
 #[derive(Args, Debug)]
