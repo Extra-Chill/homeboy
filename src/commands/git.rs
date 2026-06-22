@@ -5,8 +5,9 @@ use homeboy::core::git::{
     self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
     IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions,
-    PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions,
-    PrRefreshOutput, PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
+    PrFindOptions, PrLandOptions, PrLandOutput, PrLandRefreshHelper, PrPolicyDecision,
+    PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions, PrRefreshOutput,
+    PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -592,6 +593,44 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Land a train of ready PRs sequentially, pausing on the first blocker.
+    Land {
+        /// Repository as owner/repo or host/owner/repo.
+        repo: String,
+
+        /// PR numbers or URLs. URLs must point at the selected repo.
+        #[arg(value_name = "PR")]
+        prs: Vec<String>,
+
+        /// Merge method: merge, squash, or rebase.
+        #[arg(long, default_value = "squash", value_parser = ["merge", "squash", "rebase"])]
+        merge_method: String,
+
+        /// Delete the PR branch after merge.
+        #[arg(long)]
+        delete_branch: bool,
+
+        /// Inspect and report what would land without merging or refreshing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Safe helper program used to refresh a dirty dependent PR.
+        /// Not run through a shell. Combine with --refresh-helper-arg.
+        #[arg(long, value_name = "PROGRAM")]
+        refresh_helper: Option<String>,
+
+        /// Argument for --refresh-helper. Supports {repo}, {number}, {url}, {head_sha}.
+        #[arg(
+            long = "refresh-helper-arg",
+            value_name = "ARG",
+            requires = "refresh_helper"
+        )]
+        refresh_helper_args: Vec<String>,
+
+        /// Retry merge after this many base-branch-modified races.
+        #[arg(long, default_value_t = 1)]
+        max_base_retries: usize,
+    },
 }
 
 #[derive(Args)]
@@ -702,6 +741,7 @@ pub enum GitCommandOutput {
     PrRefresh(PrRefreshOutput),
     Find(GithubFindOutput),
     Policy(PrPolicyDecision),
+    Land(PrLandOutput),
 }
 
 impl Serialize for GitCommandOutput {
@@ -717,6 +757,7 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::PrRefresh(output) => ("pr_refresh", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
+            GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;
@@ -1231,6 +1272,31 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             let exit = if output.success { 0 } else { 1 };
             Ok((GitCommandOutput::PrRefresh(output), exit))
+        }
+        PrCommand::Land {
+            repo,
+            prs,
+            merge_method,
+            delete_branch,
+            dry_run,
+            refresh_helper,
+            refresh_helper_args,
+            max_base_retries,
+        } => {
+            let output = git::land_prs(PrLandOptions {
+                repo,
+                prs,
+                merge_method,
+                delete_branch,
+                dry_run,
+                refresh_helper: refresh_helper.map(|program| PrLandRefreshHelper {
+                    program,
+                    args: refresh_helper_args,
+                }),
+                max_base_retries,
+            })?;
+            let exit = if output.summary.blocked > 0 { 1 } else { 0 };
+            Ok((GitCommandOutput::Land(output), exit))
         }
     }
 }

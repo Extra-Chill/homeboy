@@ -278,6 +278,8 @@ pub struct TriagePrItem {
     pub draft: bool,
     #[serde(flatten)]
     pub signals: TriagePullRequestSignals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_readiness: Option<TriageCiReadiness>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub check_failures: Vec<TriageCheckFailure>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -290,6 +292,36 @@ pub struct TriagePrItem {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TriageCiReadiness {
+    pub checks: TriageCiReadinessBuckets,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_pending_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_pending_duration_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failure_urls: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TriageCiReadinessBuckets {
+    pub required: TriageCiCheckStateCounts,
+    pub optional: TriageCiCheckStateCounts,
+    pub unknown_requirement: TriageCiCheckStateCounts,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TriageCiCheckStateCounts {
+    pub queued: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub passed: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1337,6 +1369,7 @@ fn parse_prs(
                     last_review_at: latest_review_at(&item.reviews),
                     ..TriagePullRequestSignals::default()
                 },
+                ci_readiness: summarize_ci_readiness(&item.status_check_rollup, Utc::now()),
                 check_failures: if include_drilldown {
                     summarize_check_failures(&item.status_check_rollup)
                 } else {
@@ -1380,6 +1413,13 @@ fn derive_pr_next_action(pr: &TriagePrItem) -> Option<String> {
     }
     if checks == Some("FAILURE") {
         return Some("checks_failed".to_string());
+    }
+    if pr
+        .ci_readiness
+        .as_ref()
+        .is_some_and(TriageCiReadiness::has_pending_required_checks)
+    {
+        return Some("required_checks_pending".to_string());
     }
     if review == Some("APPROVED") && is_dirty_merge_state(merge) {
         return Some("approved_but_dirty".to_string());
@@ -1469,6 +1509,164 @@ fn summarize_check_failures(checks: &[Value]) -> Vec<TriageCheckFailure> {
         .collect()
 }
 
+fn summarize_ci_readiness(checks: &[Value], now: DateTime<Utc>) -> Option<TriageCiReadiness> {
+    if checks.is_empty() {
+        return None;
+    }
+
+    let mut buckets = TriageCiReadinessBuckets::default();
+    let mut failure_urls = Vec::new();
+    let mut oldest_pending_started_at: Option<DateTime<Utc>> = None;
+
+    for check in checks {
+        let state = classify_check_state(check);
+        let counts = match bool_field(check, &["required", "isRequired"]) {
+            Some(true) => &mut buckets.required,
+            Some(false) => &mut buckets.optional,
+            None => &mut buckets.unknown_requirement,
+        };
+        counts.increment(state);
+
+        if state == TriageCiCheckState::Failed {
+            if let Some(url) = string_field(check, &["detailsUrl", "targetUrl", "url"]) {
+                failure_urls.push(url);
+            }
+        }
+
+        if matches!(
+            state,
+            TriageCiCheckState::Queued | TriageCiCheckState::Pending | TriageCiCheckState::Running
+        ) {
+            if let Some(started_at) = check_started_at(check) {
+                oldest_pending_started_at = Some(match oldest_pending_started_at {
+                    Some(existing) => existing.min(started_at),
+                    None => started_at,
+                });
+            }
+        }
+    }
+
+    failure_urls.sort();
+    failure_urls.dedup();
+
+    let oldest_pending_duration_seconds = oldest_pending_started_at
+        .map(|started_at| now.signed_duration_since(started_at).num_seconds().max(0));
+    let oldest_pending_started_at = oldest_pending_started_at.map(|dt| dt.to_rfc3339());
+    let next_steps = ci_readiness_next_steps(&buckets, oldest_pending_duration_seconds);
+
+    Some(TriageCiReadiness {
+        checks: buckets,
+        oldest_pending_started_at,
+        oldest_pending_duration_seconds,
+        failure_urls,
+        next_steps,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriageCiCheckState {
+    Queued,
+    Pending,
+    Running,
+    Failed,
+    Skipped,
+    Passed,
+}
+
+impl TriageCiCheckStateCounts {
+    fn increment(&mut self, state: TriageCiCheckState) {
+        match state {
+            TriageCiCheckState::Queued => self.queued += 1,
+            TriageCiCheckState::Pending => self.pending += 1,
+            TriageCiCheckState::Running => self.running += 1,
+            TriageCiCheckState::Failed => self.failed += 1,
+            TriageCiCheckState::Skipped => self.skipped += 1,
+            TriageCiCheckState::Passed => self.passed += 1,
+        }
+    }
+
+    fn active(&self) -> usize {
+        self.queued + self.pending + self.running
+    }
+}
+
+impl TriageCiReadiness {
+    fn has_pending_required_checks(&self) -> bool {
+        self.checks.required.active() > 0
+    }
+}
+
+fn classify_check_state(check: &Value) -> TriageCiCheckState {
+    let conclusion = check.get("conclusion").and_then(Value::as_str);
+    if matches!(
+        conclusion,
+        Some("FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED")
+    ) {
+        return TriageCiCheckState::Failed;
+    }
+    if matches!(conclusion, Some("SKIPPED" | "NEUTRAL")) {
+        return TriageCiCheckState::Skipped;
+    }
+    if matches!(conclusion, Some("SUCCESS")) {
+        return TriageCiCheckState::Passed;
+    }
+
+    match check.get("status").and_then(Value::as_str) {
+        Some("QUEUED" | "REQUESTED" | "WAITING") => TriageCiCheckState::Queued,
+        Some("IN_PROGRESS") => TriageCiCheckState::Running,
+        Some("COMPLETED") => TriageCiCheckState::Passed,
+        _ => TriageCiCheckState::Pending,
+    }
+}
+
+fn check_started_at(check: &Value) -> Option<DateTime<Utc>> {
+    string_field(check, &["startedAt", "createdAt", "updatedAt"])
+        .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn ci_readiness_next_steps(
+    buckets: &TriageCiReadinessBuckets,
+    oldest_pending_duration_seconds: Option<i64>,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    if buckets.required.failed > 0 {
+        steps.push("Fix or rerun failing required checks before merge.".to_string());
+    }
+    if buckets.optional.failed > 0 || buckets.unknown_requirement.failed > 0 {
+        steps.push(
+            "Review failing optional/unknown checks and decide whether they block this PR."
+                .to_string(),
+        );
+    }
+    if buckets.required.active() > 0 {
+        let label = oldest_pending_duration_seconds
+            .map(format_duration)
+            .map(|duration| format!("Wait for required checks to finish; oldest pending check has been active for {duration}."))
+            .unwrap_or_else(|| "Wait for required checks to finish.".to_string());
+        steps.push(label);
+    } else if buckets.optional.active() > 0 || buckets.unknown_requirement.active() > 0 {
+        steps.push(
+            "Required checks are not pending; monitor optional/unknown checks for signal."
+                .to_string(),
+        );
+    }
+    if buckets.required.failed == 0 && buckets.required.active() == 0 {
+        steps.push("Required checks are not blocking merge.".to_string());
+    }
+    steps
+}
+
+fn format_duration(seconds: i64) -> String {
+    if seconds >= 3600 {
+        format!("{}h", seconds / 3600)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         value
@@ -1478,6 +1676,11 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     })
+}
+
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_bool))
 }
 
 fn is_stale(updated_at: Option<&str>, stale_cutoff: Option<DateTime<Utc>>) -> bool {
@@ -1591,6 +1794,7 @@ const PR_ACTION_PRIORITY: &[&str] = &[
     "approved_but_dirty",
     "needs_rebase",
     "review_required",
+    "required_checks_pending",
     "clean_but_checks_not_reported",
     "approved_but_pending_checks",
     "clean_and_ready",
@@ -1602,6 +1806,7 @@ fn pr_action_severity(kind: &str) -> &'static str {
         "draft_with_failing_checks" | "checks_failed" | "approved_but_dirty" => "high",
         "needs_rebase"
         | "review_required"
+        | "required_checks_pending"
         | "clean_but_checks_not_reported"
         | "approved_but_pending_checks"
         | "clean_and_ready" => "medium",
@@ -1620,6 +1825,11 @@ fn pr_action_label(kind: &str, count: usize) -> String {
         "approved_but_dirty" => pluralize(count, "approved PR is dirty", "approved PRs are dirty"),
         "needs_rebase" => pluralize(count, "PR needs rebase", "PRs need rebase"),
         "review_required" => pluralize(count, "PR needs review", "PRs need review"),
+        "required_checks_pending" => pluralize(
+            count,
+            "PR is waiting on required checks",
+            "PRs are waiting on required checks",
+        ),
         "clean_but_checks_not_reported" => pluralize(
             count,
             "PR is CLEAN but checks have not reported yet",

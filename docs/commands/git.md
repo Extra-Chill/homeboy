@@ -8,7 +8,7 @@ homeboy git <COMMAND>
 
 Git operations for Homeboy components, worktrees, portable checkouts, and GitHub issue / pull request workflows.
 
-Most commands emit Homeboy's structured JSON envelope when appropriate. See the [JSON output contract](../architecture/output-system.md). Git JSON output includes a top-level `variant` discriminator for the public wrapper shape: `single`, `bulk`, `issue`, `pr`, `find`, or `policy`. Some subcommands also accept `--json` for bulk input.
+Most commands emit Homeboy's structured JSON envelope when appropriate. See the [JSON output contract](../architecture/output-system.md). Git JSON output includes a top-level `variant` discriminator for the public wrapper shape: `single`, `bulk`, `issue`, `pr`, `pr_refresh`, `find`, `policy`, or `land`. Some subcommands also accept `--json` for bulk input.
 
 Follow-up: git has many subcommand-specific payload shapes inside those wrappers; the current public contract tags the wrapper variants, and per-subcommand golden fixtures can be added incrementally where consumers need stricter fixtures.
 
@@ -170,6 +170,7 @@ homeboy git pr edit <component_id> --number <n> [--title <title>] [--body <body>
 homeboy git pr find <component_id> [--base <base>] [--head <head>] [--state open|closed|merged|all] [--limit <n>]
 homeboy git pr comment <component_id> --number <n> [comment mode flags]
 homeboy git pr refresh <component_id> <number-or-url> [--strategy auto|rebase|merge|ff-only] [--check <cmd>...] [--push]
+homeboy git pr land <repo> <pr>... [--merge-method squash|merge|rebase]
 ```
 
 Like issue commands, PR commands accept `--path` to discover component metadata from a portable checkout:
@@ -197,6 +198,34 @@ Safety behavior:
 4. Reports conflicted files from `git status --porcelain` and exits non-zero when blockers remain.
 5. Runs lightweight checks only after a clean refresh. When no `--check` is supplied, it runs `git diff --check`.
 6. Never pushes by default. `--push` publishes only a clean, check-passing branch and uses `git push --force-with-lease`; plain destructive force-push is not exposed.
+
+### PR Landing Train
+
+`homeboy git pr land` lands a list of PRs one at a time. It inspects the next PR immediately before merging, merges only clean PRs with successful reported checks, then rechecks the next PR after each merge. The command pauses at the first blocker and emits a final fleet status table.
+
+```sh
+homeboy git pr land Extra-Chill/homeboy 123 124 125
+homeboy git pr land Extra-Chill/homeboy https://github.com/Extra-Chill/homeboy/pull/123 --dry-run
+```
+
+Safety behavior:
+
+- PRs merge sequentially by default; there is no parallel landing mode.
+- A PR with failing, pending, or unreported required checks blocks the train.
+- A `CLEAN` merge state without reported successful checks is not considered ready.
+- If GitHub reports a base-branch-modified merge race, Homeboy recomputes readiness and retries within `--max-base-retries`.
+- Dirty dependent PRs are refreshed only when an explicit helper program is supplied with `--refresh-helper`; helper arguments are passed directly, not through a shell.
+
+Refresh helper example:
+
+```sh
+homeboy git pr land Extra-Chill/homeboy 123 124 \
+  --refresh-helper homeboy-pr-refresh \
+  --refresh-helper-arg {repo} \
+  --refresh-helper-arg {number}
+```
+
+Supported helper placeholders are `{repo}`, `{number}`, `{url}`, and `{head_sha}`.
 
 ### PR Comments
 
