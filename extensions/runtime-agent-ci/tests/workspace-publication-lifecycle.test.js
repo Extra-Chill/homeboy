@@ -52,16 +52,16 @@ const templates = publicationTemplates({
     pr_body_template: 'Provider: {provider}\nModel: {model_label}\n',
   },
 }, {
-  agent_slug: 'docs-agent',
+  agent_slug: 'fixture-agent',
   run_id: '12345',
-  task_id: 'developer-docs',
+  task_id: 'fixture-workload',
   result_label: 'workspace changes',
   provider: 'openai',
   model_label: 'gpt-5.5',
 }, { env: { GITHUB_BASE_REF: 'ignored-by-runner-workspace-from' } });
 assert.deepEqual(templates, {
-  branch: 'agent-artifacts/docs-agent-12345',
-  commitMessage: 'chore: publish developer-docs',
+  branch: 'agent-artifacts/fixture-agent-12345',
+  commitMessage: 'chore: publish fixture-workload',
   title: 'Publish workspace changes',
   body: 'Provider: openai\nModel: gpt-5.5\n',
   base: 'trunk',
@@ -93,10 +93,10 @@ try {
 
   const publication = publishWorkspace({
     target_repo: 'owner/repo',
-    agent_slug: 'docs-agent',
+    agent_slug: 'fixture-agent',
     provider: 'openai',
     model: 'gpt-5.5',
-    workload_id: 'developer-docs',
+    workload_id: 'fixture-workload',
     runner_workspace: { branch: 'agent-artifacts/{agent_slug}-{run_id}', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist {task_id}',
@@ -104,7 +104,7 @@ try {
       pr_body_template: 'Provider: {provider}\nModel: {model_label}\n',
     },
   }, {}, {
-    id: 'developer-docs',
+    id: 'fixture-workload',
     metadata: { job_id: 'job-1' },
   }, workspace, ['docs/generated.md'], {
     env: { GITHUB_RUN_ID: '12345' },
@@ -115,7 +115,7 @@ try {
   assert.equal(publication.opened, true);
   assert.equal(publication.success, true);
   assert.equal(publication.repo, 'owner/repo');
-  assert.equal(publication.head, 'agent-artifacts/docs-agent-12345');
+  assert.equal(publication.head, 'agent-artifacts/fixture-agent-12345');
   assert.equal(publication.base, 'trunk');
   assert.equal(publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.equal(publication.action, 'created');

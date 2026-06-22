@@ -10,20 +10,20 @@ declare(strict_types=1);
  *
  * Spec example:
  *   {
- *     "bundle_dir": "bundles/docs-agent",
- *     "bundle_slug": "docs-agent",
- *     "agent_slug": "docs-agent",
- *     "agent_label": "Docs Agent",
- *     "expected_pipelines": ["technical-docs-pipeline", "user-docs-pipeline"],
- *     "expected_flows": ["technical-docs-flow", "user-docs-flow"],
+ *     "bundle_dir": "bundles/example-agent",
+ *     "bundle_slug": "example-agent",
+ *     "agent_slug": "example-agent",
+ *     "agent_label": "Example Agent",
+ *     "expected_pipelines": ["example-pipeline"],
+ *     "expected_flows": ["example-flow"],
  *     "memory_files": ["SOUL.md", "MEMORY.md"],
  *     "manifest_assertions": {
  *       "run_artifacts.completion_assertions.egress": ["pr-body"],
  *       "agent.agent_config.daily_memory.enabled": true
  *     },
  *     "flow_assertions": {
- *       "technical-docs-flow": {
- *         "pipeline_slug": "technical-docs-pipeline",
+ *       "example-flow": {
+ *         "pipeline_slug": "example-pipeline",
  *         "ai_step_required_tools": [
  *           "get_github_file",
  *           "create_or_update_github_file",
@@ -33,22 +33,22 @@ declare(strict_types=1);
  *       }
  *     },
  *     "pipeline_assertions": {
- *       "technical-docs-pipeline": {
+ *       "example-pipeline": {
  *         "system_prompt_must_contain": "source code"
  *       }
  *     },
  *     "example_runner_config": "examples/homeboy-runner-config.example.json",
  *     "example_assertions": {
  *       "success_requires_pr": false,
- *       "pipeline_slug": "technical-docs-pipeline"
+ *       "pipeline_slug": "example-pipeline"
  *     }
  *   }
  *
  * Paths:
  *   bundle_dir and example_runner_config are resolved relative to the spec
  *   file's parent directory. This lets consumers keep the spec at repo root
- *   with "bundle_dir": "bundles/docs-agent", or under tests/ with
- *   "bundle_dir": "../bundles/docs-agent".
+ *   with "bundle_dir": "bundles/example-agent", or under tests/ with
+ *   "bundle_dir": "../bundles/example-agent".
  *
  * This script is intentionally standalone: no Composer dependencies, no
  * WordPress runtime, and no PHPUnit bootstrap.

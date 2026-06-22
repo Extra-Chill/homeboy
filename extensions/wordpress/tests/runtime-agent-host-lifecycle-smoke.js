@@ -86,12 +86,12 @@ function makeRunFiles(tmp, config) {
   const resultsPath = path.join(tmp, 'results.json');
   writeJson(configPath, {
     target_repo: 'owner/repo',
-    agent_slug: 'docs-agent',
+    agent_slug: 'fixture-agent',
     provider: 'openai',
     model: 'gpt-5.5',
-    workload_id: 'developer-docs',
+    workload_id: 'fixture-workload',
     ignored_workspace_paths: ['runtime-agent-artifacts'],
-    runner_workspace: { branch: 'agent-artifacts/docs-agent-host-lifecycle', from: 'origin/trunk' },
+    runner_workspace: { branch: 'agent-artifacts/fixture-agent-host-lifecycle', from: 'origin/trunk' },
     artifact_export: {
       commit_message_template: 'chore: persist generated docs',
       pr_title_template: 'Persist generated docs',
@@ -101,7 +101,7 @@ function makeRunFiles(tmp, config) {
   });
   writeJson(resultsPath, {
     component_id: 'runtime-agent-driver',
-    scenarios: [{ id: 'developer-docs', metrics: {}, metadata: { engine_data: {}, ...(config.initial_metadata || {}) } }],
+    scenarios: [{ id: 'fixture-workload', metrics: {}, metadata: { engine_data: {}, ...(config.initial_metadata || {}) } }],
   });
   return { configPath, resultsPath };
 }
@@ -110,11 +110,11 @@ function makeRunFiles(tmp, config) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-host-lifecycle-success.'));
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
-  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['checkout', '-B', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
   checked('git', ['add', 'stale.txt'], { cwd: repo });
   checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
-  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   checked('git', ['checkout', 'trunk'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
@@ -123,7 +123,7 @@ function makeRunFiles(tmp, config) {
     drift_checks: [{ command: 'git diff --exit-code', description: 'Verification did not create unstaged drift' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -138,10 +138,10 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metadata.engine_data.success_status, 'pr_opened');
   assert.equal(scenario.metadata.runner_workspace_publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.match(fs.readFileSync(gh.log, 'utf8'), /pr create .*--base trunk/);
-  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['fetch', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   const publishedFiles = checked(
     'git',
-    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/fixture-agent-host-lifecycle'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
@@ -166,7 +166,7 @@ function makeRunFiles(tmp, config) {
     },
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -199,7 +199,7 @@ function makeRunFiles(tmp, config) {
     },
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.notEqual(result.status, 0);
@@ -226,15 +226,15 @@ function makeRunFiles(tmp, config) {
   const repo = makeRepo(tmp);
   const gh = makeGhFixture(tmp);
   fs.mkdirSync(path.join(repo, 'plugins', 'amp'), { recursive: true });
-  fs.mkdirSync(path.join(repo, 'runtime-agent-artifacts', 'technical-docs-agent'), { recursive: true });
+  fs.mkdirSync(path.join(repo, 'runtime-agent-artifacts', 'fixture-agent'), { recursive: true });
   fs.writeFileSync(path.join(repo, 'plugins', 'amp', 'AGENTS.md'), 'invalid docs lane output\n');
-  fs.writeFileSync(path.join(repo, 'runtime-agent-artifacts', 'technical-docs-agent', 'transcript.json'), '{}\n');
+  fs.writeFileSync(path.join(repo, 'runtime-agent-artifacts', 'fixture-agent', 'transcript.json'), '{}\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     writable_paths: ['README.md', 'docs/**', 'plugins/**/README.md'],
     verification_commands: [{ command: 'test -f plugins/amp/AGENTS.md', description: 'Out-of-policy file exists' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.notEqual(result.status, 0);
@@ -259,7 +259,7 @@ function makeRunFiles(tmp, config) {
     drift_checks: [{ command: 'git diff --exit-code', description: 'Tracked docs update is staged for drift check' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -269,10 +269,10 @@ function makeRunFiles(tmp, config) {
   assert.equal(scenario.metrics.pr_opened, 1);
   assert.deepEqual(scenario.metadata.runner_workspace_capture.files, ['README.md']);
   assert.deepEqual(scenario.metadata.runner_writable_path_policy.rejected_files, []);
-  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['fetch', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   const publishedReadme = checked(
     'git',
-    ['show', 'origin/agent-artifacts/docs-agent-host-lifecycle:README.md'],
+    ['show', 'origin/agent-artifacts/fixture-agent-host-lifecycle:README.md'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedReadme, /Tracked docs update/);
@@ -294,7 +294,7 @@ function makeRunFiles(tmp, config) {
     drift_checks: [{ command: 'git diff --exit-code', description: 'Verifier did not create tracked drift' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -307,10 +307,10 @@ function makeRunFiles(tmp, config) {
   assert.deepEqual(scenario.metadata.runner_workspace_capture.files, ['docs/architecture.md', 'plugins/amp/AGENTS.md']);
   assert.deepEqual(scenario.metadata.runner_workspace_capture.verification_side_effect_files, ['plugins/amp/AGENTS.md']);
   assert.deepEqual(scenario.metadata.runner_side_effect_policy.accepted_files, ['plugins/amp/AGENTS.md']);
-  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['fetch', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   const publishedFiles = checked(
     'git',
-    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/fixture-agent-host-lifecycle'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedFiles, /docs\/architecture\.md/);
@@ -330,7 +330,7 @@ function makeRunFiles(tmp, config) {
     }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.notEqual(result.status, 0);
@@ -350,11 +350,11 @@ function makeRunFiles(tmp, config) {
   const gh = makeGhFixture(tmp, {
     existingPullRequest: { number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' },
   });
-  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['checkout', '-B', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
   checked('git', ['add', 'stale.txt'], { cwd: repo });
   checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
-  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from agent on stale branch\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     initial_metadata: {
@@ -368,7 +368,7 @@ function makeRunFiles(tmp, config) {
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -384,10 +384,10 @@ function makeRunFiles(tmp, config) {
   const ghLog = fs.readFileSync(gh.log, 'utf8');
   assert.match(ghLog, /pr reopen 47/);
   assert.doesNotMatch(ghLog, /pr create/);
-  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['fetch', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   const publishedFiles = checked(
     'git',
-    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle'],
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/fixture-agent-host-lifecycle'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
@@ -401,17 +401,17 @@ function makeRunFiles(tmp, config) {
     existingPullRequest: { number: 47, state: 'CLOSED', url: 'https://github.com/owner/repo/pull/47' },
     failReopen: true,
   });
-  checked('git', ['checkout', '-B', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['checkout', '-B', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'stale.txt'), 'old branch content\n');
   checked('git', ['add', 'stale.txt'], { cwd: repo });
   checked('git', ['commit', '-m', 'Stale generated docs'], { cwd: repo });
-  checked('git', ['push', '-u', 'origin', 'agent-artifacts/docs-agent-host-lifecycle'], { cwd: repo });
+  checked('git', ['push', '-u', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle'], { cwd: repo });
   fs.writeFileSync(path.join(repo, 'generated.txt'), 'hello from replacement branch\n');
   const { configPath, resultsPath } = makeRunFiles(tmp, {
     verification_commands: [{ command: 'test -f generated.txt', description: 'Generated file exists' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -419,16 +419,16 @@ function makeRunFiles(tmp, config) {
   const publication = output.scenarios[0].metadata.runner_workspace_publication;
   assert.equal(publication.url, 'https://github.com/owner/repo/pull/1291');
   assert.equal(publication.action, 'created_after_closed_pr');
-  assert.equal(publication.head, 'agent-artifacts/docs-agent-host-lifecycle-run-12345');
+  assert.equal(publication.head, 'agent-artifacts/fixture-agent-host-lifecycle-run-12345');
   assert.equal(publication.closed_pr_number, 47);
   assert.match(publication.reopen_error, /Could not open the pull request/);
   const ghLog = fs.readFileSync(gh.log, 'utf8');
   assert.match(ghLog, /pr reopen 47/);
-  assert.match(ghLog, /pr create --head agent-artifacts\/docs-agent-host-lifecycle-run-12345 --base trunk/);
-  checked('git', ['fetch', 'origin', 'agent-artifacts/docs-agent-host-lifecycle-run-12345'], { cwd: repo });
+  assert.match(ghLog, /pr create --head agent-artifacts\/fixture-agent-host-lifecycle-run-12345 --base trunk/);
+  checked('git', ['fetch', 'origin', 'agent-artifacts/fixture-agent-host-lifecycle-run-12345'], { cwd: repo });
   const publishedFiles = checked(
     'git',
-    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/docs-agent-host-lifecycle-run-12345'],
+    ['ls-tree', '-r', '--name-only', 'origin/agent-artifacts/fixture-agent-host-lifecycle-run-12345'],
     { cwd: repo },
   ).stdout;
   assert.match(publishedFiles, /generated\.txt/);
@@ -448,7 +448,7 @@ function makeRunFiles(tmp, config) {
     drift_checks: [{ command: 'git diff --exit-code', description: 'Verifier output must be committed' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.notEqual(result.status, 0);
@@ -472,7 +472,7 @@ function makeRunFiles(tmp, config) {
     drift_checks: [{ command: 'printf should-not-run', description: 'Skipped drift check' }],
   });
 
-  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'developer-docs', '--workspace', repo], {
+  const result = run('node', [script, '--results', resultsPath, '--config', configPath, '--scenario', 'fixture-workload', '--workspace', repo], {
     env: { PATH: `${gh.bin}${path.delimiter}${process.env.PATH}`, GITHUB_RUN_ID: '12345', GH_TOKEN: 'fixture' },
   });
   assert.notEqual(result.status, 0);
