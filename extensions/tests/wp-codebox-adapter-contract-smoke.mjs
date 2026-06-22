@@ -95,10 +95,15 @@ assert.deepEqual(WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.map((requirement) =>
 	'provider-runtime-invocation',
 	'artifact-result-envelope',
 	'artifact-apply-execution',
+	'preview-materialization',
 ]);
 assert.equal(
 	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'artifact-result-envelope').adapter_behavior,
 	'consume_canonical_envelope_with_legacy_package_fallback'
+);
+assert.equal(
+	WP_CODEBOX_UPSTREAM_PRIMITIVE_REQUIREMENTS.find((requirement) => requirement.id === 'preview-materialization').adapter_behavior,
+	'delegate_contained_site_open_without_constructing_playground_urls'
 );
 assert.doesNotMatch(JSON.stringify(cliDescriptor), /datamachine|data machine|wp-site-generator|wpsg|site generator/i);
 
