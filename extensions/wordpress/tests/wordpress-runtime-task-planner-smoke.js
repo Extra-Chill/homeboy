@@ -30,7 +30,13 @@ const plan = wordpressRuntimeTaskPlan({
 	dlaUrl: 'dla://runtime/import/demo-site',
 	provider: 'codex',
 	model: 'openai/gpt-5.5',
-	runtimeId: 'wp-codebox',
+	runtimeProfile: 'wp-codebox',
+	runtimeProfiles: {
+		'wp-codebox': {
+			backend: 'codebox',
+			runtime: 'wp-codebox',
+		},
+	},
 	concurrency: 2,
 	timeoutSeconds: 900,
 	expectedArtifacts: ['runtime-task-result'],
@@ -118,6 +124,8 @@ const result = spawnSync(process.execPath, [
 	script,
 	'--plan-id', 'cli-runtime-task-plan-smoke',
 	'--ability', 'example/validate-artifact',
+	'--backend', 'codebox',
+	'--runtime-id', 'wp-codebox',
 	'--ability-input', '{"artifact":"report.json"}',
 	'--dla-url', 'https://dla.example/export/123',
 	'--expected-artifact', 'validation-report',

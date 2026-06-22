@@ -220,7 +220,6 @@ function normalizeTaskId(value) {
 function failedTaskRecord(taskRequest, id, error) {
   return {
     id,
-    ...(taskRequest.sandbox_session_id ? { sandbox_session_id: taskRequest.sandbox_session_id } : {}),
     group_key: taskRequest.group_key || '',
     status: 'failed',
     error_message: errorMessage(error),
@@ -235,7 +234,7 @@ function errorMessage(error) {
 }
 
 function defaultTaskId(taskRequest) {
-  return taskRequest.id || taskRequest.sandbox_session_id || taskRequest.group_key;
+  return taskRequest.task_id || taskRequest.id || taskRequest.group_key;
 }
 
 function defaultRunningEntry(taskRequest) {
@@ -261,7 +260,7 @@ function runningGroups(running) {
 }
 
 function defaultTaskOrder(plan, taskId, record) {
-  const recordId = record.id || record.sandbox_session_id || record.group_key;
+  const recordId = record.task_id || record.id || record.group_key;
   return plan.task_requests.findIndex((taskRequest) => taskId(taskRequest) === recordId);
 }
 

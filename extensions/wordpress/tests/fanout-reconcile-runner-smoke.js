@@ -167,7 +167,7 @@ async function assertTaskIdsAreRequiredAndUnique(plan) {
       plan: {
         ...plan,
         task_requests: [
-          { ...plan.task_requests[0], id: '', sandbox_session_id: '', group_key: '' },
+          { ...plan.task_requests[0], id: '', task_id: '', group_key: '' },
         ],
       },
       execute_task_request: async () => {

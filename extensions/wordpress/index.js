@@ -32,7 +32,6 @@ module.exports = {
 	...require('./lib/fixture-setup'),
 	...require('./lib/webperf-evidence-summary'),
 	...require('./lib/benchmark-matrix-report'),
-	...require('./lib/static-site-fanout-adapter'),
 	...require('./lib/audit-fanout-runtime-provider'),
 	...require('./lib/agent-terminal-actions'),
 	...require('./lib/agent-task-runner-spec'),
