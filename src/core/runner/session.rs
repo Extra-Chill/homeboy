@@ -196,6 +196,12 @@ pub struct RunnerJob {
     pub claim_expires_in_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_refs: Vec<RunnerArtifactRef>,
 }
@@ -225,6 +231,9 @@ impl From<&ActiveRunnerJobSummary> for RunnerJob {
             claim_expires_at_ms: job.claim_expires_at_ms,
             claim_expires_in_ms: job.claim_expires_in_ms,
             durable_run_id: job.durable_run_id.clone(),
+            stale_reason: job.stale_reason.clone(),
+            lifecycle_state: job.lifecycle_state.clone(),
+            retryable: job.retryable,
             artifact_refs: Vec::new(),
         }
     }
@@ -261,6 +270,9 @@ impl RunnerJob {
             claim_expires_at_ms: job.claim_expires_at_ms,
             claim_expires_in_ms: None,
             durable_run_id: None,
+            stale_reason: job.stale_reason.clone(),
+            lifecycle_state: job.stale_reason.as_ref().map(|_| "stale".to_string()),
+            retryable: job.stale_reason.as_ref().map(|_| true),
             artifact_refs: job.artifacts.iter().map(RunnerArtifactRef::from).collect(),
         }
     }
@@ -400,8 +412,12 @@ pub struct RunnerStatusReport {
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_runner_jobs: Vec<RunnerJob>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_runner_jobs: Vec<RunnerJob>,
     #[serde(default)]
     pub active_job_count: usize,
+    #[serde(default)]
+    pub stale_runner_job_count: usize,
     pub active_job_state: RunnerActiveJobState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_source: Option<RunnerActiveJobSource>,
