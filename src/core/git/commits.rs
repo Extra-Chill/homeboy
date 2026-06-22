@@ -327,6 +327,27 @@ pub fn get_latest_tag_with_prefix(path: &str, tag_prefix: Option<&str>) -> Resul
         .map(|(tag, _)| tag))
 }
 
+/// Get the latest exact release tag regardless of whether it is reachable from HEAD.
+pub fn get_latest_tag_any_with_prefix(
+    path: &str,
+    tag_prefix: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(tags) = command::run_in_optional(path, "git", &["tag", "--sort=-v:refname", "--list"])
+    else {
+        return Ok(None);
+    };
+
+    Ok(tags
+        .lines()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            exact_release_version_from_tag(tag, tag_prefix)
+                .map(|version| (tag.to_string(), version))
+        })
+        .max_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(tag, _)| tag))
+}
+
 /// Get the previous release tag reachable from `current_tag`.
 ///
 /// In monorepos, `tag_prefix` scopes the search to the component tag namespace.
@@ -350,6 +371,45 @@ pub fn get_previous_tag_before_with_prefix(
             "--list",
         ],
     ) else {
+        return Ok(None);
+    };
+
+    Ok(tags
+        .lines()
+        .filter_map(|tag| {
+            let tag = tag.trim();
+            if tag == current_tag {
+                return None;
+            }
+            let version = exact_release_version_from_tag(tag, tag_prefix)?;
+            if version < current_version {
+                Some((tag.to_string(), version))
+            } else {
+                None
+            }
+        })
+        .max_by(|(_, a), (_, b)| a.cmp(b))
+        .map(|(tag, _)| tag))
+}
+
+/// Get the highest release tag lower than `current_tag` regardless of ancestry.
+///
+/// This is deliberately broader than [`get_previous_tag_before_with_prefix`],
+/// which only returns tags merged into `current_tag`. Release-note planning uses
+/// this to fail closed when a prior published tag exists on a side branch and
+/// would otherwise be skipped, causing generated notes to duplicate an older
+/// release range.
+pub fn get_previous_tag_before_any_with_prefix(
+    path: &str,
+    current_tag: &str,
+    tag_prefix: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(current_version) = exact_release_version_from_tag(current_tag, tag_prefix) else {
+        return Ok(None);
+    };
+
+    let Some(tags) = command::run_in_optional(path, "git", &["tag", "--sort=-v:refname", "--list"])
+    else {
         return Ok(None);
     };
 

@@ -173,6 +173,11 @@ pub(super) fn resolve_tag_and_commits(
     match monorepo {
         Some(ctx) => {
             let latest_tag = git::get_latest_tag_with_prefix(&ctx.git_root, Some(&ctx.tag_prefix))?;
+            validate_latest_release_tag_reachable(
+                &ctx.git_root,
+                latest_tag.as_deref(),
+                Some(&ctx.tag_prefix),
+            )?;
             let commits = git::get_commits_since_tag_for_path(
                 &ctx.git_root,
                 latest_tag.as_deref(),
@@ -182,10 +187,49 @@ pub(super) fn resolve_tag_and_commits(
         }
         None => {
             let latest_tag = git::get_latest_tag(local_path)?;
+            validate_latest_release_tag_reachable(local_path, latest_tag.as_deref(), None)?;
             let commits = git::get_commits_since_tag(local_path, latest_tag.as_deref())?;
             Ok((latest_tag, commits))
         }
     }
+}
+
+fn validate_latest_release_tag_reachable(
+    git_root: &str,
+    latest_reachable_tag: Option<&str>,
+    tag_prefix: Option<&str>,
+) -> Result<()> {
+    let Some(latest_any_tag) = git::get_latest_tag_any_with_prefix(git_root, tag_prefix)? else {
+        return Ok(());
+    };
+
+    if latest_reachable_tag == Some(latest_any_tag.as_str()) {
+        return Ok(());
+    }
+
+    if git::is_ancestor(git_root, &latest_any_tag, "HEAD")? {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "release-range",
+        format!(
+            "Latest release tag {} is not reachable from HEAD. Refusing to plan changelog entries from {} because that would duplicate a prior release range.",
+            latest_any_tag,
+            latest_reachable_tag.unwrap_or("the initial commit")
+        ),
+        Some(format!("Repository: {}", git_root)),
+        Some(vec![
+            format!(
+                "Merge or recover the {} release commit onto the selected release base/default branch, then rerun the release.",
+                latest_any_tag
+            ),
+            format!(
+                "Inspect the boundary: git merge-base --is-ancestor {} HEAD",
+                latest_any_tag
+            ),
+        ]),
+    ))
 }
 
 fn commit_rows(commits: &[git::CommitInfo]) -> Vec<ReleaseSemverCommit> {
@@ -378,6 +422,39 @@ mod tests {
         assert_eq!(latest_tag.as_deref(), Some("v1.0.0"));
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "fix: patch bug");
+    }
+
+    #[test]
+    fn resolve_tag_and_commits_fails_closed_when_latest_release_tag_is_off_branch() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["branch", "-M", "main"]);
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(
+            dir,
+            "feature.txt",
+            "first release work",
+            "feat: first release work",
+        );
+        run_git(dir, &["branch", "release-v0.2.0"]);
+        run_git(dir, &["checkout", "release-v0.2.0"]);
+        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(dir, &["tag", "v0.2.0"]);
+        run_git(dir, &["checkout", "main"]);
+        commit_file(
+            dir,
+            "fix.txt",
+            "second release work",
+            "fix: second release work",
+        );
+
+        let err = resolve_tag_and_commits(&dir.to_string_lossy(), None)
+            .expect_err("off-branch latest release tag should fail closed");
+
+        assert!(err.message.contains("Latest release tag v0.2.0"));
+        assert!(err.message.contains("not reachable from HEAD"));
+        assert!(err.message.contains("duplicate a prior release range"));
     }
 
     #[test]

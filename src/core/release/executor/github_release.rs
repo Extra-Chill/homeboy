@@ -509,7 +509,33 @@ fn github_generated_notes_start_tag(component: &Component, tag: &str) -> Result<
         Some(ctx) => (ctx.git_root.as_str(), Some(ctx.tag_prefix.as_str())),
         None => (component.local_path.as_str(), None),
     };
-    crate::core::git::get_previous_tag_before_with_prefix(git_root, tag, tag_prefix)
+    let previous =
+        crate::core::git::get_previous_tag_before_any_with_prefix(git_root, tag, tag_prefix)?;
+
+    if let Some(previous_tag) = previous.as_deref() {
+        if !crate::core::git::is_ancestor(git_root, previous_tag, tag)? {
+            return Err(Error::validation_invalid_argument(
+                "release-notes-range",
+                format!(
+                    "Previous release tag {} is not reachable from release tag {}. Refusing to generate GitHub release notes because using an older reachable tag would duplicate prior release ranges.",
+                    previous_tag, tag
+                ),
+                Some(format!("Repository: {}", git_root)),
+                Some(vec![
+                    format!(
+                        "Merge or recover the {} release commit onto the selected release base/default branch, then rerun the release.",
+                        previous_tag
+                    ),
+                    format!(
+                        "Inspect the boundary: git merge-base --is-ancestor {} {}",
+                        previous_tag, tag
+                    ),
+                ]),
+            ));
+        }
+    }
+
+    Ok(previous)
 }
 
 /// Build the release body used when GitHub-generated notes are unavailable.
@@ -1015,14 +1041,15 @@ pub(super) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<
 mod tests {
     use std::collections::HashMap;
 
+    use crate::core::component::Component;
     use crate::core::component::{GithubConfig, GithubHostConfig};
     use crate::core::deploy::release_download::GitHubRepo;
     use crate::core::release::types::{ReleaseState, ReleaseStepStatus};
 
     use super::{
         create_failed_result, fallback_release_notes, github_cli_env,
-        github_release_repair_commands, not_created_result, upload_failed_result,
-        GitHubReleaseBody,
+        github_generated_notes_start_tag, github_release_repair_commands, not_created_result,
+        upload_failed_result, GitHubReleaseBody,
     };
 
     fn test_repo() -> GitHubRepo {
@@ -1050,6 +1077,45 @@ mod tests {
                 .to_string(),
             generated_notes_ok: true,
             changelog_url: Some("https://example/CHANGELOG.md".to_string()),
+        }
+    }
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: stdout={} stderr={}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_file(dir: &std::path::Path, name: &str, content: &str, message: &str) {
+        std::fs::write(dir.join(name), content).expect("write fixture file");
+        run_git(dir, &["add", name]);
+        run_git(dir, &["commit", "-q", "-m", message]);
+    }
+
+    fn git_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        run_git(dir, &["init", "-q", "-b", "main"]);
+        run_git(dir, &["config", "user.email", "homeboy@example.com"]);
+        run_git(dir, &["config", "user.name", "Homeboy Test"]);
+        run_git(dir, &["config", "commit.gpgsign", "false"]);
+        temp
+    }
+
+    fn component_for_repo(dir: &std::path::Path) -> Component {
+        Component {
+            id: "test-component".to_string(),
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
         }
     }
 
@@ -1398,5 +1464,78 @@ mod tests {
             "HTTPS_PROXY".to_string(),
             "socks5://127.0.0.1:9999".to_string()
         )));
+    }
+
+    #[test]
+    fn generated_notes_start_tag_fails_closed_when_prior_release_tag_is_off_branch() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(
+            dir,
+            "feature.txt",
+            "first release work",
+            "feat: first release work",
+        );
+        run_git(dir, &["branch", "release-v0.2.0"]);
+        run_git(dir, &["checkout", "release-v0.2.0"]);
+        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(dir, &["tag", "v0.2.0"]);
+        run_git(dir, &["checkout", "main"]);
+        commit_file(
+            dir,
+            "fix.txt",
+            "second release work",
+            "fix: second release work",
+        );
+        run_git(dir, &["tag", "v0.2.1"]);
+
+        assert_eq!(
+            crate::core::git::get_previous_tag_before_with_prefix(
+                &dir.to_string_lossy(),
+                "v0.2.1",
+                None,
+            )
+            .expect("reachable previous tag lookup"),
+            Some("v0.1.0".to_string()),
+            "the old reachable-only lookup skips the off-branch v0.2.0 boundary"
+        );
+
+        let err = github_generated_notes_start_tag(&component_for_repo(dir), "v0.2.1")
+            .expect_err("off-branch prior release tag should fail closed");
+        assert!(err.message.contains("Previous release tag v0.2.0"));
+        assert!(err
+            .message
+            .contains("not reachable from release tag v0.2.1"));
+        assert!(err.message.contains("duplicate prior release ranges"));
+    }
+
+    #[test]
+    fn generated_notes_start_tag_uses_prior_release_tag_when_reachable() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(
+            dir,
+            "feature.txt",
+            "first release work",
+            "feat: first release work",
+        );
+        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
+        run_git(dir, &["tag", "v0.2.0"]);
+        commit_file(
+            dir,
+            "fix.txt",
+            "second release work",
+            "fix: second release work",
+        );
+        run_git(dir, &["tag", "v0.2.1"]);
+
+        let start_tag = github_generated_notes_start_tag(&component_for_repo(dir), "v0.2.1")
+            .expect("reachable previous tag should resolve");
+
+        assert_eq!(start_tag.as_deref(), Some("v0.2.0"));
     }
 }

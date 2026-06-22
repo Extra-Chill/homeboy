@@ -27,9 +27,11 @@ pub use changes::{
 pub(crate) use commits::extract_version_from_tag;
 pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_since_tag,
-    get_commits_since_tag_for_path, get_last_n_commits, get_latest_tag, get_latest_tag_with_prefix,
-    get_previous_tag_before_with_prefix, recommended_bump_from_commits, strip_conventional_prefix,
-    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
+    get_commits_since_tag_for_path, get_last_n_commits, get_latest_tag,
+    get_latest_tag_any_with_prefix, get_latest_tag_with_prefix,
+    get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
+    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
+    CommitInfo, MonorepoContext, SemverBump,
 };
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::{
