@@ -96,6 +96,8 @@ pub struct AgentTaskExecutorProvider {
     pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lab_runtime_components: Vec<String>,
     #[serde(
         default,
         skip_serializing_if = "AgentTaskProviderTimeoutArtifactDiscovery::is_empty"
@@ -779,7 +781,7 @@ impl AgentTaskProviderCatalog {
             let refreshed = discover_provider_catalog();
             let catalog = PROVIDER_CATALOG.get_or_init(|| RwLock::new(refreshed.clone()));
             *catalog.write().expect("provider catalog lock") = refreshed.clone();
-            return refreshed;
+            refreshed
         }
         #[cfg(test)]
         {
@@ -860,6 +862,10 @@ impl ExtensionProviderAgentTaskExecutor {
 
     pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
         required_extension_ids_for_plan_with_providers(plan, &self.providers)
+    }
+
+    pub fn lab_runtime_component_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
+        lab_runtime_component_ids_for_plan_with_providers(plan, &self.providers)
     }
 }
 
@@ -978,6 +984,10 @@ fn validate_provider_runner_readiness_for_backend_with_providers(
 
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
     ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
+}
+
+pub fn lab_runtime_component_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
+    ExtensionProviderAgentTaskExecutor::discover().lab_runtime_component_ids_for_plan(plan)
 }
 
 pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {
@@ -1914,6 +1924,24 @@ fn required_extension_ids_for_plan_with_providers(
         }
     }
     extension_ids.into_iter().collect()
+}
+
+fn lab_runtime_component_ids_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    let mut component_ids = BTreeSet::new();
+    for request in &plan.tasks {
+        if let Some(provider) = select_provider(providers, request) {
+            for component_id in &provider.lab_runtime_components {
+                let component_id = component_id.trim();
+                if !component_id.is_empty() {
+                    component_ids.insert(component_id.to_string());
+                }
+            }
+        }
+    }
+    component_ids.into_iter().collect()
 }
 
 /// Maximum number of attempts (1 initial + retries) for a transient provider
@@ -3642,6 +3670,7 @@ mod tests {
             runner_readiness: Vec::new(),
             runner_sources: Vec::new(),
             dependency_failure_patterns: Vec::new(),
+            lab_runtime_components: Vec::new(),
             timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
             role_aliases: AgentTaskProviderRoleAliases::default(),
             runtime_contract: AgentTaskRuntimeContract::default(),
@@ -3755,6 +3784,31 @@ mod tests {
         ));
 
         assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
+    }
+
+    #[test]
+    fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
+        let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
+        provider_a.id = "provider-a".to_string();
+        provider_a.lab_runtime_components =
+            vec!["agents-api".to_string(), "data-machine".to_string()];
+        let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
+        request_b.executor.selector = Some("provider-b".to_string());
+        provider_b.id = "provider-b".to_string();
+        provider_b.lab_runtime_components =
+            vec!["data-machine".to_string(), "php-ai-client".to_string()];
+        let executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
+
+        let component_ids = executor.lab_runtime_component_ids_for_plan(&AgentTaskPlan::new(
+            "plan-a",
+            vec![request_a, request_b],
+        ));
+
+        assert_eq!(
+            component_ids,
+            vec!["agents-api", "data-machine", "php-ai-client"]
+        );
     }
 
     #[test]
@@ -4056,7 +4110,8 @@ process.stdout.write(JSON.stringify({
                 "path_contains": "prepared-dependencies/",
                 "error_contains_any": ["enoent", "no such file or directory"],
                 "remediation": "Refresh prepared dependencies."
-            }]
+            }],
+            "lab_runtime_components": ["agents-api", "data-machine"]
         }))
         .expect("provider manifest");
 
@@ -4072,6 +4127,10 @@ process.stdout.write(JSON.stringify({
         assert_eq!(
             provider.dependency_failure_patterns[0].path_contains,
             "prepared-dependencies/"
+        );
+        assert_eq!(
+            provider.lab_runtime_components,
+            vec!["agents-api", "data-machine"]
         );
     }
 

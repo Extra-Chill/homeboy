@@ -58,11 +58,12 @@ use super::super::lab_selection::{
     LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
-    agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
-    path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-    provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
-    sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
-    workspace_mapping_entry, LabWorkspaceMappingEntry,
+    agent_task_plan_extra_workspaces, agent_task_provider_runtime_component_extra_workspaces,
+    lab_extra_workspaces, lab_workspace_mapping_metadata, path_setting_extra_workspaces,
+    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
+    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
+    workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
+    LabWorkspaceMappingEntry,
 };
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
@@ -70,11 +71,9 @@ use super::super::{
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
     prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
     status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
+    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
-#[cfg(test)]
-use super::super::{RunnerActiveJobSource, RunnerActiveJobState};
 
 use super::agent_task_bridge::{
     agent_task_dispatch_run_isolation_token, ensure_agent_task_dispatch_run_id_with,
@@ -769,6 +768,10 @@ fn prepare_lab_offload_workspace_stage(
         &offload_args,
         source_path,
     )?);
+    extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
     extra_workspaces.extend(path_setting_extra_workspaces(&offload_args, source_path)?);
     extra_workspaces.extend(rig_component_path_env_extra_workspaces(source_path)?);
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
@@ -830,7 +833,7 @@ fn prepare_lab_offload_workspace_stage(
                 .inputs(
                     PlanValues::new().json("count", at_file_specs.len()).json(
                         "files",
-                        &at_file_specs
+                        at_file_specs
                             .iter()
                             .map(|spec| {
                                 serde_json::json!({
@@ -1821,6 +1824,7 @@ fn lab_materialization_proof_metadata(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn runner_workload_metadata(
     plan: &HomeboyPlan,
     contract: &LabOffloadCommand,
@@ -1921,14 +1925,6 @@ impl LabOffloadWorkspaceModePolicy {
             Self::RunnerResident => "runner_resident",
         }
     }
-}
-
-fn passive_wp_codebox_version() -> Option<String> {
-    ["HOMEBOY_WP_CODEBOX_VERSION", "WP_CODEBOX_VERSION"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn source_checkout_ref_display(metadata: &serde_json::Value) -> String {
