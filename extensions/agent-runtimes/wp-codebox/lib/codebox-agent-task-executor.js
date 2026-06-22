@@ -688,7 +688,7 @@ function componentContractsFromAgentTaskRequest(request, config, options = {}) {
 
 function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, defaults = {}, componentContracts = [], runtimeOverlays = []) {
   const runtimeProfile = firstObject(options.runtimeProfile) || {};
-  const runtimeRequirements = firstObject(config.runtime_requirements, config.runtimeRequirements) || {};
+  const runtimeRequirements = mergeRuntimeRequirements(defaults.runtimeRequirements, firstObject(config.runtime_requirements, config.runtimeRequirements) || {});
   const runtimeEnv = firstNonEmptyObject(config.runtime_env, config.runtimeEnv, config.wp_codebox_runtime_env, runtimeRequirements.env, runtimeRequirements.runtime_env, runtimeProfile.env, runtimeProfile.runtime_env, options.runtimeEnv, defaults.runtimeEnv) || {};
   const providerPluginPaths = firstNonEmptyArray(
     config.provider_plugin_paths,
@@ -708,6 +708,41 @@ function codeboxRuntimeRequirementsFromAgentTaskRequest(config, options = {}, de
     runtimeConfigMounts: firstDefined(config.runtime_config_mounts, config.runtimeConfigMounts, config.wp_codebox_runtime_config_mounts, runtimeRequirements.runtime_config_mounts, runtimeProfile.runtime_config_mounts, options.runtimeConfigMounts, defaults.runtimeConfigMounts),
     normalizeRuntimeProfile: options.normalizeRuntimeProfile,
     normalizeRuntimeProfilePayload: options.normalizeRuntimeProfilePayload,
+  });
+}
+
+function mergeRuntimeRequirements(...requirements) {
+  const normalized = requirements.filter((requirement) => requirement && typeof requirement === 'object' && !Array.isArray(requirement));
+  if (normalized.length === 0) {
+    return {};
+  }
+  return {
+    ...Object.assign({}, ...normalized),
+    ability_requirements: uniqueStrings(normalized.flatMap((requirement) => normalizeArray(requirement.ability_requirements || requirement.abilityRequirements))),
+    component_contracts: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.component_contracts))),
+    extra_plugins: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.extra_plugins))),
+    components: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.components))),
+    mu_plugins: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.mu_plugins))),
+    plugins: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.plugins))),
+    runtime_overlays: uniqueRuntimeRequirementObjects(normalized.flatMap((requirement) => normalizeArray(requirement.runtime_overlays))),
+  };
+}
+
+function uniqueRuntimeRequirementObjects(entries) {
+  const seen = new Set();
+  return normalizeArray(entries).filter((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return false;
+    }
+    const key = [entry.slug, entry.id, entry.path || entry.source || entry.target, entry.kind, entry.type].filter(Boolean).join(':');
+    if (!key) {
+      return true;
+    }
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
   });
 }
 
@@ -1191,6 +1226,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
   const providerConfig = providerConfigFor(provider, settings, providerDefaults);
   const model = config.model || options.model || defaultModelForProvider(provider, settings, providerConfig);
   const phpAiClientPath = defaultPhpAiClientPath(settings, options);
+  const agentsApiPath = defaultAgentsApiPath(settings, options, agentRuntimePath);
 
   return {
     agentRuntime: agentRuntimePath,
@@ -1204,6 +1240,7 @@ function defaultCodeboxRuntimeConfig(request, config, inputs, options = {}) {
     wpCodeboxBin: wpCodeboxBin({ settings, executable: '' }),
     runtimeOverlayProfiles: defaultRuntimeOverlayProfiles(settings),
     runtimeOverlays: defaultRuntimeOverlays(settings, phpAiClientPath),
+    runtimeRequirements: defaultRuntimeRequirements(agentsApiPath),
     runtimeEnv: defaultRuntimeEnv(settings),
     runtimeStateMounts: defaultRuntimeStateMounts(settings),
     runtimeConfigMounts: defaultRuntimeConfigMounts(settings),
@@ -1245,6 +1282,45 @@ function defaultRuntimeOverlays(settings, phpAiClientPath = '') {
     strategy: 'wordpress-scoped-bundle',
     metadata: { component: 'php-ai-client', source: 'homeboy-extensions-default' },
   }] : [];
+}
+
+function defaultRuntimeRequirements(agentsApiPath = '') {
+  if (!agentsApiPath) {
+    return {};
+  }
+  return {
+    ability_requirements: ['agents/chat'],
+    component_contracts: [{
+      slug: 'agents-api',
+      path: agentsApiPath,
+      pluginFile: 'agents-api/agents-api.php',
+      loadAs: 'mu-plugin',
+      activate: false,
+      metadata: { source: 'homeboy-extensions-codebox-runtime-default' },
+    }],
+  };
+}
+
+function defaultAgentsApiPath(settings, options = {}, agentRuntimePath = '') {
+  return firstExistingPath(
+    options.agentsApi,
+    options.agents_api,
+    settings.wp_codebox_agents_api_path,
+    settings.agents_api_path,
+    process.env.HOMEBOY_WP_CODEBOX_AGENTS_API_PATH,
+    process.env.WP_CODEBOX_AGENTS_API_PATH,
+    ...bundledAgentsApiPaths(agentRuntimePath),
+  );
+}
+
+function bundledAgentsApiPaths(agentRuntimePath = '') {
+  if (!agentRuntimePath) {
+    return [];
+  }
+  return [
+    path.join(agentRuntimePath, 'vendor', 'wordpress', 'agents-api'),
+    path.join(agentRuntimePath, 'vendor', 'automattic', 'agents-api'),
+  ];
 }
 
 function defaultPhpAiClientPath(settings, options = {}) {

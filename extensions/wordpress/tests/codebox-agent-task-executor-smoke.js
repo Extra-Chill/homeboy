@@ -1144,6 +1144,28 @@ try {
   assert(!JSON.stringify(defaultedRequest).includes(staleStandaloneAgentsApiPath));
   assert(!JSON.stringify(defaultedRequest).includes(alternateBundledAgentsApiPath));
 
+  const bundledAgentsApiRequest = codeboxTaskRequestFromAgentTaskRequest({
+    ...request,
+    task_id: 'bundled-agents-api-runtime-task-123',
+    executor: {
+      backend: 'codebox',
+      config: exampleAgentCiCodeboxExecutorConfig({ provider: 'codex' }),
+    },
+    inputs: {
+      target: { root: workspaceRoot },
+    },
+  }, {
+    agentRuntime: runtimePath,
+    settings: {},
+  });
+  const bundledAgentsApiContract = bundledAgentsApiRequest.runtime_requirements.component_contracts.find((contract) => contract.slug === 'agents-api');
+  assert.equal(bundledAgentsApiContract.path, bundledAgentsApiPath);
+  assert.equal(bundledAgentsApiContract.pluginFile, 'agents-api/agents-api.php');
+  assert.equal(bundledAgentsApiContract.loadAs, 'mu-plugin');
+  assert.equal(bundledAgentsApiContract.activate, false);
+  assert.deepEqual(bundledAgentsApiRequest.runtime_requirements.ability_requirements, ['agents/chat']);
+  assert.equal(bundledAgentsApiRequest.component_contracts.some((contract) => contract.slug === 'agents-api'), true);
+
   const configuredDefaultProviderRequest = codeboxTaskRequestFromAgentTaskRequest({
     ...request,
     task_id: 'configured-provider-default-task-123',
