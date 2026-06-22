@@ -160,7 +160,8 @@ fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutput> {
 mod tests {
     use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
     use super::execution::{
-        fuzz_campaign_contract, fuzz_runner_env, persist_fuzz_run_evidence, FuzzRunEvidenceInput,
+        fuzz_campaign_contract, fuzz_run_outcome, fuzz_runner_env, persist_fuzz_run_evidence,
+        FuzzRunEvidenceInput,
     };
     use super::replay::run_replay;
     use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness, gate_status};
@@ -748,6 +749,65 @@ mod tests {
             assert_eq!(artifacts[0].artifact_type, "file");
             assert!(std::path::Path::new(&artifacts[0].path).is_file());
         });
+    }
+
+    #[test]
+    fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = serde_json::json!({
+            "status": "failed",
+            "success": false,
+            "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
+        });
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign));
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
+    #[test]
+    fn fuzz_run_outcome_fails_when_successful_command_reports_nested_wordpress_error() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = serde_json::json!({
+            "wordpress_fuzz_result": {
+                "status": "errored",
+                "success": false,
+                "case_counts": { "passed": 0, "failed": 0, "errored": 1 }
+            }
+        });
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign));
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
+    fn empty_fuzz_campaign() -> FuzzCampaign {
+        FuzzCampaign {
+            schema: homeboy::core::fuzz::FUZZ_CAMPAIGN_SCHEMA.to_string(),
+            version: homeboy::core::fuzz::FUZZ_CONTRACT_VERSION,
+            id: "campaign-1".to_string(),
+            title: None,
+            safety_class: homeboy::core::fuzz::FuzzSafetyClass::ReadOnly,
+            surfaces: Vec::new(),
+            targets: Vec::new(),
+            workloads: Vec::new(),
+            cases: Vec::new(),
+            seeds: Vec::new(),
+            coverage: Vec::new(),
+            coverage_summary: None,
+            findings: Vec::new(),
+            artifacts: Vec::new(),
+            thresholds: Vec::new(),
+            lifecycle: None,
+            provenance: None,
+            replay: None,
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        }
     }
 
     #[test]

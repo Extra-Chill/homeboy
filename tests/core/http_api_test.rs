@@ -311,6 +311,7 @@ fn runs_list_includes_active_runner_jobs() {
                 capture_patch: false,
                 source_snapshot: None,
                 require_paths: Vec::new(),
+                runner_workload: None,
                 metadata: Some(serde_json::json!({
                     "source": "lab",
                     "kind": "agent-task-cook",

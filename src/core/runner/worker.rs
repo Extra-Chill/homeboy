@@ -934,6 +934,7 @@ mod tests {
                 diagnostics: None,
             },
             0,
+            None,
         );
 
         assert_eq!(result.exit_code, 0);
@@ -1000,6 +1001,7 @@ mod tests {
                 diagnostics: None,
             },
             0,
+            None,
         );
 
         assert_eq!(

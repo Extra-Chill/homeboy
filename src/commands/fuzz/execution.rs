@@ -66,9 +66,14 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
     } else {
         None
     };
-    let exit_code = runner_output.exit_code;
-    let success = runner_output.success;
-    let status = if success { "passed" } else { "failed" }.to_string();
+    let outcome = fuzz_run_outcome(
+        runner_output.exit_code,
+        runner_output.success,
+        results.as_ref(),
+    );
+    let exit_code = outcome.exit_code;
+    let success = outcome.success;
+    let status = outcome.status.to_string();
     let rig_id = rig_context.map(|context| context.spec.id);
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
@@ -124,6 +129,57 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         },
         exit_code,
     ))
+}
+
+pub(super) struct FuzzRunOutcome {
+    pub(super) status: &'static str,
+    pub(super) success: bool,
+    pub(super) exit_code: i32,
+}
+
+pub(super) fn fuzz_run_outcome(
+    runner_exit_code: i32,
+    runner_success: bool,
+    results: Option<&FuzzCampaign>,
+) -> FuzzRunOutcome {
+    let nested_failed = results.is_some_and(fuzz_campaign_reports_failure);
+    let success = runner_success && !nested_failed;
+    FuzzRunOutcome {
+        status: if success { "passed" } else { "failed" },
+        success,
+        exit_code: if success {
+            runner_exit_code
+        } else if runner_exit_code == 0 {
+            1
+        } else {
+            runner_exit_code
+        },
+    }
+}
+
+fn fuzz_campaign_reports_failure(campaign: &FuzzCampaign) -> bool {
+    fuzz_metadata_reports_failure(&campaign.metadata)
+        || campaign
+            .metadata
+            .get("wordpress_fuzz_result")
+            .is_some_and(fuzz_metadata_reports_failure)
+}
+
+fn fuzz_metadata_reports_failure(value: &serde_json::Value) -> bool {
+    let status_failed = value
+        .get("status")
+        .and_then(|status| status.as_str())
+        .is_some_and(|status| matches!(status, "failed" | "errored" | "error"));
+    let success_failed = value.get("success").and_then(|success| success.as_bool()) == Some(false);
+    let case_failed = value
+        .get("case_counts")
+        .is_some_and(|counts| json_u64(counts, "failed") > 0 || json_u64(counts, "errored") > 0);
+
+    status_failed || success_failed || case_failed
+}
+
+fn json_u64(value: &serde_json::Value, key: &str) -> u64 {
+    value.get(key).and_then(|entry| entry.as_u64()).unwrap_or(0)
 }
 
 pub(super) fn fuzz_campaign_contract(
