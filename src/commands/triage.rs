@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::core::triage::{
-    self, TriageCommandOutput, TriageOptions, TriageTarget, TriageWatchOptions,
+    self, CiFailureTriageOptions, TriageCommandOutput, TriageOptions, TriageTarget,
+    TriageWatchOptions,
 };
 use homeboy::core::Error;
 use std::path::PathBuf;
@@ -91,6 +92,8 @@ pub struct TriageArgs {
 
 #[derive(Subcommand, Debug)]
 enum TriageCommand {
+    /// Summarize latest failed GitHub Actions checks for one pull request.
+    CiFailure(CiFailureArgs),
     /// Triage one registered component.
     ///
     /// When `--path <CHECKOUT>` is supplied, the registry is bypassed and the
@@ -113,6 +116,24 @@ enum TriageCommand {
     Rig { rig_id: String },
     /// Triage every configured project, rig, and registered component once per repo.
     Workspace,
+}
+
+#[derive(Args, Debug)]
+struct CiFailureArgs {
+    /// Pull request number or GitHub PR URL.
+    target: String,
+
+    /// GitHub repository in owner/repo or host/owner/repo form. Required when TARGET is a number.
+    #[arg(long)]
+    repo: Option<String>,
+
+    /// Maximum failed checks to fetch logs for.
+    #[arg(long, default_value_t = 5)]
+    max_checks: usize,
+
+    /// Context lines per snippet around detected failure lines.
+    #[arg(long, default_value_t = 8)]
+    snippet_lines: usize,
 }
 
 pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCommandOutput> {
@@ -144,6 +165,15 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
     issue_numbers.dedup();
 
     let target = match args.command.unwrap_or(TriageCommand::Workspace) {
+        TriageCommand::CiFailure(args) => {
+            let output = triage::ci_failure(CiFailureTriageOptions {
+                target: args.target,
+                repo: args.repo,
+                max_checks: args.max_checks,
+                snippet_lines: args.snippet_lines,
+            })?;
+            return Ok((TriageCommandOutput::CiFailure(output), 0));
+        }
         TriageCommand::Component { component_id, path } => {
             resolve_component_target(component_id, path)?
         }
@@ -315,6 +345,28 @@ mod tests {
         assert_eq!(cli.args.timeout, "5m");
         assert_eq!(cli.args.poll_interval, "30s");
         assert!(cli.args.command.is_none());
+    }
+
+    #[test]
+    fn ci_failure_accepts_pr_number_and_repo() {
+        let cli = TestCli::parse_from([
+            "triage",
+            "ci-failure",
+            "5808",
+            "--repo",
+            "Extra-Chill/homeboy",
+            "--max-checks",
+            "2",
+        ]);
+
+        match cli.args.command {
+            Some(TriageCommand::CiFailure(args)) => {
+                assert_eq!(args.target, "5808");
+                assert_eq!(args.repo.as_deref(), Some("Extra-Chill/homeboy"));
+                assert_eq!(args.max_checks, 2);
+            }
+            other => panic!("expected CiFailure subcommand, got {other:?}"),
+        }
     }
 
     #[test]

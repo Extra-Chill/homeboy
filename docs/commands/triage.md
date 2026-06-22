@@ -21,6 +21,7 @@ When no command is provided, `homeboy triage` defaults to `homeboy triage worksp
 ## Subcommands
 
 - `component` — triage one registered component, or any checkout via `--path`
+- `ci-failure` — summarize latest failed GitHub Actions checks for one PR
 - `project` — triage every component attached to a project
 - `fleet` — triage unique components used across a fleet
 - `rig` — triage components declared in a local rig spec
@@ -63,6 +64,25 @@ Supported `--until` states:
 Watch output is structured JSON with `command: "triage.watch"`, final watched target states, and an `events` array. Events include `watch.started`, `item.state_changed`, `pr.commit.pushed`, `pr.ci.transitioned`, `pr.merged`, optional `pr.merge_requested`, and `watch.exit`.
 
 `--auto-merge` uses the GitHub REST merge endpoint with `--merge-method squash` by default. When `--auto-merge` is passed without `--until`, Homeboy watches for `green-mergeable`. This avoids depending on `gh pr merge`'s GraphQL path for the actual merge operation.
+
+## CI Failure Triage
+
+`triage ci-failure` fetches the latest failed check runs for a pull request head SHA, then fetches GitHub Actions job metadata/logs for failed checks with job URLs. It emits concise structured JSON instead of dumping full logs.
+
+```sh
+homeboy triage ci-failure 5808 --repo Extra-Chill/homeboy
+homeboy triage ci-failure https://github.com/Extra-Chill/homeboy/pull/5808 --max-checks 3
+```
+
+Output includes:
+
+- `workflow`, `job`, failed `step` when GitHub exposes step metadata
+- `category`, one of `fmt`, `clippy`, `compile`, `unit-test`, `baseline`, `infra`, `queueing`, or `unknown`
+- bounded `snippets` around detected failure lines
+- `details_url` and direct job log API URL where detectable
+- `baseline_vs_head` when the failed check/log text mentions baseline/head comparison
+
+Use `--max-checks` to cap how many failed checks get log fetches and `--snippet-lines` to tune context. Full logs are intentionally not included in stdout.
 
 ## Output Signals
 
@@ -114,6 +134,7 @@ must return a parseable GitHub URL — otherwise the command surfaces the same
 homeboy triage
 homeboy triage --mine --drilldown
 homeboy triage component homeboy --failing-checks --drilldown
+homeboy triage ci-failure 5808 --repo Extra-Chill/homeboy
 homeboy triage component --path /Users/me/Developer/homeboy
 homeboy triage component homeboy --path ./homeboy --failing-checks
 ```
