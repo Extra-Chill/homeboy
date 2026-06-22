@@ -39,6 +39,13 @@ function normalizeTypedArtifactEntry(name, artifact, options = {}) {
   if (!plainObject(artifact)) {
     return null;
   }
+  const coreNormalizer = firstFunction(options.normalizeTypedArtifactEntry, options.normalizeTypedArtifactDto, options.normalizeTypedArtifactDTO);
+  if (coreNormalizer) {
+    const normalized = normalizeWithCoreTypedArtifactNormalizer(coreNormalizer, name, artifact, options);
+    if (plainObject(normalized)) {
+      return typeof options.sanitize === 'function' ? options.sanitize(normalized) : normalized;
+    }
+  }
   const artifactName = artifact.name || name;
   if (!artifactName) {
     return null;
@@ -57,6 +64,13 @@ function normalizeTypedArtifactEntry(name, artifact, options = {}) {
 }
 
 function normalizeTypedArtifacts(value, options = {}) {
+  const coreNormalizer = firstFunction(options.normalizeTypedArtifacts, options.normalizeTypedArtifactMap);
+  if (coreNormalizer) {
+    const normalized = normalizeWithCoreTypedArtifactsNormalizer(coreNormalizer, value, options);
+    if (plainObject(normalized)) {
+      return typeof options.sanitize === 'function' ? options.sanitize(normalized) : normalized;
+    }
+  }
   if (Array.isArray(value)) {
     return Object.fromEntries(value
       .map((artifact, index) => normalizeTypedArtifactEntry(artifact?.name || artifact?.id || `artifact_${index + 1}`, artifact, options))
@@ -86,6 +100,30 @@ function typedArtifactsFromCodeboxResult(result, options = {}) {
 
   return Object.assign({}, ...legacyTypedArtifactCandidatesFromCodeboxResult(result, workload)
     .map((candidate) => normalizeTypedArtifacts(candidate, options)));
+}
+
+function normalizeWithCoreTypedArtifactNormalizer(normalizer, name, artifact, options = {}) {
+  try {
+    return normalizer(name, artifact, { sanitize: options.sanitize });
+  } catch {
+    try {
+      return normalizer({ ...artifact, name: artifact.name || name }, { sanitize: options.sanitize });
+    } catch {
+      return null;
+    }
+  }
+}
+
+function normalizeWithCoreTypedArtifactsNormalizer(normalizer, value, options = {}) {
+  try {
+    return normalizer(value, { sanitize: options.sanitize });
+  } catch {
+    return null;
+  }
+}
+
+function firstFunction(...values) {
+  return values.find((value) => typeof value === 'function') || null;
 }
 
 function caseArtifactIndexFromCodeboxResult(result, options = {}) {

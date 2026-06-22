@@ -29,6 +29,8 @@ function codeboxRuntimeProfilePayload({
   providerPluginPaths = [],
   runtimeStateMounts,
   runtimeConfigMounts,
+  normalizeRuntimeProfile,
+  normalizeRuntimeProfilePayload,
 } = {}) {
   const normalizedProfile = plainObject(profile);
   const normalizedRuntimeRequirements = plainObject(runtimeRequirements);
@@ -60,7 +62,7 @@ function codeboxRuntimeProfilePayload({
     ...providerPluginEntries(normalizedRuntimeRequirements.provider_plugins),
     ...providerPluginPaths.map((pluginPath) => ({ path: pluginPath })),
   ]);
-  return withoutEmptyObjectValues({
+  const payload = withoutEmptyObjectValues({
     ...normalizedProfile,
     ...normalizedRuntimeRequirements,
     schema: WP_CODEBOX_RUNTIME_PROFILE_SCHEMA,
@@ -76,6 +78,24 @@ function codeboxRuntimeProfilePayload({
     runtime_config_mounts: runtimeConfigMounts,
     ...parentToolBridgeProfileFields(normalizedProfile, normalizedRuntimeRequirements, runtimeProfileDependencies, normalizedComponentContracts),
   });
+  const coreNormalizer = firstFunction(normalizeRuntimeProfilePayload, normalizeRuntimeProfile);
+  if (coreNormalizer) {
+    const normalized = normalizeWithCoreRuntimeProfileNormalizer(coreNormalizer, payload, {
+      id,
+      profile: normalizedProfile,
+      runtimeRequirements: normalizedRuntimeRequirements,
+      componentContracts,
+      runtimeOverlays,
+      runtimeEnv,
+      providerPluginPaths,
+      runtimeStateMounts,
+      runtimeConfigMounts,
+    });
+    if (isPlainObject(normalized)) {
+      return normalized;
+    }
+  }
+  return payload;
 }
 
 function componentContractsFromDependencies(runtimeProfileDependencies = {}) {
@@ -257,6 +277,22 @@ function slugFromPath(value) {
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function normalizeWithCoreRuntimeProfileNormalizer(normalizer, payload, context = {}) {
+  try {
+    return normalizer(payload, context);
+  } catch {
+    try {
+      return normalizer(context);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function firstFunction(...values) {
+  return values.find((value) => typeof value === 'function') || null;
 }
 
 function uniqueObjectsByRuntimeIdentity(entries) {
