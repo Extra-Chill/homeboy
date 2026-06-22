@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
 use crate::core::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutionState,
     AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
@@ -697,22 +700,92 @@ fn validate_non_blank_optional(field: &str, value: Option<&str>, errors: &mut Ve
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
+    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderCatalog {
+    pub providers: Vec<AgentTaskExecutorProvider>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
+}
+
+impl AgentTaskProviderCatalog {
+    pub fn discover() -> Self {
+        #[cfg(not(test))]
+        {
+            static PROVIDER_CATALOG: OnceLock<AgentTaskProviderCatalog> = OnceLock::new();
+            return PROVIDER_CATALOG
+                .get_or_init(discover_provider_catalog)
+                .clone();
+        }
+        #[cfg(test)]
+        {
+            discover_provider_catalog()
+        }
+    }
+
+    pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
+        &self.providers
+    }
+
+    pub fn diagnostics(&self) -> &[AgentRuntimeDiscoveryDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn provider_requires_cwd_git_checkout(
+        &self,
+        backend: &str,
+        selector: Option<&str>,
+    ) -> bool {
+        provider_requires_cwd_git_checkout_with_providers(&self.providers, backend, selector)
+    }
+
+    pub fn apply_provider_runner_secret_env_contracts(&self, plan: &mut AgentTaskPlan) {
+        apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
+    }
+
+    pub fn provider_secret_sources_for_providers(
+        &self,
+    ) -> HashMap<String, defaults::AgentTaskSecretSource> {
+        provider_secret_sources_for_providers(&self.providers)
+    }
+}
+
+fn discover_provider_catalog() -> AgentTaskProviderCatalog {
+    let catalog = agent_runtime_manifest::discover_agent_task_executor_provider_catalog();
+    AgentTaskProviderCatalog {
+        providers: catalog.providers,
+        diagnostics: catalog.diagnostics,
+    }
 }
 
 impl ExtensionProviderAgentTaskExecutor {
     pub fn discover() -> Self {
+        Self::from_catalog(AgentTaskProviderCatalog::discover())
+    }
+
+    pub fn from_catalog(catalog: AgentTaskProviderCatalog) -> Self {
         Self {
-            providers: discover_agent_task_executor_providers(),
+            providers: catalog.providers,
+            diagnostics: catalog.diagnostics,
         }
     }
 
     #[cfg(test)]
     fn with_providers(providers: Vec<AgentTaskExecutorProvider>) -> Self {
-        Self { providers }
+        Self {
+            providers,
+            diagnostics: Vec::new(),
+        }
     }
 
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
         &self.providers
+    }
+
+    pub fn diagnostics(&self) -> &[AgentRuntimeDiscoveryDiagnostic] {
+        &self.diagnostics
     }
 
     pub fn default_backend(&self) -> crate::core::Result<Option<String>> {
@@ -735,21 +808,24 @@ pub fn default_backend_for_component(
 }
 
 pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadiness> {
-    discover_agent_task_executor_providers()
+    AgentTaskProviderCatalog::discover()
+        .providers
         .into_iter()
         .flat_map(|provider| provider.runner_readiness)
         .collect()
 }
 
 pub fn provider_runner_source_contracts() -> Vec<AgentTaskProviderRunnerSource> {
-    discover_agent_task_executor_providers()
+    AgentTaskProviderCatalog::discover()
+        .providers
         .into_iter()
         .flat_map(|provider| provider.runner_sources)
         .collect()
 }
 
 pub fn dependency_failure_patterns() -> Vec<AgentTaskProviderDependencyFailurePattern> {
-    discover_agent_task_executor_providers()
+    AgentTaskProviderCatalog::discover()
+        .providers
         .into_iter()
         .flat_map(|provider| provider.dependency_failure_patterns)
         .collect()
@@ -839,31 +915,28 @@ pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
 }
 
 pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {
-    let providers = discover_agent_task_executor_providers();
-    provider_requires_cwd_git_checkout_with_providers(&providers, backend, selector)
+    AgentTaskProviderCatalog::discover().provider_requires_cwd_git_checkout(backend, selector)
 }
 
 pub fn apply_provider_runner_secret_env_contracts(plan: &mut AgentTaskPlan) {
-    let providers = discover_agent_task_executor_providers();
-    apply_provider_runner_secret_env_contracts_with_providers(plan, &providers);
+    AgentTaskProviderCatalog::discover().apply_provider_runner_secret_env_contracts(plan);
 }
 
 pub fn provider_runner_secret_env_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
-    let providers = discover_agent_task_executor_providers();
-    provider_runner_secret_env_for_plan_with_providers(plan, &providers)
+    let catalog = AgentTaskProviderCatalog::discover();
+    provider_runner_secret_env_for_plan_with_providers(plan, catalog.providers())
 }
 
 pub fn provider_secret_sources_for_plan(
     plan: &AgentTaskPlan,
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let providers = discover_agent_task_executor_providers();
-    provider_secret_sources_for_plan_with_providers(plan, &providers)
+    let catalog = AgentTaskProviderCatalog::discover();
+    provider_secret_sources_for_plan_with_providers(plan, catalog.providers())
 }
 
 pub fn provider_secret_sources_for_discovered_providers(
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let providers = discover_agent_task_executor_providers();
-    provider_secret_sources_for_providers(&providers)
+    AgentTaskProviderCatalog::discover().provider_secret_sources_for_providers()
 }
 
 pub fn provider_secret_sources_for_providers(
@@ -981,8 +1054,8 @@ pub(crate) fn role_aliases_for_executor(
     backend: &str,
     selector: Option<&str>,
 ) -> AgentTaskProviderRoleAliases {
-    let providers = discover_agent_task_executor_providers();
-    select_provider_by_backend(&providers, backend, selector)
+    let catalog = AgentTaskProviderCatalog::discover();
+    select_provider_by_backend(catalog.providers(), backend, selector)
         .map(|provider| provider.role_aliases.clone())
         .unwrap_or_default()
 }
@@ -991,8 +1064,8 @@ pub(crate) fn timeout_artifact_discovery_for_executor(
     backend: &str,
     selector: Option<&str>,
 ) -> AgentTaskProviderTimeoutArtifactDiscovery {
-    let providers = discover_agent_task_executor_providers();
-    select_provider_by_backend(&providers, backend, selector)
+    let catalog = AgentTaskProviderCatalog::discover();
+    select_provider_by_backend(catalog.providers(), backend, selector)
         .map(|provider| provider.timeout_artifact_discovery.clone())
         .unwrap_or_default()
 }
@@ -1000,8 +1073,9 @@ pub(crate) fn timeout_artifact_discovery_for_executor(
 pub(crate) fn role_aliases_for_provider(
     provider_id_or_backend: &str,
 ) -> AgentTaskProviderRoleAliases {
-    let providers = discover_agent_task_executor_providers();
-    providers
+    let catalog = AgentTaskProviderCatalog::discover();
+    catalog
+        .providers()
         .iter()
         .find(|provider| {
             provider.id == provider_id_or_backend || provider.backend == provider_id_or_backend
@@ -2285,7 +2359,7 @@ fn is_failure_status(status: AgentTaskOutcomeStatus) -> bool {
 /// Surface actionable provider run-result evidence into the outcome on failure
 /// (#4105).
 ///
-/// Provider executors (e.g. the WP Codebox agent-task executor) emit a
+/// Provider executors emit a
 /// structured run-result under `outputs.provider_run_result` following the
 /// `*/agent-task-run-result/*` shape: `{status, failure_classification,
 /// diagnostics[], artifacts[], metadata{provider_error,run_id,run_status,
@@ -3631,16 +3705,16 @@ mod tests {
     #[test]
     fn provider_selection_reports_exact_backend_selector_mismatch() {
         let (_, mut provider) = request("task-a", "node provider.js".to_string());
-        provider.id = "wordpress.codebox-agent-task-executor".to_string();
-        provider.backend = "codebox".to_string();
+        provider.id = "example.synthetic-agent-task-executor".to_string();
+        provider.backend = "synthetic-runtime".to_string();
 
         let providers = [provider];
-        let resolution = resolve_provider_for_backend(&providers, "codebox", Some("openai"));
+        let resolution = resolve_provider_for_backend(&providers, "synthetic-runtime", Some("fast"));
 
         assert_eq!(
             resolution,
             ProviderResolution::SelectorMismatch {
-                available_ids: vec!["wordpress.codebox-agent-task-executor".to_string()],
+                available_ids: vec!["example.synthetic-agent-task-executor".to_string()],
             }
         );
     }
@@ -4304,7 +4378,7 @@ process.stdout.write(JSON.stringify({
             schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
             task_id: "cook-conductor".to_string(),
             status: AgentTaskOutcomeStatus::Failed,
-            summary: Some("WP Codebox agent task failed.".to_string()),
+            summary: Some("Provider agent task failed.".to_string()),
             failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
             artifacts: Vec::new(),
             typed_artifacts: Vec::new(),
@@ -4321,7 +4395,7 @@ process.stdout.write(JSON.stringify({
     fn empty_failed_run_result_surfaces_explanatory_diagnostic() {
         // Mirrors the #4105 repro: a failed run-result that is an empty shell.
         let mut outcome = failed_outcome_with_run_result(json!({
-            "schema": "wp-codebox/agent-task-run-result/v1",
+            "schema": "example-provider/agent-task-run-result/v1",
             "status": "failed",
             "failure_classification": "runtime",
             "artifacts": [],
@@ -4359,10 +4433,10 @@ process.stdout.write(JSON.stringify({
     #[test]
     fn populated_failed_run_result_surfaces_error_identity_and_refs() {
         let mut outcome = failed_outcome_with_run_result(json!({
-            "schema": "wp-codebox/agent-task-run-result/v1",
+            "schema": "example-provider/agent-task-run-result/v1",
             "status": "failed",
             "diagnostics": [
-                { "class": "codebox.api_error", "message": "runtime provisioning rejected" }
+                { "class": "provider.api_error", "message": "runtime provisioning rejected" }
             ],
             "metadata": {
                 "provider_error": { "code": "E_RUNTIME", "message": "quota exceeded" },
@@ -4372,8 +4446,8 @@ process.stdout.write(JSON.stringify({
                 "runtime_status": "failed"
             },
             "refs": {
-                "logs": ["https://codebox.example/logs/run-123"],
-                "transcripts": [{ "uri": "https://codebox.example/transcripts/rt-456" }],
+                "logs": ["https://provider.example/logs/run-123"],
+                "transcripts": [{ "uri": "https://provider.example/transcripts/rt-456" }],
                 "artifact_bundles": []
             }
         }));
@@ -4384,7 +4458,7 @@ process.stdout.write(JSON.stringify({
         assert!(outcome
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.class == "codebox.api_error"));
+            .any(|diagnostic| diagnostic.class == "provider.api_error"));
         // The structured identity becomes an actionable diagnostic.
         let identity = outcome
             .diagnostics
@@ -4404,12 +4478,12 @@ process.stdout.write(JSON.stringify({
             .evidence_refs
             .iter()
             .any(|reference| reference.kind == "provider-log"
-                && reference.uri == "https://codebox.example/logs/run-123"));
+                && reference.uri == "https://provider.example/logs/run-123"));
         assert!(outcome
             .evidence_refs
             .iter()
             .any(|reference| reference.kind == "provider-transcript"
-                && reference.uri == "https://codebox.example/transcripts/rt-456"));
+                && reference.uri == "https://provider.example/transcripts/rt-456"));
         // The empty-shell guard must NOT fire when real evidence exists.
         assert!(outcome
             .diagnostics
@@ -4840,10 +4914,10 @@ process.stdout.write(JSON.stringify({
     #[test]
     fn scheduler_reports_provider_selector_mismatch() {
         let (mut request, mut provider) = request("task-selector-mismatch", "unused".to_string());
-        request.executor.backend = "codebox".to_string();
-        request.executor.selector = Some("openai".to_string());
-        provider.id = "wordpress.codebox-agent-task-executor".to_string();
-        provider.backend = "codebox".to_string();
+        request.executor.backend = "synthetic-runtime".to_string();
+        request.executor.selector = Some("fast".to_string());
+        provider.id = "example.synthetic-agent-task-executor".to_string();
+        provider.backend = "synthetic-runtime".to_string();
         let scheduler =
             AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
                 provider,
@@ -4858,7 +4932,7 @@ process.stdout.write(JSON.stringify({
         );
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].data["available_provider_ids"],
-            json!(["wordpress.codebox-agent-task-executor"])
+            json!(["example.synthetic-agent-task-executor"])
         );
     }
 

@@ -7,8 +7,8 @@
 //! implementation details in the matching submodule:
 //!
 //! - [`output`] owns response-mode, output-file, JSON-family,
-//!   output-descriptor, aggregate-descriptor, response-plan types, and the
-//!   `Commands` impl that resolves them.
+//!   command-registry, output-descriptor, aggregate-descriptor,
+//!   response-plan types, and the `Commands` impl that resolves them.
 //! - [`lab`] owns Lab portability contracts and the `Commands` accessors
 //!   that surface Lab fields on a descriptor.
 //! - [`public_variants`] owns [`PublicOutputVariantContract`] and the
@@ -20,7 +20,8 @@ mod output;
 mod public_variants;
 
 pub use lab::{
-    lab_runner_support_summary, lab_runner_supported_labels, lab_runner_unsupported_hint,
+    lab_runner_support_summary, lab_runner_supported_contract_labels, lab_runner_supported_labels,
+    lab_runner_supports_contract_label, lab_runner_unsupported_hint,
     lab_runner_unsupported_message, LabCommandContract, LabCommandPortability,
     LabCommandRequiredTool, LabRoutingPolicy, LabRunnerSupportSummary, LabSourcePathMode,
     LabWorkspaceModePolicy, LAB_TRACE_EXTRA_TOOLS,
@@ -30,9 +31,9 @@ pub(crate) use lab::{
     TEST_LAB_LABEL,
 };
 pub use output::{
-    registered_command_dispatch_family, registered_command_json_family, CommandDescriptor,
-    CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
-    CommandOutputFileMode, CommandRawOutputMode, CommandRegistryEntry, CommandResponseMode,
-    CommandResponsePlan, CommandStdoutMode, COMMAND_REGISTRY,
+    registered_command, registered_command_dispatch_family, registered_command_json_family,
+    CommandDescriptor, CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind,
+    CommandOutputDescriptor, CommandOutputFileMode, CommandRawOutputMode, CommandRegistryEntry,
+    CommandResponseMode, CommandResponsePlan, CommandStdoutMode, COMMAND_REGISTRY,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};

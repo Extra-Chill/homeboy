@@ -376,6 +376,7 @@ fn run_once_output(
                 exit_code: 1,
                 stdout: None,
                 stderr: Some(err.to_string()),
+                patch: None,
                 data: Some(json!({
                     "error": err.to_string(),
                 })),
@@ -413,18 +414,10 @@ fn run_once_output(
             job,
         ));
     }
-    let job = finish(RemoteRunnerJobResult {
+    let job = finish(remote_runner_result_from_exec_output(
+        exec_output,
         exit_code,
-        stdout: Some(exec_output.stdout),
-        stderr: Some(exec_output.stderr),
-        data: Some(json!({
-            "mode": exec_output.mode,
-            "remote_cwd": exec_output.remote_cwd,
-        })),
-        artifacts: Vec::new(),
-        metrics: exec_output.metrics.clone(),
-        capture: exec_output.capture.clone(),
-    })?;
+    ))?;
 
     Ok((
         claimed_output(
@@ -438,6 +431,34 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+fn remote_runner_result_from_exec_output(
+    exec_output: super::execution::RunnerExecOutput,
+    exit_code: i32,
+) -> RemoteRunnerJobResult {
+    let patch = exec_output.patch.clone();
+    let mut data = json!({
+        "mode": exec_output.mode,
+        "remote_cwd": exec_output.remote_cwd,
+    });
+    // Reverse workers currently execute through the local process seam. That
+    // seam cannot create mutation artifacts by itself, but preserving this
+    // generic patch/artifact envelope lets future daemon-equivalent worker
+    // runtimes report mutations without provider-specific parsing here.
+    if let Some(patch) = patch.clone() {
+        data["patch"] = patch;
+    }
+    RemoteRunnerJobResult {
+        exit_code,
+        stdout: Some(exec_output.stdout),
+        stderr: Some(exec_output.stderr),
+        patch,
+        data: Some(data),
+        artifacts: exec_output.artifacts,
+        metrics: exec_output.metrics,
+        capture: exec_output.capture,
+    }
 }
 
 fn cancelled_output(
@@ -662,7 +683,10 @@ mod tests {
     use std::io::{Read, Write};
 
     use super::*;
-    use crate::core::api_jobs::{JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
+    use crate::core::api_jobs::{
+        JobArtifactMetadata, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest,
+    };
+    use crate::core::runner::RunnerExecMode;
     use crate::core::server::RunnerPolicy;
     use crate::test_support;
     use serde_json::Value;
@@ -681,6 +705,58 @@ mod tests {
             broker_failure_backoff_ms: 1,
             broker_retry_limit: 1,
         }
+    }
+
+    #[test]
+    fn reverse_worker_result_preserves_exec_patch_and_artifacts() {
+        let result = remote_runner_result_from_exec_output(
+            super::super::execution::RunnerExecOutput {
+                variant: "exec",
+                command: "runner.exec",
+                runner_id: "lab".to_string(),
+                dry_run: false,
+                mode: RunnerExecMode::Local,
+                argv: vec!["homeboy".to_string(), "refactor".to_string()],
+                remote_cwd: "/srv/workspace".to_string(),
+                exit_code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                source_snapshot: None,
+                job: None,
+                job_id: None,
+                job_events: None,
+                mirror_run_id: None,
+                patch: Some(json!({
+                    "patch_artifact_id": "patch.diff",
+                    "modified_files": ["src/lib.rs"],
+                })),
+                artifacts: vec![JobArtifactMetadata {
+                    id: "patch.diff".to_string(),
+                    name: Some("patch.diff".to_string()),
+                    path: Some("/srv/workspace/.homeboy/patch.diff".to_string()),
+                    url: None,
+                    mime: Some("text/x-diff".to_string()),
+                    size_bytes: Some(42),
+                    sha256: Some("abc123".to_string()),
+                    metadata: Some(json!({ "kind": "lab_fix_patch" })),
+                }],
+                metrics: None,
+                capture: None,
+                diagnostics: None,
+            },
+            0,
+        );
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.patch.as_ref().expect("patch")["patch_artifact_id"],
+            "patch.diff"
+        );
+        assert_eq!(
+            result.data.as_ref().expect("data")["patch"]["modified_files"][0],
+            "src/lib.rs"
+        );
+        assert_eq!(result.artifacts[0].id, "patch.diff");
     }
 
     #[test]

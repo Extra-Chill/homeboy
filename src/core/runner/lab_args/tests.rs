@@ -228,8 +228,8 @@ fn remap_prunes_stale_unresolved_provider_plugin_path() {
     // #4829: a `provider_plugin_paths` entry inherited from stale/global
     // settings points at a controller-local absolute directory that is not part
     // of this run's synced workspace, so no local->remote mapping is recorded
-    // for it. Forwarding it verbatim makes the WP Codebox recipe declare an
-    // `extra_plugins` entry for a directory that does not exist on the runner,
+    // for it. Forwarding it verbatim makes the provider runtime declare an
+    // extra plugin/workspace entry for a directory that does not exist on the runner,
     // failing recipe validation. Such entries must be pruned before offload.
     let mappings = vec![LabPathRemap {
         local: "/Users/user/Developer/sample-plugin@cook".to_string(),

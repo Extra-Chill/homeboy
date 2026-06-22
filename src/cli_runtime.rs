@@ -2,7 +2,10 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-use crate::cli_surface::{current_command_safety_manifest, Cli, Commands};
+use crate::cli_surface::{
+    command_safety_manifest_from_dynamic, command_surface_from, Cli, Commands,
+    DynamicCommandDescriptor,
+};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -23,8 +26,7 @@ struct ExtensionCliCommand {
 
 struct ExtensionCliInfo {
     tool: String,
-    display_name: String,
-    extension_name: String,
+    descriptor: DynamicCommandDescriptor,
     project_id_help: Option<String>,
     args_help: Option<String>,
     examples: Vec<String>,
@@ -192,7 +194,7 @@ impl CliRuntime {
 
         if let Commands::List { json } = &cli.command {
             if *json {
-                print_command_safety_manifest_json();
+                self.print_command_safety_manifest_json();
             } else {
                 let mut cmd = self.build_augmented_command();
                 cmd.print_help().expect("Failed to print help");
@@ -235,12 +237,20 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info)
     }
-}
 
-fn print_command_safety_manifest_json() {
-    let manifest = current_command_safety_manifest();
-    let json = serde_json::to_string_pretty(&manifest).expect("command safety manifest serializes");
-    println!("{json}");
+    fn print_command_safety_manifest_json(&self) {
+        let discovery = self.extension_discovery();
+        let dynamic_commands = discovery
+            .info
+            .iter()
+            .map(|info| info.descriptor.clone())
+            .collect::<Vec<_>>();
+        let surface = command_surface_from(self.build_augmented_command());
+        let manifest = command_safety_manifest_from_dynamic(surface, &dynamic_commands);
+        let json =
+            serde_json::to_string_pretty(&manifest).expect("command safety manifest serializes");
+        println!("{json}");
+    }
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
@@ -296,10 +306,13 @@ fn collect_extension_cli_info() -> ExtensionCliDiscovery {
         .filter_map(|m| {
             m.cli.map(|cli| {
                 let help = cli.help.unwrap_or_default();
+                let about = format!("Run {} commands via {}", cli.display_name, m.name);
                 ExtensionCliInfo {
+                    descriptor: DynamicCommandDescriptor::extension_command(
+                        cli.tool.clone(),
+                        about,
+                    ),
                     tool: cli.tool,
-                    display_name: cli.display_name,
-                    extension_name: m.name,
                     project_id_help: help.project_id_help,
                     args_help: help.args_help,
                     examples: help.examples,
@@ -333,11 +346,8 @@ fn build_augmented_command(
             .clone()
             .unwrap_or_else(|| "Command arguments".to_string());
 
-        let mut subcommand = Command::new(info.tool.clone())
-            .about(format!(
-                "Run {} commands via {}",
-                info.display_name, info.extension_name
-            ))
+        let mut subcommand = Command::new(info.descriptor.name.clone())
+            .about(info.descriptor.about.clone())
             .arg(
                 clap::Arg::new("project_id")
                     .help(project_id_help)
@@ -428,9 +438,7 @@ fn try_parse_extension_cli_command(
 }
 
 fn is_builtin_subcommand(name: &str) -> bool {
-    Cli::command()
-        .get_subcommands()
-        .any(|command| command.get_name() == name)
+    crate::command_contract::registered_command(name).is_some()
 }
 
 fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
@@ -706,8 +714,10 @@ mod tests {
     fn sample_extension_info(tool: &str) -> ExtensionCliInfo {
         ExtensionCliInfo {
             tool: tool.to_string(),
-            display_name: "Sample CLI".to_string(),
-            extension_name: "Sample Extension".to_string(),
+            descriptor: DynamicCommandDescriptor::extension_command(
+                tool.to_string(),
+                "Run Sample CLI commands via Sample Extension".to_string(),
+            ),
             project_id_help: None,
             args_help: None,
             examples: Vec::new(),

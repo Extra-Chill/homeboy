@@ -852,9 +852,9 @@ mod tests {
     #[test]
     fn component_lifecycle_bundled_roundtrips_and_suppresses() {
         let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "agents-api",
+            "id": "shared-runtime",
             "lifecycle": "bundled",
-            "bundled_into": "data-machine"
+            "bundled_into": "host-app"
         }))
         .unwrap();
 
@@ -862,18 +862,18 @@ mod tests {
         assert!(!component.is_active_lifecycle());
         assert_eq!(
             component.bundled_into.as_deref(),
-            Some("data-machine"),
+            Some("host-app"),
             "bundled_into host should be preserved"
         );
         assert_eq!(
             component.lifecycle_suppression_reason().as_deref(),
-            Some("Component is bundled into 'data-machine'")
+            Some("Component is bundled into 'host-app'")
         );
 
         // Roundtrip must preserve the lifecycle marker so config is stable.
         let json = serde_json::to_value(&component).unwrap();
         assert_eq!(json["lifecycle"], serde_json::json!("bundled"));
-        assert_eq!(json["bundled_into"], serde_json::json!("data-machine"));
+        assert_eq!(json["bundled_into"], serde_json::json!("host-app"));
         let reparsed: Component = serde_json::from_value(json).unwrap();
         assert_eq!(reparsed.lifecycle, ComponentLifecycle::Bundled);
     }

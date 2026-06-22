@@ -233,6 +233,7 @@ fn test_supports_lab_runner() {
 
 #[test]
 fn test_lab_command_contracts_cover_hot_commands() {
+    let supported_contract_labels = lab_runner_supported_contract_labels();
     let supported = [
         (parsed_command(&["homeboy", "lint"]), "lint"),
         (parsed_command(&["homeboy", "test"]), "test"),
@@ -336,6 +337,11 @@ fn test_lab_command_contracts_cover_hot_commands() {
         assert!(
             lab_runner_summary_covers_contract_label(contract.hot_label),
             "Lab support summary omitted `{}`",
+            contract.hot_label
+        );
+        assert!(
+            supported_contract_labels.contains(&contract.hot_label),
+            "Lab supported contract labels omitted `{}`",
             contract.hot_label
         );
         assert_eq!(contract.portability, LabCommandPortability::Portable);

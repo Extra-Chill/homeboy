@@ -580,7 +580,7 @@ mod provider_config_candidate_paths_tests {
             "runtime_overlays": [
                 { "kind": "bundled-library", "library": "portable-ai-client", "source": "/local/portable-ai-client@custom-provider-auth", "target": "/runtime/includes/portable-ai-client" }
             ],
-            "agents_api": "/local/agents-api",
+            "provider_support": "/local/provider-support",
             "source_cli": "/local/provider/packages/cli/dist/index.js",
             "model": "claude-opus-4-8"
         });
@@ -593,7 +593,7 @@ mod provider_config_candidate_paths_tests {
             "/local/sample-plugin-code",
             "/local/ai-provider-for-claude-code",
             "/local/portable-ai-client@custom-provider-auth",
-            "/local/agents-api",
+            "/local/provider-support",
             "/local/provider/packages/cli/dist/index.js",
         ] {
             assert!(

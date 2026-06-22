@@ -2,6 +2,7 @@ use clap::{Command, CommandFactory, Parser, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
+use crate::command_contract::registered_command;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
@@ -362,6 +363,23 @@ impl Commands {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicCommandDescriptor {
+    pub name: String,
+    pub about: String,
+    pub docs_path: Option<String>,
+}
+
+impl DynamicCommandDescriptor {
+    pub fn extension_command(name: String, about: String) -> Self {
+        Self {
+            docs_path: Some(format!("docs/commands/{name}.md")),
+            name,
+            about,
+        }
+    }
+}
+
 pub fn current_command_surface() -> CommandSurface {
     command_surface_from(Cli::command())
 }
@@ -381,16 +399,27 @@ pub fn current_command_safety_manifest() -> CommandSafetyManifest {
 }
 
 pub fn command_safety_manifest_from(surface: CommandSurface) -> CommandSafetyManifest {
+    command_safety_manifest_from_dynamic(surface, &[])
+}
+
+pub fn command_safety_manifest_from_dynamic(
+    surface: CommandSurface,
+    dynamic_commands: &[DynamicCommandDescriptor],
+) -> CommandSafetyManifest {
     CommandSafetyManifest {
         commands: surface
             .commands
             .iter()
-            .map(|entry| command_safety_entry(entry, &[]))
+            .map(|entry| command_safety_entry(entry, &[], dynamic_commands))
             .collect(),
     }
 }
 
-fn command_safety_entry(entry: &CommandSurfaceEntry, parent_path: &[String]) -> CommandSafetyEntry {
+fn command_safety_entry(
+    entry: &CommandSurfaceEntry,
+    parent_path: &[String],
+    dynamic_commands: &[DynamicCommandDescriptor],
+) -> CommandSafetyEntry {
     let mut path = parent_path.to_vec();
     path.push(entry.name.clone());
     let safety = command_safety_metadata(&path);
@@ -415,7 +444,7 @@ fn command_safety_entry(entry: &CommandSurfaceEntry, parent_path: &[String]) -> 
             notes: safety.lab_notes.to_string(),
         },
         docs: CommandDocsMetadata {
-            path: docs_path(&path),
+            path: docs_path(&path, dynamic_commands),
         },
         dangerous_flags: safety
             .dangerous_flags
@@ -425,7 +454,7 @@ fn command_safety_entry(entry: &CommandSurfaceEntry, parent_path: &[String]) -> 
         subcommands: entry
             .subcommands
             .iter()
-            .map(|subcommand| command_safety_entry(subcommand, &path))
+            .map(|subcommand| command_safety_entry(subcommand, &path, dynamic_commands))
             .collect(),
     }
 }
@@ -458,6 +487,14 @@ impl Default for CommandSafetyMetadata {
 
 fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
     let mut metadata = CommandSafetyMetadata::default();
+
+    if let Some(top_level) = path.first().and_then(|name| registered_command(name)) {
+        metadata.structured_output =
+            top_level.json_family != crate::command_contract::CommandJsonFamily::RawOnly;
+        metadata.output_notes = top_level.output_notes;
+        metadata.lab_supported = top_level.lab_supported;
+        metadata.lab_notes = top_level.lab_notes;
+    }
 
     match path
         .iter()
@@ -510,25 +547,26 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.dangerous_flags =
                 vec!["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
         }
-        ["bench"] | ["fuzz"] | ["test"] | ["lint"] | ["audit"] | ["trace"] => {
-            metadata.lab_supported = true;
-            metadata.lab_notes =
-                "portable Lab offload may be available for resource-heavy workflows";
-        }
-        ["list"] => {
-            metadata.structured_output = false;
-            metadata.output_notes = "hidden raw Markdown help alias";
-        }
         _ => {}
     }
 
     metadata
 }
 
-fn docs_path(path: &[String]) -> Option<String> {
-    path.first()
-        .filter(|command| command.as_str() != "list")
-        .map(|command| format!("docs/commands/{command}.md"))
+fn docs_path(path: &[String], dynamic_commands: &[DynamicCommandDescriptor]) -> Option<String> {
+    let command = path.first()?;
+
+    if path.len() == 1 {
+        if let Some(dynamic) = dynamic_commands.iter().find(|entry| entry.name == *command) {
+            return dynamic.docs_path.clone();
+        }
+    }
+
+    registered_command(command).and_then(|entry| {
+        entry
+            .docs_slug
+            .map(|slug| format!("docs/commands/{slug}.md"))
+    })
 }
 
 fn visible_subcommands(command: &Command, remaining_depth: usize) -> Vec<CommandSurfaceEntry> {
@@ -672,6 +710,37 @@ mod tests {
     fn hidden_lab_shortcut_still_parses() {
         Cli::try_parse_from(["homeboy", "lab", "status"])
             .expect("hidden Lab compatibility shortcut should keep parsing");
+    }
+
+    #[test]
+    fn command_safety_manifest_uses_registry_metadata() {
+        let manifest = current_command_safety_manifest();
+
+        let bench = manifest.find_path(&["bench"]).unwrap();
+        assert!(bench.output.structured);
+        assert!(bench.lab.supported);
+        assert!(bench.lab.notes.contains("portable Lab offload"));
+        assert_eq!(bench.docs.path.as_deref(), Some("docs/commands/bench.md"));
+    }
+
+    #[test]
+    fn command_safety_manifest_includes_dynamic_command_descriptors() {
+        let dynamic_command = DynamicCommandDescriptor::extension_command(
+            "ext-tool".to_string(),
+            "Run extension tool commands".to_string(),
+        );
+        let command = Cli::command().subcommand(clap::Command::new("ext-tool"));
+        let manifest = command_safety_manifest_from_dynamic(
+            command_surface_from(command),
+            std::slice::from_ref(&dynamic_command),
+        );
+
+        let ext_tool = manifest.find_path(&["ext-tool"]).unwrap();
+        assert_eq!(
+            ext_tool.docs.path.as_deref(),
+            Some("docs/commands/ext-tool.md")
+        );
+        assert!(ext_tool.output.structured);
     }
 
     #[test]

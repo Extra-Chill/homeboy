@@ -327,6 +327,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "backend": args.backend,
                 "selector": args.selector,
             },
+            "diagnostics": executor.diagnostics(),
             "secret_env": homeboy::core::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,

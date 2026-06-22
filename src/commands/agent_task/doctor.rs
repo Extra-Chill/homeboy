@@ -163,6 +163,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         "ready": provider_ready,
         "capability_contract": homeboy::core::agent_tasks::provider::provider_capability_contract(),
         "providers": providers,
+        "diagnostics": executor.diagnostics(),
         "backend_mapping": mapping_value,
         "secret_env": secret_env,
     });
