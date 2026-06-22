@@ -1699,7 +1699,7 @@ fn select_workload<'a>(
             Some(vec![
                 "Run `homeboy fuzz list <component> --rig <id>` to inspect the resolved selection.".to_string(),
                 "Declare extension fuzz workloads, component scripts.fuzz commands, or rig fuzz_workloads before claiming fuzz coverage.".to_string(),
-                "If the command is available in source but not on the Lab runner, run `homeboy lab status --runner <id>` and refresh or upgrade the runner binary.".to_string(),
+                "If the command is available in source but not on the Lab runner, run `homeboy runner status <id>` and refresh or upgrade the runner binary.".to_string(),
             ]),
         ));
     }

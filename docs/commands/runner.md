@@ -420,6 +420,21 @@ The JSON payload uses `command: "runner.status"` and reports whether a saved
 session exists, whether the tunnel still appears live, and the recorded endpoint
 details.
 
+Status output also carries the former Lab readiness handoff. `extra` includes
+`preferred_lab_runner`, `selected_lab_runner.runner_homeboy`, and
+`managed_followups` with copyable commands for recent run discovery, evidence
+inspection, `runner doctor --scope lab-offload`, runner environment inspection,
+daemon refresh, binary upgrade, managed `runner exec`, and workspace sync. Use
+this output before assuming a runner has picked up a merged Homeboy CLI fix.
+
+Runner-side extension updates use the generic runner/extension primitives instead
+of a Lab-specific sync command:
+
+```sh
+homeboy runner exec <runner-id> -- homeboy extension install <source> --id <extension-id> --ref <ref> --replace
+homeboy runner exec <runner-id> -- homeboy extension refresh <source> --id <extension-id> --ref <ref>
+```
+
 Status output is also the operator handoff for active runner jobs. When the
 connected daemon or reverse broker can report active work, each active job
 includes lifecycle timing fields such as `updated_at_ms`, `heartbeat_age_ms`,

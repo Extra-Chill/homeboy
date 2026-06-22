@@ -6,9 +6,9 @@ use crate::command_contract::registered_command;
 use crate::commands::{
     agent_task, api, audit, audit_baseline, auth, bench, build, changelog, changes, ci, cleanup,
     component, config, daemon, db, deploy, deps, doctor, extension, file, fleet, fuzz, git, http,
-    issues, lab, lint, logs, manifest, observe, project, refactor, refs, release, report, review,
-    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel,
-    undo, upgrade, version, worktree,
+    issues, lint, logs, manifest, observe, project, refactor, refs, release, report, review, rig,
+    runner, runs, runtime, self_cmd, server, ssh, stack, status, test, trace, triage, tunnel, undo,
+    upgrade, version, worktree,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -153,9 +153,6 @@ pub enum Commands {
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
     Runner(runner::RunnerArgs),
-    /// Compatibility shortcut for Lab routing helpers; use `runner` for discovery.
-    #[command(hide = true)]
-    Lab(lab::LabArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
@@ -342,7 +339,6 @@ impl Commands {
             Commands::Refs(_) => "refs",
             Commands::Rig(_) => "rig",
             Commands::Runner(_) => "runner",
-            Commands::Lab(_) => "lab",
             Commands::Runtime(_) => "runtime",
             Commands::Worktree(_) => "worktree",
             Commands::Tunnel(_) => "tunnel",
@@ -919,18 +915,9 @@ mod tests {
             .notes
             .contains("recursive command safety"));
 
-        let lab = manifest_path(&manifest, &["lab"]);
-        assert!(lab.hidden);
-
         let visible_status = manifest.find_path(&["status"]).unwrap();
         assert!(!visible_status.hidden);
         assert!(visible_status.aliases.is_empty());
-    }
-
-    #[test]
-    fn hidden_lab_shortcut_still_parses() {
-        Cli::try_parse_from(["homeboy", "lab", "status"])
-            .expect("hidden Lab compatibility shortcut should keep parsing");
     }
 
     #[test]
