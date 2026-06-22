@@ -58,11 +58,12 @@ use super::super::lab_selection::{
     LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
-    agent_task_plan_extra_workspaces, lab_extra_workspaces, lab_workspace_mapping_metadata,
-    path_setting_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-    provider_config_extra_workspaces, rig_component_path_env_extra_workspaces,
-    sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
-    workspace_mapping_entry, LabWorkspaceMappingEntry,
+    agent_task_plan_extra_workspaces, agent_task_provider_runtime_component_extra_workspaces,
+    lab_extra_workspaces, lab_workspace_mapping_metadata, path_setting_extra_workspaces,
+    preflight_provider_config_source_cli_dependencies, provider_config_extra_workspaces,
+    rig_component_path_env_extra_workspaces, sync_extra_lab_workspaces,
+    workspace_mapping_entries_for_git_dependency, workspace_mapping_entry,
+    LabWorkspaceMappingEntry,
 };
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
@@ -766,6 +767,10 @@ fn prepare_lab_offload_workspace_stage(
         source_path,
     )?);
     extra_workspaces.extend(agent_task_plan_extra_workspaces(
+        &offload_args,
+        source_path,
+    )?);
+    extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
         &offload_args,
         source_path,
     )?);
