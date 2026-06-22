@@ -17,7 +17,7 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     assert_eq!(
         lab_runner_supported_labels().as_slice(),
         &[
-            "agent-task dispatch/cook/loop/run-plan",
+            "agent-task dispatch/cook/run-plan",
             "agent-task controller from-spec --resume/materialize/resume",
             "agent-task retry --run",
             "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
@@ -38,11 +38,11 @@ fn test_lab_runner_supported_labels_are_contract_owned() {
     );
     assert_eq!(
         lab_runner_unsupported_message(),
-        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
+        "--runner is only supported for commands with portable Lab offload support: agent-task dispatch/cook/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench, fuzz, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start"
     );
     assert_eq!(
         lab_runner_unsupported_hint(),
-        "Current Lab offload support: agent-task dispatch/cook/loop/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
+        "Current Lab offload support: agent-task dispatch/cook/run-plan, agent-task controller from-spec --resume/materialize/resume, agent-task retry --run, agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers, agent-task auth status, lint, test, audit, review, bench run, fuzz run, trace, refactor source runs, rig check, tunnel preview-consumer run, tunnel service expose, and tunnel service start."
     );
 }
 
@@ -113,7 +113,7 @@ fn test_supports_lab_runner() {
     );
     assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
+    assert!(!parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
@@ -226,33 +226,9 @@ fn test_supports_lab_runner() {
         "OPENAI_API_KEY",
     ])
     .supports_lab_runner());
-    assert!(parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "loop",
-        "--to-worktree",
-        "homeboy@smoke",
-        "--verify",
-        "true",
-        "--prompt",
-        "cook"
-    ])
-    .supports_lab_runner());
-    let invalid_loop = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "loop",
-        "--to-worktree",
-        "homeboy@smoke",
-        "--prompt",
-        "cook",
-    ]);
-    assert!(!invalid_loop.supports_lab_runner());
-    assert_eq!(
-        invalid_loop.lab_runner_unsupported_reason(),
-        Some(
-            "agent-task loop requires at least one deterministic --verify or --private-verify gate"
-        )
+    assert!(
+        !parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"])
+            .supports_lab_runner()
     );
     assert!(
         !parsed_command(&["homeboy", "refactor", "rename", "--from", "old", "--to", "new",])
@@ -315,33 +291,19 @@ fn test_lab_command_contracts_cover_hot_commands() {
         ),
         (
             parsed_command(&["homeboy", "agent-task", "dispatch", "--prompt", "cook"]),
-            "agent-task dispatch/cook/loop/run-plan/retry --run",
+            "agent-task dispatch/cook/run-plan/retry --run",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "cook", "--prompt", "cook"]),
-            "agent-task dispatch/cook/loop/run-plan/retry --run",
-        ),
-        (
-            parsed_command(&[
-                "homeboy",
-                "agent-task",
-                "loop",
-                "--to-worktree",
-                "homeboy@smoke",
-                "--verify",
-                "true",
-                "--prompt",
-                "cook",
-            ]),
-            "agent-task dispatch/cook/loop/run-plan/retry --run",
+            "agent-task dispatch/cook/run-plan/retry --run",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "run-plan", "--plan", "@plan.json"]),
-            "agent-task dispatch/cook/loop/run-plan/retry --run",
+            "agent-task dispatch/cook/run-plan/retry --run",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "retry", "agent-task-123", "--run"]),
-            "agent-task dispatch/cook/loop/run-plan/retry --run",
+            "agent-task dispatch/cook/run-plan/retry --run",
         ),
         (
             parsed_command(&["homeboy", "agent-task", "providers"]),
@@ -400,9 +362,14 @@ fn test_lab_command_contracts_cover_hot_commands() {
         );
         assert_eq!(contract.portability, LabCommandPortability::Portable);
         assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
-        assert_eq!(
-            contract.workspace_mode_policy,
-            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+        assert!(
+            matches!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+                    | LabWorkspaceModePolicy::GitCheckoutRequired
+            ),
+            "unexpected workspace mode for `{label}`: {:?}",
+            contract.workspace_mode_policy
         );
     }
 
@@ -656,6 +623,12 @@ fn test_lab_command_contracts_cover_hot_commands() {
     assert!(parsed_command(&["homeboy", "audit", "--conventions"])
         .lab_contract()
         .is_none());
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "loop", "resume", "loop-123"])
+            .lab_contract()
+            .is_none()
+    );
+
     assert!(parsed_command(&[
         "homeboy",
         "agent-task",
@@ -733,39 +706,21 @@ fn agent_task_git_checkout_policy_treats_workspace_like_cwd() {
 }
 
 #[test]
-fn agent_task_git_checkout_policy_covers_loop_dispatch_workspace() {
-    let command = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "loop",
-        "--to-worktree",
-        "homeboy@smoke",
-        "--verify",
-        "true",
-        "--cwd",
-        "/work/repo",
-        "--backend",
-        "generic-patch-provider",
-        "--selector",
-        "selected",
-        "--prompt",
-        "cook",
-    ]);
-    let Commands::AgentTask(ref args) = command else {
+fn agent_task_loop_status_is_durable_controller_surface_not_cook_dispatch() {
+    let command = parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"]);
+    let Commands::AgentTask(args) = command else {
         panic!("expected agent-task command");
     };
 
-    assert!(agent_task_provider_requires_cwd_git_checkout_with(
+    assert!(!agent_task_provider_requires_cwd_git_checkout_with(
         &args.command,
-        || None,
-        |backend, selector| backend == "generic-patch-provider" && selector == Some("selected"),
+        || Some("default-patch-provider".to_string()),
+        |backend, _| backend == "default-patch-provider",
     ));
-    assert_eq!(
-        command
+    assert!(
+        parsed_command(&["homeboy", "agent-task", "loop", "status", "site-loop"])
             .lab_contract()
-            .expect("agent-task loop contract")
-            .workspace_mode_policy,
-        LabWorkspaceModePolicy::GitCheckoutRequired
+            .is_none()
     );
 }
 

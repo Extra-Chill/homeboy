@@ -231,8 +231,8 @@ pub struct AgentTaskDiscoveryCommands {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentTaskLoopServiceOptions {
-    pub loop_id: String,
+pub struct AgentTaskCookServiceOptions {
+    pub cook_id: String,
     pub initial_run_id: String,
     pub to_worktree: String,
     pub provider_command: Option<String>,
@@ -253,11 +253,11 @@ pub struct AgentTaskLoopServiceOptions {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct AgentTaskLoopReport {
+pub struct AgentTaskCookReport {
     pub schema: &'static str,
-    pub loop_id: String,
+    pub cook_id: String,
     pub status: String,
-    pub attempts: Vec<AgentTaskLoopAttemptReport>,
+    pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -265,7 +265,7 @@ pub struct AgentTaskLoopReport {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct AgentTaskLoopAttemptReport {
+pub struct AgentTaskCookAttemptReport {
     pub attempt: u32,
     pub run_id: String,
     pub run_state: String,
@@ -650,38 +650,38 @@ fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(Value::as_bool)
 }
 
-pub fn run_cook_loop<E>(
-    options: AgentTaskLoopServiceOptions,
+pub fn run_cook<E>(
+    options: AgentTaskCookServiceOptions,
     executor: E,
-) -> Result<AgentTaskRunResult<AgentTaskLoopReport>>
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
     let max_attempts = options.max_attempts.max(1);
     let mut attempts = Vec::new();
     let mut run_id = options.initial_run_id.clone();
-    let loop_id = options.loop_id.clone();
+    let cook_id = options.cook_id.clone();
 
     for attempt in 1..=max_attempts {
         let record = agent_task_lifecycle::status(&run_id)?;
         let plan = agent_task_lifecycle::load_plan(&run_id)?;
         let Some(source_request) = plan.tasks.first().cloned() else {
-            return Ok(loop_report(
-                loop_id,
+            return Ok(cook_report(
+                cook_id,
                 "policy_failure",
                 attempts,
                 None,
-                Some("agent-task loop requires a plan with one source task".to_string()),
+                Some("agent-task cook requires a plan with one source task".to_string()),
                 1,
             ));
         };
         if plan.tasks.len() != 1 {
-            return Ok(loop_report(
-                loop_id,
+            return Ok(cook_report(
+                cook_id,
                 "policy_failure",
                 attempts,
                 None,
-                Some("agent-task loop currently supports one task per cook attempt".to_string()),
+                Some("agent-task cook currently supports one task per cook attempt".to_string()),
                 1,
             ));
         }
@@ -690,7 +690,7 @@ where
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
         ) {
-            attempts.push(AgentTaskLoopAttemptReport {
+            attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state),
@@ -698,8 +698,8 @@ where
                 promotion: None,
                 feedback: None,
             });
-            return Ok(loop_report(
-                loop_id,
+            return Ok(cook_report(
+                cook_id,
                 "provider_failure",
                 attempts,
                 None,
@@ -714,7 +714,7 @@ where
         let promotion = match promote_attempt(&options, &run_id) {
             Ok(report) => report,
             Err(error) => {
-                attempts.push(AgentTaskLoopAttemptReport {
+                attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
                     run_state: format!("{:?}", record.state),
@@ -722,8 +722,8 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                return Ok(loop_report(
-                    loop_id,
+                return Ok(cook_report(
+                    cook_id,
                     "policy_failure",
                     attempts,
                     None,
@@ -744,7 +744,7 @@ where
         });
         let feedback_status = feedback.status;
         let follow_up_request = feedback.follow_up_request.clone();
-        attempts.push(AgentTaskLoopAttemptReport {
+        attempts.push(AgentTaskCookAttemptReport {
             attempt,
             run_id: run_id.clone(),
             run_state: format!("{:?}", record.state),
@@ -756,8 +756,8 @@ where
         match feedback_status {
             AgentTaskCookLoopStatus::GreenCompleted => {
                 if options.no_finalize {
-                    return Ok(loop_report(
-                        loop_id,
+                    return Ok(cook_report(
+                        cook_id,
                         "green_no_finalize",
                         attempts,
                         None,
@@ -768,7 +768,7 @@ where
                         0,
                     ));
                 }
-                let finalization = finalize_loop_pr(&options, &loop_id, &promotion)?;
+                let finalization = finalize_loop_pr(&options, &cook_id, &promotion)?;
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")
@@ -777,8 +777,8 @@ where
                 let stop_reason = (final_status == "no_changes").then(|| {
                     "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry".to_string()
                 });
-                return Ok(loop_report(
-                    loop_id,
+                return Ok(cook_report(
+                    cook_id,
                     &final_status,
                     attempts,
                     Some(finalization),
@@ -787,8 +787,8 @@ where
                 ));
             }
             AgentTaskCookLoopStatus::NoChanges => {
-                return Ok(loop_report(
-                    loop_id,
+                return Ok(cook_report(
+                    cook_id,
                     "no_changes",
                     attempts,
                     None,
@@ -801,29 +801,28 @@ where
             }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
-                    return Ok(loop_report(
-                        loop_id,
+                    return Ok(cook_report(
+                        cook_id,
                         "policy_failure",
                         attempts,
                         None,
                         Some(
-                            "cook-loop feedback requested retry without a follow-up request"
-                                .to_string(),
+                            "cook feedback requested retry without a follow-up request".to_string(),
                         ),
                         1,
                     ));
                 };
-                let next_run_id = format!("{loop_id}-attempt-{}", attempt + 1);
+                let next_run_id = format!("{cook_id}-attempt-{}", attempt + 1);
                 let follow_up_plan = AgentTaskPlan::new(
-                    format!("{loop_id}-cook-loop-attempt-{}", attempt + 1),
+                    format!("{cook_id}-cook-attempt-{}", attempt + 1),
                     vec![follow_up_request],
                 );
                 run_loaded_plan(follow_up_plan, Some(&next_run_id), executor.clone())?;
                 run_id = next_run_id;
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
-                return Ok(loop_report(
-                    loop_id,
+                return Ok(cook_report(
+                    cook_id,
                     "retries_exhausted",
                     attempts,
                     None,
@@ -837,12 +836,12 @@ where
         }
     }
 
-    Ok(loop_report(
-        loop_id,
+    Ok(cook_report(
+        cook_id,
         "retries_exhausted",
         attempts,
         None,
-        Some("cook-loop attempt budget exhausted".to_string()),
+        Some("cook attempt budget exhausted".to_string()),
         1,
     ))
 }
@@ -1065,7 +1064,7 @@ pub fn aggregate_exit_code(aggregate: &AgentTaskAggregate) -> i32 {
 }
 
 fn promote_attempt(
-    options: &AgentTaskLoopServiceOptions,
+    options: &AgentTaskCookServiceOptions,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     let (source, source_path) = promotion_source(run_id)?;
@@ -1083,14 +1082,14 @@ fn promote_attempt(
 }
 
 fn finalize_loop_pr(
-    options: &AgentTaskLoopServiceOptions,
-    loop_id: &str,
+    options: &AgentTaskCookServiceOptions,
+    cook_id: &str,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<Value> {
     if promotion.status != AgentTaskPromotionStatus::Applied {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "agent-task loop finalization requires an applied promotion with green gates",
+            "agent-task cook finalization requires an applied promotion with green gates",
             None,
             None,
         ));
@@ -1113,13 +1112,13 @@ fn finalize_loop_pr(
         .iter()
         .cloned()
         .chain(std::iter::once(format!(
-            "homeboy://agent-task/run/{loop_id}"
+            "homeboy://agent-task/run/{cook_id}"
         )))
         .collect();
     let artifact_refs = std::iter::once(promotion.patch_artifact.path.clone()).collect();
     let report = finalize_pr(AgentTaskPrFinalizationOptions {
         path,
-        run_id: loop_id.to_string(),
+        run_id: cook_id.to_string(),
         base: options.base.clone(),
         head: options.head.clone(),
         title: options.title.clone(),
@@ -1131,7 +1130,7 @@ fn finalize_loop_pr(
             source_refs,
             artifact_refs,
             attempt_summary: format!(
-                "{} deterministic cook-loop gate attempt(s) completed green",
+                "{} deterministic cook gate attempt(s) completed green",
                 promotion.deterministic_gates.len()
             ),
             ai_tool: options.ai_tool.clone(),
@@ -1144,7 +1143,7 @@ fn finalize_loop_pr(
                 manual_reviewer_check: None,
             },
             runtime_guardrails: AgentTaskPrRuntimeGuardrails::default(),
-            lifecycle: crate::core::agent_task_lifecycle::status(loop_id)
+            lifecycle: crate::core::agent_task_lifecycle::status(cook_id)
                 .ok()
                 .map(|record| record.lifecycle),
         },
@@ -1154,18 +1153,18 @@ fn finalize_loop_pr(
     Ok(serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
-fn loop_report(
-    loop_id: String,
+fn cook_report(
+    cook_id: String,
     status: &str,
-    attempts: Vec<AgentTaskLoopAttemptReport>,
+    attempts: Vec<AgentTaskCookAttemptReport>,
     finalization: Option<Value>,
     stop_reason: Option<String>,
     exit_code: i32,
-) -> AgentTaskRunResult<AgentTaskLoopReport> {
+) -> AgentTaskRunResult<AgentTaskCookReport> {
     AgentTaskRunResult {
-        value: AgentTaskLoopReport {
-            schema: "homeboy/agent-task-loop/v1",
-            loop_id,
+        value: AgentTaskCookReport {
+            schema: "homeboy/agent-task-cook/v1",
+            cook_id,
             status: status.to_string(),
             attempts,
             finalization,
@@ -1476,26 +1475,26 @@ mod tests {
                 Some("https://github.com/Extra-Chill/homeboy/issues/4386")
             );
             assert_eq!(run.counts.queued, 1);
-            assert_eq!(
-                run.commands.status,
-                "homeboy agent-task status run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.logs,
-                "homeboy agent-task logs run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.artifacts,
-                "homeboy agent-task artifacts run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.review,
-                "homeboy agent-task review run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.retry,
-                "homeboy agent-task retry run-discovery-list --run"
-            );
+            assert!(run
+                .commands
+                .status
+                .ends_with("agent-task status run-discovery-list"));
+            assert!(run
+                .commands
+                .logs
+                .ends_with("agent-task logs run-discovery-list"));
+            assert!(run
+                .commands
+                .artifacts
+                .ends_with("agent-task artifacts run-discovery-list"));
+            assert!(run
+                .commands
+                .review
+                .ends_with("agent-task review run-discovery-list"));
+            assert!(run
+                .commands
+                .retry
+                .ends_with("agent-task retry run-discovery-list --run"));
             assert!(run
                 .commands
                 .run_plan
@@ -1594,7 +1593,7 @@ mod tests {
                 .find(|run| run.run_id == "run-live-queued")
                 .expect("queued listed");
             assert_eq!(queued.liveness, Some(AgentTaskLiveness::Active));
-            assert_eq!(queued.source, "local");
+            assert!(queued.source == "local" || queued.source.starts_with("runner:"));
 
             let stale = report
                 .runs

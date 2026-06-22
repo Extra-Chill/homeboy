@@ -3357,7 +3357,7 @@ mod tests {
     fn non_release_gate_command_keeps_allow_local_hot_bypass() {
         // Non-gate portable commands (e.g. agent-task) keep the existing
         // --force-hot --allow-local-hot bypass behavior.
-        let command = portable_lab_command("agent-task dispatch/cook/loop/run-plan");
+        let command = portable_lab_command("agent-task dispatch/cook/run-plan");
 
         assert!(resolve_lab_runner_selection_from_default(
             &command,

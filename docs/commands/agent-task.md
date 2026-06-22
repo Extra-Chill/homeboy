@@ -13,8 +13,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 - **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
 - **Cook/review:** workspace task conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
 - **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
-- **Prompt store:** Homeboy-owned markdown prompts for reusable dispatch/cook/loop input.
-- **Controller:** durable multi-agent loop state that can create or observe lifecycle runs over time.
+- **Prompt store:** Homeboy-owned markdown prompts for reusable dispatch/cook input.
+- **Loop/controller:** durable multi-agent loop state with on/off, revolutions, handoffs, continuation policy, and resume/stop controls.
 
 ## Subcommands
 
@@ -36,7 +36,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
-| `fanout plan\|submit\|run-plan` | Compile, persist, or run generic provider-neutral fanout inputs. |
+| `fanout plan\|submit\|run-plan` | Batch many independent cooks through provider-neutral fanout inputs. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
@@ -45,8 +45,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 | Subcommand | Purpose |
 |---|---|
-| `cook` | Sync a workspace when `--runner` is supplied, dispatch a workspace task, and return the durable run id. |
-| `loop` | Run a durable repo cook loop: dispatch, promote, verify, retry red gates, and finalize. |
+| `cook` | Run one workspace task through the patch-artifact handoff workflow. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `finalize-pr` | Finalize a green cook run into a review-ready pull request. |
@@ -55,7 +54,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 ## Lab Guardrails
 
 Use global `--lab-only` (alias `--no-local-execution`) with long-running or
-patch-producing `agent-task cook` / `agent-task loop` waves that must not execute
+patch-producing `agent-task cook` waves that must not execute
 provider processes on the controller. If Lab routing cannot select or prepare a
 runner, Homeboy fails before local execution instead of falling back.
 
@@ -82,7 +81,7 @@ processes start. Compact `agent-task status` includes `execution_location` as
 
 `agent-task prompts` stores markdown prompt files under Homeboy's data directory,
 not under the current repo/worktree. Save prompt content with inline text,
-`@file`, or `-` for stdin, then reference it from `dispatch`, `cook`, or `loop`
+`@file`, or `-` for stdin, then reference it from `dispatch` or `cook`
 with `prompt:<id>` anywhere a prompt string is accepted.
 
 ```bash
@@ -100,6 +99,7 @@ resolution behavior unless the prompt string starts with `prompt:`.
 | Subcommand | Purpose |
 |---|---|
 | `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
+| `loop define\|status\|resume\|stop` | Operate durable defined loops with explicit on/off, revolutions, continuation policy, and handoffs. |
 | `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
 
 ## Internal Bridge
@@ -240,6 +240,29 @@ workflow `client_context.artifact_graph_edges` and includes graph producers in
 and retry policy remain controller-only follow-ups and produce deterministic
 diagnostics instead of partial compilation.
 
+## Durable Loops
+
+`agent-task loop` is reserved for defined, durable multi-agent loops. A loop is
+not a one-shot PR cook. It persists controller state, tracks whether it is on or
+off, counts revolutions, records continuation policy, and resumes or stops
+handoffs explicitly.
+
+```bash
+homeboy agent-task loop define @.github/homeboy/controllers/site-loop.json \
+  --on \
+  --revolution-limit 5
+
+homeboy agent-task loop status site-loop
+homeboy agent-task loop resume site-loop
+homeboy agent-task loop stop site-loop
+```
+
+Use `loop define --off` to register or update loop state without executing
+handoffs. Use `loop define --on --resume` when the operator wants to initialize
+the controller and immediately run pending handoffs. `loop resume` refuses to
+run off loops and stops once the persisted or supplied revolution limit is
+reached.
+
 ## Dispatch
 
 `agent-task dispatch` builds a durable task plan from common workspace inputs
@@ -268,9 +291,9 @@ accepted as `--selector`) selects a specific provider id for that backend, and
 
 ## Fanout/Reconcile
 
-`agent-task fanout` is the public provider-neutral seam for downstream loops that
-need to submit many related agent tasks and reconcile aggregate outcomes without
-calling Homeboy Extensions internal scripts.
+`agent-task fanout` is the public provider-neutral seam for batch cooking: many
+independent tasks, each with its own durable cook lifecycle and review handoff,
+without calling Homeboy Extensions internal scripts.
 
 It accepts these generic input shapes:
 

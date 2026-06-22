@@ -200,8 +200,7 @@ fn command_surface_depth_is_configurable() {
 
 #[test]
 fn manifest_command_exposes_recursive_safety_manifest() {
-    let cli = Cli::try_parse_from(["homeboy", "manifest"])
-        .expect("manifest command should parse");
+    let cli = Cli::try_parse_from(["homeboy", "manifest"]).expect("manifest command should parse");
     assert!(matches!(cli.command, Commands::Manifest(_)));
     assert!(Cli::try_parse_from(["homeboy", "list", "--json"]).is_err());
 

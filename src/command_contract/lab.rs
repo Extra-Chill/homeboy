@@ -248,9 +248,7 @@ impl LabLocalExecutionPolicy {
 pub const LAB_TRACE_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[LabCommandRequiredTool::Playwright];
 const LAB_NO_EXTRA_TOOLS: &[LabCommandRequiredTool] = &[];
 const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror.";
-const AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON: &str =
-    "agent-task loop requires at least one deterministic --verify or --private-verify gate";
-const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/loop/run-plan/retry --run";
+const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task dispatch/cook/run-plan/retry --run";
 const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
     "agent-task controller from-spec --resume/materialize";
 const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
@@ -287,8 +285,8 @@ pub struct LabRunnerSupportSummary {
 const LAB_SUPPORTED_COMMAND_SUMMARIES: &[LabSupportedCommandSummary] = &[
     LabSupportedCommandSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
-        message_label: "agent-task dispatch/cook/loop/run-plan",
-        hint_label: "agent-task dispatch/cook/loop/run-plan",
+        message_label: "agent-task dispatch/cook/run-plan",
+        hint_label: "agent-task dispatch/cook/run-plan",
     },
     LabSupportedCommandSummary {
         contract_labels: &[
@@ -458,20 +456,6 @@ impl Commands {
                 LAB_NO_EXTRA_TOOLS,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Loop(args),
-            }) if !args.gates.has_deterministic_gate() => LabCommandContract::local_only(
-                AGENT_TASK_RUN_LAB_LABEL,
-                AGENT_TASK_LOOP_MISSING_VERIFY_GATE_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Loop(_),
-            }) => LabCommandContract::portable(
-                AGENT_TASK_RUN_LAB_LABEL,
-                None,
-                true,
-                LAB_NO_EXTRA_TOOLS,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
@@ -603,12 +587,7 @@ fn agent_task_provider_requires_cwd_git_checkout_with(
     provider_requires_cwd_git_checkout: impl Fn(&str, Option<&str>) -> bool,
 ) -> bool {
     match command {
-        agent_task::AgentTaskCommand::Cook(args)
-        | agent_task::AgentTaskCommand::Dispatch(args)
-        | agent_task::AgentTaskCommand::Loop(agent_task::AgentTaskLoopArgs {
-            dispatch: args,
-            ..
-        }) => {
+        agent_task::AgentTaskCommand::Cook(args) | agent_task::AgentTaskCommand::Dispatch(args) => {
             let has_workspace = args.cwd.as_ref().is_some_and(|cwd| !cwd.trim().is_empty())
                 || args
                     .workspace
