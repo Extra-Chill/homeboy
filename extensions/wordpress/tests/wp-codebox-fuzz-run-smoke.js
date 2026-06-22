@@ -200,6 +200,24 @@ runWpCodeboxFuzzRun({
 	});
 	assert.equal(doubleNested.succeeded, true);
 	assert.equal(doubleNested.metadata.suite.id, 'double-nested-suite');
+	const rawNested = normalizeWpCodeboxFuzzRunResult({
+		json: {
+			schema: 'wp-codebox/agent-task-run/v1',
+			status: 'no_op',
+			agent_task_result: {
+				raw: {
+					result: {
+						schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+						status: 'passed',
+						suite: { id: 'raw-nested-suite' },
+						summary: { total: 0, passed: 0, failed: 0, error: 0, skipped: 0 },
+					},
+				},
+			},
+		},
+	});
+	assert.equal(rawNested.succeeded, true);
+	assert.equal(rawNested.metadata.suite.id, 'raw-nested-suite');
 	assert.equal(normalizeWpCodeboxFuzzSuiteResult({ status: 'passed' }).result_schema, WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA);
 	return runWpCodeboxFuzzSuite({ taskId: 'suite-run-alias', runFuzzRun: async () => ({ status: 'passed' }) });
 }).then((summary) => {
