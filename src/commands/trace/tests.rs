@@ -1,7 +1,7 @@
 use std::fs;
 
 use clap::Parser;
-use homeboy::core::observation::RunStatus;
+use homeboy::core::observation::{ObservationStore, RunStatus};
 use homeboy::core::ErrorCode;
 
 use crate::test_support::with_isolated_home;
