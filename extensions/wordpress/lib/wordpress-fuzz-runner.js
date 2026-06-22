@@ -58,11 +58,13 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 	const plan = normalizeRunnerPlan(workload.plan || workload.fuzz_plan || workload.fuzzPlan || workload);
 	const instructions = fuzzSuiteInstructions({ workload, workloadId, runId });
 	const wpCodeboxInput = buildWpCodeboxInput({ workload, plan, runId, workloadId, seed, maxDuration, instructions });
+	const runtimeRequirements = wpCodeboxRuntimeRequirementsFromWorkload(workload);
 	const taskRequest = wpCodeboxFuzzSuiteTaskRequest({
 		taskId: runId,
 		input: wpCodeboxInput,
 		provider: workload.provider,
 		runtimeId: workload.runtime_id || workload.runtimeId || 'wp-codebox',
+		runtimeRequirements,
 		instructions,
 	});
 	const codeboxPlanRecipe = buildCodeboxPlanRecipe(workload);
@@ -76,6 +78,7 @@ function buildWordPressFuzzRunnerContext(options = {}) {
 		maxDuration,
 		plan,
 		wpCodeboxInput,
+		runtimeRequirements,
 		taskRequest,
 		codeboxPlanRecipe,
 	};
@@ -89,6 +92,7 @@ function buildWordPressFuzzRunnerSummary({
 	maxDuration,
 	plan,
 	wpCodeboxInput,
+	runtimeRequirements,
 	taskRequest,
 	codeboxPlanRecipe,
 	codeboxResult,
@@ -107,6 +111,7 @@ function buildWordPressFuzzRunnerSummary({
 		max_duration_seconds: maxDuration,
 		plan_id: plan.id,
 		wp_codebox_input: wpCodeboxInput,
+		wp_codebox_runtime_requirements: runtimeRequirements,
 		wp_codebox_task_request: taskRequest,
 		wp_codebox_plan_recipe: codeboxPlanRecipe,
 		wp_codebox_result: codeboxResult,
@@ -132,6 +137,7 @@ async function resolveCodeboxResult(context, options = {}) {
 		input: context.wpCodeboxInput,
 		provider: context.workload.provider,
 		runtimeId: context.workload.runtime_id || context.workload.runtimeId || 'wp-codebox',
+		runtimeRequirements: context.runtimeRequirements,
 		instructions: context.taskRequest.instructions,
 		runFuzzSuite: runner,
 	});
@@ -196,6 +202,58 @@ function buildCodeboxPlanRecipe(workload) {
 		return undefined;
 	}
 	return buildWpCodeboxFuzzPlanRecipe(plan);
+}
+
+function wpCodeboxRuntimeRequirementsFromWorkload(workload = {}) {
+	const context = objectOrUndefined(workload.metadata?.homeboy_runtime_context || workload.metadata?.homeboyRuntimeContext);
+	const components = objectOrUndefined(context?.components);
+	if (!components) {
+		return undefined;
+	}
+	const componentId = workload.target?.component
+		|| workload.metadata?.fixture?.component
+		|| workload.metadata?.fixture?.plugin
+		|| workload.target?.slug;
+	const component = componentId ? objectOrUndefined(components[componentId]) : undefined;
+	const source = component?.path || component?.source;
+	if (!componentId || typeof source !== 'string' || source.trim() === '') {
+		return undefined;
+	}
+	const activation = workload.metadata?.fixture?.activation || firstCasePluginActivation(workload);
+	return {
+		extra_plugins: [stripUndefined({
+			slug: workload.target?.slug || componentId,
+			source,
+			path: source,
+			pluginFile: activation,
+			loadAs: 'plugin',
+			activate: Boolean(activation),
+			metadata: stripUndefined({
+				component: componentId,
+				rig_id: context.rig_id,
+			}),
+		})],
+		component_contracts: [stripUndefined({
+			slug: workload.target?.slug || componentId,
+			path: source,
+			pluginFile: activation,
+			loadAs: 'plugin',
+		})],
+		metadata: stripUndefined({
+			homeboy_runtime_context_schema: context.schema,
+			rig_id: context.rig_id,
+		}),
+	};
+}
+
+function firstCasePluginActivation(workload = {}) {
+	for (const entry of normalizeArray(workload.cases)) {
+		const activation = entry?.intent?.plugin?.activation;
+		if (typeof activation === 'string' && activation.trim() !== '') {
+			return activation;
+		}
+	}
+	return undefined;
 }
 
 function normalizeCodeboxResult(workload, context = {}) {

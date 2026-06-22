@@ -56,14 +56,8 @@ async function runWpCodeboxAgentTask(request) {
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
 	if (publicInvocation) {
-		try {
-			const publicResult = await runWpCodeboxPublicRuntimeCommand(command, publicInvocation, tempDir, { env });
-			return { json: normalizeWpCodeboxAgentTaskOutput(publicResult, request) };
-		} catch (error) {
-			if (!shouldFallbackToRunAgentTask(error)) {
-				throw error;
-			}
-		}
+		const publicResult = await runWpCodeboxPublicRuntimeCommand(command, publicInvocation, tempDir, { env });
+		return { json: normalizeWpCodeboxAgentTaskOutput(publicResult, request) };
 	}
 
 	const inputFile = path.join(tempDir, 'agent-task-request.json');
@@ -94,6 +88,9 @@ async function discoverRuntimeContractManifest(env = process.env) {
 }
 
 function wpCodeboxPublicRuntimeInvocation(request, options = {}) {
+	if (requiresCodeboxTaskAdapter(request)) {
+		return null;
+	}
 	const runtimeTask = request.executor?.config?.runtime_task || {};
 	const ability = runtimeTask.ability || wpCodeboxFuzzSuiteAbility(options);
 	const command = wpCodeboxCommandFromPublicAbility(ability, options);
@@ -111,6 +108,23 @@ function wpCodeboxPublicRuntimeInvocation(request, options = {}) {
 			},
 		},
 	};
+}
+
+function requiresCodeboxTaskAdapter(request) {
+	const config = request.executor?.config || {};
+	const runtimeRequirements = config.runtime_requirements || config.runtimeRequirements || {};
+	return [
+		config.component_contracts,
+		config.componentContracts,
+		config.runtime_overlays,
+		config.runtimeOverlays,
+		runtimeRequirements.extra_plugins,
+		runtimeRequirements.extraPlugins,
+		runtimeRequirements.component_contracts,
+		runtimeRequirements.componentContracts,
+		runtimeRequirements.plugins,
+		runtimeRequirements.components,
+	].some((value) => Array.isArray(value) && value.length > 0);
 }
 
 function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
@@ -134,12 +148,6 @@ async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, op
 		cwd: process.cwd(),
 		env: options.env || process.env,
 	});
-}
-
-function shouldFallbackToRunAgentTask(error) {
-	const message = String(error?.message || '').toLowerCase();
-	return error?.code === 'ENOENT'
-		|| /unknown command|invalid command|not found|no such command|unrecognized command|unknown subcommand|unsupported command/.test(message);
 }
 
 function wpCodeboxRunAgentTaskInvocation(request) {

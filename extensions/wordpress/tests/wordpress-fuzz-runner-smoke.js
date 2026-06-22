@@ -129,7 +129,17 @@ const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 		schema: 'homeboy/fuzz-workload/v1',
 		id: 'json-workload',
 		label: 'JSON workload smoke',
-		target: { type: 'wordpress-plugin', slug: 'sample-plugin' },
+		target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
+		metadata: {
+			fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' },
+			homeboy_runtime_context: {
+				schema: 'homeboy/fuzz-workload-runtime-context/v1',
+				rig_id: 'sample-rig',
+				components: {
+					'sample-plugin': { path: '/runner/components/sample-plugin', branch: 'main' },
+				},
+			},
+		},
 		workload: {
 			runner: 'wp-codebox',
 			type: 'json',
@@ -160,6 +170,19 @@ assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.action, [{ 
 assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
 assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required, true);
 assert.equal(jsonWorkloadResult.wp_codebox_input.metadata.artifacts.expected[0].semantic_key, 'fuzz.suite_result');
+assert.deepEqual(jsonWorkloadResult.wp_codebox_runtime_requirements.extra_plugins, [{
+	slug: 'sample-plugin',
+	source: '/runner/components/sample-plugin',
+	path: '/runner/components/sample-plugin',
+	pluginFile: 'sample-plugin/sample-plugin.php',
+	loadAs: 'plugin',
+	activate: true,
+	metadata: { component: 'sample-plugin', rig_id: 'sample-rig' },
+}]);
+assert.equal(
+	jsonWorkloadResult.wp_codebox_task_request.executor.config.runtime_requirements.extra_plugins[0].source,
+	'/runner/components/sample-plugin'
+);
 
 let dispatchedRequest;
 const dispatchPromise = runWordPressFuzzRunnerResult({
@@ -205,10 +228,35 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-runner-'));
 const workloadPath = path.join(tempDir, 'workload.json');
+const runtimeRequirementWorkloadPath = path.join(tempDir, 'runtime-requirement-workload.json');
 const resultsPath = path.join(tempDir, 'fuzz-results.json');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 const { discoverWpCodeboxBin, wpCodeboxCommand, wpCodeboxRuntimeEnv } = require(runnerPath);
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload)}\n`);
+fs.writeFileSync(runtimeRequirementWorkloadPath, `${JSON.stringify({
+	schema: 'homeboy/fuzz-workload/v1',
+	id: 'runtime-requirement-workload',
+	label: 'Runtime requirement workload',
+	target: { type: 'wordpress-plugin', slug: 'sample-plugin', component: 'sample-plugin' },
+	metadata: {
+		fixture: { component: 'sample-plugin', activation: 'sample-plugin/sample-plugin.php' },
+		homeboy_runtime_context: {
+			schema: 'homeboy/fuzz-workload-runtime-context/v1',
+			rig_id: 'sample-rig',
+			components: {
+				'sample-plugin': { path: '/runner/components/sample-plugin' },
+			},
+		},
+	},
+	cases: [{
+		case_id: 'runtime-requirement-workload:default',
+		intent: {
+			type: 'wordpress-plugin-workload',
+			plugin: { activation: 'sample-plugin/sample-plugin.php' },
+			execute: { path: '/runner/workloads/sample.php', type: 'php' },
+		},
+	}],
+})}\n`);
 
 assert.equal(fs.statSync(runnerPath).mode & 0o111, 0o111, 'fuzz runner script must be executable');
 assert.equal(
@@ -319,29 +367,29 @@ assert.equal(dispatchCliResult.succeeded, true);
 assert.equal(dispatchCliResult.wp_codebox_result.request_id, 'dispatch-cli-run');
 assert.equal(dispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'fake/fuzz-report.json');
 
-const legacyCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-legacy-wp-codebox.js');
-fs.writeFileSync(legacyCodeboxBin, `#!/usr/bin/env node
+const taskAdapterCodeboxBin = path.join(tempDir, 'packages/cli/dist/fake-task-adapter-wp-codebox.js');
+fs.writeFileSync(taskAdapterCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const command = process.argv[2];
 if (command === 'run-fuzz-suite') {
-  process.stderr.write('unknown command: run-fuzz-suite');
+  process.stderr.write('runtime requirements must use the task adapter');
   process.exit(1);
 }
 const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
 const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-if (command !== 'run-agent-task' || request.schema !== '${runtimeContractSchemas().agentTask.runRequest}' || request.task_id !== 'legacy-dispatch-cli-run') {
-  process.stderr.write('invalid run-agent-task fallback input');
+if (command !== 'run-agent-task' || request.schema !== '${runtimeContractSchemas().agentTask.runRequest}' || request.task_id !== 'task-adapter-dispatch-cli-run') {
+  process.stderr.write('invalid run-agent-task adapter input');
   process.exit(1);
 }
 if (request.runtime_task || request.artifact_declarations || request.sandbox_tool_policy || request.extra_plugins) {
-  process.stderr.write('fallback rebuilt the Codebox task payload instead of delegating to the adapter');
+  process.stderr.write('adapter rebuilt the Codebox task payload instead of delegating to the adapter');
   process.exit(1);
 }
 if (request.task_input?.schema !== 'wp-codebox/task-input/v1') {
   process.stderr.write('missing delegated task input');
   process.exit(1);
 }
-if (request.task_input?.goal !== 'Run WordPress fuzz suite legacy-dispatch-cli-workload and return the declared fuzz artifacts.') {
+if (request.task_input?.goal !== 'Run WordPress fuzz suite Runtime requirement workload and return the declared fuzz artifacts.') {
   process.stderr.write('missing delegated task goal');
   process.exit(1);
 }
@@ -353,7 +401,11 @@ if (request.task_input?.artifact_declarations?.[0]?.name !== 'wp-codebox-fuzz-su
   process.stderr.write('missing delegated artifact contract');
   process.exit(1);
 }
-if (request.task_input?.parent_request?.task_id !== 'legacy-dispatch-cli-run') {
+if (request.task_input?.runtime_requirements?.extra_plugins?.[0]?.source !== '/runner/components/sample-plugin') {
+  process.stderr.write('missing delegated runtime extra plugin');
+  process.exit(1);
+}
+if (request.task_input?.parent_request?.task_id !== 'task-adapter-dispatch-cli-run') {
   process.stderr.write('missing parent request metadata');
   process.exit(1);
 }
@@ -367,31 +419,31 @@ process.stdout.write(JSON.stringify({
       status: 'succeeded',
       summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
       cases: [{ id: 'get-posts', status: 'passed', success: true, diagnostics: [] }],
-      artifactRefs: [{ path: 'legacy/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
+      artifactRefs: [{ path: 'task-adapter/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
       coverage_summary: { surface_count: 1, exercised_count: 1 }
     }
   }
 }));
 `);
-fs.chmodSync(legacyCodeboxBin, 0o755);
+fs.chmodSync(taskAdapterCodeboxBin, 0o755);
 
-const legacyDispatchCli = spawnSync(runnerPath, [], {
+const taskAdapterDispatchCli = spawnSync(runnerPath, [], {
 	encoding: 'utf8',
 	env: {
 		...process.env,
-		HOMEBOY_WP_CODEBOX_BIN: legacyCodeboxBin,
+		HOMEBOY_WP_CODEBOX_BIN: taskAdapterCodeboxBin,
 		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_WP_CODEBOX_PLUGIN_PATH: path.join(tempDir, 'packages/wordpress-plugin'),
-		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
-		HOMEBOY_FUZZ_WORKLOAD_ID: 'legacy-dispatch-cli-workload',
-		HOMEBOY_FUZZ_RUN_ID: 'legacy-dispatch-cli-run',
+		HOMEBOY_FUZZ_WORKLOAD_PATH: runtimeRequirementWorkloadPath,
+		HOMEBOY_FUZZ_WORKLOAD_ID: 'task-adapter-dispatch-cli-workload',
+		HOMEBOY_FUZZ_RUN_ID: 'task-adapter-dispatch-cli-run',
 	},
 });
 
-assert.equal(legacyDispatchCli.status, 0, legacyDispatchCli.stderr);
-const legacyDispatchCliResult = JSON.parse(legacyDispatchCli.stdout);
-assert.equal(legacyDispatchCliResult.succeeded, true);
-assert.equal(legacyDispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'legacy/fuzz-report.json');
+assert.equal(taskAdapterDispatchCli.status, 0, taskAdapterDispatchCli.stderr);
+const taskAdapterDispatchCliResult = JSON.parse(taskAdapterDispatchCli.stdout);
+assert.equal(taskAdapterDispatchCliResult.succeeded, true);
+assert.equal(taskAdapterDispatchCliResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'task-adapter/fuzz-report.json');
 
 dispatchPromise.then(() => {
 	console.log('WordPress fuzz runner smoke passed.');

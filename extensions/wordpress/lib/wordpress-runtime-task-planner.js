@@ -157,6 +157,7 @@ function wordpressRuntimeTaskExecutorConfig(options = {}) {
 		homeboy_extensions: options.homeboyExtensions || options.homeboy_extensions,
 		runtime_component_paths: options.runtimeComponentPaths || options.runtime_component_paths,
 		component_contracts: options.componentContracts || options.component_contracts,
+		runtime_requirements: options.runtimeRequirements || options.runtime_requirements,
 		ability_tools: options.abilityTools || options.ability_tools,
 		structured_artifacts: options.structuredArtifacts || options.structured_artifacts,
 		runtime_env: options.runtimeEnv || options.runtime_env,
