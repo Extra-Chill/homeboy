@@ -17,7 +17,7 @@ const WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA = 'wp-codebox/fuzz-suite-result/v1';
 const WP_CODEBOX_FUZZ_RUN_SCHEMA = WP_CODEBOX_FUZZ_SUITE_SCHEMA;
 const WP_CODEBOX_FUZZ_RUN_RESULT_SCHEMA = WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA;
 const WORDPRESS_CODEBOX_FUZZ_RUN_CONSUMER_SCHEMA = 'homeboy/wordpress-codebox-fuzz-run-consumer/v1';
-const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/fuzz-suite';
+const DEFAULT_FUZZ_SUITE_ABILITY = 'wp-codebox/run-fuzz-suite';
 const DEFAULT_FUZZ_RUN_ABILITY = DEFAULT_FUZZ_SUITE_ABILITY;
 const DEFAULT_FUZZ_RUN_EXPECTED_ARTIFACTS = [
 	'wp-codebox-fuzz-suite-result',
