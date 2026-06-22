@@ -77,6 +77,10 @@ pub fn prepare_git_lab_offload_changed_since(
 }
 
 pub fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
+    if lab_offload_has_precomputed_changed_files(args) {
+        return None;
+    }
+
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         if arg == "--" {
@@ -90,6 +94,22 @@ pub fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn lab_offload_has_precomputed_changed_files(args: &[String]) -> bool {
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--lab-changed-files-json" {
+            return iter.next().is_some();
+        }
+        if arg.starts_with("--lab-changed-files-json=") {
+            return true;
+        }
+    }
+    false
 }
 
 fn rewrite_changed_since_ref(args: &[String], resolved_base: &str) -> Vec<String> {
@@ -243,6 +263,48 @@ mod tests {
         assert!(err.message.contains("cannot honor --changed-since"));
         assert!(err.message.contains("snapshot workspaces"));
         assert_eq!(err.details["id"], "origin/main");
+    }
+
+    #[test]
+    fn precomputed_changed_files_make_changed_since_snapshot_portable() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--path".to_string(),
+            "/Users/user/Developer/project".to_string(),
+            "--changed-since".to_string(),
+            "origin/main".to_string(),
+            "--lab-changed-files-json".to_string(),
+            "[\"src/lib.rs\"]".to_string(),
+        ];
+
+        assert_eq!(lab_offload_changed_since_ref(&args), None);
+
+        let preflight =
+            preflight_lab_offload_changed_since(&args, RunnerWorkspaceSyncMode::Snapshot)
+                .expect("precomputed changed-file scope should be snapshot portable");
+        assert_eq!(preflight.args, args);
+        assert_eq!(preflight.requested_ref, None);
+        assert_eq!(preflight.resolved_base, None);
+        assert!(preflight.git_fetch_refs.is_empty());
+    }
+
+    #[test]
+    fn precomputed_changed_files_ignore_passthrough_payloads() {
+        let args = vec![
+            "homeboy".to_string(),
+            "test".to_string(),
+            "--changed-since".to_string(),
+            "origin/main".to_string(),
+            "--".to_string(),
+            "--lab-changed-files-json".to_string(),
+            "[\"fixture\"]".to_string(),
+        ];
+
+        assert_eq!(
+            lab_offload_changed_since_ref(&args),
+            Some("origin/main".to_string())
+        );
     }
 
     #[test]

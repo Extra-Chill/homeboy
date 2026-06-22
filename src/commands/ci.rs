@@ -2,6 +2,9 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::path::PathBuf;
 
+use homeboy::core::ci_gate::{
+    self, DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide,
+};
 use homeboy::core::ci_plan::{self, CiEventContext, CiPlan};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::ci_scope::{
@@ -49,6 +52,35 @@ pub enum CiCommand {
     /// `--github-actions` the context is read from the standard GitHub
     /// Actions environment; explicit flags override individual fields.
     Scope(CiScopeArgs),
+    /// Classify differential CI results without blaming a PR for a red baseline.
+    DifferentialGate(CiDifferentialGateArgs),
+}
+
+#[derive(Args)]
+pub struct CiDifferentialGateArgs {
+    /// Exact command run against the baseline checkout.
+    #[arg(long)]
+    pub baseline_command: String,
+
+    /// Exit code from the baseline command.
+    #[arg(long)]
+    pub baseline_exit_code: i32,
+
+    /// Evidence for baseline failures, such as log excerpts or artifact refs.
+    #[arg(long = "baseline-evidence")]
+    pub baseline_evidence: Vec<String>,
+
+    /// Exact command run against the candidate/PR-head checkout.
+    #[arg(long)]
+    pub head_command: String,
+
+    /// Exit code from the candidate/PR-head command.
+    #[arg(long)]
+    pub head_exit_code: i32,
+
+    /// Evidence for candidate failures, such as log excerpts or artifact refs.
+    #[arg(long = "head-evidence")]
+    pub head_evidence: Vec<String>,
 }
 
 #[derive(Args)]
@@ -180,6 +212,14 @@ pub enum CiOutput {
     Run(CiRunCommandOutput),
     Autofix(CiAutofixCommandOutput),
     Scope(CiScopeCommandOutput),
+    DifferentialGate(CiDifferentialGateCommandOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CiDifferentialGateCommandOutput {
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub decision: DifferentialGateDecision,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,7 +266,35 @@ pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
         CiCommand::Run(args) => run_ci(args, global),
         CiCommand::Autofix(args) => run_autofix(args, global),
         CiCommand::Scope(args) => run_scope(args, global),
+        CiCommand::DifferentialGate(args) => run_differential_gate(args, global),
     }
+}
+
+fn run_differential_gate(
+    args: CiDifferentialGateArgs,
+    _global: &GlobalArgs,
+) -> CmdResult<CiOutput> {
+    let decision = ci_gate::classify(DifferentialGateInput {
+        baseline: DifferentialGateSide {
+            command: args.baseline_command,
+            exit_code: args.baseline_exit_code,
+            evidence: args.baseline_evidence,
+        },
+        head: DifferentialGateSide {
+            command: args.head_command,
+            exit_code: args.head_exit_code,
+            evidence: args.head_evidence,
+        },
+    });
+    let exit_code = decision.exit_code();
+
+    Ok((
+        CiOutput::DifferentialGate(CiDifferentialGateCommandOutput {
+            command: "ci.differential-gate",
+            decision,
+        }),
+        exit_code,
+    ))
 }
 
 fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
@@ -531,6 +599,85 @@ mod tests {
         assert_eq!(args.event_name.as_deref(), Some("pull_request"));
         assert_eq!(args.base_sha.as_deref(), Some("abc123"));
         assert_eq!(args.for_commands, vec!["lint", "test"]);
+    }
+
+    #[test]
+    fn parses_ci_differential_gate_evidence() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "ci",
+            "differential-gate",
+            "--baseline-command",
+            "cargo fmt --check",
+            "--baseline-exit-code",
+            "1",
+            "--baseline-evidence",
+            "FMT SUMMARY: 7 files need formatting",
+            "--head-command",
+            "homeboy test homeboy",
+            "--head-exit-code",
+            "0",
+        ])
+        .expect("parse cli");
+
+        let crate::cli_surface::Commands::Ci(args) = cli.command else {
+            panic!("expected ci command");
+        };
+        let CiCommand::DifferentialGate(args) = args.command else {
+            panic!("expected ci differential-gate");
+        };
+
+        assert_eq!(args.baseline_command, "cargo fmt --check");
+        assert_eq!(args.baseline_exit_code, 1);
+        assert_eq!(
+            args.baseline_evidence,
+            vec!["FMT SUMMARY: 7 files need formatting"]
+        );
+        assert_eq!(args.head_command, "homeboy test homeboy");
+        assert_eq!(args.head_exit_code, 0);
+    }
+
+    #[test]
+    fn ci_differential_gate_baseline_red_exits_zero() {
+        let args = CiDifferentialGateArgs {
+            baseline_command: "cargo fmt --check".to_string(),
+            baseline_exit_code: 1,
+            baseline_evidence: vec!["FMT SUMMARY: 7 files need formatting".to_string()],
+            head_command: "homeboy test homeboy".to_string(),
+            head_exit_code: 0,
+            head_evidence: Vec::new(),
+        };
+
+        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+
+        assert_eq!(exit, 0);
+        let CiOutput::DifferentialGate(output) = output else {
+            panic!("expected ci differential gate output");
+        };
+        assert_eq!(output.command, "ci.differential-gate");
+        assert_eq!(output.decision.status, "baseline_red");
+        assert!(output.decision.passed);
+    }
+
+    #[test]
+    fn ci_differential_gate_candidate_failure_exits_nonzero() {
+        let args = CiDifferentialGateArgs {
+            baseline_command: "cargo fmt --check".to_string(),
+            baseline_exit_code: 0,
+            baseline_evidence: Vec::new(),
+            head_command: "homeboy test homeboy".to_string(),
+            head_exit_code: 1,
+            head_evidence: vec!["homeboy-ci-results/test.log".to_string()],
+        };
+
+        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+
+        assert_eq!(exit, 1);
+        let CiOutput::DifferentialGate(output) = output else {
+            panic!("expected ci differential gate output");
+        };
+        assert_eq!(output.decision.status, "failed");
+        assert!(!output.decision.passed);
     }
 
     #[test]

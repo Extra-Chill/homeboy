@@ -92,10 +92,12 @@ pub fn status(component_id: Option<&str>) -> Result<GitOutput> {
 
 /// Like [`status`] but with an explicit path override for git operations.
 pub fn status_at(component_id: Option<&str>, path_override: Option<&str>) -> Result<GitOutput> {
-    let (id, path) = resolve_target(component_id, path_override)?;
-    let output = execute_git(&path, &["status", "--porcelain=v1"])
-        .map_err(|e| Error::git_command_failed(e.to_string()))?;
-    Ok(GitOutput::from_output(id, path, "status", output))
+    super::run_resolved_git(
+        component_id,
+        path_override,
+        "status",
+        &["status", "--porcelain=v1"],
+    )
 }
 
 /// Get git status for multiple components from JSON spec.
@@ -120,10 +122,7 @@ pub fn pull(component_id: Option<&str>) -> Result<GitOutput> {
 
 /// Like [`pull`] but with an explicit path override for git operations.
 pub fn pull_at(component_id: Option<&str>, path_override: Option<&str>) -> Result<GitOutput> {
-    let (id, path) = resolve_target(component_id, path_override)?;
-    let output =
-        execute_git(&path, &["pull"]).map_err(|e| Error::git_command_failed(e.to_string()))?;
-    Ok(GitOutput::from_output(id, path, "pull", output))
+    super::run_resolved_git(component_id, path_override, "pull", &["pull"])
 }
 
 /// Options for [`rebase`].

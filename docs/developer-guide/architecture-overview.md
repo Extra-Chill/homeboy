@@ -78,7 +78,9 @@ Config entities:
 
 **Location:** `src/core/engine/local_files.rs`
 
-File-based storage for configurations:
+File-based storage adapter used by configuration and other local persistence
+callers. `src/core/config.rs` owns config entity semantics and delegates actual
+file operations through the `local_files` adapter:
 - Reads/writes JSON files in config directory
 - Handles atomic operations for safety
 - Cross-platform paths (macOS, Linux, Windows)
@@ -258,6 +260,13 @@ Command-line interface built with `clap`:
 - Output mode selection (JSON, markdown, interactive)
 - JSON envelope wrapping
 - Response mapping
+
+Command modules are adapters. They may parse CLI arguments, resolve output mode,
+map errors into CLI responses, and call explicit `core` facades. Durable
+workflow orchestration, direct process execution, filesystem mutation, runner
+dispatch, and artifact persistence belong behind a `core` service boundary. See
+[Architecture Cleanup Map](architecture-cleanup-map.md) for the current cleanup
+inventory and ratchet policy.
 
 ### Documentation System
 
