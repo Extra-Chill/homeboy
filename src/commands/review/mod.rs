@@ -992,6 +992,47 @@ mod tests {
         assert_eq!(build_audit_args(&args, &review_context).profile, "full");
     }
 
+    #[test]
+    fn scoped_review_lint_args_do_not_use_self_check_dispatch() {
+        let mut args = review_args_fixture();
+        args.changed_since = Some("origin/main".to_string());
+        let review_context = ReviewExecutionContext {
+            scope: "changed-since".to_string(),
+            changed_file_count: Some(1),
+            precomputed_changed_files: Some(vec!["src/lib.rs".to_string()]),
+        };
+
+        let lint_args = build_lint_args(&args, &review_context);
+
+        assert_eq!(lint_args.changed_since.as_deref(), Some("origin/main"));
+        assert_eq!(
+            lint_args.precomputed_changed_files.as_deref(),
+            Some(&["src/lib.rs".to_string()][..])
+        );
+        assert!(
+            !lint_args.should_use_self_check_dispatch(),
+            "review-scoped lint must run the main lint workflow, not full self-check scripts"
+        );
+    }
+
+    #[test]
+    fn review_test_args_do_not_use_self_check_dispatch() {
+        let args = review_args_fixture();
+        let review_context = ReviewExecutionContext {
+            scope: "full".to_string(),
+            changed_file_count: None,
+            precomputed_changed_files: None,
+        };
+
+        let test_args = build_test_args(&args, &review_context);
+
+        assert!(test_args.skip_lint);
+        assert!(
+            !test_args.should_use_self_check_dispatch(&[]),
+            "review test substep carries behavior flags and must not fall back to full self-check scripts"
+        );
+    }
+
     fn review_args_fixture() -> ReviewArgs {
         ReviewArgs {
             comp: PositionalComponentArgs {
