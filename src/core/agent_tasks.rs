@@ -63,6 +63,13 @@ pub use super::agent_task_contract::{
     AgentTaskCoreRedactionDefaults, AGENT_TASK_CORE_CONTRACT_SCHEMA,
 };
 
+pub use super::agent_task_batch::{
+    AgentTaskBatchArtifactsReport, AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun,
+    AgentTaskBatchCommands, AgentTaskBatchRecord, AgentTaskBatchState, AgentTaskBatchStatusReport,
+    AgentTaskBatchTotals, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA,
+    AGENT_TASK_BATCH_STATUS_SCHEMA,
+};
+
 pub use super::agent_task_fanout::{
     AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
     AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,
@@ -162,6 +169,17 @@ pub mod cook_loop {
     pub use super::super::agent_task_cook_loop::{
         evaluate_cook_loop, AgentTaskCookLoopGateFailure, AgentTaskCookLoopOptions,
         AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AGENT_TASK_COOK_LOOP_REPORT_SCHEMA,
+    };
+}
+
+/// Durable batch/fanout lifecycle records built from independent child runs.
+pub mod batch {
+    pub use super::super::agent_task_batch::{
+        artifacts, status, submit_plan_batch, AgentTaskBatchArtifactsReport,
+        AgentTaskBatchChildArtifacts, AgentTaskBatchChildRun, AgentTaskBatchCommands,
+        AgentTaskBatchRecord, AgentTaskBatchState, AgentTaskBatchStatusReport,
+        AgentTaskBatchTotals, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA, AGENT_TASK_BATCH_SCHEMA,
+        AGENT_TASK_BATCH_STATUS_SCHEMA,
     };
 }
 

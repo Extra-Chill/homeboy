@@ -38,6 +38,12 @@ pub enum AgentTaskFanoutCommand {
     Plan(AgentTaskFanoutPlanArgs),
     /// Persist a compiled fanout plan and return durable status/log/artifact commands.
     Submit(AgentTaskFanoutSubmitArgs),
+    /// Submit each independent fanout task as its own durable child run.
+    SubmitBatch(AgentTaskFanoutSubmitBatchArgs),
+    /// Reconcile and read a durable fanout batch.
+    Status(AgentTaskFanoutBatchStatusArgs),
+    /// Collate artifacts from every child run in a durable fanout batch.
+    Artifacts(AgentTaskFanoutBatchStatusArgs),
     /// Run a fanout plan immediately through extension-declared executor providers.
     RunPlan(AgentTaskFanoutRunPlanArgs),
 }
@@ -87,6 +93,22 @@ pub struct AgentTaskFanoutSubmitArgs {
     /// Optional durable run id. Generated when omitted.
     #[arg(long = "run-id", value_name = "ID")]
     pub run_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutSubmitBatchArgs {
+    #[command(flatten)]
+    pub input: AgentTaskFanoutInputArgs,
+
+    /// Optional durable batch id. Generated when omitted.
+    #[arg(long = "batch-id", value_name = "ID")]
+    pub batch_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentTaskFanoutBatchStatusArgs {
+    /// Durable fanout batch id returned by submit-batch.
+    pub batch_id: String,
 }
 
 #[derive(Args, Debug)]
