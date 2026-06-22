@@ -83,7 +83,7 @@ pub struct AgentTaskControllerFromSpecArgs {
 
 #[derive(Args, Debug)]
 pub struct AgentTaskControllerMaterializeArgs {
-    /// Repo loop spec JSON, @file, or - for stdin.
+    /// Repo loop spec JSON, @file, -, or a generator manifest that writes a spec file.
     #[arg(value_name = "SPEC")]
     pub spec: String,
 
