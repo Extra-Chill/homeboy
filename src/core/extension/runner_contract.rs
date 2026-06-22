@@ -2,6 +2,21 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+/// Generic, ecosystem-agnostic markers that indicate a runner failed because of
+/// its own infrastructure (missing harness wrapper, bootstrap aborted, etc.)
+/// rather than because the component under test had findings.
+///
+/// Core only knows these vocabulary-neutral phrases. Any ecosystem- or
+/// product-specific failure signatures (e.g. a particular interpreter crash or
+/// a bootstrap script path) are the responsibility of the extension that owns
+/// that ecosystem — core must not branch on them. Detection of those belongs
+/// in the extension's own runner output, not in this list.
+pub const GENERIC_INFRASTRUCTURE_FAILURE_MARKERS: &[&str] = &[
+    "bootstrap failure:",
+    "test harness infrastructure failure",
+    "lint runner infrastructure failure",
+];
+
 /// Shared verification phase vocabulary for isolated commands and composed runners.
 ///
 /// `homeboy lint`, `homeboy audit`, and `homeboy test` stay independent. A
