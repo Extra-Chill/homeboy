@@ -319,6 +319,12 @@ pub struct Component {
     pub audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
+    /// Component IDs that must be deployed in the same operation as this component.
+    ///
+    /// Use this for separately tracked components that form one runtime contract,
+    /// such as a plugin and theme that must stay in sync on the target site.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deploy_together: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_inputs: Vec<ArtifactInput>,
     /// Override the CLI path used by extension deploy install steps.
@@ -412,6 +418,8 @@ struct RawComponent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dependency_stack: Vec<DependencyStackEdge>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deploy_together: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     artifact_inputs: Vec<ArtifactInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cli_path: Option<String>,
@@ -457,6 +465,7 @@ impl From<RawComponent> for Component {
             scripts: raw.scripts,
             audit: raw.audit,
             dependency_stack: raw.dependency_stack,
+            deploy_together: raw.deploy_together,
             artifact_inputs: raw.artifact_inputs,
             cli_path: raw.cli_path,
             extra_drift_files: raw.extra_drift_files,
@@ -499,6 +508,7 @@ impl From<Component> for RawComponent {
             scripts: c.scripts,
             audit: c.audit,
             dependency_stack: c.dependency_stack,
+            deploy_together: c.deploy_together,
             artifact_inputs: c.artifact_inputs,
             cli_path: c.cli_path,
             extra_drift_files: c.extra_drift_files,
@@ -584,6 +594,7 @@ impl Component {
             scripts: None,
             audit: None,
             dependency_stack: Vec::new(),
+            deploy_together: Vec::new(),
             artifact_inputs: Vec::new(),
             cli_path: None,
             extra_drift_files: Vec::new(),
