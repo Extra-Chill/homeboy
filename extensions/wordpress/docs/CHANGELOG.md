@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.33] - 2026-06-22
+
+### Changed
+- Resolve fuzz runner Codebox runtime path
+
 ## [3.12.32] - 2026-06-22
 
 ### Changed
