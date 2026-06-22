@@ -295,7 +295,7 @@ fn sync_lab_extension(
             capability_preflight: Some(homeboy::core::runners::RunnerCapabilityPreflight {
                 command: "homeboy lab extension-sync".to_string(),
                 required_tools: vec![RunnerRequiredTool::Homeboy],
-                required_commands: vec!["extension".to_string()],
+                required_commands: Vec::new(),
                 required_components: Vec::new(),
                 required_env: Vec::new(),
             }),
