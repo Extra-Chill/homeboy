@@ -80,6 +80,7 @@ pub(crate) fn execute_upgrade(
         }
         InstallMethod::Source => {
             let workspace_root = resolve_source_workspace(source_path)?;
+            prepare_source_workspace_for_upgrade(&workspace_root)?;
 
             // Execute the upgrade command from defaults
             let cmd = &defaults.install_methods.source.upgrade_command;
@@ -323,6 +324,163 @@ pub(crate) fn resolve_source_workspace(source_path: Option<&Path>) -> Result<Pat
         None,
     )
     .with_hint("Run from the Homeboy source workspace, or pass: homeboy upgrade --method source --source-path <PATH>"))
+}
+
+fn prepare_source_workspace_for_upgrade(workspace_root: &Path) -> Result<()> {
+    if !git_command_success(workspace_root, &["rev-parse", "--is-inside-work-tree"])? {
+        return Ok(());
+    }
+
+    run_git_command(workspace_root, &["fetch", "origin"])?;
+
+    let Some(default_branch) = origin_default_branch(workspace_root)? else {
+        if git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])?
+            && git_command_success(
+                workspace_root,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )?
+        {
+            run_git_command(workspace_root, &["pull", "--ff-only"])?;
+            return Ok(());
+        }
+
+        return Err(Error::validation_invalid_argument(
+            "source_path",
+            "Cannot determine origin default branch for source checkout",
+            Some(workspace_root.display().to_string()),
+            None,
+        )
+        .with_hint("Ensure the source checkout has an origin remote with a HEAD ref."));
+    };
+
+    let origin_ref = format!("origin/{default_branch}");
+    if !git_command_success(workspace_root, &["symbolic-ref", "-q", "HEAD"])? {
+        run_git_command(workspace_root, &["reset", "--hard", &origin_ref])?;
+        return Ok(());
+    }
+
+    let current_branch = git_command_stdout(workspace_root, &["branch", "--show-current"])?;
+    if current_branch.trim() != default_branch {
+        if git_command_success(
+            workspace_root,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{default_branch}"),
+            ],
+        )? {
+            run_git_command(workspace_root, &["switch", &default_branch])?;
+        } else {
+            run_git_command(
+                workspace_root,
+                &["switch", "--track", "-c", &default_branch, &origin_ref],
+            )?;
+        }
+    }
+
+    run_git_command(
+        workspace_root,
+        &["branch", "--set-upstream-to", &origin_ref, &default_branch],
+    )?;
+    run_git_command(
+        workspace_root,
+        &["pull", "--ff-only", "origin", &default_branch],
+    )
+}
+
+fn origin_default_branch(workspace_root: &Path) -> Result<Option<String>> {
+    let remote_head = git_command_stdout_optional(
+        workspace_root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?;
+    if let Some(branch) = remote_head
+        .as_deref()
+        .and_then(|head| head.trim().strip_prefix("origin/"))
+        .filter(|branch| !branch.is_empty())
+    {
+        return Ok(Some(branch.to_string()));
+    }
+
+    let ls_remote =
+        git_command_stdout_optional(workspace_root, &["ls-remote", "--symref", "origin", "HEAD"])?;
+    Ok(ls_remote.and_then(|output| {
+        output.lines().find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")
+                .and_then(|rest| rest.split_whitespace().next())
+                .filter(|branch| !branch.is_empty())
+                .map(str::to_string)
+        })
+    }))
+}
+
+fn git_command_success(workspace_root: &Path, args: &[&str]) -> Result<bool> {
+    Ok(git_command_output(workspace_root, args)?.status.success())
+}
+
+fn git_command_stdout(workspace_root: &Path, args: &[&str]) -> Result<String> {
+    let output = git_command_output(workspace_root, args)?;
+    if !output.status.success() {
+        return Err(git_command_error(args, &output));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_command_stdout_optional(workspace_root: &Path, args: &[&str]) -> Result<Option<String>> {
+    let output = git_command_output(workspace_root, args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn run_git_command(workspace_root: &Path, args: &[&str]) -> Result<()> {
+    let output = git_command_output(workspace_root, args)?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(git_command_error(args, &output))
+}
+
+fn git_command_output(workspace_root: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .map_err(|e| Error::internal_io(e.to_string(), Some("prepare source checkout".to_string())))
+}
+
+fn git_command_error(args: &[&str], output: &std::process::Output) -> Error {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit code {}", output.status.code().unwrap_or(1))
+    };
+
+    Error::internal_io(
+        format!("git {} failed: {detail}", args.join(" ")),
+        Some("prepare source checkout".to_string()),
+    )
 }
 
 fn workspace_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
@@ -989,6 +1147,62 @@ mod tests {
     }
 
     #[test]
+    fn source_upgrade_preparation_resets_detached_checkout_to_origin_default() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(
+            remote.path(),
+            &["init", "--bare", "--initial-branch", "main"],
+        );
+
+        let seed = source_workspace_with_package_name("homeboy");
+        git(seed.path(), &["init", "--initial-branch", "main"]);
+        git(seed.path(), &["config", "user.email", "test@example.com"]);
+        git(seed.path(), &["config", "user.name", "Homeboy Test"]);
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-m", "initial"]);
+        git(
+            seed.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &remote.path().display().to_string(),
+            ],
+        );
+        git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let checkout = tempfile::tempdir().expect("checkout tempdir");
+        std::fs::remove_dir(checkout.path()).expect("remove placeholder checkout dir");
+        git(
+            remote.path(),
+            &[
+                "clone",
+                &remote.path().display().to_string(),
+                &checkout.path().display().to_string(),
+            ],
+        );
+
+        std::fs::write(seed.path().join("src.txt"), "new source\n").expect("write source change");
+        git(seed.path(), &["add", "."]);
+        git(seed.path(), &["commit", "-m", "update source"]);
+        git(seed.path(), &["push", "origin", "main"]);
+
+        git(checkout.path(), &["switch", "--detach", "HEAD"]);
+        let stale_head = git_stdout(checkout.path(), &["rev-parse", "HEAD"]);
+
+        prepare_source_workspace_for_upgrade(checkout.path()).expect("prepare detached checkout");
+
+        let prepared_head = git_stdout(checkout.path(), &["rev-parse", "HEAD"]);
+        let origin_head = git_stdout(checkout.path(), &["rev-parse", "origin/main"]);
+        assert_ne!(prepared_head, stale_head);
+        assert_eq!(prepared_head, origin_head);
+        assert_eq!(
+            git_stdout(checkout.path(), &["branch", "--show-current"]),
+            ""
+        );
+    }
+
+    #[test]
     fn executable_workspace_only_resolves_target_build_paths() {
         let path = Path::new("/repo/target/release/homeboy");
         assert_eq!(
@@ -1059,5 +1273,38 @@ mod tests {
             format!("[package]\nname = \"{package_name}\"\nversion = \"0.0.0\"\n"),
         )
         .expect("package manifest");
+    }
+
+    fn git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }
