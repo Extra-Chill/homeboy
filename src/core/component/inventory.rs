@@ -590,9 +590,9 @@ fn stable_workspace_roots(path: &Path) -> Vec<PathBuf> {
 }
 
 fn stable_root_before_temp_marker(path: &Path) -> Option<PathBuf> {
+    let segments = crate::core::paths::path_component_strings(path);
     let mut root = PathBuf::new();
-    for component in path.components() {
-        let segment = component.as_os_str().to_string_lossy();
+    for segment in segments {
         if segment == "opencode" || segment == "tmp" || segment == "Temp" || segment == "T" {
             return if root.as_os_str().is_empty() {
                 None
@@ -600,7 +600,7 @@ fn stable_root_before_temp_marker(path: &Path) -> Option<PathBuf> {
                 Some(root)
             };
         }
-        root.push(component.as_os_str());
+        root.push(&segment);
     }
     None
 }
