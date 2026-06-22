@@ -429,6 +429,7 @@ mod tests {
                 mime: None,
                 size_bytes: Some(42),
                 sha256: None,
+                content_base64: None,
                 metadata: None,
             }],
         );

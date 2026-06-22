@@ -4350,6 +4350,7 @@ mod tests {
                 false,
                 None,
                 Vec::new(),
+                None,
                 false,
             )
             .expect("reverse broker exec");
@@ -4454,6 +4455,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            None,
             false,
         )
         .expect_err("daemon exec failure");
@@ -4539,6 +4541,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            None,
             false,
         )
         .expect_err("daemon exec failure");

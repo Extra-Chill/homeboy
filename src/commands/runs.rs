@@ -38,6 +38,7 @@ use homeboy::core::{api_jobs, runners as runner};
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 
 use super::{CmdResult, GlobalArgs};
+pub(crate) use bench::bench_compare_from_args;
 pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
 use bundle::{
