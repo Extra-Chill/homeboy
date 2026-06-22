@@ -38,6 +38,7 @@ const {
 } = require('../../lib/codebox-run-agent-task-contract');
 
 const CODEX_OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
+const WP_CODEBOX_OWNED_SUBSTRATE_SLUGS = new Set(['agents-api', 'data-machine', 'data-machine-code']);
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
 function argValue(name) {
@@ -1193,7 +1194,7 @@ function runnerInput(request, artifacts) {
     artifacts_path: artifacts,
     wp_codebox_bin: argValue('--wp-codebox-bin') || request.wp_codebox_bin || '',
     runtime_component_paths: runtimeComponentPaths,
-    component_contracts: uniqueComponentContracts(requestComponentContracts(request).map(remapRuntimeComponentContract)),
+    component_contracts: uniqueComponentContracts(requestComponentContracts(request).map(remapRuntimeComponentContract).filter((contract) => !isCodeboxOwnedSubstrateContract(contract))),
     homeboy_path: argValue('--homeboy') || request.homeboy_path || request.homeboy || '',
     homeboy_extensions_path: argValue('--homeboy-extensions') || request.homeboy_extensions_path || request.homeboy_extensions || path.resolve(__dirname, '..', '..'),
     wp_version: request.wordpress_runtime_version || request.wordpress_version || request.wp_codebox_wordpress_version || request.wp_version || request.wp || undefined,
@@ -1244,7 +1245,12 @@ function componentContracts(input) {
     ...requestComponentContracts(input.parent_request).map(remapRuntimeComponentContract),
     ...requestComponentContracts(input.parent_request?.parent_request).map(remapRuntimeComponentContract),
     ...runtimeContracts,
-  ]);
+  ].filter((contract) => !isCodeboxOwnedSubstrateContract(contract)));
+}
+
+function isCodeboxOwnedSubstrateContract(contract) {
+  const slug = typeof contract?.slug === 'string' ? contract.slug.trim() : '';
+  return WP_CODEBOX_OWNED_SUBSTRATE_SLUGS.has(slug);
 }
 
 function requestComponentContracts(request) {
