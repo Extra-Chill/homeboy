@@ -129,6 +129,7 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 	runRuntimeTask: async (request) => {
 		dispatchedRequest = request;
 		assert.equal(request.task_id, 'dispatch-run');
+		assert.equal(request.goal, 'Run WordPress fuzz suite generic-wordpress-workload and return the declared fuzz artifacts.');
 		assert.equal(request.executor.backend, 'codebox');
 		assert.equal(request.executor.config.runtime_task.ability, 'wp-codebox/run-fuzz-suite');
 		assert.equal(request.executor.config.runtime_task.input.schema, 'wp-codebox/fuzz-suite/v1');
@@ -289,6 +290,10 @@ if (request.runtime_task || request.artifact_declarations || request.sandbox_too
 }
 if (request.task_input?.schema !== 'wp-codebox/task-input/v1') {
   process.stderr.write('missing delegated task input');
+  process.exit(1);
+}
+if (request.task_input?.goal !== 'Run WordPress fuzz suite legacy-dispatch-cli-workload and return the declared fuzz artifacts.') {
+  process.stderr.write('missing delegated task goal');
   process.exit(1);
 }
 if (request.task_input?.runtime_task?.ability !== 'wp-codebox/run-fuzz-suite' || request.task_input?.runtime_task?.input?.schema !== 'wp-codebox/fuzz-suite/v1') {
