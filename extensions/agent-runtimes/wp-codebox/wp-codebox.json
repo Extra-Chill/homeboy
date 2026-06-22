@@ -10,6 +10,12 @@
       "export": "scenarioResultsFromOutcome"
     }
   },
+  "workflow_input_projection": {
+    "adapter": {
+      "module": "agent-runtimes/wp-codebox/lib/runtime-workflow-input-projection.js",
+      "export": "renderRuntimeWorkflowInputs"
+    }
+  },
   "runner_config_projection": {
     "adapter": {
       "module": "agent-runtimes/wp-codebox/lib/runtime-config-projection.js",

@@ -1,5 +1,7 @@
 'use strict';
 
+const path = require('node:path');
+
 const { normalizeRuntimeId, resolveRuntimeProvider } = require('./runtime-provider-resolver.cjs');
 
 const RUNTIME_WORKFLOW_INPUTS_SCHEMA = 'homeboy/runtime-workflow-inputs/v1';
@@ -12,7 +14,7 @@ function renderRuntimeWorkflowInputs(options = {}) {
 	const runtimeProfiles = plainObject(options.runtimeProfiles || options.runtime_profiles);
 	const selectedProfile = selectedRuntimeProfile(profileSelection, runtimeProfiles);
 	const toolProfile = plainObject(options.toolProfile || options.tool_profile || options.sandboxToolPolicy || options.sandbox_tool_policy || options.toolPolicy || options.tool_policy);
-	const adapter = runtimeWorkflowInputAdapter(runtime);
+	const adapter = runtimeWorkflowInputAdapter(runtime, options);
 	const rendered = adapter({
 		...options,
 		runtime,
@@ -37,11 +39,19 @@ function renderRuntimeWorkflowInputs(options = {}) {
 	});
 }
 
-function runtimeWorkflowInputAdapter(runtime) {
-	if (isCodeboxRuntime(runtime)) {
-		return renderCodeboxWorkflowInputs;
+function runtimeWorkflowInputAdapter(runtime, options = {}) {
+	const adapter = runtime?.manifest?.workflow_input_projection?.adapter;
+	if (!isPlainObject(adapter) || !adapter.module) {
+		return renderDefaultWorkflowInputs;
 	}
-	return renderDefaultWorkflowInputs;
+	const repoRoot = options.repoRoot || path.resolve(__dirname, '..', '..');
+	const adapterPath = path.resolve(repoRoot, adapter.module);
+	const loaded = require(adapterPath);
+	const exportName = adapter.export || 'renderRuntimeWorkflowInputs';
+	if (typeof loaded[exportName] !== 'function') {
+		throw new Error(`Runtime ${runtime.id} workflow input adapter ${adapter.module} does not export ${exportName}`);
+	}
+	return loaded[exportName];
 }
 
 function renderDefaultWorkflowInputs({ runtime, profileId, profile, runtimeProfiles }) {
@@ -56,50 +66,6 @@ function renderDefaultWorkflowInputs({ runtime, profileId, profile, runtimeProfi
 			profile: profileId,
 			runtime_profiles: effectiveRuntimeProfiles,
 		},
-	};
-}
-
-function renderCodeboxWorkflowInputs({
-	profileId,
-	profile,
-	runtimeProfiles,
-	toolProfile,
-	componentContracts,
-	component_contracts,
-	runtimeOverlays,
-	runtime_overlays,
-	runtimeEnv,
-	runtime_env,
-	providerPluginPaths,
-	provider_plugin_paths,
-	runtimeStateMounts,
-	runtime_state_mounts,
-	runtimeConfigMounts,
-	runtime_config_mounts,
-}) {
-	const { codeboxRuntimeProfilePayload } = require('../../agent-runtimes/wp-codebox/lib/codebox-runtime-profile');
-	const runtimeRequirements = codeboxRuntimeProfilePayload({
-		id: profileId,
-		profile,
-		componentContracts: componentContracts || component_contracts || [],
-		runtimeOverlays: runtimeOverlays || runtime_overlays || [],
-		runtimeEnv: runtimeEnv || runtime_env || {},
-		providerPluginPaths: providerPluginPaths || provider_plugin_paths || [],
-		runtimeStateMounts: runtimeStateMounts || runtime_state_mounts,
-		runtimeConfigMounts: runtimeConfigMounts || runtime_config_mounts,
-	});
-
-	return {
-		runtime_requirements: runtimeRequirements,
-		workflow_inputs: stripUndefined({
-			runtime: 'wp-codebox',
-			profile: profileId,
-			runtime_profiles: {
-				...runtimeProfiles,
-				[profileId]: runtimeRequirements,
-			},
-			sandbox_tool_policy: Object.keys(toolProfile).length > 0 ? toolProfile : undefined,
-		}),
 	};
 }
 
@@ -125,12 +91,12 @@ function selectedRuntimeProfile(selection, runtimeProfiles) {
 	return { ...profile, id: profile.id || selection.id };
 }
 
-function isCodeboxRuntime(runtime) {
-	return runtime?.id === 'wp-codebox' || runtime?.executor?.backend === 'codebox';
-}
-
 function plainObject(value) {
 	return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function isPlainObject(value) {
+	return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
 function stripUndefined(value) {
