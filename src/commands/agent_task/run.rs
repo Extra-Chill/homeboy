@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::core::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,

@@ -5,12 +5,15 @@
 
 pub(crate) use std::process::Command;
 
+pub(in crate::commands::agent_task) use super::super::super::agent_task_dispatch::{
+    DispatchArgs, DispatchCoreArgs,
+};
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskControllerApplyEventArgs, AgentTaskControllerFromSpecArgs,
     AgentTaskControllerMaterializeArgs, AgentTaskControllerRunFromSpecArgs,
 };
 pub(in crate::commands::agent_task) use super::super::args::{
-    CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs,
+    AgentTaskCookArgs, CompileLoopArgs, ReviewArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -32,8 +35,10 @@ pub(crate) use homeboy::core::agent_tasks::controller_service::{
 pub(crate) use homeboy::core::agent_tasks::controller_service::{
     AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
 };
+pub(crate) use homeboy::core::agent_tasks::gate::AgentTaskGateRevealPolicy;
 pub(crate) use homeboy::core::agent_tasks::provider::{
-    AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+    ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+    AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
 };
 pub(crate) use homeboy::core::agent_tasks::scheduler::{AgentTaskExecutorAdapter, AgentTaskPlan};
 
