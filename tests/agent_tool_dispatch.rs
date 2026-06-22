@@ -138,6 +138,7 @@ fn agent_tool_dispatch_outputs_raw_control_plane_validation_result() {
 fn run_tool_dispatch(policy: Value, request: Value) -> std::process::Output {
     let mut child = Command::new(homeboy_bin())
         .args(["agent-task", "tool", "dispatch"])
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("HOMEBOY_AGENT_TOOL_POLICY_JSON", policy.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

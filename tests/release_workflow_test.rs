@@ -65,6 +65,12 @@ fn release_audit_is_advisory_without_losing_raw_failure_outcome() {
     assert!(gate_audit.contains("audit-result: ${{ steps.audit.outcome }}"));
     assert!(gate_audit.contains("id: audit"));
     assert!(gate_audit.contains("continue-on-error: true"));
+    assert!(gate_audit.contains("--profile=pr"));
+}
+
+#[test]
+fn release_ci_disables_homeboy_update_checks() {
+    assert!(release_workflow().contains("HOMEBOY_NO_UPDATE_CHECK: '1'"));
 }
 
 #[test]

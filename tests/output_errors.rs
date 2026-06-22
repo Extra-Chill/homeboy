@@ -33,7 +33,7 @@ fn validation_error_writes_json_output_file() {
     let output_path = dir.path().join("runner-unsupported.json");
     register_local_runner(dir.path());
 
-    let output = Command::new(homeboy_bin())
+    let output = homeboy_command()
         .args(["--output"])
         .arg(&output_path)
         .args([
@@ -75,7 +75,7 @@ fn bare_json_output_format_is_rejected_as_footgun() {
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let output = Command::new(homeboy_bin())
+        let output = homeboy_command()
             .args(args)
             .current_dir(dir.path())
             .env("HOME", dir.path())
@@ -102,7 +102,7 @@ fn bare_json_output_format_is_rejected_as_footgun() {
 fn command_owned_output_path_is_not_rejected_as_global_format() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let output = Command::new(homeboy_bin())
+    let output = homeboy_command()
         .args([
             "runs",
             "artifact",
@@ -132,7 +132,7 @@ fn lab_status_accepts_command_owned_runner_selector() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_local_runner(dir.path());
 
-    let output = Command::new(homeboy_bin())
+    let output = homeboy_command()
         .args(["lab", "status", "--runner", "lab-local"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
@@ -176,7 +176,7 @@ fn explicit_json_path_is_allowed() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_local_runner(dir.path());
 
-    let output = Command::new(homeboy_bin())
+    let output = homeboy_command()
         .args([
             "--output",
             "./json",
@@ -212,8 +212,14 @@ fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("CARGO_BIN_EXE_homeboy"))
 }
 
+fn homeboy_command() -> Command {
+    let mut command = Command::new(homeboy_bin());
+    command.env("HOMEBOY_NO_UPDATE_CHECK", "1");
+    command
+}
+
 fn register_local_runner(home: &std::path::Path) {
-    let output = Command::new(homeboy_bin())
+    let output = homeboy_command()
         .args([
             "runner",
             "add",

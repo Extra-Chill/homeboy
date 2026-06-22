@@ -40,6 +40,7 @@ on:
 
 env:
   RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'lint,test' }}
+  HOMEBOY_NO_UPDATE_CHECK: '1'
 
 # Only one release pipeline at a time. If a push arrives while a release
 # is already running, it queues (never cancels). The queued run starts
@@ -232,7 +233,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: audit
           expected-commands: audit,lint,test
-          args: ${{ github.event.before && format('--changed-since {0}', github.event.before) || '' }}
+          args: ${{ github.event.before && format('--profile=pr --changed-since {0}', github.event.before) || '--profile=pr' }}
           autofix: 'false'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 

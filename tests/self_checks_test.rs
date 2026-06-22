@@ -153,7 +153,7 @@ fn json_self_check_failure_reports_bounded_large_output_metadata() {
     write_script(
         dir.path(),
         "large-fail.sh",
-        "perl -e 'print \"stdout-line\\n\" x 20000'\nperl -e 'print STDERR \"stderr-line\\n\" x 20000'\nexit 7\n",
+        "perl -e 'print \"stdout-line-\" . (\"x\" x 80) . \"\\n\" for 1..800'\nperl -e 'print STDERR \"stderr-line-\" . (\"x\" x 80) . \"\\n\" for 1..800'\nexit 7\n",
     );
 
     let (output, exit_code) = run_test(json_test_args(dir.path()), &GlobalArgs {})
