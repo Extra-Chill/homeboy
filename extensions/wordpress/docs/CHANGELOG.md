@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.56] - 2026-06-22
+
+### Changed
+- Read embedded fuzz result artifacts
+
 ## [3.12.55] - 2026-06-22
 
 ### Changed
