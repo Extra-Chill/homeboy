@@ -172,11 +172,15 @@ fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 const inputFile = process.argv[process.argv.indexOf('--input-file') + 1];
 const request = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+if (request.schema !== 'wp-codebox/run-agent-task/v1' || !request.goal || !request.runtime_task) {
+  process.stderr.write('invalid run-agent-task input');
+  process.exit(1);
+}
 process.stdout.write(JSON.stringify({
   success: true,
   result: {
     schema: 'wp-codebox/fuzz-suite-result/v1',
-    request_id: request.task_id,
+    request_id: request.id,
     status: 'succeeded',
     artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
     coverage_summary: { surface_count: 1, exercised_count: 1 }
