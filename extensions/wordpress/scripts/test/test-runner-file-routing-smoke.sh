@@ -141,6 +141,7 @@ if [ -n "$component_path" ]; then
         exit 1
     fi
     printf 'ALL TESTS PASSED\nTESTS: 1 FAILURES: 0 ERRORS: 0\n' > "${component_path}/.pg-test-result.txt"
+    printf '{}\n' > "${component_path}/.phpunit.result.cache"
 fi
 printf '{"success":true,"executions":[{"stdout":"OK (1 test, 1 assertion)\n","stderr":""}]}\n'
 SH
@@ -338,6 +339,10 @@ assert_contains "${TMPDIR}/wp-codebox-args.txt" "wordpress.phpunit"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" "autoload-file=/wp-codebox-vendor/autoload.php"
 assert_not_contains "${TMPDIR}/wp-codebox-args.txt" "6.9"
 assert_contains "${TMPDIR}/wp-codebox-args.txt" '"target": "/wordpress/wp-content/plugins/component"'
+if [ -e "${component}/.phpunit.result.cache" ]; then
+    echo "Expected WP Codebox runner to clean PHPUnit result cache" >&2
+    exit 1
+fi
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \

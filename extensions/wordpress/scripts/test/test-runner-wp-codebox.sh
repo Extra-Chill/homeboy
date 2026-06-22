@@ -784,7 +784,14 @@ if [ -n "$DEPENDENCY_PATHS" ]; then
 fi
 
 RESULT_FILE="${PLUGIN_PATH}/.pg-test-result.txt"
-rm -f "$RESULT_FILE"
+PHPUNIT_RESULT_CACHE_FILE="${PLUGIN_PATH}/.phpunit.result.cache"
+
+cleanup_wp_codebox_phpunit_runtime_files() {
+    rm -f "$RESULT_FILE" "$PHPUNIT_RESULT_CACHE_FILE"
+}
+
+trap cleanup_wp_codebox_phpunit_runtime_files EXIT
+cleanup_wp_codebox_phpunit_runtime_files
 
 ARTIFACTS_DIR="${HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR:-}"
 if [ -z "$ARTIFACTS_DIR" ] && [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
