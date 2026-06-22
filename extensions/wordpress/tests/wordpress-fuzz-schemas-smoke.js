@@ -61,6 +61,7 @@ assert.equal(plan.targets[0].operation_id, 'rest:get-posts');
 assert.equal(plan.targets[0].cases[0].operation_id, 'rest:get-posts:per-page');
 assert.equal(plan.targets[0].cases[1].id, 'case-2');
 assert.deepEqual(plan.targets[0].cases[1].required_capabilities, ['snapshot', 'transaction']);
+assert.equal(plan.budget.max_cases, 25);
 
 const result = normalizeWordPressFuzzResult({
 	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
@@ -105,6 +106,68 @@ assert.equal(result.summary.db_query_metrics.query_count, 3);
 assert.equal(result.summary.admin_browser_errors.errors, 1);
 assert.equal(result.summary.http_guardrail_outcomes.blocked, 1);
 assert.equal(result.provenance.workload_manifest, 'fuzz-manifest.json');
+
+const passingBudgetResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	id: 'passing-budget-result',
+	cases: [
+		{
+			id: 'within-budget',
+			status: 'passed',
+			duration_ms: 40,
+			db_query: { query_count: 2 },
+			admin_browser: { resource_count: 8 },
+			memory: { peak_bytes: 1024 },
+			budget: {
+				max_duration_ms: 50,
+				max_query_count: 3,
+				max_memory_peak_bytes: 2048,
+				max_browser_resource_count: 10,
+			},
+		},
+	],
+});
+
+assert.equal(passingBudgetResult.status, 'passed');
+assert.equal(passingBudgetResult.summary.budget_failure_count, 0);
+assert.equal(passingBudgetResult.findings.length, 0);
+assert.equal(passingBudgetResult.cases[0].performance_metrics.request_duration_ms, 40);
+assert.equal(passingBudgetResult.cases[0].budget.max_request_duration_ms, 50);
+
+const failingBudgetResult = normalizeWordPressFuzzResult({
+	schema: WORDPRESS_FUZZ_RESULT_SCHEMA,
+	id: 'failing-budget-result',
+	budgets: { max_query_count: 4 },
+	cases: [
+		{
+			id: 'slow-case',
+			status: 'passed',
+			durationMs: 75,
+			dbQuery: { queryCount: 5 },
+			adminBrowser: { resources: { count: 12 } },
+			memory: { peakBytes: 4096 },
+			budgets: {
+				maxRequestDurationMs: 50,
+				maxQueryCount: 3,
+				maxMemoryPeakBytes: 2048,
+				maxResourceCount: 10,
+			},
+		},
+	],
+});
+
+assert.equal(failingBudgetResult.status, 'failed');
+assert.equal(failingBudgetResult.cases[0].status, 'failed');
+assert.equal(failingBudgetResult.summary.budget_failure_count, 5);
+assert.deepEqual(failingBudgetResult.findings.map((finding) => finding.code), [
+	'request_duration_budget_exceeded',
+	'query_count_budget_exceeded',
+	'memory_peak_budget_exceeded',
+	'browser_resource_count_budget_exceeded',
+	'query_count_budget_exceeded',
+]);
+assert.equal(failingBudgetResult.diagnostics[0].severity, 'failure');
+assert.equal(failingBudgetResult.summary.performance_metrics.query_count, 5);
 
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ schema: 'other/v1' }), /Unsupported/);
 assert.throws(() => normalizeWordPressSurfaceDiscovery({ surfaces: [{ type: 'woocommerce-product' }] }), /Unsupported WordPress surface type/);
