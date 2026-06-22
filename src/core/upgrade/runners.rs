@@ -213,6 +213,20 @@ fn upgrade_runner_with_executor(
             );
         }
     };
+    if let Some(err) = prepare_runner_source_checkout_for_upgrade(
+        runner,
+        method_override,
+        command_source_path.as_deref(),
+        exec,
+    ) {
+        return runner_upgrade_failure_entry(
+            &runner.id,
+            original_homeboy_path,
+            previous_version,
+            1,
+            err,
+        );
+    }
     let mut upgrade_homeboy_path = original_homeboy_path.clone();
     let mut path_update_detail = None;
     let upgrade = exec(
@@ -959,6 +973,88 @@ fn runner_upgrade_command(
     }
 
     command
+}
+
+fn prepare_runner_source_checkout_for_upgrade(
+    runner: &Runner,
+    method_override: Option<InstallMethod>,
+    source_path: Option<&str>,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> Option<String> {
+    if method_override != Some(InstallMethod::Source) || runner.kind != RunnerKind::Ssh {
+        return None;
+    }
+
+    let source_path = source_path?;
+    let command = vec![
+        "sh".to_string(),
+        "-lc".to_string(),
+        runner_source_checkout_prepare_script().to_string(),
+    ];
+    let mut options = runner_source_checkout_prepare_options(runner, command);
+    options.cwd = Some(source_path.to_string());
+
+    match exec(&runner.id, options) {
+        Ok((_, 0)) => None,
+        Ok((output, exit_code)) => Some(format!(
+            "runner source checkout preparation failed with exit code {exit_code}: {}",
+            runner_upgrade_detail(&output)
+        )),
+        Err(err) => Some(format!(
+            "runner source checkout preparation failed: {}",
+            err.message
+        )),
+    }
+}
+
+fn runner_source_checkout_prepare_options(
+    runner: &Runner,
+    command: Vec<String>,
+) -> RunnerExecOptions {
+    RunnerExecOptions {
+        cwd: None,
+        project_id: None,
+        allow_diagnostic_ssh: true,
+        command,
+        env: runner.env.clone(),
+        secret_env_names: Vec::new(),
+        capture_patch: false,
+        raw_exec: false,
+        source_snapshot: None,
+        capability_preflight: Some(RunnerCapabilityPreflight {
+            command: "prepare source checkout for homeboy upgrade".to_string(),
+            required_tools: vec![RunnerRequiredTool::Git],
+            required_commands: Vec::new(),
+            required_components: Vec::new(),
+            required_env: Vec::new(),
+        }),
+        required_extensions: Vec::new(),
+        require_paths: Vec::new(),
+        detach_after_handoff: false,
+    }
+}
+
+fn runner_source_checkout_prepare_script() -> &'static str {
+    r#"set -e
+git fetch origin
+remote_head="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+branch="${remote_head#origin/}"
+if [ -z "$branch" ]; then
+  if git symbolic-ref -q HEAD >/dev/null && git rev-parse --abbrev-ref --symbolic-full-name @{upstream} >/dev/null 2>&1; then
+    git pull --ff-only
+    exit 0
+  fi
+  echo "Cannot determine origin default branch for source checkout" >&2
+  exit 1
+fi
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+  git switch "$branch"
+else
+  git switch --track -c "$branch" "origin/$branch"
+fi
+git branch --set-upstream-to="origin/$branch" "$branch"
+git pull --ff-only origin "$branch"
+"#
 }
 
 fn runner_upgrade_source_path(
@@ -1775,7 +1871,7 @@ mod tests {
         let runner = ssh_runner("lab", Some("/home/user/.cargo/bin/homeboy"));
         let source_path =
             Path::new("/Users/user/Developer/homeboy@fix-bench-selected-duplicate-validation-1266");
-        let mut commands = Vec::new();
+        let mut calls = Vec::new();
         let mut materialized = Vec::new();
 
         let (updated, skipped) = upgrade_runners_with_executor_and_source_materializer(
@@ -1785,12 +1881,13 @@ mod tests {
             Some(source_path),
             &[],
             |runner_id, options| {
-                commands.push(options.command.clone());
-                let stdout = match commands.len() {
+                calls.push((options.command.clone(), options.cwd.clone()));
+                let stdout = match calls.len() {
                     1 => "homeboy 0.228.13\n",
-                    2 => "{\"install_method\":\"source\",\"message\":\"Upgrade command completed but active binary is still 0.228.13\",\"upgraded\":false}\n",
-                    3 => "homeboy 0.228.13\n",
+                    2 => "prepared source checkout\n",
+                    3 => "{\"install_method\":\"source\",\"message\":\"Upgrade command completed but active binary is still 0.228.13\",\"upgraded\":false}\n",
                     4 => "homeboy 0.228.13\n",
+                    5 => "homeboy 0.228.13\n",
                     _ => "",
                 };
                 Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
@@ -1814,8 +1911,15 @@ mod tests {
                     .to_string()
             )]
         );
+        assert_eq!(&calls[1].0[..2], &["sh".to_string(), "-lc".to_string()]);
         assert_eq!(
-            commands[1],
+            calls[1].1.as_deref(),
+            Some("/home/user/Developer/_lab_workspaces/homeboy-source")
+        );
+        assert!(calls[1].0[2].contains("git fetch origin"));
+        assert!(calls[1].0[2].contains("git branch --set-upstream-to"));
+        assert_eq!(
+            calls[2].0,
             vec![
                 "/home/user/.cargo/bin/homeboy",
                 "upgrade",
