@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.254.0] - 2026-06-22
+
+### Added
+- feat(agent-task): add durable fanout batches
+- add bounded controller run from spec
+
+### Changed
+- split runners.rs god-file into modules
+- style(agent-task): format command surface test
+- refactor(agent-task): make cook the one-shot workflow
+- Authenticate GitHub release asset downloads
+- Export rig context for fuzz workloads
+- split execution.rs god-file into modules
+- Format agent task command exports
+- clean brittle contract coverage
+
+### Fixed
+- Fix agent task controller reexports
+- align scoped command contract expectations
+- fix(agent-task): import cook dispatch dependencies after rebase
+- fix(agent-task): resolve cook loop rebase fallout
+- fix(agent-task): satisfy cook parse contract in prompt test
+- fix(agent-task): keep dispatch internal after cook unification
+- Fix fuzz workload run file path
+
 ## [0.253.2] - 2026-06-22
 
 ### Changed
