@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{
-    job_not_found, timestamp_ms, Job, JobEvent, JobEventKind, JobStatus, JobStore, StoredJob,
-};
+use super::persistence::{job_not_found, timestamp_ms};
+use super::store::{JobStore, StoredJob};
+use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::command_contract::RunnerWorkload;
 use crate::core::engine::command::CommandCaptureMetadata;
 use crate::core::error::{Error, Result};
