@@ -119,6 +119,48 @@ assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
 
+const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		workloadId: 'json-workload',
+		runId: 'json-workload-run',
+	},
+	workload: {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'json-workload',
+		label: 'JSON workload smoke',
+		target: { type: 'wordpress-plugin', slug: 'sample-plugin' },
+		workload: {
+			runner: 'wp-codebox',
+			type: 'json',
+			path: '${package.root}/bench/json-workload.workload.json',
+			entry: 'wp-codebox/run-fuzz-suite',
+		},
+		artifacts: {
+			expected: [{ name: 'json_fuzz_result', role: 'fuzz_report', semantic_key: 'fuzz.suite_result', schema: 'wp-codebox/fuzz-suite-result/v1', required: true }],
+		},
+		cases: [{
+			case_id: 'json-workload:default',
+			artifacts: [{ name: 'json_fuzz_result', path: 'json-workload/fuzz-suite-result.json', required: true }],
+			intent: {
+				schema: 'homeboy/fuzz-workload-intent/v1',
+				type: 'wordpress-plugin-workload',
+				plugin: { activation: 'sample-plugin/sample-plugin.php' },
+				execute: { workload_ref: 'default', path: '${package.root}/bench/json-workload.workload.json', type: 'json', entry: 'wp-codebox/run-fuzz-suite' },
+				collect: [{ artifact: 'json_fuzz_result' }],
+			},
+		}],
+	},
+});
+
+assert.equal(jsonWorkloadResult.wp_codebox_input.cases.length, 1);
+assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].id, 'json-workload:default');
+assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.setup, [{ command: 'wordpress.ensure-plugin-active', args: ['plugin=sample-plugin/sample-plugin.php'] }]);
+assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.action, [{ command: 'wordpress.run-workload', args: ['path=${package.root}/bench/json-workload.workload.json'] }]);
+assert.deepEqual(jsonWorkloadResult.wp_codebox_input.cases[0].phases.assert, [{ command: 'wordpress.collect-workload-result', args: ['artifact=json_fuzz_result'] }]);
+assert.equal(jsonWorkloadResult.wp_codebox_input.cases[0].artifacts[0].required, true);
+assert.equal(jsonWorkloadResult.wp_codebox_input.metadata.artifacts.expected[0].semantic_key, 'fuzz.suite_result');
+
 let dispatchedRequest;
 const dispatchPromise = runWordPressFuzzRunnerResult({
 	env: {
@@ -140,6 +182,8 @@ const dispatchPromise = runWordPressFuzzRunnerResult({
 				schema: 'wp-codebox/fuzz-suite-result/v1',
 				request_id: request.task_id,
 				status: 'succeeded',
+				summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+				cases: [{ id: 'get-posts', status: 'passed', success: true, diagnostics: [] }],
 				coverage_summary: { surface_count: 1, exercised_count: 1 },
 				artifactRefs: [
 					{ path: 'dispatch/fuzz-report.json', kind: 'report', contentType: 'application/json' },
@@ -248,6 +292,8 @@ process.stdout.write(JSON.stringify({
   schema: 'wp-codebox/fuzz-suite-result/v1',
   request_id: request.id,
   status: 'succeeded',
+  summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+  cases: [{ id: 'get-posts', status: 'passed', success: true, diagnostics: [] }],
   artifactRefs: [{ path: 'fake/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
   coverage_summary: { surface_count: 1, exercised_count: 1 }
 }));
@@ -319,6 +365,8 @@ process.stdout.write(JSON.stringify({
       schema: 'wp-codebox/fuzz-suite-result/v1',
       request_id: request.task_id,
       status: 'succeeded',
+      summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+      cases: [{ id: 'get-posts', status: 'passed', success: true, diagnostics: [] }],
       artifactRefs: [{ path: 'legacy/fuzz-report.json', kind: 'report', contentType: 'application/json' }],
       coverage_summary: { surface_count: 1, exercised_count: 1 }
     }
