@@ -1,7 +1,12 @@
 //! `agent-task controller` handlers: durable multi-agent loop controller
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use homeboy::core::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopPolicyResultMaterialization,
@@ -20,6 +25,8 @@ use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
 use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
+
+const CONTROLLER_SPEC_GENERATOR_SCHEMA: &str = "homeboy/agent-task-loop-spec-generator/v1";
 
 use super::super::agent_task_dispatch::{DispatchArgs, DispatchCoreArgs};
 use super::super::CmdResult;
@@ -92,15 +99,8 @@ fn controller_validate_proof(args: AgentTaskControllerValidateProofArgs) -> CmdR
 }
 
 pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -> CmdResult<Value> {
-    let raw = config::read_json_spec_to_string(&args.spec)?;
-    let mut spec: AgentTaskRepoLoopSpec = serde_json::from_str(&raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "spec",
-            error.to_string(),
-            Some(args.spec.clone()),
-            None,
-        )
-    })?;
+    let source = load_materialize_spec_source(&args.spec)?;
+    let mut spec = source.spec;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
     let run_inputs = match args.inputs {
         Some(inputs) => {
@@ -125,7 +125,205 @@ pub(super) fn controller_materialize(args: AgentTaskControllerMaterializeArgs) -
         run_inputs: &run_inputs,
         policy_results: &policy_results,
     })?;
-    Ok((command_json_value(report)?, 0))
+    let mut value = command_json_value(report)?;
+    if let Some(generator_evidence) = source.generator_evidence {
+        if let Value::Object(map) = &mut value {
+            map.insert("generator_evidence".to_string(), generator_evidence);
+        }
+    }
+    Ok((value, 0))
+}
+
+struct ControllerMaterializeSpecSource {
+    spec: AgentTaskRepoLoopSpec,
+    generator_evidence: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControllerSpecGeneratorManifest {
+    schema: String,
+    command: Vec<String>,
+    output_path: String,
+    #[serde(default)]
+    inputs: Value,
+}
+
+fn load_materialize_spec_source(
+    source: &str,
+) -> homeboy::core::Result<ControllerMaterializeSpecSource> {
+    let raw = config::read_json_spec_to_string(source)?;
+    match serde_json::from_str::<AgentTaskRepoLoopSpec>(&raw) {
+        Ok(spec) => {
+            return Ok(ControllerMaterializeSpecSource {
+                spec,
+                generator_evidence: None,
+            })
+        }
+        Err(spec_error) => {
+            let manifest: ControllerSpecGeneratorManifest =
+                serde_json::from_str(&raw).map_err(|_| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "spec",
+                        spec_error.to_string(),
+                        Some(source.to_string()),
+                        None,
+                    )
+                })?;
+            load_generated_materialize_spec(source, manifest)
+        }
+    }
+}
+
+fn load_generated_materialize_spec(
+    source: &str,
+    manifest: ControllerSpecGeneratorManifest,
+) -> homeboy::core::Result<ControllerMaterializeSpecSource> {
+    validate_generator_manifest(source, &manifest)?;
+    let manifest_dir = manifest_base_dir(source);
+    let output_path = resolve_manifest_path(manifest_dir.as_deref(), &manifest.output_path);
+    let command_status = run_spec_generator_command(&manifest, manifest_dir.as_deref())?;
+    let generated_raw = std::fs::read_to_string(&output_path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "spec.output_path",
+            format!(
+                "generator command completed but generated spec was not found at {}; rerun the manifest command or update output_path: {error}",
+                output_path.display()
+            ),
+            Some(source.to_string()),
+            Some(vec![format!(
+                "{} must write {}",
+                manifest.command.join(" "),
+                manifest.output_path
+            )]),
+        )
+    })?;
+    let spec: AgentTaskRepoLoopSpec = serde_json::from_str(&generated_raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "spec.output_path",
+            format!("generated spec JSON is invalid: {error}"),
+            Some(output_path.display().to_string()),
+            None,
+        )
+    })?;
+    let materialized = materialize_repo_loop_spec(AgentTaskLoopSpecMaterializationRequest {
+        spec: &spec,
+        run_inputs: &Value::Null,
+        policy_results: &[],
+    })?;
+    let validation_result = validate_proof_value(command_json_value(materialized)?);
+    let spec_hash = format!("{:x}", Sha256::digest(generated_raw.as_bytes()));
+
+    Ok(ControllerMaterializeSpecSource {
+        spec,
+        generator_evidence: Some(serde_json::json!({
+            "schema": "homeboy/agent-task-loop-spec-generator-evidence/v1",
+            "manifest": source,
+            "command": manifest.command,
+            "inputs": manifest.inputs,
+            "output_path": output_path.display().to_string(),
+            "spec_hash": spec_hash,
+            "validation_result": validation_result,
+            "status": command_status,
+        })),
+    })
+}
+
+fn validate_generator_manifest(
+    source: &str,
+    manifest: &ControllerSpecGeneratorManifest,
+) -> homeboy::core::Result<()> {
+    if manifest.schema != CONTROLLER_SPEC_GENERATOR_SCHEMA {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "spec.schema",
+            format!(
+                "controller materialize generator manifests must use schema {CONTROLLER_SPEC_GENERATOR_SCHEMA}"
+            ),
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    if manifest.command.is_empty() || manifest.command.iter().any(|part| part.trim().is_empty()) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "spec.command",
+            "generator command must be a non-empty array of program and arguments",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    if manifest.output_path.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "spec.output_path",
+            "generator manifest must declare the spec file path written by the command",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    if !manifest.inputs.is_null() && !manifest.inputs.is_object() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "spec.inputs",
+            "generator manifest inputs must be a JSON object when present",
+            Some(source.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn manifest_base_dir(source: &str) -> Option<PathBuf> {
+    let file = source.strip_prefix('@')?;
+    if file == "-" {
+        return None;
+    }
+    Path::new(file).parent().map(Path::to_path_buf)
+}
+
+fn resolve_manifest_path(base_dir: Option<&Path>, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else if let Some(base_dir) = base_dir {
+        base_dir.join(path)
+    } else {
+        path
+    }
+}
+
+fn run_spec_generator_command(
+    manifest: &ControllerSpecGeneratorManifest,
+    manifest_dir: Option<&Path>,
+) -> homeboy::core::Result<Value> {
+    let mut command = Command::new(&manifest.command[0]);
+    command.args(&manifest.command[1..]);
+    if let Some(manifest_dir) = manifest_dir {
+        command.current_dir(manifest_dir);
+    }
+    let output = command.output().map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "spec.command",
+            format!("failed to execute generator command: {error}"),
+            Some(manifest.command.join(" ")),
+            None,
+        )
+    })?;
+    let code = output.status.code();
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "spec.command",
+            format!(
+                "generator command exited with status {}; stderr: {}",
+                code.map(|value| value.to_string())
+                    .unwrap_or_else(|| "terminated by signal".to_string()),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(manifest.command.join(" ")),
+            None,
+        ));
+    }
+    Ok(serde_json::json!({
+        "exit_code": code,
+        "stdout": String::from_utf8_lossy(&output.stdout).trim(),
+        "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+    }))
 }
 
 fn parse_policy_result(

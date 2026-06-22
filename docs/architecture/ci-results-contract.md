@@ -134,6 +134,28 @@ Stage payloads preserve the same structured data as invoking the stage directly:
 - `data.test.output`: `TestCommandOutput`, including test counts, failures, drift,
   and coverage fields when those modes are active.
 
+## Pre-result runner failures
+
+Lint and test extension runners also write structured fallback sidecars when the
+runner exits non-zero before producing normal findings or test counts. This lets
+orchestrators diagnose bootstrap, formatter, dependency, or pre-test failures
+without scraping raw GitHub logs.
+
+Fallback sidecars preserve the existing file roles:
+
+- `lint-findings.json` remains a JSON array of findings. A pre-result lint
+  failure is emitted as a single `homeboy-extension-runner` infrastructure
+  finding with `metadata.failure` containing `phase`, `command`, `exit_code`,
+  `stdout_tail`, `stderr_tail`, truncation flags, and `parsed_detail` when a
+  JSON object can be recovered from runner output.
+- `test-results.json` remains a JSON object. A pre-result test failure contains
+  `status: "failed"`, `phase`, `command`, `exit_code`, output tails, and a
+  nested `failure` object with the same structured fields. It intentionally does
+  not invent test counts when no runner produced them.
+
+Runners that already wrote their structured sidecar keep ownership of it; the
+fallback only fills missing/empty sidecar files after a failed runner exit.
+
 ## Legacy per-command artifacts
 
 Existing CI wrappers may still run individual commands and upload one JSON file per
@@ -245,6 +267,9 @@ PR review agents should:
 - Use `success`, `data.summary.passed`, and per-stage `passed` fields for status.
 - Use `finding_count` for quick triage and the nested stage `output` for details.
 - Use `changed-since` scoped payloads to avoid repeating unrelated baseline findings.
+- Treat `baseline-red` / `baseline_red` and `inconclusive` failure-origin statuses as
+  baseline or evidence problems, not proven candidate regressions. These statuses
+  should include the baseline command and artifact/evidence refs when available.
 - Keep a link to the GitHub check or run URL from action-owned metadata.
 - Ignore unknown additive fields.
 - Avoid scraping human logs unless the JSON envelope is absent or malformed.

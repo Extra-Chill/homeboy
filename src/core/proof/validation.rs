@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::core::agent_task_controller_service::AgentTaskRepoLoopSpec;
+use crate::core::agent_task_controller_service::{validate_loop_spec, AgentTaskRepoLoopSpec};
 use crate::core::agent_task_repo_loop_compile::validate_repo_loop_artifact_references;
 use crate::core::artifact_address::validated_public_url;
 use crate::core::gate::{HomeboyGateResult, HomeboyGateStatus};
@@ -222,6 +222,13 @@ fn validate_materialized_loop_spec(
         ));
         return;
     };
+    if let Err(error) = validate_loop_spec(&spec) {
+        diagnostics.push(diagnostic(
+            "invalid_controller_loop_spec",
+            error.message,
+            path("/spec"),
+        ));
+    }
     if let Err(error) = validate_repo_loop_artifact_references(&spec) {
         diagnostics.push(diagnostic(
             "invalid_artifact_references",
