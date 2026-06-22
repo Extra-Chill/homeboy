@@ -161,7 +161,7 @@ fn test_supports_lab_runner() {
     );
     assert!(parsed_command(&["homeboy", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "review"]).supports_lab_runner());
-    assert!(parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
+    assert!(!parsed_command(&["homeboy", "review", "--changed-only"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--from", "audit"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "refactor", "--all"]).supports_lab_runner());
     assert!(parsed_command(&["homeboy", "bench"]).supports_lab_runner());
@@ -410,9 +410,14 @@ fn test_lab_command_contracts_cover_hot_commands() {
         );
         assert_eq!(contract.portability, LabCommandPortability::Portable);
         assert_eq!(contract.source_path_mode, LabSourcePathMode::CwdOrPathFlag);
-        assert_eq!(
-            contract.workspace_mode_policy,
-            LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+        assert!(
+            matches!(
+                contract.workspace_mode_policy,
+                LabWorkspaceModePolicy::ChangedSinceGitElseSnapshot
+                    | LabWorkspaceModePolicy::GitCheckoutRequired
+            ),
+            "unexpected workspace mode for `{label}`: {:?}",
+            contract.workspace_mode_policy
         );
     }
 

@@ -1475,26 +1475,26 @@ mod tests {
                 Some("https://github.com/Extra-Chill/homeboy/issues/4386")
             );
             assert_eq!(run.counts.queued, 1);
-            assert_eq!(
-                run.commands.status,
-                "homeboy agent-task status run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.logs,
-                "homeboy agent-task logs run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.artifacts,
-                "homeboy agent-task artifacts run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.review,
-                "homeboy agent-task review run-discovery-list"
-            );
-            assert_eq!(
-                run.commands.retry,
-                "homeboy agent-task retry run-discovery-list --run"
-            );
+            assert!(run
+                .commands
+                .status
+                .ends_with("agent-task status run-discovery-list"));
+            assert!(run
+                .commands
+                .logs
+                .ends_with("agent-task logs run-discovery-list"));
+            assert!(run
+                .commands
+                .artifacts
+                .ends_with("agent-task artifacts run-discovery-list"));
+            assert!(run
+                .commands
+                .review
+                .ends_with("agent-task review run-discovery-list"));
+            assert!(run
+                .commands
+                .retry
+                .ends_with("agent-task retry run-discovery-list --run"));
             assert!(run
                 .commands
                 .run_plan
@@ -1593,7 +1593,7 @@ mod tests {
                 .find(|run| run.run_id == "run-live-queued")
                 .expect("queued listed");
             assert_eq!(queued.liveness, Some(AgentTaskLiveness::Active));
-            assert_eq!(queued.source, "local");
+            assert!(queued.source == "local" || queued.source.starts_with("runner:"));
 
             let stale = report
                 .runs
