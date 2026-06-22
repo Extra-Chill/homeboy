@@ -8,6 +8,12 @@ const { pathToFileURL } = require('node:url');
 const DEFAULT_CODEBOX_CORE_MODULE = '@automattic/wp-codebox-core';
 const RUNTIME_CONTRACT_MANIFEST_SCHEMA = 'wp-codebox/runtime-contract-manifest/v1';
 
+const DEPRECATED_RUNTIME_CONTRACT_FALLBACK = {
+  status: 'deprecated',
+  replacement: '@automattic/wp-codebox-core runtimeContractManifest()',
+  reason: 'Homeboy Extensions must consume WP Codebox public package contracts instead of carrying schema copies.',
+};
+
 const FALLBACK_RUNTIME_CONTRACT_SCHEMAS = {
   providerRuntime: {
     invocation: 'wp-codebox/provider-runtime-invocation-contract/v1',
@@ -88,6 +94,16 @@ function runtimeContractManifest() {
   return clone(FALLBACK_RUNTIME_CONTRACT_MANIFEST);
 }
 
+function runtimeContractFallbackDiagnostic(details = {}) {
+  return withoutUndefinedValues({
+    ...DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
+    source: 'homeboy-extensions-fallback',
+    schema: RUNTIME_CONTRACT_MANIFEST_SCHEMA,
+    canonical_required_option: 'required',
+    details: Object.keys(details).length > 0 ? details : undefined,
+  });
+}
+
 function runtimeContractSchemas() {
   return runtimeContractManifest().schemas;
 }
@@ -106,6 +122,7 @@ async function loadRuntimeContractSource(options = {}) {
     manifest: runtimeContractManifest(),
     normalizers: {},
     canonical: false,
+    diagnostics: [runtimeContractFallbackDiagnostic()],
   };
 }
 
@@ -206,7 +223,12 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function withoutUndefinedValues(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
 module.exports = {
+  DEPRECATED_RUNTIME_CONTRACT_FALLBACK,
   FALLBACK_RUNTIME_CONTRACT_MANIFEST,
   FALLBACK_RUNTIME_CONTRACT_SCHEMAS,
   RUNTIME_CONTRACT_MANIFEST_SCHEMA,
@@ -214,6 +236,7 @@ module.exports = {
   loadCanonicalRuntimeContractSource,
   loadRuntimeContractSource,
   providerRuntimeInvocationContract,
+  runtimeContractFallbackDiagnostic,
   runtimeContractManifest,
   runtimeContractSchemas,
   validateCanonicalRuntimeContractManifest,
