@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.42] - 2026-06-22
+
+### Changed
+- Allow WordPress builds to skip nested packages
+
 ## [3.12.41] - 2026-06-22
 
 ### Changed
