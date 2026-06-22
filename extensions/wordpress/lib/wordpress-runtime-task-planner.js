@@ -14,7 +14,7 @@ const {
 	genericAgentTaskPlan,
 	genericAgentTaskRequest,
 	genericAgentTaskRunnerSpec,
-} = require('../../runtime-agent-ci/lib/generic-agent-task-plan');
+} = require('./generic-agent-task-plan');
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
 const WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;

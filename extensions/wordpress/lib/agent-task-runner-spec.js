@@ -1,3 +1,3 @@
 'use strict';
 
-module.exports = require('../../runtime-agent-ci/lib/agent-task-runner-contract');
+module.exports = require('./agent-task-runner-contract');
