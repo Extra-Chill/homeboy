@@ -169,6 +169,7 @@ homeboy git pr create <component_id> --base <base> --head <head> --title <title>
 homeboy git pr edit <component_id> --number <n> [--title <title>] [--body <body> | --body-file <path>]
 homeboy git pr find <component_id> [--base <base>] [--head <head>] [--state open|closed|merged|all] [--limit <n>]
 homeboy git pr comment <component_id> --number <n> [comment mode flags]
+homeboy git pr refresh <component_id> <number-or-url> [--strategy auto|rebase|merge|ff-only] [--check <cmd>...] [--push]
 ```
 
 Like issue commands, PR commands accept `--path` to discover component metadata from a portable checkout:
@@ -177,6 +178,25 @@ Like issue commands, PR commands accept `--path` to discover component metadata 
 homeboy git pr create homeboy --base main --head docs-refresh-git-command --title "docs: refresh git command workflows" --body-file /tmp/pr.md
 homeboy git pr find homeboy --head docs-refresh-git-command --state open
 ```
+
+### PR Refresh
+
+`homeboy git pr refresh` updates a PR branch from its current base and emits a structured summary for merge-train recovery after sibling PRs land.
+
+```sh
+homeboy git pr refresh homeboy 5806
+homeboy git pr refresh homeboy https://github.com/Extra-Chill/homeboy/pull/5806 --strategy rebase
+homeboy git pr refresh homeboy 5806 --check "git diff --check" --push
+```
+
+Safety behavior:
+
+1. Refuses to start when the worktree is already dirty.
+2. Checks out the PR through `gh pr checkout`, fetches the current base, then applies the selected strategy.
+3. `--strategy auto` honors `branch.<name>.rebase` or `pull.rebase`, falling back to `rebase`.
+4. Reports conflicted files from `git status --porcelain` and exits non-zero when blockers remain.
+5. Runs lightweight checks only after a clean refresh. When no `--check` is supplied, it runs `git diff --check`.
+6. Never pushes by default. `--push` publishes only a clean, check-passing branch and uses `git push --force-with-lease`; plain destructive force-push is not exposed.
 
 ### PR Comments
 

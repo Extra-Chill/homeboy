@@ -12,6 +12,7 @@ mod operations_commit;
 mod operations_push;
 mod operations_tags;
 mod pr_policy;
+mod pr_refresh;
 mod primitives;
 mod primitives_query;
 
@@ -61,6 +62,9 @@ pub use operations_tags::{
 pub use pr_policy::{
     evaluate_merge_policy, evaluate_open_policy, PrPolicyContext, PrPolicyDecision, PrPolicyFile,
     PrPolicyMergeOptions, PrPolicyMode, PrPolicyOpenOptions, PrPolicyRules,
+};
+pub use pr_refresh::{
+    pr_refresh, PrRefreshCheck, PrRefreshOptions, PrRefreshOutput, PrRefreshStrategy,
 };
 pub use primitives::{
     clone_repo, clone_repo_at_ref, commit_staged_with_author, get_component_path_prefix,

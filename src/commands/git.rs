@@ -5,8 +5,8 @@ use homeboy::core::git::{
     self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrOutput,
     IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions, IssueEditOptions,
     IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions,
-    PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrState,
-    PushOptions, RebaseOptions,
+    PrFindOptions, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions, PrRefreshOptions,
+    PrRefreshOutput, PrRefreshStrategy, PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -565,6 +565,33 @@ enum PrCommand {
     },
     /// Evaluate PR open/merge policy.
     Policy(PrPolicyArgs),
+    /// Refresh a PR branch from its current base and report conflicts/checks.
+    Refresh {
+        /// Component ID
+        component_id: String,
+
+        /// PR number or GitHub pull request URL.
+        pr: String,
+
+        /// Update strategy. `auto` uses branch/pull rebase git config, falling
+        /// back to rebase.
+        #[arg(long, default_value = "auto", value_parser = ["auto", "rebase", "merge", "ff-only"])]
+        strategy: String,
+
+        /// Push the refreshed PR branch when the worktree is clean and checks pass.
+        /// Uses --force-with-lease for rebase safety; plain force is not exposed.
+        #[arg(long)]
+        push: bool,
+
+        /// Lightweight check command to run after a clean refresh. Repeatable.
+        /// Defaults to `git diff --check` when omitted.
+        #[arg(long = "check", value_name = "COMMAND")]
+        checks: Vec<String>,
+
+        /// Workspace path to discover the component from a portable homeboy.json.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -672,6 +699,7 @@ pub enum GitCommandOutput {
     Bulk(BulkResult<GitOutput>),
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
+    PrRefresh(PrRefreshOutput),
     Find(GithubFindOutput),
     Policy(PrPolicyDecision),
 }
@@ -686,6 +714,7 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Bulk(output) => ("bulk", serde_json::to_value(output)),
             GitCommandOutput::Issue(output) => ("issue", serde_json::to_value(output)),
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
+            GitCommandOutput::PrRefresh(output) => ("pr_refresh", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
             GitCommandOutput::Policy(output) => ("policy", serde_json::to_value(output)),
         };
@@ -1181,6 +1210,43 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             Ok((GitCommandOutput::Pr(output), 0))
         }
         PrCommand::Policy(args) => run_pr_policy(args),
+        PrCommand::Refresh {
+            component_id,
+            pr,
+            strategy,
+            push,
+            checks,
+            path,
+        } => {
+            let strategy = parse_pr_refresh_strategy(&strategy)?;
+            let output = git::pr_refresh(
+                Some(&component_id),
+                PrRefreshOptions {
+                    pr,
+                    strategy,
+                    push,
+                    checks,
+                    path,
+                },
+            )?;
+            let exit = if output.success { 0 } else { 1 };
+            Ok((GitCommandOutput::PrRefresh(output), exit))
+        }
+    }
+}
+
+fn parse_pr_refresh_strategy(value: &str) -> homeboy::core::Result<PrRefreshStrategy> {
+    match value {
+        "auto" => Ok(PrRefreshStrategy::Auto),
+        "rebase" => Ok(PrRefreshStrategy::Rebase),
+        "merge" => Ok(PrRefreshStrategy::Merge),
+        "ff-only" => Ok(PrRefreshStrategy::FfOnly),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "strategy",
+            "strategy must be one of auto, rebase, merge, or ff-only",
+            Some(value.to_string()),
+            None,
+        )),
     }
 }
 
