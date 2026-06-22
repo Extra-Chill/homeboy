@@ -149,6 +149,7 @@
     "test:wp-codebox-fuzz-suite": "node tests/wp-codebox-fuzz-run-smoke.js",
     "test:wp-codebox-fuzz-run": "npm run test:wp-codebox-fuzz-suite",
     "test:wordpress-fuzz-runner": "node tests/wordpress-fuzz-runner-smoke.js",
+    "test:wordpress-fuzz-runner-codebox-contract": "node tests/wordpress-fuzz-runner-codebox-contract-canary.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",
     "test:refactor-source-wp-codebox": "node tests/refactor-source-wp-codebox-smoke.js",
