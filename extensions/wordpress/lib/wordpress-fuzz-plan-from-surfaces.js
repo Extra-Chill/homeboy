@@ -55,6 +55,7 @@ const SURFACE_COLLECTION_KEYS = [
 	'routes',
 ];
 const SAFE_REST_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const DB_MUTATION_REQUIRED_CAPABILITIES = ['snapshot', 'transaction', 'reset'];
 
 function buildWordPressFuzzPlanFromSurfaces(input = {}, options = {}) {
 	const discovery = normalizeWordPressSurfaceDiscovery({
@@ -313,6 +314,10 @@ function casesForSurface(surface, options = {}) {
 		const operationId = surface.operation_id || surface.operationId || `${surface.id}:${caseIntent(surface.type)}`;
 		return blockCasesFromSurface(surface, operation, operationId, options);
 	}
+	if (['database-table', 'db-query'].includes(surface.type)) {
+		const testCase = genericCaseForSurface(surface, options);
+		return [testCase, ...dbMutationCasesFromSurface(surface, testCase.operation_id, options)];
+	}
 	const crudResource = crudResourceForSurface(surface);
 	if (!crudResource) {
 		return [genericCaseForSurface(surface, options)];
@@ -542,6 +547,55 @@ function blockCasesFromSurface(surface, operation, operationId, options = {}) {
 	return cases;
 }
 
+function dbMutationCasesFromSurface(surface, operationId, options = {}) {
+	const mutations = normalizeMutationMetadata(surface.mutations || surface.mutation || surface.mutation_metadata || surface.mutationMetadata);
+	return mutations.map((mutation, index) => {
+		const mutationId = mutation.id || mutation.name || mutation.operation || `mutation-${index + 1}`;
+		return {
+			id: `${surface.id}-${safeIdPart(mutationId)}-gated-mutation`,
+			intent: surface.type === 'database-table' ? 'mutate-database-table' : 'mutate-database-query',
+			operation_id: `${operationId}:${safeIdPart(mutationId)}`,
+			operation: stripUndefined({
+				...operationForSurface(surface),
+				mutation: mutation.operation || mutation.name || mutation.type || mutationId,
+				statement: mutation.statement || mutation.sql,
+			}),
+			seed: options.seed,
+			executable: false,
+			required_capabilities: DB_MUTATION_REQUIRED_CAPABILITIES,
+			skip_reasons: ['requires-runtime-db-safety-capabilities'],
+			destructive_reasons: ['db-mutation'],
+			metadata: { surface, mutation, gated: true },
+		};
+	});
+}
+
+function normalizeMutationMetadata(value) {
+	if (value === undefined || value === null || value === false) {
+		return [];
+	}
+	if (value === true) {
+		return [{ id: 'declared-mutation', operation: 'declared-mutation' }];
+	}
+	if (Array.isArray(value)) {
+		return value.map((item, index) => mutationObject(item, index));
+	}
+	if (isObject(value)) {
+		if (value.id || value.name || value.operation || value.type || value.statement || value.sql) {
+			return [value];
+		}
+		return Object.entries(value).map(([key, item]) => mutationObject(isObject(item) ? { id: key, ...item } : { id: key, operation: item }, 0));
+	}
+	return [mutationObject(value, 0)];
+}
+
+function mutationObject(value, index) {
+	if (isObject(value)) {
+		return value;
+	}
+	return { id: `mutation-${index + 1}`, operation: String(value) };
+}
+
 function collectAdminPageInteractions(surface) {
 	return [
 		...tagAdminPageInteractions(surface.interactions, 'interaction'),
@@ -691,6 +745,14 @@ function reasonList(value) {
 	return [...new Set((Array.isArray(value) ? value : [value]).map(String).filter(Boolean))].sort();
 }
 
+function safeIdPart(value) {
+	return String(value || 'mutation')
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '') || 'mutation';
+}
+
 function stripUndefined(value) {
 	return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
@@ -716,6 +778,7 @@ function normalizeToken(value) {
 }
 
 module.exports = {
+	DB_MUTATION_REQUIRED_CAPABILITIES,
 	buildWordPressFuzzPlanFromSurfaces,
 	collectWordPressFuzzPlanSurfaces,
 };
