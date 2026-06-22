@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.24] - 2026-06-22
+
+### Changed
+- Use canonical WP Codebox fuzz ability
+
 ## [3.12.23] - 2026-06-22
 
 ### Changed
