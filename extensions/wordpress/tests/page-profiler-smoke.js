@@ -27,6 +27,7 @@ const {
 	formatWordPressRestNetworkDiffMarkdownReport,
 	formatWordPressRestPayloadBudgetMarkdownReport,
 	formatWordPressRestWaterfallMarkdownReport,
+	DEFAULT_THIRD_PARTY_WATERFALL_GROUPS,
 	normalizeBrowserAction,
 	normalizePageManifest,
 	normalizeWordPressPageMatrixManifest,
@@ -44,6 +45,7 @@ const {
 	summarizeWordPressRestNetworkRows,
 	summarizeWordPressRestWaterfall,
 	summarizeResourceTimings,
+	WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS,
 } = require('../lib/page-profiler');
 
 class FakeFrame {
@@ -179,6 +181,8 @@ assert.equal(classifyResourceUrl('https://example.test/wp-admin/load-styles.php'
 assert.equal(classifyResourceUrl('https://example.test/wp-content/themes/theme/style.css'), 'content-asset');
 assert.equal(resourceFamily('https://example.test/wp-includes/js/dist/block-editor.min.js?ver=1'), '/wp-includes/js/dist/block-editor.js');
 assert.equal(resourceFamily('https://example.test/wp-content/plugins/example-plugin/assets/admin.js?ver=1'), '/wp-content/plugins/example-plugin');
+assert.equal(DEFAULT_THIRD_PARTY_WATERFALL_GROUPS.some((group) => group.id === 'woocommerce-store-api'), false);
+assert.equal(WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS.woocommerce.firstPartyWaterfallGroupIds[0], 'woocommerce-store-api');
 
 const manifest = normalizePageManifest({
 	pages: [
@@ -696,6 +700,13 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 		});
 		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'payments').responseCount, 3);
 		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'same-origin').responseCount, 4);
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'woocommerce-store-api'), undefined);
+		const woocommerceAttribution = summarizeThirdPartyWaterfall(browserNetworkRows, {
+			baseUrl: 'https://example.test',
+			productAdapters: ['woocommerce'],
+		});
+		assert.equal(woocommerceAttribution.groups.find((group) => group.id === 'woocommerce-store-api').responseCount, 1);
+		assert.equal(woocommerceAttribution.thirdPartyGroupCount, 3);
 		writeJson(path.join(browserDirectory, 'action-summary.json'), {
 			schema: 'wp-codebox/browser-actions/v1',
 			startedAt: '2026-01-01T00:00:01.250Z',
@@ -726,7 +737,8 @@ process.stdout.write(JSON.stringify(output) + '\\n');
 		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').responseCount, 3);
 		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').requestCount, 1);
 		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').transferSizeBytes, 7800);
-		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'woocommerce-store-api').responseCount, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'wordpress-assets').responseCount, 4);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'woocommerce-store-api'), undefined);
 		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'google').resourceTypes.font, 1);
 		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'third-party:cdn.example-cdn.test').duplicateUrlPatterns[0].count, 2);
 		assert.equal(artifactProfile.browserMetrics.browser_network_stripe_transfer_size_bytes, 7800);
