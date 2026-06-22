@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.2] - 2026-06-22
+
+### Fixed
+- reduce differential CI latency
+
 ## [2.8.1] - 2026-06-22
 
 ### Fixed
