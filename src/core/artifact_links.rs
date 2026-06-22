@@ -289,12 +289,17 @@ mod tests {
     }
 
     #[test]
-    fn playground_descriptor_produces_public_artifact_viewer_metadata() {
-        let viewer = WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER.to_metadata(None);
+    fn descriptor_produces_public_artifact_viewer_metadata() {
+        let viewer = ArtifactViewerDescriptor::new(
+            "example-viewer-kind",
+            "https://viewer.example.test/",
+            "artifact-url",
+        )
+        .to_metadata(None);
 
-        assert_eq!(viewer["kind"], "wordpress-playground-blueprint");
-        assert_eq!(viewer["base"], "https://playground.wordpress.net/");
-        assert_eq!(viewer["query"]["parameter"], "blueprint-url");
+        assert_eq!(viewer["kind"], "example-viewer-kind");
+        assert_eq!(viewer["base"], "https://viewer.example.test/");
+        assert_eq!(viewer["query"]["parameter"], "artifact-url");
         assert_eq!(viewer["query"]["value"]["source"], "public-artifact-url");
     }
 
