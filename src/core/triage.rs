@@ -670,6 +670,8 @@ fn summarize_failed_check(
         .collect::<Vec<_>>()
         .join("\n");
     haystack.push(snippet_text.as_str());
+    let category = classify_failure(&haystack);
+    let baseline_vs_head = detect_baseline_vs_head(&haystack);
 
     Ok(CiFailureDigest {
         workflow: infer_workflow_name(details_url.as_deref(), &check.name),
@@ -679,8 +681,8 @@ fn summarize_failed_check(
             .as_ref()
             .and_then(|job| job.conclusion.clone())
             .or(check.conclusion),
-        category: classify_failure(&haystack),
-        baseline_vs_head: detect_baseline_vs_head(&haystack),
+        category,
+        baseline_vs_head,
         details_url,
         log_url,
         snippets,
