@@ -168,6 +168,7 @@ Use `close --reason not-planned` for intentional wontfix decisions. Homeboy's re
 homeboy git pr create <component_id> --base <base> --head <head> --title <title> [--body <body> | --body-file <path>] [--draft]
 homeboy git pr edit <component_id> --number <n> [--title <title>] [--body <body> | --body-file <path>]
 homeboy git pr find <component_id> [--base <base>] [--head <head>] [--state open|closed|merged|all] [--limit <n>]
+homeboy git pr readiness <component_id> --number <n>
 homeboy git pr comment <component_id> --number <n> [comment mode flags]
 homeboy git pr refresh <component_id> <number-or-url> [--strategy auto|rebase|merge|ff-only] [--check <cmd>...] [--push]
 homeboy git pr land <repo> <pr>... [--merge-method squash|merge|rebase]
@@ -178,6 +179,51 @@ Like issue commands, PR commands accept `--path` to discover component metadata 
 ```sh
 homeboy git pr create homeboy --base main --head docs-refresh-git-command --title "docs: refresh git command workflows" --body-file /tmp/pr.md
 homeboy git pr find homeboy --head docs-refresh-git-command --state open
+homeboy git pr readiness homeboy --number 123 --output /tmp/pr-readiness.json
+```
+
+### PR Merge Readiness
+
+`homeboy git pr readiness` is a read-only explanation command. It fetches GitHub PR metadata with `gh pr view`, reports GitHub's raw `mergeStateStatus`, and adds a Homeboy interpretation without attempting a merge as the discovery mechanism.
+
+The command exits `0` only when the interpreted state is `mergeable_now` and no blockers are present. Other interpreted states exit nonzero so automation can gate on readiness while still reading the structured JSON result from `--output`.
+
+Interpreted states:
+
+| State | Meaning | Usual guidance |
+|-------|---------|----------------|
+| `mergeable_now` | GitHub reports `CLEAN`, the PR is not draft, and checks are terminal green. | Merge policy may proceed. |
+| `conflicted` | GitHub reports `DIRTY` or the branch is `BEHIND`. | Rebase or update the PR branch, resolve conflicts, push, then re-run readiness. |
+| `waiting_on_required_checks` | Required checks are pending, or GitHub reports `CLEAN` before checks have appeared on a new head. | Wait for checks to report on the current head. |
+| `failing_required_checks` | Branch protection or required checks block merge. | Fix failing required checks or branch-rule blockers. |
+| `waiting_on_optional_checks` | GitHub reports `UNSTABLE` while checks are still pending. | Wait for non-blocking checks if your workflow treats them as merge evidence. |
+| `failing_optional_checks` | GitHub reports `UNSTABLE` with failed or inconclusive checks. | Inspect optional check failures and decide whether they are acceptable. |
+| `unknown` | GitHub reports `UNKNOWN`, no raw merge state, hooks are still settling, or Homeboy does not recognize the combination. | Wait briefly and re-run readiness; do not probe by attempting a merge. |
+
+Machine-readable output includes the raw state, interpreted state, blockers, and guidance:
+
+```json
+{
+  "variant": "pr_readiness",
+  "action": "pr.readiness",
+  "number": 123,
+  "ci_state": "terminal_green",
+  "ci_summary": "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+  "readiness": {
+    "raw_merge_state": "UNKNOWN",
+    "interpreted_state": "unknown",
+    "mergeable": false,
+    "blockers": [
+      {
+        "kind": "mergeability_unknown",
+        "message": "GitHub has not computed mergeability for the current PR head yet.",
+        "guidance": "Wait briefly and re-run readiness; do not attempt a merge just to discover state."
+      }
+    ],
+    "check_guidance": "Check state alone is insufficient while mergeability is UNKNOWN. 1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
+    "conflict_guidance": "Conflict state is unknown until GitHub recomputes mergeability."
+  }
+}
 ```
 
 ### PR Refresh
