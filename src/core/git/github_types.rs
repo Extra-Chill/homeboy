@@ -48,13 +48,53 @@ pub struct GithubPrOutput {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrReadinessBlocker {
+    pub kind: String,
+    pub message: String,
+    pub guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrMergeReadiness {
+    pub raw_merge_state: Option<String>,
+    pub interpreted_state: String,
+    pub mergeable: bool,
+    pub blockers: Vec<PrReadinessBlocker>,
+    pub check_guidance: String,
+    pub conflict_guidance: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GithubPrReadinessOutput {
+    pub component_id: String,
+    pub owner: String,
+    pub repo: String,
+    pub action: String,
+    pub success: bool,
+    pub number: u64,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub state: String,
+    pub draft: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    pub ci_state: String,
+    pub ci_summary: String,
+    pub readiness: PrMergeReadiness,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GithubPrView {
     pub component_id: String,
     pub owner: String,
     pub repo: String,
     pub number: u64,
+    pub url: String,
+    pub title: Option<String>,
     pub state: String,
+    pub draft: bool,
     pub author: Option<String>,
     pub base: String,
     pub head: String,

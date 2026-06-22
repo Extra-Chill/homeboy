@@ -3,11 +3,12 @@ use serde::{Serialize, Serializer};
 
 use homeboy::core::git::{
     self, CherryPickOptions, GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrFleetOutput,
-    GithubPrOutput, IssueCloseOptions, IssueCloseReason, IssueCommentOptions, IssueCreateOptions,
-    IssueEditOptions, IssueFindOptions, IssueState, PrCommentMode, PrCommentOptions,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions, PrLandOptions, PrLandOutput,
-    PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrPolicyDecision,
-    PrPolicyMergeOptions, PrPolicyOpenOptions, PrState, PushOptions, RebaseOptions,
+    GithubPrOutput, GithubPrReadinessOutput, IssueCloseOptions, IssueCloseReason,
+    IssueCommentOptions, IssueCreateOptions, IssueEditOptions, IssueFindOptions, IssueState,
+    PrCommentMode, PrCommentOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrFleetOptions,
+    PrLandOptions, PrLandOutput, PrLandRefreshHelper, PrMergeabilityReconcileOptions,
+    PrMergeabilityReconcileOutput, PrPolicyDecision, PrPolicyMergeOptions, PrPolicyOpenOptions,
+    PrState, PushOptions, RebaseOptions,
 };
 use homeboy::core::BulkResult;
 
@@ -485,6 +486,19 @@ enum PrCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Explain PR merge readiness without attempting a merge
+    Readiness {
+        /// Component ID
+        component_id: String,
+
+        /// PR number
+        #[arg(short, long)]
+        number: u64,
+
+        /// Workspace path to discover the component from a portable homeboy.json
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Post a comment on a PR. Three modes:
     ///
     /// 1. Plain: no marker flags — a fresh comment is appended.
@@ -749,6 +763,7 @@ pub enum GitCommandOutput {
     Bulk(BulkResult<GitOutput>),
     Issue(GithubIssueOutput),
     Pr(GithubPrOutput),
+    PrReadiness(GithubPrReadinessOutput),
     Find(GithubFindOutput),
     ReconcileMergeability(PrMergeabilityReconcileOutput),
     Policy(PrPolicyDecision),
@@ -766,6 +781,7 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Bulk(output) => ("bulk", serde_json::to_value(output)),
             GitCommandOutput::Issue(output) => ("issue", serde_json::to_value(output)),
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
+            GitCommandOutput::PrReadiness(output) => ("pr_readiness", serde_json::to_value(output)),
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
             GitCommandOutput::ReconcileMergeability(output) => {
                 ("reconcile_mergeability", serde_json::to_value(output))
@@ -1205,6 +1221,15 @@ fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Find(output), 0))
         }
+        PrCommand::Readiness {
+            component_id,
+            number,
+            path,
+        } => {
+            let output = git::pr_readiness(Some(&component_id), number, path)?;
+            let exit = if output.readiness.mergeable { 0 } else { 1 };
+            Ok((GitCommandOutput::PrReadiness(output), exit))
+        }
         PrCommand::Comment {
             component_id,
             number,
@@ -1568,5 +1593,36 @@ mod tests {
             };
 
         assert!(err.to_string().contains("--remote-url"));
+    }
+
+    #[test]
+    fn pr_readiness_flags_parse() {
+        let cli = TestCli::try_parse_from([
+            "git",
+            "pr",
+            "readiness",
+            "homeboy",
+            "--number",
+            "5805",
+            "--path",
+            "/tmp/homeboy",
+        ])
+        .expect("pr readiness flags parse");
+
+        match cli.command {
+            GitCommand::Pr(PrArgs {
+                command:
+                    PrCommand::Readiness {
+                        component_id,
+                        number,
+                        path,
+                    },
+            }) => {
+                assert_eq!(component_id, "homeboy");
+                assert_eq!(number, 5805);
+                assert_eq!(path.as_deref(), Some("/tmp/homeboy"));
+            }
+            _ => panic!("expected pr readiness command"),
+        }
     }
 }
