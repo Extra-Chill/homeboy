@@ -10,7 +10,7 @@ use crate::core::release::version;
 use super::execution::{
     execute_preflighted_component_deploy, prepare_component_deploy, PreparedComponentDeploy,
 };
-use super::generated_artifacts::unexpected_uncommitted_files_excluding_generated_build;
+use super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
 use super::orchestration_tag_checkout::{
     checkout_deploy_tags, deploy_tag_for_version, restore_branches, TagCheckout,
 };
@@ -641,7 +641,7 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
     // nonexistent uncommitted-changes problem when the real issue is that
     // local_path doesn't point at a git checkout. (#1141)
     let mut non_git: Vec<&Component> = Vec::new();
-    let mut dirty: Vec<&str> = Vec::new();
+    let mut dirty: Vec<DirtyComponent> = Vec::new();
 
     for component in components {
         if component.is_file_component() {
@@ -651,9 +651,18 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
             non_git.push(component);
             continue;
         }
-        match unexpected_uncommitted_files_excluding_generated_build(component) {
-            Ok(unexpected) if unexpected.is_empty() => {}
-            Ok(_) | Err(_) => dirty.push(component.id.as_str()),
+        match uncommitted_file_report_excluding_known_generated(component) {
+            Ok(report) if report.unexpected.is_empty() => {}
+            Ok(report) => dirty.push(DirtyComponent {
+                id: component.id.clone(),
+                unexpected_paths: report.unexpected,
+                known_generated_paths: report.known_generated,
+            }),
+            Err(_) => dirty.push(DirtyComponent {
+                id: component.id.clone(),
+                unexpected_paths: Vec::new(),
+                known_generated_paths: Vec::new(),
+            }),
         }
     }
 
@@ -689,18 +698,57 @@ fn check_uncommitted_changes(components: &[Component]) -> Result<()> {
     }
 
     if !dirty.is_empty() {
+        let dirty_ids: Vec<&str> = dirty.iter().map(|row| row.id.as_str()).collect();
         return Err(Error::validation_invalid_argument(
             "components",
-            format!("Components have uncommitted changes: {}", dirty.join(", ")),
+            format!(
+                "Components have uncommitted changes: {}. {}",
+                dirty_ids.join(", "),
+                dirty_worktree_path_summary(&dirty)
+            ),
             None,
             Some(vec![
                 "Commit your changes before deploying to ensure deployed code is tracked"
+                    .to_string(),
+                "Known generated artifacts are ignored by the deploy dirty gate; remove them with `homeboy cleanup --apply` if you want a clean worktree"
                     .to_string(),
                 "Use --force to deploy anyway".to_string(),
             ]),
         ));
     }
     Ok(())
+}
+
+struct DirtyComponent {
+    id: String,
+    unexpected_paths: Vec<String>,
+    known_generated_paths: Vec<String>,
+}
+
+fn dirty_worktree_path_summary(dirty: &[DirtyComponent]) -> String {
+    dirty
+        .iter()
+        .map(|row| {
+            let unexpected = if row.unexpected_paths.is_empty() {
+                "<unable to read git status>".to_string()
+            } else {
+                row.unexpected_paths.join(", ")
+            };
+            let known_generated = if row.known_generated_paths.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; known generated artifacts ignored: {}",
+                    row.known_generated_paths.join(", ")
+                )
+            };
+            format!(
+                "{} unexpected paths: {}{}",
+                row.id, unexpected, known_generated
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Fetch and pull latest changes for each component before deploying.
@@ -1304,6 +1352,9 @@ mod tests {
             .expect_err("source changes should still block deploy");
 
         assert!(err.message.contains("uncommitted changes"));
+        assert!(err.message.contains("src.rs"));
+        assert!(err.message.contains("known generated artifacts ignored"));
+        assert!(err.message.contains(".homeboy-build/"));
     }
 
     #[test]
