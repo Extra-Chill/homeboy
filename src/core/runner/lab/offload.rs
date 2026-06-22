@@ -20,6 +20,7 @@ use std::path::Path;
 
 use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
+use crate::core::agent_tasks::provider::provider_runner_source_contracts;
 use crate::core::engine::shell;
 use crate::core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use crate::core::redaction::{redact_argv, redact_argv_display};
@@ -63,11 +64,12 @@ use super::super::lab_workspaces::{
 use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
     evaluate_lab_runner_capabilities_for_runner, exec, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, prepare_lab_runner_capability, rig_materialization,
-    status, sync_workspace, LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerStatusReport, RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
+    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
+    prepare_lab_runner_capability, rig_materialization, status, sync_workspace,
+    LabRunnerGateDecision, RunnerCapabilityPreflight, RunnerExecOptions, RunnerStatusReport,
+    RunnerWorkspaceApplyOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput,
 };
 
 use super::super::workload::{build_runner_workload, RunnerWorkloadBuildInput};
@@ -596,6 +598,36 @@ fn run_runner_resident_lab_offload(
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
+    let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
+    if source_syncs.is_empty() {
+        plan = with_step(
+            plan,
+            PlanStep::builder(
+                "lab.managed_sources",
+                "lab.managed_sources",
+                PlanStepStatus::Skipped,
+            )
+            .skip_reason("no extension-declared managed runner sources")
+            .build(),
+        );
+    } else {
+        let syncs_json = serde_json::to_value(&source_syncs).map_err(|err| {
+            Error::internal_json(
+                format!("failed to serialize managed source syncs: {err}"),
+                None,
+            )
+        })?;
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.managed_sources", "lab.managed_sources")
+                .inputs(PlanValues::new().json("sources", &syncs_json))
+                .build(),
+        );
+        messages.push(format!(
+            "Lab offload: refreshed {} managed runner source checkout(s) before dispatch.",
+            source_syncs.len()
+        ));
+    }
     plan = with_step(
         plan,
         PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
@@ -717,6 +749,73 @@ fn run_runner_resident_lab_offload(
         stderr,
         exit_code,
     })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManagedRunnerSourceRefreshOutput {
+    id: String,
+    label: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_ref: Option<String>,
+    stdout: String,
+    stderr: String,
+}
+
+fn refresh_managed_runner_sources(
+    runner_id: &str,
+    cwd: &str,
+) -> Result<Vec<ManagedRunnerSourceRefreshOutput>> {
+    let plans = plan_managed_runner_source_syncs(&provider_runner_source_contracts());
+    let mut refreshed = Vec::new();
+
+    for source in plans {
+        let (output, exit_code) = exec(
+            runner_id,
+            RunnerExecOptions {
+                cwd: Some(cwd.to_string()),
+                project_id: None,
+                allow_diagnostic_ssh: false,
+                command: vec!["sh".to_string(), "-lc".to_string(), source.script.clone()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                capability_preflight: None,
+                required_extensions: Vec::new(),
+                require_paths: Vec::new(),
+                runner_workload: None,
+                detach_after_handoff: false,
+            },
+        )?;
+        if exit_code != 0 {
+            return Err(Error::validation_invalid_argument(
+                "managed_runner_source",
+                format!(
+                    "Managed runner source `{}` could not be refreshed before Lab dispatch",
+                    source.label
+                ),
+                Some(source.id),
+                Some(vec![format!(
+                    "Run `homeboy runner doctor {runner_id} --scope lab-offload --repair` for the first-class repair report before retrying."
+                )]),
+            ));
+        }
+        refreshed.push(ManagedRunnerSourceRefreshOutput {
+            id: source.id,
+            label: source.label,
+            path: source.path,
+            remote_url: source.remote_url,
+            git_ref: source.git_ref,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        });
+    }
+
+    Ok(refreshed)
 }
 
 struct LabOffloadWorkspaceStage {
