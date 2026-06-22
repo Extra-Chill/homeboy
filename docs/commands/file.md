@@ -17,7 +17,6 @@ homeboy file <COMMAND>
 - `find <project_id> <path> [options]` (search for files by name)
 - `grep <project_id> <path> <pattern> [options]` (search file contents)
 - `download <project_id> <path> [local_path] [-r|--recursive]`
-- `upload <server> <local_path> <remote_path> [-c|--compress] [--dry-run]`
 - `copy <source> <destination> [-r|--recursive] [-c|--compress] [--dry-run] [--exclude <pattern>]`
 - `sync <source> <destination> [-c|--compress] [--dry-run] [--exclude <pattern>]`
 - `edit <project_id> <file_path> [operations] [-n|--dry-run] [-f|--force]`
@@ -98,7 +97,7 @@ homeboy file sync ./uploads prod:/var/www/uploads --exclude cache --dry-run
 Notes:
 
 - `copy` preserves the old local↔remote and remote↔remote transfer target syntax.
-- `file upload` is deprecated; use `file copy <local> <server>:<path>` for local-to-server uploads.
+- Use `file copy <local> <server>:<path>` for local-to-server copies.
 - `sync` is directory-oriented and recursive, but does not delete files from the destination.
 
 ### `edit`
@@ -158,7 +157,7 @@ Fields:
 
 ### Transfer output
 
-`upload`, `copy`, and `sync` return the shared transfer payload:
+`copy` and `sync` return the shared transfer payload:
 
 - `source`
 - `destination`

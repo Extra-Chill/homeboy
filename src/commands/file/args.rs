@@ -121,22 +121,6 @@ pub(crate) enum FileCommand {
         #[arg(short, long)]
         recursive: bool,
     },
-    /// Upload a local file or directory to a remote server
-    #[command(hide = true)]
-    Upload {
-        /// Server ID
-        server: String,
-        /// Local source path
-        local_path: String,
-        /// Remote destination path
-        remote_path: String,
-        /// Compress data during transfer
-        #[arg(short, long)]
-        compress: bool,
-        /// Show what would be uploaded without doing it
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Copy a file or path between local and remote targets
     Copy(TransferArgs),
     /// Sync a directory between local and remote targets without deleting extras
