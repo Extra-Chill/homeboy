@@ -33,6 +33,12 @@ pub const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA: &str =
     "homeboy/agent-task-artifact-declaration/v1";
 pub const AGENT_TASK_EVIDENCE_REF_SCHEMA: &str = "homeboy/agent-task-evidence-ref/v1";
 pub const SECRET_ENV_REQUIREMENT_SCHEMA: &str = "homeboy/secret-env-requirement/v1";
+pub const AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA: &str =
+    "homeboy/agent-task-batch-cook-fanout-plan/v1";
+pub const AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA: &str =
+    "homeboy/agent-task-batch-cook-fanout-run/v1";
+pub const AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA: &str =
+    "homeboy/agent-task-batch-cook-fanout-submit/v1";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskCoreContract {
@@ -70,6 +76,9 @@ pub struct AgentTaskCoreContractSchemas {
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
     pub command_invocation: String,
+    pub batch_cook_fanout_plan: String,
+    pub batch_cook_fanout_run: String,
+    pub batch_cook_fanout_submit: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -143,6 +152,9 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
             command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),
+            batch_cook_fanout_plan: AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA.to_string(),
+            batch_cook_fanout_run: AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA.to_string(),
+            batch_cook_fanout_submit: AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA.to_string(),
         },
         provider_capability: AgentTaskCoreProviderCapabilityContract {
             schema: provider_capability.schema,
@@ -386,6 +398,10 @@ mod tests {
         assert_eq!(
             contract.schemas.command_invocation,
             COMMAND_INVOCATION_SCHEMA
+        );
+        assert_eq!(
+            contract.schemas.batch_cook_fanout_plan,
+            AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA
         );
         assert_eq!(
             contract.provider_capability.request_required_fields,
