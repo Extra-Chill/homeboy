@@ -29,8 +29,8 @@ pub struct CompareArtifactPaths {
 /// directories. Downstream report commands address this record instead of
 /// rediscovering run ids and artifact directories from temp paths.
 ///
-/// The shape is intentionally generic — it knows nothing about WordPress,
-/// browsers, screenshots, or any specific extension. Visual diffs and other
+/// The shape is intentionally generic — it knows nothing about any specific
+/// runtime, browsers, screenshots, or any specific extension. Visual diffs and other
 /// post-compare evidence are linked generically through `post_compare_artifacts`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ComparePairArtifact {
