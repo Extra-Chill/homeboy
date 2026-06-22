@@ -5,7 +5,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { resolveWpCodeboxRuntimePath } = require('../scripts/fuzz/fuzz-runner.cjs');
+const {
+	resolveWpCodeboxRuntimePath,
+	wpCodeboxRuntimeEnv,
+} = require('../scripts/fuzz/fuzz-runner.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-fuzz-runner-runtime-path-'));
 const homeboyRoot = path.join(root, '.config', 'homeboy');
@@ -26,5 +29,19 @@ assert.equal(
 
 const sourceRuntimePath = path.resolve(__dirname, '..', '..', 'agent-runtimes', 'wp-codebox');
 assert.equal(resolveWpCodeboxRuntimePath({ env: {} }), sourceRuntimePath);
+
+assert.equal(
+	wpCodeboxRuntimeEnv({
+		HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_core_module: '/tmp/wp-codebox-core.mjs' }),
+	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
+	'/tmp/wp-codebox-core.mjs'
+);
+assert.equal(
+	wpCodeboxRuntimeEnv({
+		HOMEBOY_WP_CODEBOX_CORE_MODULE: '/existing/core.mjs',
+		HOMEBOY_SETTINGS_JSON: JSON.stringify({ wp_codebox_core_module: '/tmp/wp-codebox-core.mjs' }),
+	}).HOMEBOY_WP_CODEBOX_CORE_MODULE,
+	'/existing/core.mjs'
+);
 
 console.log('fuzz runner installed runtime path smoke passed');

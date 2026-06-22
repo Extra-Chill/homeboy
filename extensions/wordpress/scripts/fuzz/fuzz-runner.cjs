@@ -50,13 +50,14 @@ async function buildRunnerResult(env) {
 
 async function runWpCodeboxAgentTask(request) {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-fuzz-'));
-	const command = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
-	const manifest = await discoverRuntimeContractManifest();
+	const env = wpCodeboxRuntimeEnv(process.env);
+	const command = env.HOMEBOY_WP_CODEBOX_BIN || env.HOMEBOY_SETTINGS_WP_CODEBOX_BIN || 'wp-codebox';
+	const manifest = await discoverRuntimeContractManifest(env);
 	const publicInvocation = wpCodeboxPublicRuntimeInvocation(request, { runtimeContractManifest: manifest });
 
 	if (publicInvocation) {
 		try {
-			const publicResult = await runWpCodeboxPublicRuntimeCommand(command, publicInvocation, tempDir);
+			const publicResult = await runWpCodeboxPublicRuntimeCommand(command, publicInvocation, tempDir, { env });
 			return { json: normalizeWpCodeboxAgentTaskOutput(publicResult, request) };
 		} catch (error) {
 			if (!shouldFallbackToRunAgentTask(error)) {
@@ -72,15 +73,17 @@ async function runWpCodeboxAgentTask(request) {
 	const args = wpCodeboxInvocationArgs(invocation, inputFile);
 	const result = await spawnJson(command, args, {
 		cwd: process.cwd(),
-		env: process.env,
+		env,
 	});
 
 	return { json: normalizeWpCodeboxAgentTaskOutput(result, request) };
 }
 
-async function discoverRuntimeContractManifest() {
+async function discoverRuntimeContractManifest(env = process.env) {
 	try {
-		const runtimeContractManifest = await loadWpCodeboxCoreFunction('runtimeContractManifest');
+		const runtimeContractManifest = await loadWpCodeboxCoreFunction('runtimeContractManifest', {
+			wpCodeboxCoreModule: env.HOMEBOY_WP_CODEBOX_CORE_MODULE,
+		});
 		if (typeof runtimeContractManifest === 'function') {
 			return runtimeContractManifest();
 		}
@@ -124,12 +127,12 @@ function wpCodeboxCommandFromPublicAbility(ability, options = {}) {
 	return String(ability).replace(/^wp-codebox\//, '');
 }
 
-async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir) {
+async function runWpCodeboxPublicRuntimeCommand(command, invocation, tempDir, options = {}) {
 	const inputFile = path.join(tempDir, `${invocation.command}-request.json`);
 	fs.writeFileSync(inputFile, `${JSON.stringify(invocation.input, null, 2)}\n`);
 	return spawnJson(command, [invocation.command, '--input-file', inputFile, '--json'], {
 		cwd: process.cwd(),
-		env: process.env,
+		env: options.env || process.env,
 	});
 }
 
@@ -170,6 +173,29 @@ function resolveWpCodeboxRuntimePath(options = {}) {
 	}
 
 	return candidates[0];
+}
+
+function wpCodeboxRuntimeEnv(env) {
+	const nextEnv = { ...env };
+	if (!nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE) {
+		const settings = parseJsonObject(nextEnv.HOMEBOY_SETTINGS_JSON);
+		if (settings?.wp_codebox_core_module) {
+			nextEnv.HOMEBOY_WP_CODEBOX_CORE_MODULE = String(settings.wp_codebox_core_module);
+		}
+	}
+	return nextEnv;
+}
+
+function parseJsonObject(value) {
+	if (!value) {
+		return null;
+	}
+	try {
+		const parsed = JSON.parse(value);
+		return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
 }
 
 function wpCodeboxInvocationArgs(invocation, inputFile) {
@@ -287,4 +313,5 @@ function findFuzzSuiteResult(value) {
 
 module.exports = {
 	resolveWpCodeboxRuntimePath,
+	wpCodeboxRuntimeEnv,
 };
