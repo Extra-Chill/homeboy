@@ -83,10 +83,7 @@ use super::agent_task_bridge::{
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::provider_preflight::preflight_agent_task_provider_on_runner;
-use super::secrets::{
-    hydrate_agent_task_secret_env, hydrate_trace_secret_env, hydrate_tunnel_secret_env,
-    preflight_agent_task_runner_secret_env,
-};
+use super::secrets::{build_lab_secret_env_handoff_plan, preflight_agent_task_runner_secret_env};
 use super::trace_fetch_refs::lab_offload_git_fetch_refs;
 use super::workspace_plan::{lab_workspace_sync_mode, preflight_required_git_checkout_workspace};
 #[cfg(test)]
@@ -623,11 +620,10 @@ fn run_runner_resident_lab_offload(
         "runner_cwd": runner_workspace_root,
         "command_paths": "runner_side",
     });
+    let secret_env_handoff = build_lab_secret_env_handoff_plan(&remapped_args, Default::default())?;
+    lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    let tunnel_secret_env = hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
-    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
-    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    hydrate_tunnel_secret_env(&remapped_args, &mut env)?;
+    env.extend(secret_env_handoff.env_delta);
 
     let (exec_output, exit_code) = exec(
         runner_id,
@@ -637,7 +633,7 @@ fn run_runner_resident_lab_offload(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: Vec::new(),
+            secret_env_names: secret_env_handoff.secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: None,
@@ -1421,20 +1417,18 @@ fn run_lab_offload_inner(
         &workspace_mapping_metadata,
         &synced_rigs,
     );
-    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    let rig_component_path_env = forward_rig_component_path_env(&mut env, &workspace_mapping)?;
-    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
-    let agent_task_secret_env =
-        hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
-    let trace_secret_env = hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
-    let tunnel_secret_env = hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
-    lab_metadata["agent_task_secret_env"] = agent_task_secret_env;
-    lab_metadata["trace_secret_env"] = trace_secret_env;
-    lab_metadata["tunnel_secret_env"] = tunnel_secret_env;
+    let mut env_delta = std::collections::HashMap::new();
+    let rig_component_path_env =
+        forward_rig_component_path_env(&mut env_delta, &workspace_mapping)?;
+    apply_rig_component_path_overrides(&mut env_delta, &rig_component_path_overrides);
+    let secret_env_handoff =
+        build_lab_secret_env_handoff_plan(&changed_since_preflight.args, env_delta)?;
+    lab_metadata["secret_env_handoff"] = secret_env_handoff.diagnostics.clone();
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["rig_component_path_overrides"] =
         rig_component_path_overrides_metadata(&rig_component_path_overrides);
-    lab_metadata["settings_env"] = settings_env_diagnostics(&remapped_args, &env);
+    lab_metadata["settings_env"] =
+        settings_env_diagnostics(&remapped_args, &secret_env_handoff.env_delta);
     lab_metadata["runner_homeboy"] = runner_homeboy.clone();
     lab_metadata["source_checkout"] = source_checkout.clone();
     lab_metadata["rig_sync"] = serde_json::json!({
@@ -1451,12 +1445,8 @@ fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
-    env = build_lab_offload_env_with_passthroughs(&lab_metadata);
-    forward_rig_component_path_env(&mut env, &workspace_mapping)?;
-    apply_rig_component_path_overrides(&mut env, &rig_component_path_overrides);
-    hydrate_agent_task_secret_env(&changed_since_preflight.args, &mut env)?;
-    hydrate_trace_secret_env(&changed_since_preflight.args, &mut env)?;
-    hydrate_tunnel_secret_env(&changed_since_preflight.args, &mut env)?;
+    let mut env = build_lab_offload_env_with_passthroughs(&lab_metadata);
+    env.extend(secret_env_handoff.env_delta.clone());
     preflight_agent_task_runner_secret_env(
         runner_id,
         &runner,
@@ -1496,7 +1486,7 @@ fn run_lab_offload_inner(
             allow_diagnostic_ssh: false,
             command,
             env,
-            secret_env_names: Vec::new(),
+            secret_env_names: secret_env_handoff.secret_env_names,
             capture_patch: request.capture_patch,
             raw_exec: false,
             source_snapshot: Some(source_snapshot),
