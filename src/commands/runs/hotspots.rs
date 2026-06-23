@@ -95,6 +95,60 @@ pub fn runs_hotspots(args: RunsHotspotsArgs) -> CmdResult<RunsOutput> {
     ))
 }
 
+pub(crate) fn fuzz_hotspot_lines(run: &Value) -> Vec<String> {
+    let Some(run_id) = string_field(run, &["id"]) else {
+        return Vec::new();
+    };
+    let Some(artifacts) = value_at(run, &["artifacts"]).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let loaded = artifacts
+        .iter()
+        .filter(|artifact| is_fuzz_artifact_value(artifact))
+        .filter_map(|artifact| {
+            if string_field(artifact, &["type", "artifact_type"]).as_deref() != Some("file") {
+                return None;
+            }
+            let path = string_field(artifact, &["path"])?;
+            let file = File::open(path).ok()?;
+            let json = serde_json::from_reader::<_, Value>(file).ok()?;
+            if !is_fuzz_json(&json) {
+                return None;
+            }
+            Some(LoadedFuzzArtifact {
+                run_id: run_id.clone(),
+                artifact_kind: string_field(artifact, &["kind"])
+                    .unwrap_or_else(|| "fuzz".to_string()),
+                json,
+            })
+        })
+        .collect::<Vec<_>>();
+    let hotspots = rank_hotspots(&loaded, 5);
+    if hotspots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec!["Hotspots:".to_string(), "  Fuzz hotspots:".to_string()];
+    for hotspot in hotspots {
+        let label = hotspot
+            .label
+            .as_deref()
+            .filter(|label| *label != hotspot.key)
+            .map(|label| format!(" ({label})"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "    #{} {}{} score={} occurrences={} runs={}",
+            hotspot.rank,
+            hotspot.key,
+            label,
+            format_score(hotspot.score),
+            hotspot.occurrences,
+            hotspot.run_count
+        ));
+    }
+    lines
+}
+
 struct LoadedFuzzArtifacts {
     artifacts: Vec<LoadedFuzzArtifact>,
     skipped: Vec<SkippedArtifactRow>,
@@ -159,6 +213,13 @@ fn is_fuzz_artifact(artifact: &ArtifactRecord) -> bool {
         || artifact
             .metadata_json
             .get("schema")
+            .and_then(Value::as_str)
+            .is_some_and(|schema| schema.contains("fuzz"))
+}
+
+fn is_fuzz_artifact_value(artifact: &Value) -> bool {
+    string_field(artifact, &["kind"]).is_some_and(|kind| kind.contains("fuzz"))
+        || value_at(artifact, &["metadata", "schema"])
             .and_then(Value::as_str)
             .is_some_and(|schema| schema.contains("fuzz"))
 }
@@ -412,6 +473,17 @@ fn numeric_field(value: &Value, fields: &[&str]) -> Option<f64> {
         .iter()
         .find_map(|field| value.get(field).and_then(Value::as_f64))
         .filter(|value| value.is_finite())
+}
+
+fn format_score(value: f64) -> String {
+    let mut formatted = format!("{value:.3}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
 }
 
 fn composite_key(value: &Value, fields: &[&str]) -> Option<String> {

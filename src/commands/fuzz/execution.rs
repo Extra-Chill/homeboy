@@ -8,6 +8,7 @@ use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign, FuzzFindingStat
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
+use uuid::Uuid;
 
 use super::report::{evaluate_fuzz_gates, fuzz_coverage_completeness};
 use super::types::{
@@ -19,7 +20,14 @@ use super::workloads::{
     resolve_component_id, resolve_fuzz_context, select_workload, FuzzRigContext,
 };
 
-pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
+pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
+    if args
+        .run_id
+        .as_deref()
+        .is_none_or(|run_id| run_id.trim().is_empty())
+    {
+        args.run_id = Some(format!("fuzz-{}", Uuid::new_v4()));
+    }
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
     if let Some(context) = rig_context.as_ref() {
         let prepare_settings = fuzz_prepare_settings(&args);
@@ -250,10 +258,13 @@ fn fuzz_metadata_reports_failure(value: &serde_json::Value) -> bool {
 fn metadata_failure_count_reports_failure(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
-            (is_failure_count_key(key) && json_numeric_value(value).is_some_and(|count| count > 0.0))
+            (is_failure_count_key(key)
+                && json_numeric_value(value).is_some_and(|count| count > 0.0))
                 || metadata_failure_count_reports_failure(value)
         }),
-        serde_json::Value::Array(values) => values.iter().any(metadata_failure_count_reports_failure),
+        serde_json::Value::Array(values) => {
+            values.iter().any(metadata_failure_count_reports_failure)
+        }
         _ => false,
     }
 }
@@ -342,9 +353,11 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
 pub(super) fn persist_fuzz_run_evidence(
     input: FuzzRunEvidenceInput<'_>,
 ) -> homeboy::core::Result<Option<RunRecord>> {
-    let Some(run_id) = input.run_id.filter(|run_id| !run_id.trim().is_empty()) else {
-        return Ok(None);
-    };
+    let run_id = input
+        .run_id
+        .filter(|run_id| !run_id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("fuzz-{}", Uuid::new_v4()));
     let store = ObservationStore::open_initialized()?;
     let now = chrono::Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
@@ -363,7 +376,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "gates": input.results.map(evaluate_fuzz_gates),
     });
     let run = RunRecord {
-        id: run_id.to_string(),
+        id: run_id.clone(),
         kind: "fuzz".to_string(),
         component_id: Some(input.component_id.to_string()),
         started_at: now.clone(),
@@ -389,7 +402,7 @@ pub(super) fn persist_fuzz_run_evidence(
     };
     store.upsert_imported_run(&run)?;
     if input.results_path.is_file() {
-        store.record_artifact(run_id, "fuzz_results", input.results_path)?;
+        store.record_artifact(&run_id, "fuzz_results", input.results_path)?;
     }
     Ok(Some(run))
 }
@@ -461,7 +474,7 @@ pub(super) fn default_runner_contract() -> FuzzRunnerContract {
             "HOMEBOY_FUZZ_RESULTS_FILE",
             "HOMEBOY_FUZZ_WORKLOAD_ID",
             "HOMEBOY_FUZZ_WORKLOAD_PATH",
-            "WP_CODEBOX_FUZZ_WORKLOAD_ROOT",
+            "HOMEBOY_FUZZ_WORKLOAD_ROOT",
             "HOMEBOY_FUZZ_RUN_ID",
             "HOMEBOY_FUZZ_SEED",
             "HOMEBOY_FUZZ_INVENTORY_FILE",
@@ -531,7 +544,7 @@ pub(super) fn fuzz_runner_env(
     }
     if let Some(package_root) = rig_context.and_then(|context| context.package_root.as_ref()) {
         env.push((
-            "WP_CODEBOX_FUZZ_WORKLOAD_ROOT".to_string(),
+            "HOMEBOY_FUZZ_WORKLOAD_ROOT".to_string(),
             package_root.to_string_lossy().to_string(),
         ));
     }
