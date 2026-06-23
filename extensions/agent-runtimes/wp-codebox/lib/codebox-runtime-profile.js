@@ -312,7 +312,7 @@ function uniqueObjectsByRuntimeIdentity(entries) {
     }
     const existingIndex = seen.get(key);
     if (existingIndex !== undefined) {
-      merged[existingIndex] = cleanObject({
+      merged[existingIndex] = withoutEmptyObjectValues({
         ...merged[existingIndex],
         ...entry,
         metadata: {
