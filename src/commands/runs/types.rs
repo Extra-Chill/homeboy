@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use homeboy::core::artifact_links::ArtifactViewerDescriptor;
 use homeboy::core::observation::runs_service;
-use homeboy::core::observation::{ArtifactRecord, RunRecord};
+use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::runners::RunnerArtifactRef;
 use homeboy::core::validation_progress::ValidationCommandSummary;
 
@@ -22,13 +22,13 @@ use super::compare::{RunsCompareArgs, RunsCompareOutput};
 use super::distribution::{RunsDistributionArgs, RunsDistributionOutput};
 use super::drift::{RunsDriftArgs, RunsDriftOutput};
 use super::evidence::RunsEvidenceOutput;
+use super::findings;
 use super::findings::{RunsFindingOutput, RunsFindingsOutput};
 use super::gh_actions::GhActionsImportOutput;
 use super::latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
 use super::loop_sync::{RunsLoopSyncArgs, RunsLoopSyncOutput};
 use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
-use super::findings;
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;

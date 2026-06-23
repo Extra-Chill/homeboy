@@ -42,33 +42,39 @@ pub use dispatch::{global_runner_error, run, run_markdown};
 pub use handlers::list_runs;
 pub use types::{RunsArgs, RunsOutput, WORDPRESS_PLAYGROUND_BLUEPRINT_VIEWER};
 
-// Intra-module re-exports so sibling submodules can reference shared items via
-// `super::` without depending on each other's internal module paths.
+// Intra-module re-exports so sibling submodules (and the test modules) can
+// reference shared items via `super::` without depending on each other's
+// internal module paths. `pub(super)` items are re-exported with a private
+// `use` (still reachable by descendant submodules) so the re-export never
+// widens their visibility.
 pub(crate) use common::RunSummary;
-pub(crate) use handlers::{require_run, run_summary};
-pub(crate) use types::{
-    DEFAULT_LIMIT, RunsArtifactGetArgs, RunsListArgs, RunsListOutput,
-};
+pub(crate) use handlers::run_summary;
+use handlers::require_run;
+use types::DEFAULT_LIMIT;
+pub(crate) use types::{RunsArtifactGetArgs, RunsListArgs, RunsListOutput};
 
 pub(crate) use bench::bench_compare_from_args;
 pub use bench::{bench_compare, BenchCompareOutput, RunsBenchCompareArgs};
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
-pub(crate) use bundle::{
-    export_runs, import_runs, RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput,
-};
 pub use distribution::{runs_distribution, RunsDistributionArgs, RunsDistributionOutput};
 
+// Test-only re-exports consumed by sibling test modules (golden contract tests,
+// the `runs` test submodules) via `super::runs::*` / `super::*`.
+#[cfg(test)]
+pub(crate) use types::{RunDetail, RunsArtifactsOutput, RunsShowOutput};
+#[cfg(test)]
+use bundle::{export_runs, import_runs, RunsExportArgs, RunsImportArgs};
+#[cfg(test)]
+use common::dead_owned_run;
 #[cfg(test)]
 pub(crate) use common::SkippedArtifactRow;
-pub(crate) use drift::RunsDriftOutput;
 #[cfg(test)]
-pub(crate) use drift::{DriftValue, RunsDriftFilters};
+pub(crate) use drift::{DriftValue, RunsDriftFilters, RunsDriftOutput};
 #[cfg(test)]
 pub(crate) use query::{
     QueryGroup, QueryRow, RunsQueryFilters, RunsQueryOutput as TestRunsQueryOutput,
 };
-pub(crate) use refs::RunsRefsOutput;
 #[cfg(test)]
 pub(crate) use refs::{
-    ArtifactRef as RunsRefsArtifactRef, RunRef as RunsRefsRunRef, RunsRefsFilters,
+    ArtifactRef as RunsRefsArtifactRef, RunRef as RunsRefsRunRef, RunsRefsFilters, RunsRefsOutput,
 };
