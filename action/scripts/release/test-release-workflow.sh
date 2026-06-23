@@ -36,6 +36,22 @@ assert_contains() {
   printf 'PASS: %s\n' "${label}"
 }
 
+assert_count() {
+  local needle="$1"
+  local expected="$2"
+  local file_path="$3"
+  local label="$4"
+  local actual
+
+  actual="$(grep -c -- "${needle}" "${file_path}" || true)"
+  if [ "${actual}" != "${expected}" ]; then
+    printf 'FAIL: %s\nexpected %s occurrence(s) of: %s\nactual: %s\nfile: %s\n' "${label}" "${expected}" "${needle}" "${actual}" "${file_path}"
+    exit 1
+  fi
+
+  printf 'PASS: %s\n' "${label}"
+}
+
 assert_not_contains '^  create-release:' "${WORKFLOW}" "release workflow has no duplicate GitHub Release job"
 assert_not_contains 'gh release create' "${WORKFLOW}" "release workflow does not shell out to gh release create"
 assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not parse changelog notes"
@@ -43,6 +59,7 @@ assert_not_contains 'docs/CHANGELOG.md' "${WORKFLOW}" "release workflow does not
 assert_contains 'uses: ./' "${WORKFLOW}" "release workflow uses checked-out action code for self-release"
 assert_not_contains 'Extra-Chill/homeboy-action@v2' "${WORKFLOW}" "release workflow is not bootstrapped from the stale floating v2 channel"
 assert_contains 'commands: release' "${WORKFLOW}" "release workflow delegates to homeboy-action release command"
+assert_count 'release-skip-github-release' '1' "${WORKFLOW}" "release workflow only skips GitHub Release creation during dry-run check"
 assert_contains 'runner.temp }}/homeboy-release-last-failed' "${WORKFLOW}" "release failure cache lives outside checkout"
 assert_not_contains 'path: .release-last-failed' "${WORKFLOW}" "release failure cache is not restored into checkout"
 assert_not_contains '< .release-last-failed' "${WORKFLOW}" "release failure marker is not read from checkout"
