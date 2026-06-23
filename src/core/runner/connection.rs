@@ -14,13 +14,13 @@ use crate::core::error::{Error, Result};
 use crate::core::paths;
 use crate::core::server::{self, Server, ServerAuthMode, SshClient};
 
-use super::broker_http;
 use super::session::{
     ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind, RunnerSession,
     RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
     RunnerTunnelMode,
 };
+use super::{broker_auth, broker_http};
 use super::{load, Runner, RunnerKind};
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
@@ -401,6 +401,71 @@ fn runner_jobs(
             })
             .collect(),
     ))
+}
+
+pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
+    let broker_url = reverse_broker_url(runner_id)?;
+    let client = broker_client("build broker reconcile client")?;
+    broker_http::post_json(
+        &client,
+        &broker_url,
+        "/runner/jobs/reconcile",
+        Value::Null,
+        "reconcile reverse runner broker jobs",
+        broker_auth::broker_token_from_env().as_deref(),
+    )
+}
+
+pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
+    let broker_url = reverse_broker_url(runner_id)?;
+    let artifact_id = crate::core::execution_contract::encode_uri_component(artifact_id);
+    let client = broker_client("build broker artifact client")?;
+    broker_http::get_json(
+        &client,
+        &broker_url,
+        &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
+        "lookup reverse runner broker artifact",
+        broker_auth::broker_token_from_env().as_deref(),
+    )
+}
+
+fn reverse_broker_url(runner_id: &str) -> Result<String> {
+    let report = status(runner_id)?;
+    let Some(session) = report.session.filter(|_| report.connected) else {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!("runner `{runner_id}` is not connected"),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    if session.mode != RunnerTunnelMode::Reverse {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!("runner `{runner_id}` is not reverse-connected"),
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Broker job wrappers require a reverse runner session.".to_string(),
+            ]),
+        ));
+    }
+    session.broker_url.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner_id",
+            format!("reverse runner `{runner_id}` has no broker URL"),
+            Some(runner_id.to_string()),
+            Some(vec![
+                "Reconnect with `homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>`.".to_string(),
+            ]),
+        )
+    })
+}
+
+fn broker_client(action: &str) -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))
 }
 
 fn stale_daemon_warning(

@@ -224,6 +224,14 @@ The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
 controllers can queue work and reverse runners can claim, stream progress, and
 return results without inbound access to the lab machine.
 
+Use Homeboy wrappers for broker maintenance and artifact lookup instead of raw
+HTTP calls:
+
+```sh
+homeboy runner job reconcile <runner-id>
+homeboy runner job artifacts <runner-id> <job-id> <artifact-id>
+```
+
 #### Broker authentication and pairing
 
 Every `/runner/*` broker route requires an authenticated, scoped bearer token
