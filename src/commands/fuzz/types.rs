@@ -159,6 +159,24 @@ pub(crate) struct FuzzReportArgs {
 
 #[derive(Args, Clone)]
 pub(crate) struct FuzzReplayArgs {
+    /// Component ID used to resolve the extension replay_command.
+    #[arg(long = "component", value_name = "ID")]
+    pub(crate) component: Option<String>,
+
+    /// Override the component checkout path for replay command execution.
+    #[arg(long)]
+    pub(crate) path: Option<String>,
+
+    /// Resolve replay through a rig's component path and extension config.
+    #[arg(long, value_name = "RIG_ID")]
+    pub(crate) rig: Option<String>,
+
+    #[command(flatten)]
+    pub(crate) extension_override: ExtensionOverrideArgs,
+
+    #[command(flatten)]
+    pub(crate) setting_args: SettingArgs,
+
     /// Fuzz campaign/result envelope path, or a case id when --artifact is used.
     #[arg(value_name = "ARTIFACT_OR_CASE")]
     pub(crate) artifact_or_case: Option<String>,
@@ -175,7 +193,11 @@ pub(crate) struct FuzzReplayArgs {
     #[arg(long = "run-id", value_name = "ID")]
     pub(crate) run_id: Option<String>,
 
-    /// Additional runner arguments reserved for future fuzz replay support.
+    /// Resolve replay metadata and command environment without executing replay_command.
+    #[arg(long = "dry-run")]
+    pub(crate) dry_run: bool,
+
+    /// Additional arguments passed to the extension replay command.
     #[arg(last = true)]
     pub(crate) args: Vec<String>,
 }
@@ -277,8 +299,21 @@ pub struct FuzzReplayOutput {
     pub run_id: Option<String>,
     pub replay: Option<FuzzReplayMetadata>,
     pub env: Vec<FuzzReplayEnv>,
+    pub replay_command: Option<String>,
+    pub execution: Option<FuzzReplayExecution>,
     pub passthrough_args: Vec<String>,
     pub next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct FuzzReplayExecution {
+    pub kind: String,
+    pub extension_id: String,
+    pub exit_code: i32,
+    pub success: bool,
+    pub run_dir: String,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Serialize)]

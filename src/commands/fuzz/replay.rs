@@ -1,13 +1,17 @@
 use std::path::{Path, PathBuf};
 
+use homeboy::core::engine::run_dir::RunDir;
+use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner};
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzReplayMetadata, FuzzResultEnvelope, FUZZ_CAMPAIGN_SCHEMA,
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 
-use super::types::{FuzzReplayArgs, FuzzReplayEnv, FuzzReplayOutput};
+use super::super::utils::args::PositionalComponentArgs;
+use super::types::{FuzzReplayArgs, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput};
+use super::workloads::{load_rig, resolve_component_id, resolve_fuzz_context};
 
-pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<FuzzReplayOutput> {
+pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<(FuzzReplayOutput, i32)> {
     let artifact_file = replay_artifact_path(&args);
     let positional_case = args.artifact_or_case.as_ref().and_then(|value| {
         if artifact_file.is_some() && !Path::new(value).exists() {
@@ -36,33 +40,237 @@ pub(super) fn run_replay(args: FuzzReplayArgs) -> homeboy::core::Result<FuzzRepl
         replay.as_ref(),
         args.run_id.as_ref(),
     );
+    let replay_context = resolve_replay_context(&args)?;
+    let replay_command = replay_context
+        .as_ref()
+        .and_then(|context| context.replay_command.clone())
+        .map(|command| render_replay_command(&command, &env, args.args.as_slice()));
 
-    let status = if artifact_file.is_some() {
-        "dry_run"
-    } else {
-        "needs_artifact"
+    if args.dry_run {
+        let status = if artifact_file.is_some() {
+            "dry_run"
+        } else {
+            "needs_artifact"
+        };
+
+        return Ok((
+            FuzzReplayOutput {
+                command: "fuzz.replay".to_string(),
+                status: status.to_string(),
+                message: replay_message(replay_command.as_ref(), true),
+                artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+                campaign_id: resolved
+                    .as_ref()
+                    .and_then(|resolved| resolved.campaign_id.clone()),
+                envelope_id: resolved
+                    .as_ref()
+                    .and_then(|resolved| resolved.envelope_id.clone()),
+                case_id,
+                run_id: args.run_id,
+                replay,
+                env,
+                replay_command,
+                execution: None,
+                passthrough_args: args.args,
+                next_steps: replay_next_steps(true),
+            },
+            0,
+        ));
+    }
+
+    let Some(context) = replay_context else {
+        return Ok((FuzzReplayOutput {
+            command: "fuzz.replay".to_string(),
+            status: "unsupported".to_string(),
+            message: "Generic fuzz replay execution requires a component/rig extension context with fuzz.replay_command; use --dry-run to inspect metadata only."
+                .to_string(),
+            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
+            envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
+            case_id,
+            run_id: args.run_id,
+            replay,
+            env,
+            replay_command: None,
+            execution: None,
+            passthrough_args: args.args,
+            next_steps: replay_next_steps(false),
+        }, 1));
     };
 
-    Ok(FuzzReplayOutput {
-        command: "fuzz.replay".to_string(),
-        status: status.to_string(),
-        message: "Generic fuzz replay resolves replay metadata and prints the extension-owned execution contract; it does not execute local fuzz code without a component/extension context."
-            .to_string(),
-        artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
-        campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
-        envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
-        case_id,
-        run_id: args.run_id,
-        replay,
-        env,
-        passthrough_args: args.args,
-        next_steps: vec![
-            "Pass the reported HOMEBOY_FUZZ_REPLAY_* values to the originating extension replay runner."
-                .to_string(),
-            "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it."
-                .to_string(),
-        ],
-    })
+    let Some(command) = replay_command.clone() else {
+        return Ok((FuzzReplayOutput {
+            command: "fuzz.replay".to_string(),
+            status: "unsupported".to_string(),
+            message: format!(
+                "Extension '{}' does not declare fuzz.replay_command; replay execution is unsupported for this context.",
+                context.execution_context.extension_id
+            ),
+            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            campaign_id: resolved.as_ref().and_then(|resolved| resolved.campaign_id.clone()),
+            envelope_id: resolved.as_ref().and_then(|resolved| resolved.envelope_id.clone()),
+            case_id,
+            run_id: args.run_id,
+            replay,
+            env,
+            replay_command: None,
+            execution: None,
+            passthrough_args: args.args,
+            next_steps: replay_next_steps(false),
+        }, 1));
+    };
+
+    let run_dir = RunDir::create()?;
+    let mut runner = ExtensionRunner::for_context(context.execution_context.clone())
+        .component(context.component)
+        .settings(&args.setting_args.setting)
+        .settings_json(&args.setting_args.setting_json)
+        .path_override(args.path.clone())
+        .with_run_dir(&run_dir)
+        .command_override(command.clone())
+        .passthrough(false);
+    for item in &env {
+        runner = runner.env(&item.name, &item.value);
+    }
+    let output = runner.run()?;
+    let exit_code = if output.success { 0 } else { output.exit_code };
+
+    Ok((
+        FuzzReplayOutput {
+            command: "fuzz.replay".to_string(),
+            status: if output.success { "passed" } else { "failed" }.to_string(),
+            message: replay_message(Some(&command), false),
+            artifact_file: artifact_file.map(|path| path.to_string_lossy().to_string()),
+            campaign_id: resolved
+                .as_ref()
+                .and_then(|resolved| resolved.campaign_id.clone()),
+            envelope_id: resolved
+                .as_ref()
+                .and_then(|resolved| resolved.envelope_id.clone()),
+            case_id,
+            run_id: args.run_id,
+            replay,
+            env,
+            replay_command: Some(command),
+            execution: Some(FuzzReplayExecution {
+                kind: "fuzz_replay".to_string(),
+                extension_id: context.execution_context.extension_id,
+                exit_code: output.exit_code,
+                success: output.success,
+                run_dir: run_dir.path().to_string_lossy().to_string(),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }),
+            passthrough_args: args.args,
+            next_steps: replay_next_steps(false),
+        },
+        exit_code,
+    ))
+}
+
+#[derive(Clone)]
+struct ResolvedReplayContext {
+    execution_context: homeboy::core::extension::ExtensionExecutionContext,
+    component: homeboy::core::component::Component,
+    replay_command: Option<String>,
+}
+
+fn resolve_replay_context(
+    args: &FuzzReplayArgs,
+) -> homeboy::core::Result<Option<ResolvedReplayContext>> {
+    let comp = replay_component_args(args);
+    if comp.id().is_none() && args.rig.is_none() {
+        return Ok(None);
+    }
+
+    let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
+    let effective_id =
+        resolve_component_id(&comp, rig_context.as_ref().map(|context| &context.spec))?;
+    let ctx = resolve_fuzz_context(
+        &effective_id,
+        &comp,
+        &args.setting_args,
+        &args.extension_override,
+        ExtensionCapability::Fuzz,
+        rig_context.as_ref(),
+    )?;
+    let execution_context =
+        extension::resolve_execution_context(&ctx.component, ExtensionCapability::Fuzz)?;
+    let replay_command = extension::load_extension(&execution_context.extension_id)
+        .ok()
+        .and_then(|manifest| manifest.fuzz)
+        .and_then(|fuzz| fuzz.replay_command);
+
+    Ok(Some(ResolvedReplayContext {
+        execution_context,
+        component: ctx.component,
+        replay_command,
+    }))
+}
+
+fn replay_component_args(args: &FuzzReplayArgs) -> PositionalComponentArgs {
+    PositionalComponentArgs {
+        component: args.component.clone(),
+        path: args.path.clone(),
+    }
+}
+
+fn replay_message(command: Option<&String>, dry_run: bool) -> String {
+    match (command, dry_run) {
+        (Some(_), true) => "Generic fuzz replay resolved an extension replay_command and printed the execution environment without running it.".to_string(),
+        (Some(_), false) => "Generic fuzz replay executed the extension replay_command with canonical Homeboy fuzz replay environment.".to_string(),
+        (None, _) => "Generic fuzz replay resolved replay metadata and printed the extension-owned execution contract; no replay_command is available to execute.".to_string(),
+    }
+}
+
+fn replay_next_steps(dry_run: bool) -> Vec<String> {
+    if dry_run {
+        return vec![
+            "Run without --dry-run to execute the resolved extension replay_command.".to_string(),
+            "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it.".to_string(),
+        ];
+    }
+
+    vec![
+        "Inspect execution stdout/stderr in this replay result for runner-owned reproduction details.".to_string(),
+        "Use `homeboy runs artifacts <run-id>` to locate persisted fuzz evidence when a runner records it.".to_string(),
+    ]
+}
+
+fn render_replay_command(command: &str, env: &[FuzzReplayEnv], args: &[String]) -> String {
+    let mut rendered = command.to_string();
+    for (placeholder, env_name) in [
+        ("artifact", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE"),
+        ("artifact_file", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE"),
+        ("case", "HOMEBOY_FUZZ_REPLAY_CASE_ID"),
+        ("case_id", "HOMEBOY_FUZZ_REPLAY_CASE_ID"),
+        ("run_id", "HOMEBOY_FUZZ_REPLAY_RUN_ID"),
+        ("replay", "HOMEBOY_FUZZ_REPLAY_ID"),
+        ("replay_id", "HOMEBOY_FUZZ_REPLAY_ID"),
+        ("seed", "HOMEBOY_FUZZ_REPLAY_SEED"),
+        ("replay_seed", "HOMEBOY_FUZZ_REPLAY_SEED"),
+        ("replay_artifact_id", "HOMEBOY_FUZZ_REPLAY_ARTIFACT_ID"),
+    ] {
+        if let Some(value) = env_value(env, env_name) {
+            rendered = rendered.replace(
+                &format!("{{{placeholder}}}"),
+                &homeboy::core::engine::shell::quote_arg(value),
+            );
+        }
+    }
+
+    if !args.is_empty() {
+        rendered.push(' ');
+        rendered.push_str(&homeboy::core::engine::shell::quote_args(args));
+    }
+
+    rendered
+}
+
+fn env_value<'a>(env: &'a [FuzzReplayEnv], name: &str) -> Option<&'a str> {
+    env.iter()
+        .find(|item| item.name == name)
+        .map(|item| item.value.as_str())
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +433,7 @@ fn fuzz_replay_env(
     }
     if let Some(run_id) = run_id.filter(|run_id| !run_id.trim().is_empty()) {
         push_replay_env(&mut env, "HOMEBOY_FUZZ_RUN_ID", run_id.clone());
+        push_replay_env(&mut env, "HOMEBOY_FUZZ_REPLAY_RUN_ID", run_id.clone());
     }
     if let Some(replay) = replay {
         push_replay_env(&mut env, "HOMEBOY_FUZZ_REPLAY_ID", replay.id.clone());
