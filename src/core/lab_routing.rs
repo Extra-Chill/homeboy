@@ -38,6 +38,9 @@ pub struct LabRoutingRequest<'a> {
     pub active_run_id: Option<&'a str>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
+    /// Controller-local `--output` path forwarded to the offload executor so the
+    /// durable agent-task run id can be persisted before long execution (#5684).
+    pub local_output_file: Option<&'a str>,
 }
 
 pub(crate) fn route_lab_offload(
@@ -58,6 +61,7 @@ pub(crate) fn route_lab_offload(
         mutation_flag: request.mutation_flag,
         detach_after_handoff: request.detach_after_handoff,
         output_file_requested: request.output_file_requested,
+        local_output_file: request.local_output_file,
     })
 }
 
@@ -417,6 +421,7 @@ fn execute_lab_offload_with_timeout(
     let mutation_flag = request.mutation_flag.map(str::to_string);
     let detach_after_handoff = request.detach_after_handoff;
     let output_file_requested = request.output_file_requested;
+    let local_output_file = request.local_output_file.map(str::to_string);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = runners::execute_lab_offload(runners::LabOffloadRequest {
@@ -430,6 +435,7 @@ fn execute_lab_offload_with_timeout(
             mutation_flag: mutation_flag.as_deref(),
             detach_after_handoff,
             output_file_requested,
+            local_output_file: local_output_file.as_deref(),
         });
         let _ = tx.send(result);
     });
@@ -592,6 +598,7 @@ mod tests {
             active_run_id: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         })
         .unwrap();
 
@@ -761,6 +768,7 @@ mod tests {
                 active_run_id: None,
                 detach_after_handoff: false,
                 output_file_requested: false,
+                local_output_file: None,
             },
             None,
             observer,
