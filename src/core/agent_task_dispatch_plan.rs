@@ -72,9 +72,9 @@ pub fn build_dispatch_plan_with_provider_requirements(
         });
     let mut prompt_specs = Vec::new();
     if let Some(prompt) = &request.prompt {
-        prompt_specs.push(prompt.clone());
+        prompt_specs.push(DispatchPromptSpec::new(prompt.clone()));
     }
-    prompt_specs.extend(request.tasks.clone());
+    prompt_specs.extend(request.tasks.iter().cloned().map(DispatchPromptSpec::new));
     prompt_specs.extend(read_dispatch_tasks_json(
         request.core.tasks_json.as_deref(),
     )?);
@@ -88,10 +88,13 @@ pub fn build_dispatch_plan_with_provider_requirements(
     let mut tasks = Vec::new();
     for (index, prompt_spec) in prompt_specs.iter().enumerate() {
         let instructions = dispatch_instructions(
-            read_text_spec(prompt_spec, "prompt")?,
+            read_text_spec(&prompt_spec.prompt, "prompt")?,
             request.task_url.as_deref(),
         );
-        let task_id = dispatch_task_id(repo.as_deref(), index);
+        let task_id = prompt_spec
+            .task_id
+            .clone()
+            .unwrap_or_else(|| dispatch_task_id(repo.as_deref(), index));
         let mut source_refs = Vec::new();
         if let Some(task_url) = &request.task_url {
             source_refs.push(AgentTaskSourceRef {
@@ -162,7 +165,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "client_context": client_context,
                 "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
                 "task_url": request.task_url,
-                "prompt_source": prompt_spec,
+                "prompt_source": &prompt_spec.prompt,
                 "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
             }),
@@ -595,7 +598,21 @@ fn read_text_spec(spec: &str, label: &str) -> Result<String> {
     })
 }
 
-fn read_dispatch_tasks_json(spec: Option<&str>) -> Result<Vec<String>> {
+struct DispatchPromptSpec {
+    prompt: String,
+    task_id: Option<String>,
+}
+
+impl DispatchPromptSpec {
+    fn new(prompt: String) -> Self {
+        Self {
+            prompt,
+            task_id: None,
+        }
+    }
+}
+
+fn read_dispatch_tasks_json(spec: Option<&str>) -> Result<Vec<DispatchPromptSpec>> {
     let Some(spec) = spec else {
         return Ok(Vec::new());
     };
@@ -619,7 +636,7 @@ fn read_dispatch_tasks_json(spec: Option<&str>) -> Result<Vec<String>> {
     }
 }
 
-fn task_prompts_from_json_items(items: Vec<Value>) -> Result<Vec<String>> {
+fn task_prompts_from_json_items(items: Vec<Value>) -> Result<Vec<DispatchPromptSpec>> {
     items
         .into_iter()
         .enumerate()
@@ -636,24 +653,44 @@ fn invalid_tasks_json_error() -> Error {
     )
 }
 
-fn task_prompt_from_json_item(item: Value, index: usize) -> Result<String> {
+fn task_prompt_from_json_item(item: Value, index: usize) -> Result<DispatchPromptSpec> {
     match item {
-        Value::String(prompt) => Ok(prompt),
-        Value::Object(mut object) => object
-            .remove("prompt")
-            .or_else(|| object.remove("instructions"))
-            .and_then(|value| value.as_str().map(str::to_string))
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "tasks",
-                    format!(
-                        "agent-task cook task item {} must include a string prompt or instructions field",
-                        index + 1
-                    ),
-                    None,
-                    None,
-                )
-            }),
+        Value::String(prompt) => Ok(DispatchPromptSpec::new(prompt)),
+        Value::Object(mut object) => {
+            validate_task_object_keys(&object, index)?;
+            let prompt = object
+                .remove("prompt")
+                .or_else(|| object.remove("instructions"))
+                .and_then(|value| value.as_str().map(str::to_string))
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "tasks",
+                        format!(
+                            "agent-task cook task item {} must include a string prompt or instructions field",
+                            index + 1
+                        ),
+                        None,
+                        None,
+                    )
+                })?;
+            let task_id = object
+                .remove("task_id")
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "tasks",
+                            format!(
+                                "agent-task cook task item {} task_id field must be a string",
+                                index + 1
+                            ),
+                            None,
+                            None,
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(DispatchPromptSpec { prompt, task_id })
+        }
         _ => Err(Error::validation_invalid_argument(
             "tasks",
             format!(
@@ -664,6 +701,23 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<String> {
             None,
         )),
     }
+}
+
+fn validate_task_object_keys(object: &serde_json::Map<String, Value>, index: usize) -> Result<()> {
+    for key in object.keys() {
+        if key != "prompt" && key != "instructions" && key != "task_id" {
+            return Err(Error::validation_invalid_argument(
+                "tasks",
+                format!(
+                    "agent-task cook task item {} includes unsupported field {key:?}; supported fields are prompt, instructions, and task_id",
+                    index + 1
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn dispatch_task_id(repo: Option<&str>, index: usize) -> String {
@@ -826,7 +880,7 @@ mod tests {
         let tasks = tempfile::NamedTempFile::new().expect("tasks file");
         std::fs::write(
             tasks.path(),
-            r#"{"tasks":["Cook issue A",{"prompt":"Cook issue B"}]}"#,
+            r#"{"tasks":["Cook issue A",{"prompt":"Cook issue B"},{"instructions":"Cook issue C","task_id":"custom-cook-c"}]}"#,
         )
         .expect("write tasks");
 
@@ -842,13 +896,37 @@ mod tests {
         }))
         .expect("dispatch wave plan");
 
-        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks.len(), 3);
         assert_eq!(plan.options.max_concurrency, 8);
         assert_eq!(plan.options.retry.max_attempts, 3);
         assert_eq!(plan.tasks[0].task_id, "cook-homeboy");
         assert_eq!(plan.tasks[1].task_id, "cook-homeboy-2");
+        assert_eq!(plan.tasks[2].task_id, "custom-cook-c");
         assert_eq!(plan.tasks[0].instructions, "Cook issue A");
         assert_eq!(plan.tasks[1].instructions, "Cook issue B");
+        assert_eq!(plan.tasks[2].instructions, "Cook issue C");
+    }
+
+    #[test]
+    fn rejects_tasks_json_items_with_unknown_object_keys() {
+        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
+        std::fs::write(
+            tasks.path(),
+            r#"{"tasks":[{"prompt":"Cook issue A","priority":"high"}]}"#,
+        )
+        .expect("write tasks");
+
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            core: DispatchCoreInputs {
+                tasks_json: Some(format!("@{}", tasks.path().display())),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect_err("unknown task object field should fail");
+
+        assert!(error.to_string().contains("unsupported field"));
+        assert!(error.to_string().contains("priority"));
     }
 
     #[test]
