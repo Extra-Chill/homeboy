@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.66] - 2026-06-23
+
+### Changed
+- Merge duplicate Codebox runtime contracts
+
 ## [3.12.65] - 2026-06-23
 
 ### Fixed
