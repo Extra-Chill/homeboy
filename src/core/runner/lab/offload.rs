@@ -638,8 +638,18 @@ fn run_runner_resident_lab_offload(
             .build(),
     );
 
-    let remapped_args = rewrite_runner_resident_lab_offload_args(request.normalized_args);
+    let remote_output_file = request
+        .output_file_requested
+        .then(|| remote_lab_output_file(runner_workspace_root));
+    let remapped_args = rewrite_runner_resident_lab_offload_args(
+        request.normalized_args,
+        remote_output_file.as_deref(),
+    );
     let mut command = vec![homeboy_path.to_string()];
+    if remote_output_file.is_some() && !args_contain_output_file(request.normalized_args) {
+        command.push("--output".to_string());
+        command.push(remote_output_file.clone().expect("remote output path"));
+    }
     command.extend(remapped_args.iter().skip(1).cloned());
     plan = with_step(
         plan,
@@ -746,12 +756,17 @@ fn run_runner_resident_lab_offload(
         append_runner_failure_context_summary(&mut stderr, &exec_output);
     }
 
+    let output_file_content = match remote_output_file.as_deref() {
+        Some(path) => Some(download_lab_output_file(runner_id, path)?),
+        None => None,
+    };
+
     Ok(LabOffloadOutcome::Offloaded {
         plan,
         stdout: exec_output.stdout,
         stderr,
         exit_code,
-        output_file_content: None,
+        output_file_content,
     })
 }
 
@@ -1115,14 +1130,21 @@ fn prepare_lab_offload_workspace_stage(
         .output_file_requested
         .then(|| remote_lab_output_file(&remote_cwd));
     let mut command = command_prefix_argv.to_vec();
-    if let Some(path) = &remote_output_file {
-        command.push("--output".to_string());
-        command.push(path.clone());
+    if !args_contain_output_file(&remapped_args) {
+        if let Some(path) = &remote_output_file {
+            command.push("--output".to_string());
+            command.push(path.clone());
+        }
     }
     command.extend(
-        rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
-            .into_iter()
-            .skip(1),
+        rewrite_lab_offload_args(
+            &remapped_args,
+            &remote_cwd,
+            &path_remaps,
+            remote_output_file.as_deref(),
+        )
+        .into_iter()
+        .skip(1),
     );
     let remote_command = command.clone();
     plan = with_step(
@@ -1160,6 +1182,20 @@ fn remote_lab_output_file(remote_cwd: &str) -> String {
         remote_cwd.trim_end_matches('/'),
         nonce
     )
+}
+
+fn args_contain_output_file(args: &[String]) -> bool {
+    let mut passthrough = false;
+    args.iter().any(|arg| {
+        if passthrough {
+            return false;
+        }
+        if arg == "--" {
+            passthrough = true;
+            return false;
+        }
+        arg == "--output" || arg.starts_with("--output=")
+    })
 }
 
 fn materialize_lab_at_files_on_runner(runner_id: &str, specs: &[LabAtFileSpec]) -> Result<()> {

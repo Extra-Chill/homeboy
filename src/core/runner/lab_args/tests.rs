@@ -40,7 +40,7 @@ fn runner_resident_rewrite_preserves_runner_side_cwd() {
     ];
 
     assert_eq!(
-        rewrite_runner_resident_lab_offload_args(&args),
+        rewrite_runner_resident_lab_offload_args(&args, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -80,7 +80,7 @@ fn runner_resident_rewrite_expose_drops_server_and_marks_runner_local() {
         "ssh-only".to_string(),
     ];
 
-    let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+    let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
     assert_eq!(
         rewritten,
         vec![
@@ -117,7 +117,7 @@ fn runner_resident_rewrite_expose_handles_inline_server_value() {
         "127.0.0.1".to_string(),
     ];
 
-    let rewritten = rewrite_runner_resident_lab_offload_args(&args);
+    let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
     assert!(!rewritten.iter().any(|arg| arg.starts_with("--server")));
     assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
 }
@@ -976,7 +976,7 @@ fn lab_args_rewrite_agent_task_dispatch_cwd() {
     ];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[]),
+        rewrite_lab_offload_args(&args, "/home/user/Developer/wp-site-generator", &[], None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1003,7 +1003,7 @@ fn lab_args_rewrite_path_with_dependency_mapping() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+        rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1033,7 +1033,7 @@ fn lab_args_rewrite_path_prefers_more_specific_duplicate_local_mapping() {
     ];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/runner/primary", &mappings),
+        rewrite_lab_offload_args(&args, "/runner/primary", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1061,7 +1061,12 @@ fn lab_args_rewrite_remaps_absolute_at_file_args() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/wp-site-generator", &mappings),
+        rewrite_lab_offload_args(
+            &args,
+            "/home/user/_lab_workspaces/wp-site-generator",
+            &mappings,
+            None,
+        ),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
@@ -1090,7 +1095,7 @@ fn lab_args_rewrite_remaps_standalone_absolute_file_args() {
     }];
 
     assert_eq!(
-        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings),
+        rewrite_lab_offload_args(&args, "/home/user/_lab_workspaces/project", &mappings, None),
         vec![
             "homeboy".to_string(),
             "--force-hot".to_string(),
