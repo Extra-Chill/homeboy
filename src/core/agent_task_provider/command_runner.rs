@@ -4,6 +4,7 @@ use super::runner_readiness::{
 };
 use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
+use crate::core::agent_task_executor_evidence::link_latest_executor_evidence;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ProviderCommandEnvError {
@@ -43,6 +44,9 @@ pub(super) fn run_provider_command(
             if attempt > 1 {
                 annotate_transient_retry(&mut outcome, attempt, retryable);
             }
+            // Preserve and link the latest raw executor input/result as
+            // first-class run evidence before returning the final outcome.
+            link_latest_executor_evidence(request, &mut outcome);
             return outcome;
         }
 
