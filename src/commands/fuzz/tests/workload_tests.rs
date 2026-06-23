@@ -78,6 +78,9 @@ fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_cont
         run_id: Some("proof-1".to_string()),
         seed: Some("1234".to_string()),
         inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
         max_duration: Some("60s".to_string()),
         args: vec![],
     };
@@ -157,6 +160,9 @@ fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
         run_id: Some("proof-1".to_string()),
         seed: None,
         inventory: None,
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
         max_duration: None,
         args: vec![],
     };

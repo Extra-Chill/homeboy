@@ -5,8 +5,8 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ## Synopsis
 
 ```bash
-homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
-homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
+homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
 homeboy fuzz validate <results-file>
@@ -61,6 +61,24 @@ Runner scripts receive `HOMEBOY_FUZZ_RESULTS_FILE` pointing at
 `homeboy/fuzz-campaign/v1` campaign object there, `homeboy fuzz run` parses it
 and returns it as `results` in the JSON envelope. Malformed JSON fails the run
 instead of being treated as proof.
+
+Strict proof runs can require the runner to emit key fuzz artifacts directly from
+`homeboy fuzz run`:
+
+```bash
+homeboy fuzz run --rig <rig-id> --workload <workload-id> \
+  --require-case-log \
+  --require-coverage-summary \
+  --require-result-envelope
+```
+
+These flags preserve the default permissive runner contract unless requested. In
+strict mode, `--require-case-log` requires a campaign artifact with id or kind
+`case-log` / `case_log`; `--require-coverage-summary` requires either a campaign
+`coverage_summary` or a `coverage-summary` / `coverage_summary` artifact; and
+`--require-result-envelope` requires a `result-envelope` / `result_envelope`
+artifact. Missing strict artifacts fail the run after extension execution, so
+the runner stdout/stderr and raw results path remain available for diagnosis.
 
 `homeboy fuzz plan --inventory <path>`, `homeboy fuzz run --inventory <path>`,
 and `homeboy fuzz report --inventory <path>`

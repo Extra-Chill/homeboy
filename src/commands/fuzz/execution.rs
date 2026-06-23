@@ -4,7 +4,7 @@ use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
-use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzCampaign, FuzzFindingStatus};
+use homeboy::core::fuzz::{parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzFindingStatus};
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 use homeboy::core::rig::{self, FuzzPrepareReport, RigSpec};
@@ -82,11 +82,15 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
     } else {
         (None, None)
     };
+    let artifact_validation_error = fuzz_run_artifact_validation_error(&args, results.as_ref());
+    let combined_results_error = results_error
+        .as_deref()
+        .or(artifact_validation_error.as_deref());
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
         runner_output.success,
         results.as_ref(),
-        results_error.as_deref(),
+        combined_results_error,
     );
     let exit_code = outcome.exit_code;
     let success = outcome.success;
@@ -108,11 +112,11 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         args: &args,
         results_path: &results_path,
         results: results.as_ref(),
-        results_error: results_error.as_deref(),
+        results_error: combined_results_error,
     })?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
-        results_error.as_deref(),
+        combined_results_error,
         &results_path,
     );
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
@@ -151,6 +155,66 @@ pub(super) fn run_run(args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput
         },
         exit_code,
     ))
+}
+
+pub(super) fn fuzz_run_artifact_validation_error(
+    args: &FuzzRunArgs,
+    results: Option<&FuzzCampaign>,
+) -> Option<String> {
+    if !args.require_case_log && !args.require_coverage_summary && !args.require_result_envelope {
+        return None;
+    }
+
+    let Some(campaign) = results else {
+        return Some(
+            "strict fuzz artifact validation requested but runner did not emit a fuzz campaign"
+                .to_string(),
+        );
+    };
+
+    let mut missing = Vec::new();
+    if args.require_case_log && !campaign_has_artifact(campaign, &["case-log", "case_log"]) {
+        missing.push("case log (--require-case-log)");
+    }
+    if args.require_coverage_summary
+        && campaign.coverage_summary.is_none()
+        && !campaign_has_artifact(campaign, &["coverage-summary", "coverage_summary"])
+    {
+        missing.push("coverage summary (--require-coverage-summary)");
+    }
+    if args.require_result_envelope
+        && !campaign_has_artifact(
+            campaign,
+            &[
+                "result-envelope",
+                "result_envelope",
+                "fuzz-result-envelope",
+                "fuzz_result_envelope",
+            ],
+        )
+    {
+        missing.push("result envelope (--require-result-envelope)");
+    }
+
+    (!missing.is_empty()).then(|| {
+        format!(
+            "strict fuzz artifact validation failed; missing required artifact(s): {}",
+            missing.join(", ")
+        )
+    })
+}
+
+fn campaign_has_artifact(campaign: &FuzzCampaign, aliases: &[&str]) -> bool {
+    campaign
+        .artifacts
+        .iter()
+        .any(|artifact| fuzz_artifact_matches(artifact, aliases))
+}
+
+fn fuzz_artifact_matches(artifact: &FuzzArtifact, aliases: &[&str]) -> bool {
+    aliases
+        .iter()
+        .any(|alias| artifact.id == *alias || artifact.kind == *alias)
 }
 
 fn fuzz_prepare_settings(args: &FuzzRunArgs) -> Vec<(String, String)> {
@@ -420,6 +484,15 @@ fn fuzz_run_command(
     }
     if let Some(max_duration) = args.max_duration.as_ref() {
         parts.extend(["--max-duration".to_string(), max_duration.clone()]);
+    }
+    if args.require_case_log {
+        parts.push("--require-case-log".to_string());
+    }
+    if args.require_coverage_summary {
+        parts.push("--require-coverage-summary".to_string());
+    }
+    if args.require_result_envelope {
+        parts.push("--require-result-envelope".to_string());
     }
     if !args.args.is_empty() {
         parts.push("--".to_string());

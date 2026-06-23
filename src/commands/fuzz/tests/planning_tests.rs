@@ -181,6 +181,9 @@ fn fuzz_run_parses_generic_contract_flags() {
         "1234",
         "--inventory",
         "/tmp/fuzz-inventory.json",
+        "--require-case-log",
+        "--require-coverage-summary",
+        "--require-result-envelope",
         "--max-duration",
         "60s",
         "--",
@@ -199,6 +202,9 @@ fn fuzz_run_parses_generic_contract_flags() {
                 run.inventory.as_deref(),
                 Some(Path::new("/tmp/fuzz-inventory.json"))
             );
+            assert!(run.require_case_log);
+            assert!(run.require_coverage_summary);
+            assert!(run.require_result_envelope);
             assert_eq!(run.max_duration.as_deref(), Some("60s"));
             assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
         }

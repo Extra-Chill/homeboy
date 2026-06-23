@@ -2,8 +2,8 @@
 
 use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
 use super::execution::{
-    fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_outcome, fuzz_runner_env,
-    persist_fuzz_run_evidence, FuzzRunEvidenceInput,
+    fuzz_campaign_contract, fuzz_evidence_followups, fuzz_run_artifact_validation_error,
+    fuzz_run_outcome, fuzz_runner_env, persist_fuzz_run_evidence, FuzzRunEvidenceInput,
 };
 use super::planning::plan_inventory_selection;
 use super::replay::run_replay;
@@ -82,6 +82,9 @@ fn planner_args() -> FuzzPlanArgs {
             run_id: Some("proof-1".to_string()),
             seed: None,
             inventory: None,
+            require_case_log: false,
+            require_coverage_summary: false,
+            require_result_envelope: false,
             max_duration: None,
             args: Vec::new(),
         },
@@ -199,6 +202,9 @@ fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {
         run_id: Some(run_id.to_string()),
         seed: Some("1234".to_string()),
         inventory: None,
+        require_case_log: false,
+        require_coverage_summary: false,
+        require_result_envelope: false,
         max_duration: None,
         args: vec![],
     }
