@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.256.4] - 2026-06-23
+
+### Fixed
+- expose shell-safe setting env vars
+- run rig prepare pipeline
+- ignore injected force-hot in workload labels
+
 ## [0.256.3] - 2026-06-23
 
 ### Fixed
