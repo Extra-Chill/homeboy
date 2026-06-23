@@ -67,19 +67,27 @@ pub fn sync_workspace(
                 "",
             );
             let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
-            if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                materialize_snapshot_git(&runner, &local_path, &remote_path, &excludes, &snapshot)?;
+            let synthetic_checkout_commit = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit
+            {
+                materialize_snapshot_git(&runner, &local_path, &remote_path, &excludes, &snapshot)?
+                    .synthetic_commit
             } else {
                 materialize_snapshot(&runner, &local_path, &remote_path, &excludes)?;
-            }
+                None
+            };
             let validation_dependencies = sync_validation_dependency_workspaces(
                 &runner,
                 &local_path,
                 &remote_path,
                 &excludes,
             )?;
-            let current_workspace =
-                current_workspace_summary(&local_path, &remote_path, options.mode, true);
+            let current_workspace = current_workspace_summary(
+                &local_path,
+                &remote_path,
+                options.mode,
+                true,
+                synthetic_checkout_commit,
+            );
             let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
                 RunnerWorkspaceSyncOutput {
@@ -162,6 +170,7 @@ pub fn sync_workspace(
                 &remote_path,
                 RunnerWorkspaceSyncMode::Git,
                 true,
+                None,
             );
             let workspace_lease = workspace_lease(&runner.id, &current_workspace);
             Ok((
@@ -213,6 +222,7 @@ fn current_workspace_summary(
     remote_path: &str,
     sync_mode: RunnerWorkspaceSyncMode,
     materialized: bool,
+    synthetic_checkout_commit: Option<String>,
 ) -> RunnerWorkspaceCurrentSummary {
     let git_state = local_git_state(local_path);
     RunnerWorkspaceCurrentSummary {
@@ -223,6 +233,7 @@ fn current_workspace_summary(
         source_commit: git_state.commit,
         source_ref: git_state.ref_name,
         source_dirty: git_state.dirty,
+        synthetic_checkout_commit,
     }
 }
 

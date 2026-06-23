@@ -2981,6 +2981,7 @@ mod tests {
                 source_commit: None,
                 source_ref: None,
                 source_dirty: None,
+                synthetic_checkout_commit: None,
             },
             workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                 runner_id: "lab".to_string(),
@@ -3018,6 +3019,7 @@ mod tests {
                 source_commit: Some("abc123".to_string()),
                 source_ref: Some("main".to_string()),
                 source_dirty: Some(false),
+                synthetic_checkout_commit: None,
             },
             workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                 runner_id: "lab".to_string(),

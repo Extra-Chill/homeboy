@@ -94,6 +94,23 @@ pub(crate) fn ssh_client_for_runner(runner: &Runner) -> Result<(Server, SshClien
     Ok((server, client))
 }
 
+/// Best-effort capture of a shell command's trimmed stdout. Returns `None` on
+/// spawn failure or non-zero exit. Used for advisory provenance reads (e.g.
+/// reading a synthetic snapshot checkout's HEAD over SSH) where a failure must
+/// not abort the surrounding operation.
+pub(super) fn run_shell_capture(command: &str) -> Option<String> {
+    let output = Command::new("sh").args(["-c", command]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 pub(super) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     let output = Command::new("sh")
         .args(["-c", command])

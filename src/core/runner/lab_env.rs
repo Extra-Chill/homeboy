@@ -408,6 +408,7 @@ mod tests {
                     source_commit: None,
                     source_ref: None,
                     source_dirty: None,
+                    synthetic_checkout_commit: None,
                 },
                 workspace_lease: crate::core::runner::RunnerWorkspaceLease {
                     runner_id: "homeboy-lab".to_string(),
