@@ -210,6 +210,13 @@ pub(super) fn validate_provider_runner_readiness_for_backend_with_providers(
             ));
         }
         ProviderResolution::SelectorMismatch { available_ids } => {
+            let mut suggestions = vec![format!(
+                "Available provider ids for backend '{backend}': {}.",
+                available_ids.join(", ")
+            )];
+            if let Some(hint) = selector_runtime_provider_hint(backend, selector) {
+                suggestions.push(hint);
+            }
             return Err(Error::validation_invalid_argument(
                 "selector",
                 format!(
@@ -217,10 +224,7 @@ pub(super) fn validate_provider_runner_readiness_for_backend_with_providers(
                     selector.unwrap_or("")
                 ),
                 selector.map(str::to_string),
-                Some(vec![format!(
-                    "Available provider ids for backend '{backend}': {}.",
-                    available_ids.join(", ")
-                )]),
+                Some(suggestions),
             ));
         }
     };

@@ -313,9 +313,10 @@ where
         &args.policy_results,
         Some(&defaults),
     )?;
-    let from_spec = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest {
-        spec: materialized.spec.clone(),
-    })?;
+    let from_spec =
+        agent_task_controller_service::init_from_spec_for_resume(ControllerFromSpecRequest {
+            spec: materialized.spec.clone(),
+        })?;
     let dispatch = CliDispatchHook {
         executor: executor.clone(),
         defaults,
@@ -447,7 +448,13 @@ pub(super) fn controller_from_spec(args: AgentTaskControllerFromSpecArgs) -> Cmd
     if args.doctor {
         return controller_from_spec_doctor(spec, &args);
     }
-    let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
+    let report = if args.resume {
+        agent_task_controller_service::init_from_spec_for_resume(ControllerFromSpecRequest {
+            spec,
+        })?
+    } else {
+        agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?
+    };
     if !args.resume {
         return Ok((command_json_value(report)?, 0));
     }

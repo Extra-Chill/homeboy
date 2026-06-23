@@ -1,11 +1,14 @@
+use super::git;
+
 use std::fs;
 use std::path::Path;
 
-use crate::core::runner::workspace::snapshot::{snapshot_archive_command, snapshot_install_command};
-use crate::core::runner::workspace::sync::sync_workspace;
-use crate::core::runner::workspace::types::{
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+use crate::core::runner::workspace::snapshot::{
+    snapshot_archive_command, snapshot_install_command,
 };
+use crate::core::runner::workspace::sync::sync_workspace;
+use crate::core::runner::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+use crate::core::runner::workspace::util::git_output;
 
 #[test]
 fn runner_snapshot_includes_override_generated_output_excludes() {
@@ -124,8 +127,7 @@ fn test_sync_workspace() {
             "#!/bin/sh\n",
         )
         .expect("extension setup source file");
-        fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main\n")
-            .expect("git metadata");
+        fs::write(source.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("git metadata");
         fs::write(source.path().join("src/._main.rs"), "appledouble").expect("sidecar file");
         fs::write(source.path().join(".env.local"), "SECRET=1\n").expect("secret file");
         fs::write(source.path().join("target/debug/homeboy"), "binary").expect("build file");
@@ -201,8 +203,7 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
     crate::test_support::with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source tempdir");
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n")
-            .expect("manifest");
+        fs::write(source.path().join("Cargo.toml"), "[package]\nname='app'\n").expect("manifest");
 
         crate::core::runner::create(
             &format!(
@@ -236,6 +237,75 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
         assert!(second_remote_path.join("Cargo.toml").exists());
         assert!(!second_remote_path.join("sentinel.txt").exists());
         assert!(remote_path.join("sentinel.txt").exists());
+    });
+}
+
+#[test]
+fn snapshot_git_sync_materializes_dirty_source_as_synthetic_git_checkout() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = super::dirty_git_repo();
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/app.git",
+            ],
+        );
+
+        crate::core::runner::create(
+            &format!(
+                r#"{{"id":"lab-local-snapshot-git","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, exit_code) = sync_workspace(
+            "lab-local-snapshot-git",
+            RunnerWorkspaceSyncOptions {
+                path: source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                run_isolation_token: None,
+            },
+        )
+        .expect("sync workspace");
+
+        let remote = Path::new(&output.remote_path);
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+        assert_eq!(
+            output.current_workspace.sync_mode,
+            RunnerWorkspaceSyncMode::SnapshotGit
+        );
+        assert_eq!(output.current_workspace.source_dirty, Some(true));
+        assert_eq!(
+            output.workspace_cleanliness,
+            "snapshot_synthetic_git_unique_workspace"
+        );
+        assert_eq!(
+            fs::read_to_string(remote.join("file.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
+            "https://github.com/example/app.git"
+        );
+        assert!(git_output(remote, &["log", "-1", "--pretty=%B"])
+            .unwrap()
+            .contains(&output.snapshot_identity));
     });
 }
 

@@ -197,6 +197,83 @@ pub(crate) fn materialize_snapshot(
     }
 }
 
+pub(crate) fn materialize_snapshot_git(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    snapshot: &str,
+) -> Result<()> {
+    materialize_snapshot(runner, local_path, remote_path, excludes)?;
+    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot)
+}
+
+fn initialize_synthetic_git_checkout(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    snapshot: &str,
+) -> Result<()> {
+    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
+    let source_head = git_output(local_path, &["rev-parse", "HEAD"]).ok();
+    let command = synthetic_git_checkout_command(
+        remote_path,
+        snapshot,
+        remote_url.as_deref(),
+        source_head.as_deref(),
+    );
+
+    match runner.kind {
+        RunnerKind::Local => {
+            run_shell_command(&command, "initialize synthetic snapshot git checkout")
+        }
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            if client.is_local {
+                run_shell_command(&command, "initialize synthetic snapshot git checkout")
+            } else {
+                let remote = format!("{}@{}", client.user, client.host);
+                let ssh_command = format!(
+                    "ssh {ssh_args} {remote} {command}",
+                    ssh_args = ssh_args(&client),
+                    remote = shell::quote_arg(&remote),
+                    command = shell::quote_arg(&command),
+                );
+                run_shell_command(
+                    &ssh_command,
+                    "initialize SSH synthetic snapshot git checkout",
+                )
+            }
+        }
+    }
+}
+
+fn synthetic_git_checkout_command(
+    remote_path: &str,
+    snapshot: &str,
+    remote_url: Option<&str>,
+    source_head: Option<&str>,
+) -> String {
+    let remote_path = shell::quote_arg(remote_path);
+    let snapshot = shell::quote_arg(snapshot);
+    let source_head = shell::quote_arg(source_head.unwrap_or("unknown"));
+    let set_remote = remote_url
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            format!(
+                " && git -C {remote_path} remote add origin {remote_url}",
+                remote_url = shell::quote_arg(value)
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A && git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
+        message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
+        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}")),
+    )
+}
+
 pub(crate) fn copy_snapshot_to_directory(
     local_path: &Path,
     destination: &Path,

@@ -140,6 +140,14 @@ pub fn materialize_repo_loop_spec(
             .then_some(request.run_inputs)
     });
     if let Some(explicit_inputs) = explicit_inputs.filter(|value| !value.is_null()) {
+        if let Some(loop_id) = explicit_inputs
+            .get("loop_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|loop_id| !loop_id.is_empty())
+        {
+            spec.loop_id = loop_id.to_string();
+        }
         for workflow in &mut spec.workflows {
             merge_workflow_inputs(&mut workflow.inputs, explicit_inputs);
         }
@@ -494,6 +502,36 @@ mod tests {
         assert_eq!(
             plan.artifact_outputs["idea"][0].kind,
             "example/ConceptPacket/v1"
+        );
+    }
+
+    #[test]
+    fn materializes_repo_loop_id_from_run_inputs() {
+        let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-loop-spec/v1",
+            "loop_id": "example/base-loop",
+            "workflows": [
+                { "workflow_id": "idea", "prompt": "Generate an idea." }
+            ]
+        }))
+        .expect("spec parses");
+
+        let materialized = materialize_repo_loop_spec(AgentTaskLoopSpecMaterializationRequest {
+            spec: &spec,
+            run_inputs: &json!({
+                "inputs": {
+                    "loop_id": "example/base-loop/rerun-41",
+                    "run_id": "rerun-41"
+                }
+            }),
+            policy_results: &[],
+        })
+        .expect("spec materializes");
+
+        assert_eq!(materialized.spec.loop_id, "example/base-loop/rerun-41");
+        assert_eq!(
+            materialized.spec.workflows[0].inputs["run_id"],
+            json!("rerun-41")
         );
     }
 

@@ -821,6 +821,69 @@ fn init_from_spec_reconciles_changed_workflow_dependencies() {
 }
 
 #[test]
+fn init_from_spec_for_resume_rejects_changed_existing_spec() {
+    with_isolated_home(|_| {
+        let base = repo_loop_reconcile_spec("repo-loop-resume-stale-guard");
+        init_from_spec_for_resume(ControllerFromSpecRequest { spec: base.clone() })
+            .expect("base spec initialized for resume");
+
+        let mut changed = base;
+        changed
+            .workflows
+            .iter_mut()
+            .find(|workflow| workflow.workflow_id == "static_validation")
+            .expect("static validation workflow")
+            .dependencies = vec!["static_site_candidate".to_string()];
+
+        let error = init_from_spec_for_resume(ControllerFromSpecRequest { spec: changed })
+            .expect_err("changed spec is blocked before resume");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("persisted spec fingerprint is missing or different"));
+        assert!(error
+            .details
+            .get("tried")
+            .and_then(Value::as_array)
+            .is_some_and(|details| details.iter().any(|detail| detail
+                .as_str()
+                .is_some_and(|detail| detail.contains("controller_path=")))));
+    });
+}
+
+#[test]
+fn init_from_spec_projects_runtime_component_dependencies_to_contracts() {
+    with_isolated_home(|_| {
+        let mut spec = repo_loop_reconcile_spec("repo-loop-runtime-components");
+        spec.dependencies.push(AgentTaskRepoLoopSpecDependency {
+            dependency_id: "agents-api".to_string(),
+            kind: "runtime_component".to_string(),
+            value: Some("/tmp/homeboy-test/agents-api".to_string()),
+            required: true,
+        });
+        spec.workflows
+            .iter_mut()
+            .find(|workflow| workflow.workflow_id == "static_validation")
+            .expect("static validation workflow")
+            .dependencies = vec!["agents-api".to_string()];
+
+        let report = init_from_spec(ControllerFromSpecRequest { spec }).expect("spec initializes");
+        let context = workflow_action_context(&report, "static_validation");
+
+        assert_eq!(
+            context["runtime_component_contracts"],
+            json!([{
+                "slug": "agents-api",
+                "path": "/tmp/homeboy-test/agents-api",
+                "required": true,
+                "source": "repo_loop_spec_dependency",
+                "dependency_kind": "runtime_component"
+            }])
+        );
+    });
+}
+
+#[test]
 fn init_from_spec_maps_workflow_consumes_to_artifact_dependencies() {
     with_isolated_home(|_| {
         let mut spec = repo_loop_reconcile_spec("repo-loop-consumes-artifacts");
