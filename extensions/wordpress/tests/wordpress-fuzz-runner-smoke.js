@@ -94,6 +94,7 @@ assert.equal(result.wp_codebox_plan_recipe.fuzzSuite.cases[0].case_id, 'get-post
 assert.equal(result.coverage.schema, 'homeboy/wordpress-fuzz-coverage-aggregate/v1');
 assert.equal(result.coverage.totals.exercised, 1);
 assert.equal(result.homeboy_fuzz_campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
+assert.equal(result.homeboy_fuzz_campaign.version, 1);
 assert.equal(result.homeboy_fuzz_campaign.id, 'run-from-env');
 assert.equal(result.homeboy_fuzz_campaign.safety_class, 'read_only');
 assert.equal(result.homeboy_fuzz_campaign.metadata.status, 'failed');
@@ -120,6 +121,32 @@ const executedResult = buildWordPressFuzzRunnerResult({
 assert.equal(executedResult.status, 'succeeded');
 assert.equal(executedResult.succeeded, true);
 assert.equal(executedResult.homeboy_fuzz_campaign.metadata.artifact_refs[0].path, 'artifacts/replay.json');
+
+const mutatingPlanResult = buildWordPressFuzzRunnerResult({
+	env: {
+		workloadPath: '/unused/in-unit-test.json',
+		runId: 'mutating-plan-run',
+	},
+	workload: {
+		...workload,
+		plan: {
+			schema: 'wordpress-fuzz-plan/v1',
+			id: 'mutating-plan',
+			targets: [{
+				id: 'rest-posts-write',
+				surface_id: 'route:/wp/v2/posts',
+				cases: [{
+					id: 'create-post',
+					method: 'POST',
+					path: '/wp/v2/posts',
+					metadata: { safety: { level: 'mutating', mutates: true } },
+				}],
+			}],
+		},
+	},
+});
+
+assert.equal(mutatingPlanResult.homeboy_fuzz_campaign.safety_class, 'isolated_mutation');
 
 const jsonWorkloadResult = buildWordPressFuzzRunnerResult({
 	env: {
@@ -421,6 +448,7 @@ assert.equal(cliResult.succeeded, false);
 assert.equal(cliResult.wp_codebox_input.metadata.limits.max_duration_seconds, 15);
 const homeboyCampaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(homeboyCampaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
+assert.equal(homeboyCampaign.version, 1);
 assert.equal(homeboyCampaign.id, 'cli-run');
 assert.equal(homeboyCampaign.metadata.diagnostics[0].code, 'wp_codebox_fuzz_suite_execution_unsupported');
 

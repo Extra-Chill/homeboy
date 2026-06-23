@@ -110,6 +110,15 @@ assert.equal(taskRequest.executor.config.runtime_task.ability, DEFAULT_FUZZ_SUIT
 assert.equal(taskRequest.executor.config.runtime_task.input.schema, WP_CODEBOX_FUZZ_SUITE_SCHEMA);
 assert.deepEqual(taskRequest.expected_artifacts, DEFAULT_FUZZ_SUITE_EXPECTED_ARTIFACTS);
 assert.deepEqual(taskRequest.artifact_declarations, DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
+assert.deepEqual(
+	taskRequest.artifact_declarations.filter((artifact) => ['result-envelope', 'case-log', 'replay-data', 'coverage-summary'].includes(artifact.name)).map((artifact) => [artifact.name, artifact.semantic_key, artifact.required]),
+	[
+		['result-envelope', 'fuzz.result.envelope', true],
+		['case-log', 'fuzz.case.log', true],
+		['replay-data', 'fuzz.replay.data', true],
+		['coverage-summary', 'fuzz.coverage.summary', true],
+	]
+);
 assert.deepEqual(DEFAULT_FUZZ_RUN_ARTIFACT_DECLARATIONS, DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
 assert.deepEqual(legacyWpCodeboxFuzzRunArtifactDeclarationsAlias(), DEFAULT_FUZZ_SUITE_ARTIFACT_DECLARATIONS);
 assert.deepEqual(
@@ -350,6 +359,23 @@ runWpCodeboxFuzzSuite({
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'case_artifact').semantic_key, 'fuzz.case.artifact');
 	assert.equal(summary.artifacts.find((artifact) => artifact.role === 'repro_case').semantic_key, 'fuzz.case.repro');
 	assert.equal(summary.artifacts.some((artifact) => artifact.name === 'placeholder-only'), false);
+	assert.deepEqual(normalizeWpCodeboxFuzzSuiteResult({
+		json: {
+			schema: WP_CODEBOX_FUZZ_SUITE_RESULT_SCHEMA,
+			status: 'passed',
+			summary: { total: 1, passed: 1, failed: 0, error: 0, skipped: 0 },
+			cases: [{ id: 'artifact-contract-case', status: 'passed' }],
+			artifactRefs: [
+				{ name: 'case-log', path: 'cases/case-log.jsonl' },
+				{ name: 'replay-data', path: 'replay/replay-data.json' },
+				{ name: 'coverage-summary', path: 'coverage/summary.json' },
+			],
+		},
+	}).artifacts.map((artifact) => [artifact.role, artifact.semantic_key]), [
+		['case_log', 'fuzz.case.log'],
+		['replay_data', 'fuzz.replay.data'],
+		['coverage_summary', 'fuzz.coverage.summary'],
+	]);
 
 	const normalized = normalizeWpCodeboxFuzzSuiteResult({ status: 'failed', failures: [{ message: 'boom' }] });
 	assert.equal(normalized.succeeded, false);

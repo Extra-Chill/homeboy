@@ -21,6 +21,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordpress-fuzz-codebox-co
 const workloadPath = path.join(tempDir, 'workload.json');
 const resultsPath = path.join(tempDir, 'campaign.json');
 const observedRequestPath = path.join(tempDir, 'observed-fuzz-suite-request.json');
+const emptyCodeboxInstallRoot = path.join(tempDir, 'empty-wp-codebox-install');
 const fakeCodeboxBin = path.join(tempDir, 'wp-codebox');
 const runnerPath = path.join(__dirname, '..', 'scripts', 'fuzz', 'fuzz-runner.cjs');
 
@@ -48,6 +49,7 @@ const workload = {
 };
 
 fs.writeFileSync(workloadPath, `${JSON.stringify(workload, null, 2)}\n`);
+fs.mkdirSync(emptyCodeboxInstallRoot, { recursive: true });
 fs.writeFileSync(fakeCodeboxBin, `#!/usr/bin/env node
 const fs = require('node:fs');
 
@@ -104,6 +106,7 @@ const cli = spawnSync(runnerPath, [], {
 	env: {
 		...process.env,
 		HOMEBOY_WP_CODEBOX_BIN: fakeCodeboxBin,
+		HOMEBOY_WP_CODEBOX_INSTALL_DIR: emptyCodeboxInstallRoot,
 		HOMEBOY_FUZZ_WORKLOAD_PATH: workloadPath,
 		HOMEBOY_FUZZ_WORKLOAD_ID: 'contract-workload',
 		HOMEBOY_FUZZ_RUN_ID: 'contract-run',
@@ -140,6 +143,9 @@ assert.equal(observedRequest.schema, 'wp-codebox/fuzz-suite/v1');
 assert.equal(observedRequest.metadata.homeboy_agent_task_request.task_id, 'contract-run');
 assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts[0], 'wp-codebox-fuzz-suite-result');
 assert.equal(observedRequest.metadata.homeboy_agent_task_request.artifact_declarations[0].semantic_key, 'fuzz.result.normalized');
+assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('case-log'), true);
+assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('replay-data'), true);
+assert.equal(observedRequest.metadata.homeboy_agent_task_request.expected_artifacts.includes('coverage-summary'), true);
 
 const campaign = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
 assert.equal(campaign.schema, HOMEBOY_FUZZ_CAMPAIGN_SCHEMA);
