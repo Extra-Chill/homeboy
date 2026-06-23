@@ -73,6 +73,39 @@ const durationSync = runDeterministicLoop({
 assert.equal(durationExecutions, 2);
 assert.equal(durationSync.iterations.length, 2);
 
+let expiredDurationExecutions = 0;
+const expiredDuration = runDeterministicLoop({
+  mode: 'duration',
+  duration_ms: 500,
+  max_synchronous_revolutions: 2,
+  started_at: 1000,
+  now: () => 1500,
+  execute: () => {
+    expiredDurationExecutions += 1;
+    return { status: 'succeeded' };
+  },
+  stopCriteria: () => false,
+});
+assert.equal(expiredDurationExecutions, 0);
+assert.equal(expiredDuration.iterations.length, 0);
+assert.equal(expiredDuration.stop.reason, 'duration_elapsed');
+
+let expiredDeadlineExecutions = 0;
+const expiredDeadline = runDeterministicLoop({
+  mode: 'duration',
+  deadline_at: 2000,
+  max_synchronous_revolutions: 2,
+  now: () => 2000,
+  execute: () => {
+    expiredDeadlineExecutions += 1;
+    return { status: 'succeeded' };
+  },
+  stopCriteria: () => false,
+});
+assert.equal(expiredDeadlineExecutions, 0);
+assert.equal(expiredDeadline.iterations.length, 0);
+assert.equal(expiredDeadline.stop.reason, 'deadline_reached');
+
 assert.throws(
   () => runDeterministicLoop({
     mode: 'indefinite',

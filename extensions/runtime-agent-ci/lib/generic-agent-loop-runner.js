@@ -130,8 +130,13 @@ function runGenericDeterministicLoop(options = {}) {
   const evidence = [];
   const loop = runDeterministicLoop({
     loopId,
+    loop_policy: loopPolicy,
     maxIterations,
+    maxSynchronousRevolutions: maxIterations,
     maxAttempts: options.maxAttempts || options.max_attempts || options.retry?.max_attempts,
+    durationMs: loopPolicy.duration_ms,
+    deadlineAt: loopPolicy.deadline_at,
+    now: options.now,
     state: {
       ...initialState,
       tasks,

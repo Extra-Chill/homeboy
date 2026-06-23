@@ -32,6 +32,23 @@ function runDeterministicLoop(options = {}) {
 
   for (let iterationIndex = 0; iterationIndex < maxIterations; iterationIndex += 1) {
     const iteration = iterationIndex + 1;
+    const preIterationPolicyStatus = evaluateLoopPolicy(loopPolicy, {
+      completed_revolutions: iterationIndex,
+      started_at: startedAt,
+      now: options.now,
+      cancelled: options.cancelled,
+      cancellation_signal: options.cancellation_signal || options.cancellationSignal,
+    });
+    if (preIterationPolicyStatus.stop) {
+      return {
+        schema: DETERMINISTIC_LOOP_RESULT_SCHEMA,
+        loop_id: loopId,
+        status: loopStatus(iterations),
+        state,
+        iterations,
+        stop: normalizeStopDecision({ stop: true, reason: preIterationPolicyStatus.reason, data: { loop_policy_status: preIterationPolicyStatus } }),
+      };
+    }
     const input = buildIteration({ loop_id: loopId, iteration, state, iterations });
     let outcome;
     let error;
@@ -117,6 +134,7 @@ function runDeterministicLoop(options = {}) {
     status: loopStatus(iterations),
     state,
     iterations,
+    stop: iterations.at(-1)?.stop || normalizeStopDecision(false),
   };
 }
 

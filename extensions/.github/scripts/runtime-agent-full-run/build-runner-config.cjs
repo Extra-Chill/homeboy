@@ -80,6 +80,7 @@ function buildConfig(env) {
   const componentContracts = parseJsonInput('component_contracts', env.COMPONENT_CONTRACTS || '[]', 'array', []);
   const runtimeEnv = parseJsonInput('runtime_env', env.RUNTIME_ENV || '{}', 'object', {});
   const runtimeConfig = parseJsonInput('runtime_config', env.RUNTIME_CONFIG || '{}', 'object', {});
+  const loopPolicy = loopPolicyFromEnv(env);
   const providerPluginPaths = validationDependencies.providerPluginHostPath ? [validationDependencies.providerPluginHostPath] : [];
   const renderedRuntimeInputs = renderRuntimeWorkflowInputs({
     runtimeProviderConfig: runtime,
@@ -174,6 +175,7 @@ function buildConfig(env) {
     prompt: env.PROMPT || '',
     step_budget: Number(env.STEP_BUDGET || 16),
     time_budget_ms: Number(env.TIME_BUDGET_MS || 600000),
+    ...(Object.keys(loopPolicy).length > 0 ? { loop_policy: loopPolicy } : {}),
     expected_artifacts: parseJsonInput('expected_artifacts', env.EXPECTED_ARTIFACTS || '[]', 'array', []),
     artifact_declarations: runtimeProjection.artifact_declarations,
     sandbox_tool_policy: renderedRuntimeInputs.workflow_inputs.sandbox_tool_policy,
@@ -216,6 +218,24 @@ function buildConfig(env) {
       ...providerBenchEnv,
     },
   };
+}
+
+function loopPolicyFromEnv(env) {
+  const policy = parseJsonInput('loop_policy', env.LOOP_POLICY || '{}', 'object', {});
+  const maxRevolutions = positiveNumber(env.MAX_REVOLUTIONS);
+  const durationMs = positiveNumber(env.DURATION_MS);
+  const deadlineAt = String(env.DEADLINE_AT || '').trim();
+  return {
+    ...policy,
+    ...(maxRevolutions > 0 ? { max_revolutions: maxRevolutions } : {}),
+    ...(durationMs > 0 ? { duration_ms: durationMs } : {}),
+    ...(deadlineAt !== '' ? { deadline_at: deadlineAt } : {}),
+  };
+}
+
+function positiveNumber(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function providerBenchEnvFromManifest(runtime, provider, env) {
@@ -438,4 +458,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { buildConfig, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };
+module.exports = { buildConfig, loopPolicyFromEnv, projectRuntimeConfig, providerBenchEnvFromManifest, runtimePathRequired };

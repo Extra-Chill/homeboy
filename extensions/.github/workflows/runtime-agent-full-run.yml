@@ -155,6 +155,22 @@ name: Runtime Agent Full Run (reusable)
       time_budget_ms:
         type: number
         default: 600000
+      loop_policy:
+        description: JSON generic loop policy forwarded to deterministic loop-capable runners.
+        type: string
+        default: '{}'
+      max_revolutions:
+        description: Optional deterministic loop revolution cap. Zero leaves existing single-run behavior unchanged.
+        type: number
+        default: 0
+      duration_ms:
+        description: Optional deterministic loop wall-clock duration budget in milliseconds.
+        type: number
+        default: 0
+      deadline_at:
+        description: Optional deterministic loop absolute deadline as epoch milliseconds or an ISO-8601 timestamp.
+        type: string
+        default: ''
       output_mappings:
         description: JSON object mapping workflow output names to dotted paths in the runtime task result.
         type: string
@@ -526,6 +542,10 @@ jobs:
           MAX_TURNS: ${{ inputs.max_turns }}
           STEP_BUDGET: ${{ inputs.step_budget }}
           TIME_BUDGET_MS: ${{ inputs.time_budget_ms }}
+          LOOP_POLICY: ${{ inputs.loop_policy }}
+          MAX_REVOLUTIONS: ${{ inputs.max_revolutions }}
+          DURATION_MS: ${{ inputs.duration_ms }}
+          DEADLINE_AT: ${{ inputs.deadline_at }}
           EXPECTED_ARTIFACTS: ${{ inputs.expected_artifacts }}
           ARTIFACT_DECLARATIONS: ${{ inputs.artifact_declarations }}
           ARTIFACT_EXPORT_CONFIG: ${{ inputs.artifact_export_config }}

@@ -270,7 +270,7 @@ function runHeadlessPolicyLoop(options = {}) {
   const policyStatus = {
     schema: 'homeboy/headless-loop-policy-status/v1',
     status: latestAccepted ? 'succeeded' : 'failed',
-    stop_reason: stopReason || loop.iterations.at(-1)?.stop?.reason || 'unknown',
+    stop_reason: stopReason || loop.iterations.at(-1)?.stop?.reason || loop.stop?.reason || 'unknown',
     max_iterations: loopPolicy.max_iterations,
     max_revolutions: loopPolicy.max_revolutions,
     mode: loopPolicy.mode,

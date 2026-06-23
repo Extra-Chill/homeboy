@@ -152,6 +152,33 @@ assert.equal(durationBounded.status, 'failed');
 assert.equal(durationBounded.tasks[0].loop_policy.stop_reason, 'max_revolutions_reached');
 assert.equal(durationBounded.tasks[0].loop_policy.iteration_count, 2);
 
+let expiredHeadlessCalls = 0;
+const expiredHeadlessDeadline = runHeadlessDeterministicLoop({
+  spec: {
+    ...baseSpec,
+    task_id: 'expired-headless-deadline',
+    workload_id: 'expired-headless-deadline',
+    loop_policy: {
+      mode: 'duration',
+      deadline_at: 2000,
+      max_synchronous_revolutions: 2,
+      accepted_statuses: ['succeeded'],
+    },
+  },
+  runtime,
+  validate: false,
+  now: () => 2000,
+  execute: ({ request }) => {
+    expiredHeadlessCalls += 1;
+    return outcome(request, 'succeeded', 'Should not run.');
+  },
+});
+
+assert.equal(expiredHeadlessCalls, 0);
+assert.equal(expiredHeadlessDeadline.status, 'failed');
+assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.stop_reason, 'deadline_reached');
+assert.equal(expiredHeadlessDeadline.tasks[0].loop_policy.iteration_count, 0);
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-headless-loop-policy-'));
 try {
   const loopPolicyFile = path.join(tmpRoot, 'loop-policy.json');
