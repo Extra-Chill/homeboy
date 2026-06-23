@@ -655,7 +655,10 @@ fn invalid_tasks_json_error() -> Error {
 
 fn task_prompt_from_json_item(item: Value, index: usize) -> Result<DispatchPromptSpec> {
     match item {
-        Value::String(prompt) => Ok(DispatchPromptSpec::new(prompt)),
+        Value::String(prompt) => {
+            validate_task_prompt(&prompt, index)?;
+            Ok(DispatchPromptSpec::new(prompt))
+        }
         Value::Object(mut object) => {
             validate_task_object_keys(&object, index)?;
             let prompt = object
@@ -673,6 +676,7 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<DispatchPromp
                         None,
                     )
                 })?;
+            validate_task_prompt(&prompt, index)?;
             let task_id = object
                 .remove("task_id")
                 .map(|value| {
@@ -701,6 +705,22 @@ fn task_prompt_from_json_item(item: Value, index: usize) -> Result<DispatchPromp
             None,
         )),
     }
+}
+
+fn validate_task_prompt(prompt: &str, index: usize) -> Result<()> {
+    if !prompt.trim().is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "tasks",
+        format!(
+            "agent-task cook task item {} must include a non-empty prompt or instructions field",
+            index + 1
+        ),
+        None,
+        None,
+    ))
 }
 
 fn validate_task_object_keys(object: &serde_json::Map<String, Value>, index: usize) -> Result<()> {
@@ -927,6 +947,49 @@ mod tests {
 
         assert!(error.to_string().contains("unsupported field"));
         assert!(error.to_string().contains("priority"));
+    }
+
+    #[test]
+    fn rejects_tasks_json_empty_string_prompt_after_trimming() {
+        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
+        std::fs::write(tasks.path(), r#"{"tasks":["  \n\t  "]}"#).expect("write tasks");
+
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            core: DispatchCoreInputs {
+                tasks_json: Some(format!("@{}", tasks.path().display())),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect_err("empty task string should fail");
+
+        assert_eq!(error.details["field"], "tasks");
+        assert!(error
+            .to_string()
+            .contains("non-empty prompt or instructions"));
+    }
+
+    #[test]
+    fn rejects_tasks_json_object_without_usable_prompt() {
+        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
+        std::fs::write(
+            tasks.path(),
+            r#"{"tasks":[{"task_id":"missing-prompt"},{"prompt":"  "}]}"#,
+        )
+        .expect("write tasks");
+
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            core: DispatchCoreInputs {
+                tasks_json: Some(format!("@{}", tasks.path().display())),
+                ..DispatchCoreInputs::default()
+            },
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect_err("object without usable prompt should fail");
+
+        assert_eq!(error.details["field"], "tasks");
+        assert!(error.to_string().contains("task item 1"));
+        assert!(error.to_string().contains("prompt or instructions field"));
     }
 
     #[test]
