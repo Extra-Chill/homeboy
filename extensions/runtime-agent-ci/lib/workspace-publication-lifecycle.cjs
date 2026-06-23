@@ -86,7 +86,7 @@ function runShellCommand(commandConfig, workspace, key, hooks = {}) {
 function runCommandChecks(config, workspace, key, hooks = {}) {
   const commands = commandList(config, key);
   if (commands.length === 0) {
-    return { enabled: false, checks: [] };
+    return withLifecycleGateResult(key, { enabled: false, success: true, checks: [] });
   }
 
   const checks = [];

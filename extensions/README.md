@@ -22,6 +22,9 @@ helper contract.
 Generic runtime fanout/reconcile planning and runner primitives live in
 `runtime-agent-ci/lib/` and are documented in
 [`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
+Use `runAgentTaskToReview()` from `runtime-agent-ci` when a caller needs the
+standard single-task path: injectable runtime execution, workspace verification,
+dry-run or PR publication evidence, and one final green/red proof envelope.
 
 Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
 when a reusable integration needs documentation outside its owning project.
