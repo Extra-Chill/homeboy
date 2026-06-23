@@ -1,8 +1,7 @@
 //! Bridges between Lab offload execution and the local AgentTask lifecycle.
 //!
 //! - Inline `--plan` JSON arguments are materialized to a synced workspace file
-//!   so the runner can resolve them remotely (see
-//!   `materialize_inline_agent_task_plan_arg`).
+//!   so the runner can resolve them remotely.
 //! - Once the runner streams output back, `mirror_agent_task_run_plan_lifecycle`
 //!   replays the run-plan aggregate into the controller's lifecycle store so
 //!   `homeboy agent-task status/logs` keeps working transparently.
@@ -26,128 +25,36 @@ use crate::core::{config, Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(test)]
+use super::super::lab_args::materialize_inline_agent_task_json_specs_in_args;
+use super::super::lab_args::AgentTaskInlineJsonSpec;
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
 
-pub(super) fn materialize_inline_agent_task_plan_arg(
-    runner_id: &str,
-    args: &[String],
-) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    let in_context = subcommand_index(args, "agent-task")
-        .and_then(|index| args.get(index + 1).filter(|arg| arg.as_str() == "run-plan"))
-        .is_some();
-
-    materialize_inline_json_option(args, in_context, "--plan", |spec| {
-        sync_inline_agent_task_plan(runner_id, spec)
-    })
-}
-
-pub(super) fn materialize_inline_agent_task_tasks_arg(
-    runner_id: &str,
-    args: &[String],
-) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    materialize_inline_agent_task_tasks_arg_with(args, |spec| {
-        sync_inline_agent_task_file(
-            runner_id,
-            spec,
-            "agent-task-tasks.json",
-            "agent_task_tasks_remapped",
-        )
-    })
-}
-
+#[cfg(test)]
 fn materialize_inline_agent_task_tasks_arg_with(
     args: &[String],
-    sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
-) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    let in_context = subcommand_index(args, "agent-task")
-        .and_then(|index| {
-            args.get(index + 1)
-                .filter(|arg| matches!(arg.as_str(), "dispatch" | "cook"))
-        })
-        .is_some();
-
-    materialize_inline_json_option(args, in_context, "--tasks", sync)
-}
-
-/// Scans `args` for a single `--flag <json>` / `--flag=<json>` occurrence and,
-/// when `in_context` and the supplied `sync` closure produce a remapped spec,
-/// rewrites that argument to point at the synced workspace file. Parsing stops
-/// at the `--` passthrough boundary; this is argv materialization only and does
-/// not interpret anything past `--`.
-fn materialize_inline_json_option(
-    args: &[String],
-    in_context: bool,
-    flag: &str,
     mut sync: impl FnMut(&str) -> Result<Option<(String, LabWorkspaceMappingEntry)>>,
 ) -> Result<(Vec<String>, Option<LabWorkspaceMappingEntry>)> {
-    if !in_context {
-        return Ok((args.to_vec(), None));
-    }
-
-    let flag_eq = format!("{flag}=");
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.iter().peekable();
-    let mut passthrough = false;
-
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            out.push(arg.clone());
-            continue;
+    let (rewritten, entries) = materialize_inline_agent_task_json_specs_in_args(args, |spec| {
+        if spec.role == "agent_task_tasks_remapped" {
+            sync(spec.spec)
+        } else {
+            Ok(None)
         }
-        if arg == "--" {
-            passthrough = true;
-            out.push(arg.clone());
-            continue;
-        }
-        if arg == flag {
-            out.push(arg.clone());
-            if let Some(spec) = iter.next() {
-                if let Some((remapped_spec, entry)) = sync(spec)? {
-                    out.push(remapped_spec);
-                    out.extend(iter.cloned());
-                    return Ok((out, Some(entry)));
-                }
-                out.push(spec.clone());
-            }
-            continue;
-        }
-        if let Some(spec) = arg.strip_prefix(&flag_eq) {
-            if let Some((remapped_spec, entry)) = sync(spec)? {
-                out.push(format!("{flag}={remapped_spec}"));
-                out.extend(iter.cloned());
-                return Ok((out, Some(entry)));
-            }
-        }
-        out.push(arg.clone());
-    }
-
-    Ok((out, None))
+    })?;
+    Ok((
+        rewritten,
+        entries.into_iter().next().map(|entry| entry.entry),
+    ))
 }
 
-fn sync_inline_agent_task_plan(
+pub(super) fn sync_inline_agent_task_file(
     runner_id: &str,
-    spec: &str,
+    spec: AgentTaskInlineJsonSpec<'_>,
 ) -> Result<Option<(String, LabWorkspaceMappingEntry)>> {
-    sync_inline_agent_task_file(
-        runner_id,
-        spec,
-        "agent-task-plan.json",
-        "agent_task_plan_remapped",
-    )
-}
-
-fn sync_inline_agent_task_file(
-    runner_id: &str,
-    spec: &str,
-    filename: &str,
-    role: &str,
-) -> Result<Option<(String, LabWorkspaceMappingEntry)>> {
-    if spec == "-" || spec.starts_with('@') || !looks_like_inline_json(spec) {
-        return Ok(None);
-    }
-    serde_json::from_str::<serde_json::Value>(spec).map_err(|err| {
+    serde_json::from_str::<serde_json::Value>(spec.spec).map_err(|err| {
         Error::internal_json(
             err.to_string(),
             Some("parse remapped agent-task plan".to_string()),
@@ -160,8 +67,8 @@ fn sync_inline_agent_task_file(
             Some("create remapped agent-task plan workspace".to_string()),
         )
     })?;
-    let plan_file = temp.path().join(filename);
-    fs::write(&plan_file, spec).map_err(|err| {
+    let plan_file = temp.path().join(spec.filename);
+    fs::write(&plan_file, spec.spec).map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some("write remapped agent-task plan".to_string()),
@@ -181,14 +88,13 @@ fn sync_inline_agent_task_file(
         },
     )?
     .0;
-    let remote_spec = format!("@{}/{}", synced.remote_path.trim_end_matches('/'), filename);
-    let entry = workspace_mapping_entry(role, &synced);
+    let remote_spec = format!(
+        "@{}/{}",
+        synced.remote_path.trim_end_matches('/'),
+        spec.filename
+    );
+    let entry = workspace_mapping_entry(spec.role, &synced);
     Ok(Some((remote_spec, entry)))
-}
-
-fn looks_like_inline_json(spec: &str) -> bool {
-    let trimmed = spec.trim_start();
-    trimmed.starts_with('{') || trimmed.starts_with('[')
 }
 
 pub(super) fn mirror_agent_task_run_plan_lifecycle(args: &[String], stdout: &str) -> Result<()> {
@@ -537,7 +443,7 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
 
 pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
-    let action_index = invocation.child_index_matching(&["cook"])?;
+    let action_index = invocation.child_index_matching(&["cook", "dispatch"])?;
     invocation
         .option_value_after(action_index, "--run-id")
         .map(str::to_string)
@@ -556,7 +462,7 @@ pub(super) fn ensure_agent_task_dispatch_run_id_with(
     preferred: Option<&str>,
 ) -> Option<(Vec<String>, String)> {
     let invocation = CommandInvocation::for_subcommand(args, "agent-task")?;
-    let action_index = invocation.child_index_matching(&["cook"])?;
+    let action_index = invocation.child_index_matching(&["cook", "dispatch"])?;
 
     if let Some(run_id) = agent_task_dispatch_requested_run_id(args) {
         return Some((args.to_vec(), run_id));
