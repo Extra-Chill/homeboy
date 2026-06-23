@@ -81,7 +81,7 @@ pub(crate) fn validate_runner_workload_dispatch(
     runner_id: &str,
     cwd: Option<&str>,
     command: &[String],
-    _secret_env_names: &[String],
+    secret_env_names: &[String],
     capture_patch: bool,
 ) -> Result<()> {
     let Some(workload) = workload else {
@@ -121,10 +121,17 @@ pub(crate) fn validate_runner_workload_dispatch(
             ));
         }
     }
+    if !workload.required_secrets.categories.is_empty() && secret_env_names.is_empty() {
+        return Err(workload_error(
+            "runner_workload.required_secrets",
+            "runner workload requires named secret handoff for declared secret categories"
+                .to_string(),
+        ));
+    }
     for capability in &workload.required_capabilities {
         match capability.name.as_str() {
             "extension_parity" | "playwright" => {}
-            name if !capability.required => {}
+            _ if !capability.required => {}
             name => {
                 return Err(workload_error(
                     "runner_workload.required_capabilities",
@@ -353,7 +360,7 @@ mod tests {
             "lab-a",
             Some("/srv/homeboy/work"),
             &["homeboy".to_string(), "trace".to_string()],
-            &[],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
             true,
         )
         .expect("matching dispatch is valid");
@@ -368,6 +375,101 @@ mod tests {
         )
         .expect_err("drifted runner id must fail");
         assert_eq!(err.details["field"], "runner_workload.assignment.runner_id");
+    }
+
+    #[test]
+    fn runner_workload_validation_rejects_required_secret_categories_without_named_handoff() {
+        let plan = plan();
+        let command = command();
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        let err = validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &[],
+            true,
+        )
+        .expect_err("required secret category without named handoff must fail");
+        assert_eq!(err.details["field"], "runner_workload.required_secrets");
+    }
+
+    #[test]
+    fn runner_workload_validation_accepts_required_secret_categories_with_named_handoff() {
+        let plan = plan();
+        let command = command();
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "trace".to_string()],
+            &["HOMEBODY_TRACE_SECRET".to_string()],
+            true,
+        )
+        .expect("required secret category with named handoff is valid");
+    }
+
+    #[test]
+    fn runner_workload_validation_accepts_empty_secret_handoff_without_required_categories() {
+        let plan = plan();
+        let mut command = command();
+        command.hot_label = "lint";
+        let workload = build_runner_workload(RunnerWorkloadBuildInput {
+            plan: &plan,
+            command: &command,
+            capture_patch: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
+            runner_id: "lab-a",
+            runner_mode: "direct_ssh",
+            assignment_source: "explicit",
+            status: "offloaded",
+            remote_workspace: Some("/srv/homeboy/work"),
+            fallback_reason: None,
+            workspace_mapping_ref: None,
+            proof_id: None,
+        });
+
+        validate_runner_workload_dispatch(
+            Some(&workload),
+            "lab-a",
+            Some("/srv/homeboy/work"),
+            &["homeboy".to_string(), "lint".to_string()],
+            &[],
+            true,
+        )
+        .expect("empty secret handoff is valid when no categories are required");
     }
 
     #[test]
