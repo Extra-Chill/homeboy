@@ -196,6 +196,7 @@ fn copy_release_artifacts(
             durable_path: Some(destination.display().to_string()),
             artifact_type: artifact.artifact_type.clone(),
             platform: artifact.platform.clone(),
+            durable_path: None,
         });
     }
     Ok(copied)
@@ -236,6 +237,7 @@ mod tests {
                 durable_path: None,
                 artifact_type: Some("archive".to_string()),
                 platform: None,
+                durable_path: None,
             }],
         )
         .expect("copy artifacts");

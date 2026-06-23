@@ -17,7 +17,7 @@
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
     use crate::commands::utils::resource_policy::{self, HotCommand, ResourcePolicyContext};
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{serve_public_artifact_base_once, with_isolated_home};
 
     pub(super) struct XdgGuard(Option<String>);
 
@@ -58,28 +58,6 @@
                 None => std::env::remove_var(self.key),
             }
         }
-    }
-
-    fn serve_public_artifact_base_once(status: u16) -> String {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind public artifact server");
-        let addr = listener.local_addr().expect("server address");
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept public artifact probe");
-            let mut buffer = [0; 1024];
-            let _ = stream.read(&mut buffer);
-            let status_text = if status == 200 { "OK" } else { "Not Found" };
-            let body = if status == 200 { "{}" } else { "missing" };
-            write!(
-                stream,
-                "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .expect("write public artifact response");
-        });
-        format!("http://{addr}/homeboy")
     }
 
     #[test]

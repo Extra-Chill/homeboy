@@ -5,11 +5,12 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::observation::ArtifactRecord;
 
-use super::{
-    CmdResult, RunsArtifactCleanupDownloadsArgs, RunsArtifactCleanupDownloadsOutput,
+use super::types::{
+    RunsArtifactCleanupDownloadsArgs, RunsArtifactCleanupDownloadsOutput,
     RunsArtifactCleanupPersistedArgs, RunsArtifactCleanupPersistedOutput, RunsArtifactGetOutput,
     RunsOutput,
 };
+use super::CmdResult;
 
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runs_service::download_remote_artifact(artifact, output)?;
