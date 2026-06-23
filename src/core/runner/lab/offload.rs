@@ -16,7 +16,8 @@
 //! Trace-target git-fetch calculation lives in `trace_fetch_refs`; this module
 //! only decides when those refs participate in workspace sync.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::command_contract::lab_runner_support_summary;
 use crate::core::agent_task_lifecycle;
@@ -104,6 +105,7 @@ pub struct LabOffloadRequest<'a> {
     /// remote runner finishes cleanly but returns no patch to apply.
     pub mutation_flag: Option<&'a str>,
     pub detach_after_handoff: bool,
+    pub output_file_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +148,7 @@ pub enum LabOffloadOutcome {
         stdout: String,
         stderr: String,
         exit_code: i32,
+        output_file_content: Option<String>,
     },
 }
 
@@ -748,6 +751,7 @@ fn run_runner_resident_lab_offload(
         stdout: exec_output.stdout,
         stderr,
         exit_code,
+        output_file_content: None,
     })
 }
 
@@ -830,6 +834,7 @@ struct LabOffloadWorkspaceStage {
     agent_task_run_id: Option<String>,
     command: Vec<String>,
     remote_command: Vec<String>,
+    remote_output_file: Option<String>,
     synced_rigs: Vec<rig_materialization::LabOffloadRigSync>,
     rig_component_path_overrides: Vec<(String, String)>,
 }
@@ -1106,7 +1111,14 @@ fn prepare_lab_offload_workspace_stage(
         ensure_agent_task_dispatch_run_id_with(&remapped_args, run_isolation_token.as_deref())
             .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
+    let remote_output_file = request
+        .output_file_requested
+        .then(|| remote_lab_output_file(&remote_cwd));
     let mut command = command_prefix_argv.to_vec();
+    if let Some(path) = &remote_output_file {
+        command.push("--output".to_string());
+        command.push(path.clone());
+    }
     command.extend(
         rewrite_lab_offload_args(&remapped_args, &remote_cwd, &path_remaps)
             .into_iter()
@@ -1132,9 +1144,22 @@ fn prepare_lab_offload_workspace_stage(
         agent_task_run_id,
         command,
         remote_command,
+        remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
     })
+}
+
+fn remote_lab_output_file(remote_cwd: &str) -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}/homeboy-lab-structured-output-{}.json",
+        remote_cwd.trim_end_matches('/'),
+        nonce
+    )
 }
 
 fn materialize_lab_at_files_on_runner(runner_id: &str, specs: &[LabAtFileSpec]) -> Result<()> {
@@ -1324,6 +1349,7 @@ fn run_lab_offload_inner(
             stdout,
             stderr,
             exit_code: 0,
+            output_file_content: None,
         });
     }
     if let Some(warning) = misplaced_runner_exec_wait_timeout_warning(request.normalized_args) {
@@ -1493,6 +1519,7 @@ fn run_lab_offload_inner(
         agent_task_run_id,
         command,
         remote_command,
+        remote_output_file,
         synced_rigs,
         rig_component_path_overrides,
     } = workspace_stage;
@@ -1728,7 +1755,11 @@ fn run_lab_offload_inner(
         }
         plan = with_lab_apply_patch_step(plan, apply_output);
     }
-    ensure_lab_offload_streams_not_truncated(&exec_output)?;
+    let output_file_content = match remote_output_file.as_deref() {
+        Some(path) => Some(download_lab_output_file(runner_id, path)?),
+        None => None,
+    };
+    ensure_lab_offload_streams_not_truncated(&exec_output, output_file_content.is_some())?;
     mirror_agent_task_run_plan_lifecycle(request.normalized_args, &exec_output.stdout)?;
 
     let mut stderr = String::new();
@@ -1784,6 +1815,7 @@ fn run_lab_offload_inner(
                         stdout: exec_output.stdout,
                         stderr,
                         exit_code,
+                        output_file_content,
                     });
                 }
             }
@@ -1815,16 +1847,21 @@ fn run_lab_offload_inner(
         stdout: exec_output.stdout,
         stderr,
         exit_code,
+        output_file_content,
     })
 }
 
 fn ensure_lab_offload_streams_not_truncated(
     exec_output: &super::super::RunnerExecOutput,
+    structured_output_available: bool,
 ) -> Result<()> {
     let Some(capture) = exec_output.capture.as_ref() else {
         return Ok(());
     };
     if !capture.stdout.truncated && !capture.stderr.truncated {
+        return Ok(());
+    }
+    if structured_output_available {
         return Ok(());
     }
 
@@ -1839,6 +1876,44 @@ fn ensure_lab_offload_streams_not_truncated(
     error.details["capture"] =
         serde_json::to_value(capture).unwrap_or_else(|_| serde_json::json!({}));
     Err(error)
+}
+
+fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Result<String> {
+    let temp = local_lab_output_temp_path(runner_id, remote_path);
+    let temp_text = temp.display().to_string();
+    let client = ssh_client_for_lab_runner(runner_id)?;
+    let output = client.download_file(remote_path, &temp_text);
+    if !output.success {
+        return Err(Error::internal_unexpected(format!(
+            "Lab offload could not retrieve remote structured output `{remote_path}` from runner `{runner_id}`: {}",
+            output.stderr.trim()
+        ))
+        .with_hint("The remote command was invoked with --output, but the runner-side file was not readable after execution.".to_string()));
+    }
+    let content = std::fs::read_to_string(&temp).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("read downloaded Lab output {}", temp.display())),
+        )
+    })?;
+    let _ = std::fs::remove_file(&temp);
+    Ok(content)
+}
+
+fn local_lab_output_temp_path(runner_id: &str, remote_path: &str) -> PathBuf {
+    let sanitized_runner = runner_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    let sanitized_remote = remote_path
+        .chars()
+        .rev()
+        .take(48)
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    std::env::temp_dir().join(format!(
+        "homeboy-lab-output-{sanitized_runner}-{sanitized_remote}"
+    ))
 }
 
 /// Insert generic `${components.<id>.path}` override env vars so a remote rig
@@ -2196,6 +2271,7 @@ fn in_flight_daemon_disconnect_outcome(
         stdout: format!("{stdout}\n"),
         stderr,
         exit_code: 0,
+        output_file_content: None,
     }
 }
 
@@ -2784,12 +2860,14 @@ mod tests {
             stdout,
             stderr,
             exit_code,
+            output_file_content,
         } = outcome
         else {
             panic!("expected detached offloaded outcome");
         };
 
         assert_eq!(exit_code, 0);
+        assert!(output_file_content.is_none());
         let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
         assert_eq!(json["success"], serde_json::json!(true));
         assert_eq!(json["data"]["status"], "dispatched_detached");
@@ -3592,7 +3670,7 @@ mod tests {
             diagnostics: None,
         };
 
-        let err = ensure_lab_offload_streams_not_truncated(&exec_output)
+        let err = ensure_lab_offload_streams_not_truncated(&exec_output, false)
             .expect_err("truncated stdout is rejected");
 
         assert_eq!(err.code.as_str(), "internal.unexpected");
@@ -3792,6 +3870,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         })
         .expect("outcome");
 
@@ -3816,6 +3895,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         });
 
         let Err(err) = outcome else {
@@ -3841,6 +3921,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         });
 
         let Err(err) = outcome else {
@@ -3879,6 +3960,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         });
 
         let Err(err) = outcome else {
@@ -3919,6 +4001,7 @@ mod tests {
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,
+            output_file_requested: false,
         });
 
         let Err(err) = outcome else {
@@ -3932,5 +4015,66 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| hint.contains("tunnel service status"))));
+    }
+
+    #[test]
+    fn lab_stream_truncation_fails_without_structured_output_file() {
+        let output = truncated_runner_exec_output();
+
+        let err = ensure_lab_offload_streams_not_truncated(&output, false)
+            .expect_err("truncated streams without structured output should fail");
+
+        assert_eq!(err.code, ErrorCode::InternalUnexpected);
+        assert!(err.message.contains("retained stream limit"));
+    }
+
+    #[test]
+    fn lab_stream_truncation_is_allowed_with_structured_output_file() {
+        let output = truncated_runner_exec_output();
+
+        ensure_lab_offload_streams_not_truncated(&output, true)
+            .expect("structured output file preserves complete command result");
+    }
+
+    fn truncated_runner_exec_output() -> RunnerExecOutput {
+        RunnerExecOutput {
+            variant: "execution",
+            command: "runner.exec",
+            runner_id: "homeboy-lab".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Daemon,
+            argv: vec!["homeboy".to_string(), "status".to_string()],
+            remote_cwd: "/tmp/homeboy-workspace".to_string(),
+            exit_code: 0,
+            stdout: "retained stdout tail".to_string(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: Some("job-123".to_string()),
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            metrics: None,
+            capture: Some(crate::core::engine::command::CommandCaptureMetadata {
+                stdout: crate::core::engine::command::CaptureMetadata {
+                    bytes_seen: 5 * 1024 * 1024,
+                    bytes_retained: 4 * 1024 * 1024,
+                    byte_limit: 4 * 1024 * 1024,
+                    truncated: true,
+                },
+                stderr: crate::core::engine::command::CaptureMetadata {
+                    bytes_seen: 0,
+                    bytes_retained: 0,
+                    byte_limit: 4 * 1024 * 1024,
+                    truncated: false,
+                },
+            }),
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        }
     }
 }
