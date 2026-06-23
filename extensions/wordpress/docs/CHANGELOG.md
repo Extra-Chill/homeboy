@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.60] - 2026-06-23
+
+### Changed
+- Pass fuzz workload root to WordPress runner
+
 ## [3.12.59] - 2026-06-23
 
 ### Changed
