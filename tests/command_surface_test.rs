@@ -387,6 +387,7 @@ fn mutating_safety_manifest_entries_advertise_apply_or_are_allowlisted() {
                 && !entry.output.notes.contains("--dry-run")
                 && !entry.output.notes.contains("--check")
                 && !entry.dangerous_flags.iter().any(|flag| flag == "--apply")
+                && !entry.dangerous_flags.iter().any(|flag| flag == "--write")
                 && !explicit_no_apply_surface.contains(&entry.path.join(" "))
         })
         .map(|entry| entry.path.join(" "))
