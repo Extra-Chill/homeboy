@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.68] - 2026-06-23
+
+### Changed
+- Add WordPress fuzz performance evidence
+
 ## [3.12.67] - 2026-06-23
 
 ### Changed
