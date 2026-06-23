@@ -15,6 +15,9 @@ const {
 	genericAgentTaskRequest,
 	genericAgentTaskRunnerSpec,
 } = require('./generic-agent-task-plan');
+const {
+	WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA,
+} = require('./wordpress-generic-fuzz-primitives');
 
 const WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA = GENERIC_AGENT_TASK_PLAN_SCHEMA;
 const WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA = GENERIC_AGENT_TASK_REQUEST_SCHEMA;
@@ -27,6 +30,7 @@ const WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY = {
 	write: 'sandbox',
 	apply: 'review',
 };
+const WORDPRESS_CRUD_OPERATION_RESULT_ARTIFACT = 'wordpress-crud-operation-result';
 
 function wordpressRuntimeTaskPlan(options = {}) {
 	const planId = requiredString(options.planId || options.plan_id, 'planId');
@@ -67,10 +71,12 @@ function wordpressRuntimeTaskRequest(options = {}) {
 	const taskId = requiredString(options.taskId || options.task_id, 'taskId');
 	const ability = requiredString(options.ability, 'ability');
 	const abilityInput = runtimeAbilityInput(options);
+	const expectedResultContracts = expectedResultContractsForRuntimeTask(options, abilityInput);
 	const runnerSpec = wordpressRuntimeTaskRunnerSpec({
 		...options,
 		ability,
 		abilityInput,
+		expectedResultContracts,
 	});
 
 	return genericAgentTaskRequest({
@@ -93,6 +99,7 @@ function wordpressRuntimeTaskRequest(options = {}) {
 		metadata: stripUndefined({
 			...(options.metadata || {}),
 			fanout: options.fanout,
+			expected_result_contracts: expectedResultContracts.length > 0 ? expectedResultContracts : undefined,
 		}),
 		includeArtifactDeclarations: options.includeArtifactDeclarations === false
 			? false
@@ -104,6 +111,7 @@ function wordpressRuntimeTaskRequest(options = {}) {
 function wordpressRuntimeTaskRunnerSpec(options = {}) {
 	const config = wordpressRuntimeTaskExecutorConfig(options);
 	const runtimeProfile = wordpressRuntimeTaskProfile(options);
+	const expectedResultContracts = normalizeArray(options.expectedResultContracts || options.expected_result_contracts);
 	return genericAgentTaskRunnerSpec({
 		backend: wordpressRuntimeTaskBackend(options, undefined, runtimeProfile),
 		runtime: wordpressRuntimeTaskRuntime(options, undefined, runtimeProfile),
@@ -112,7 +120,7 @@ function wordpressRuntimeTaskRunnerSpec(options = {}) {
 		task_timeout_seconds: numberOrUndefined(options.taskTimeoutSeconds || options.task_timeout_seconds || options.timeoutSeconds || options.timeout_seconds),
 		limits: options.limits,
 		artifact_declarations: options.artifactDeclarations || options.artifact_declarations,
-		expected_artifacts: options.expectedArtifacts || options.expected_artifacts,
+		expected_artifacts: expectedArtifactsForRuntimeTask(options, expectedResultContracts),
 	});
 }
 
@@ -160,6 +168,7 @@ function wordpressRuntimeTaskExecutorConfig(options = {}) {
 		runtime_requirements: options.runtimeRequirements || options.runtime_requirements,
 		ability_tools: options.abilityTools || options.ability_tools,
 		structured_artifacts: options.structuredArtifacts || options.structured_artifacts,
+		expected_result_contracts: normalizeArray(options.expectedResultContracts || options.expected_result_contracts),
 		runtime_env: options.runtimeEnv || options.runtime_env,
 		runtime_mounts: options.runtimeMounts || options.runtime_mounts,
 		runtime_config_mounts: options.runtimeConfigMounts || options.runtime_config_mounts,
@@ -189,12 +198,52 @@ function wordpressRuntimeTaskProfile(options = {}) {
 }
 
 function runtimeAbilityInput(options = {}) {
+	const abilityInput = options.abilityInput || options.ability_input || {};
+	const expectedResultContracts = expectedResultContractsForRuntimeTask(options, abilityInput);
 	return stripUndefined({
-		...(options.abilityInput || options.ability_input || {}),
+		...abilityInput,
 		...(options.dlaUrl || options.dla_url ? { dla_url: options.dlaUrl || options.dla_url } : {}),
-		...(options.provider && !hasOwn(options.abilityInput || options.ability_input || {}, 'provider') ? { provider: options.provider } : {}),
-		...(options.model && !hasOwn(options.abilityInput || options.ability_input || {}, 'model') ? { model: options.model } : {}),
+		...(options.provider && !hasOwn(abilityInput, 'provider') ? { provider: options.provider } : {}),
+		...(options.model && !hasOwn(abilityInput, 'model') ? { model: options.model } : {}),
+		...(expectedResultContracts.length > 0 && !hasOwn(abilityInput, 'expected_result_contracts') ? { expected_result_contracts: expectedResultContracts } : {}),
 	});
+}
+
+function expectedResultContractsForRuntimeTask(options = {}, abilityInput = options.abilityInput || options.ability_input || {}) {
+	const explicit = normalizeArray(options.expectedResultContracts || options.expected_result_contracts);
+	if (explicit.length > 0) {
+		return explicit;
+	}
+	return hasWordPressCrudOperation(options, abilityInput) ? [WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA] : [];
+}
+
+function expectedArtifactsForRuntimeTask(options = {}, expectedResultContracts = []) {
+	const artifacts = normalizeArray(options.expectedArtifacts || options.expected_artifacts);
+	if (expectedResultContracts.includes(WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA) && !artifacts.includes(WORDPRESS_CRUD_OPERATION_RESULT_ARTIFACT)) {
+		return [...artifacts, WORDPRESS_CRUD_OPERATION_RESULT_ARTIFACT];
+	}
+	return artifacts.length > 0 ? artifacts : undefined;
+}
+
+function hasWordPressCrudOperation(options = {}, abilityInput = {}) {
+	return Boolean(
+		isCrudOperation(options.crudOperation || options.crud_operation || options.operation)
+		|| isCrudOperation(abilityInput.crud_operation || abilityInput.crudOperation || abilityInput.operation)
+	);
+}
+
+function isCrudOperation(value) {
+	return Boolean(value && typeof value === 'object' && !Array.isArray(value) && (
+		value.schema === 'homeboy/wordpress-crud-operation/v1'
+		|| value.action
+		|| value.verb
+	) && (
+		value.resource_type
+		|| value.resourceType
+		|| value.resource
+		|| value.object_type
+		|| value.objectType
+	));
 }
 
 function normalizeTaskOptions(options = {}) {
@@ -270,6 +319,7 @@ module.exports = {
 	WORDPRESS_RUNTIME_TASK_COMPATIBILITY_RUNTIME,
 	WORDPRESS_RUNTIME_TASK_DEFAULT_POLICY,
 	WORDPRESS_RUNTIME_TASK_DEFAULT_RUNTIME,
+	WORDPRESS_CRUD_OPERATION_RESULT_ARTIFACT,
 	WORDPRESS_RUNTIME_TASK_PLAN_SCHEMA,
 	WORDPRESS_RUNTIME_TASK_REQUEST_SCHEMA,
 	wordpressRuntimeTaskProfile,

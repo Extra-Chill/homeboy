@@ -187,6 +187,8 @@ assert.equal(resourcePlan.targets[0].cases[2].operation.resource_type, 'setting'
 assert.equal(resourcePlan.targets[0].cases[2].operation.capability_context.required[0], 'manage_options');
 assert.deepEqual(resourcePlan.targets[0].cases[2].skip_reasons, ['missing-runtime-fuzz-capabilities']);
 assert.equal(resourcePlan.targets[0].cases[2].executable, false);
+assert.deepEqual(resourcePlan.targets[0].cases[2].required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.equal(resourcePlan.targets[0].cases[2].metadata.runtime_capability_gated, true);
 assert.equal(resourcePlan.targets[1].cases.length, 1);
 assert.equal(resourcePlan.targets[1].cases[0].intent, 'exercise-wordpress-surface');
 
@@ -243,6 +245,11 @@ for (const testCase of capableCases.filter((entry) => entry.required_capabilitie
 	assert.equal(testCase.metadata.gated, false);
 	assert.equal(testCase.metadata.runtime_capability_gated, false);
 }
+const capableCrudMutation = capableCases.find((entry) => entry.intent === 'create-post');
+assert.equal(capableCrudMutation.executable, true);
+assert.deepEqual(capableCrudMutation.required_capabilities, ['crud', 'reset', 'restore', 'snapshot']);
+assert.deepEqual(capableCrudMutation.skip_reasons, []);
+assert.equal(capableCrudMutation.metadata.runtime_capability_gated, false);
 const capableRestMutation = capableCases.find((entry) => entry.intent === 'request-rest-route');
 assert.equal(capableRestMutation.executable, false);
 assert.equal(capableRestMutation.metadata.runtime_capability_gated, false);

@@ -1,12 +1,15 @@
 'use strict';
 
 const WORDPRESS_CRUD_OPERATION_SCHEMA = 'homeboy/wordpress-crud-operation/v1';
+const WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA = 'homeboy/wordpress-crud-operation-result/v1';
 const WORDPRESS_FIXTURE_PERSONA_SCHEMA = 'homeboy/wordpress-fixture-persona/v1';
 const WORDPRESS_PERFORMANCE_OBSERVATION_SCHEMA = 'homeboy/wordpress-performance-observation/v1';
 
 const CRUD_ACTIONS = new Set(['create', 'read', 'update', 'delete']);
 const SAFETY_LEVELS = new Set(['safe', 'mutating', 'destructive']);
 const RESET_STRATEGIES = new Set(['none', 'delete-created', 'restore-snapshot', 'transaction', 'manual']);
+const ROLLBACK_STATUSES = new Set(['not-required', 'pending', 'passed', 'failed', 'skipped']);
+const CRUD_RESULT_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 const OBSERVATION_STATUSES = new Set(['passed', 'failed', 'errored', 'skipped']);
 
 function normalizeWordPressCrudOperation(operation) {
@@ -39,6 +42,45 @@ function normalizeWordPressCrudOperation(operation) {
 		expected: objectOrUndefined(operation.expected),
 		rollback_policy: normalizeResetPolicy(operation.rollback_policy || operation.rollbackPolicy || operation.reset_policy || operation.resetPolicy, action),
 		metadata: objectOrUndefined(operation.metadata) || {},
+	});
+}
+
+function normalizeWordPressCrudOperationResult(result) {
+	assertPlainObject(result, 'result');
+	assertSchema(result.schema, WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA, 'WordPress CRUD operation result');
+
+	const operation = normalizeResultOperation(result.operation || result.crud_operation || result.crudOperation || result);
+	const status = result.status || (result.skipped || result.skip_reason || result.skipReason ? 'skipped' : 'passed');
+	if (!CRUD_RESULT_STATUSES.has(status)) {
+		throw new Error(`Unsupported WordPress CRUD operation result status: ${status}`);
+	}
+
+	const id = normalizeId(result.id, `${operation.id}-result`, 'result.id');
+	const skipReasons = normalizeReasonCodes(result.skip_reasons || result.skipReasons || result.skip_reason || result.skipReason);
+	const failures = asOptionalArray(result.failures, 'result.failures').map(normalizeFailure);
+	const createdRefs = asOptionalArray(result.created_refs || result.createdRefs || result.created, 'result.created_refs').map(normalizeCreatedRef);
+
+	return stripUndefined({
+		schema: WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA,
+		id,
+		status,
+		operation,
+		resource_type: operation.resource_type,
+		resource_id: result.resource_id ?? result.resourceId ?? result.object_id ?? result.objectId ?? operation.resource_id,
+		auth_context: normalizeAuthContext(result.auth_context || result.authContext || result.auth || result.persona),
+		capability_context: normalizeCapabilityContext(result.capability_context || result.capabilityContext || operation.capability_context),
+		nonce_context: normalizeNonceContext(result.nonce_context || result.nonceContext || operation.nonce_context),
+		before_state_hash: stringOrUndefined(result.before_state_hash || result.beforeStateHash || result.before_hash || result.beforeHash),
+		after_state_hash: stringOrUndefined(result.after_state_hash || result.afterStateHash || result.after_hash || result.afterHash),
+		rollback_policy: normalizeResetPolicy(result.rollback_policy || result.rollbackPolicy || operation.rollback_policy, operation.action),
+		rollback_result: normalizeRollbackResult(result.rollback_result || result.rollbackResult),
+		created_refs: createdRefs,
+		skip_reason: result.skip_reason || result.skipReason || null,
+		skip_reasons: skipReasons,
+		failures,
+		diagnostics: asOptionalArray(result.diagnostics, 'result.diagnostics'),
+		runtime: objectOrUndefined(result.runtime),
+		metadata: objectOrUndefined(result.metadata) || {},
 	});
 }
 
@@ -188,6 +230,58 @@ function normalizeAuthContext(context) {
 	});
 }
 
+function normalizeResultOperation(operation) {
+	if (operation.schema === WORDPRESS_CRUD_OPERATION_SCHEMA || operation.action || operation.verb || operation.resource_type || operation.resourceType) {
+		return normalizeWordPressCrudOperation({ schema: WORDPRESS_CRUD_OPERATION_SCHEMA, ...operation });
+	}
+	throw new Error('result.operation must describe a WordPress CRUD operation.');
+}
+
+function normalizeRollbackResult(result) {
+	if (result === undefined || result === null) {
+		return undefined;
+	}
+	assertPlainObject(result, 'rollback_result');
+	const status = result.status || 'pending';
+	if (!ROLLBACK_STATUSES.has(status)) {
+		throw new Error(`Unsupported WordPress rollback result status: ${status}`);
+	}
+	return stripUndefined({
+		status,
+		strategy: stringOrUndefined(result.strategy),
+		started_at: stringOrUndefined(result.started_at || result.startedAt),
+		finished_at: stringOrUndefined(result.finished_at || result.finishedAt),
+		failures: asOptionalArray(result.failures, 'rollback_result.failures').map(normalizeFailure),
+		metadata: objectOrUndefined(result.metadata),
+	});
+}
+
+function normalizeCreatedRef(ref, index) {
+	assertPlainObject(ref, `created_refs[${index}]`);
+	const resourceType = ref.resource_type || ref.resourceType || ref.type;
+	if (!resourceType || typeof resourceType !== 'string') {
+		throw new Error(`created_refs[${index}].resource_type must be a string.`);
+	}
+	return stripUndefined({
+		resource_type: resourceType,
+		resource_id: ref.resource_id ?? ref.resourceId ?? ref.id,
+		label: stringOrUndefined(ref.label),
+		rollback_action: stringOrUndefined(ref.rollback_action || ref.rollbackAction),
+		metadata: objectOrUndefined(ref.metadata),
+	});
+}
+
+function normalizeFailure(failure, index) {
+	assertPlainObject(failure, `failures[${index}]`);
+	return stripUndefined({
+		code: stringOrUndefined(failure.code) || 'wordpress_crud_failure',
+		message: stringOrUndefined(failure.message) || '',
+		field: stringOrUndefined(failure.field),
+		severity: stringOrUndefined(failure.severity),
+		metadata: objectOrUndefined(failure.metadata),
+	});
+}
+
 function normalizeTransport(transport) {
 	if (transport === undefined || transport === null) {
 		return undefined;
@@ -277,6 +371,13 @@ function asArray(value, field) {
 	return value;
 }
 
+function asOptionalArray(value, field) {
+	if (value === undefined || value === null) {
+		return [];
+	}
+	return asArray(value, field);
+}
+
 function normalizeId(value, fallback, field) {
 	const id = value || fallback;
 	if (!id || typeof id !== 'string') {
@@ -312,9 +413,11 @@ function stripUndefined(value) {
 
 module.exports = {
 	WORDPRESS_CRUD_OPERATION_SCHEMA,
+	WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA,
 	WORDPRESS_FIXTURE_PERSONA_SCHEMA,
 	WORDPRESS_PERFORMANCE_OBSERVATION_SCHEMA,
 	normalizeWordPressCrudOperation,
+	normalizeWordPressCrudOperationResult,
 	normalizeWordPressFixturePersona,
 	normalizeWordPressPerformanceObservation,
 };
