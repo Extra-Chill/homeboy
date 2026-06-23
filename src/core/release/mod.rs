@@ -37,3 +37,13 @@ pub use types::{
 };
 pub use utils::{extract_latest_notes, parse_release_artifacts};
 pub use workflow::{run_batch, run_command, SKIPPED_RELEASE_EXIT_CODE};
+
+/// Whether this component would normally get a reviewer-facing GitHub Release
+/// created as part of a release (i.e. it resolves to a GitHub remote).
+///
+/// Used by the CLI to decide whether `--no-github-release` is a sharp,
+/// confirmation-gated override on a manual/local release: suppressing the
+/// GitHub Release only matters when one would otherwise be created.
+pub fn github_release_expected(component: &crate::core::component::Component) -> bool {
+    plan_steps::github_release_applies(component)
+}

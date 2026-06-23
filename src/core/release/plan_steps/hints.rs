@@ -7,7 +7,7 @@ use crate::core::release::types::ReleaseOptions;
 /// `git remote get-url origin` in the component's local_path, then parses
 /// it as a GitHub URL. Non-GitHub remotes (GitLab, self-hosted, etc.) fall
 /// through cleanly — the step simply isn't added to the plan.
-pub(super) fn github_release_applies(component: &Component) -> bool {
+pub(in crate::core::release) fn github_release_applies(component: &Component) -> bool {
     let remote_url = component.remote_url.clone().or_else(|| {
         crate::core::deploy::release_download::detect_remote_url(std::path::Path::new(
             &component.local_path,
