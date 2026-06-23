@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.64] - 2026-06-23
+
+### Changed
+- Preserve fuzz inputs across Lab remaps
+
 ## [3.12.63] - 2026-06-23
 
 ### Changed
