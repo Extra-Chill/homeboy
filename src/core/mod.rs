@@ -21,6 +21,7 @@ pub mod agent_task_cook_loop;
 pub mod agent_task_deterministic_loop;
 pub mod agent_task_dispatch_plan;
 pub mod agent_task_dispatch_service;
+pub(crate) mod agent_task_executor_evidence;
 pub mod agent_task_fanout;
 pub mod agent_task_finalization;
 pub mod agent_task_gate;
