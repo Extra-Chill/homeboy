@@ -167,9 +167,10 @@ fn fuzz_performance_hotspots_extracts_generic_metadata_metrics() {
     assert_eq!(summary.slowest_timing_metrics[0].subject_id, "campaign-1");
     assert_eq!(summary.slowest_timing_metrics[0].metric, "duration_ms");
     assert_eq!(summary.slowest_timing_metrics[0].value, 900.0);
-    assert!(summary.slowest_timing_metrics.iter().any(|point| {
-        point.subject_id == "artifact:profile" && point.metric == "render_ms"
-    }));
+    assert!(summary
+        .slowest_timing_metrics
+        .iter()
+        .any(|point| { point.subject_id == "artifact:profile" && point.metric == "render_ms" }));
     assert!(summary.slowest_timing_metrics.iter().any(|point| {
         point.subject_id == "coverage_summary:surface-a" && point.metric == "operation_ms"
     }));
