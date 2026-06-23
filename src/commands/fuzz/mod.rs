@@ -814,6 +814,14 @@ mod tests {
         };
         let run_dir = RunDir::create().expect("run dir");
         let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let override_env = homeboy::core::rig::expand::rig_component_path_override_env_name(
+            "package-fuzz",
+            "package",
+        );
+        let override_path = temp.path().join("runner/plugins/package");
+        unsafe {
+            std::env::set_var(&override_env, override_path.to_string_lossy().to_string());
+        }
 
         let env = fuzz_runner_env(
             &args,
@@ -823,6 +831,9 @@ mod tests {
             &run_dir,
         )
         .expect("fuzz runner env");
+        unsafe {
+            std::env::remove_var(&override_env);
+        }
         let expanded_path = env
             .iter()
             .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
@@ -839,7 +850,7 @@ mod tests {
         assert_eq!(
             expanded["metadata"]["homeboy_runtime_context"]["components"]["package"]["path"]
                 .as_str(),
-            Some(format!("{}/plugins/package", temp.path().display()).as_str())
+            Some(override_path.to_string_lossy().as_ref())
         );
         assert!(env.iter().any(|(key, value)| {
             key == "WP_CODEBOX_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
