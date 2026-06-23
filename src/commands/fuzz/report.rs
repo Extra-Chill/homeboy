@@ -178,7 +178,7 @@ fn coverage_ratio(
 }
 
 fn case_evidence_artifact_count(campaign: &FuzzCampaign) -> usize {
-    campaign
+    let campaign_artifacts = campaign
         .artifacts
         .iter()
         .filter(|artifact| {
@@ -192,7 +192,39 @@ fn case_evidence_artifact_count(campaign: &FuzzCampaign) -> usize {
                     | "repro_case"
             )
         })
-        .count()
+        .count();
+    campaign_artifacts + metadata_case_evidence_artifact_count(&campaign.metadata)
+}
+
+fn metadata_case_evidence_artifact_count(metadata: &serde_json::Value) -> usize {
+    metadata_artifact_refs(metadata.get("artifact_refs"))
+        + metadata_artifact_refs(metadata.get("artifactRefs"))
+        + metadata_artifact_refs(metadata.pointer("/wordpress_fuzz_result/artifacts"))
+        + metadata_artifact_refs(metadata.pointer("/wordpressFuzzResult/artifacts"))
+}
+
+fn metadata_artifact_refs(value: Option<&serde_json::Value>) -> usize {
+    value
+        .and_then(|value| value.as_array())
+        .map(|artifacts| {
+            artifacts
+                .iter()
+                .filter(|artifact| metadata_artifact_has_case_evidence_kind(artifact))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn metadata_artifact_has_case_evidence_kind(artifact: &serde_json::Value) -> bool {
+    let kind = artifact
+        .get("kind")
+        .or_else(|| artifact.get("role"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    matches!(
+        kind,
+        "case_log" | "fuzz_report" | "fuzz_case" | "case_artifact" | "failing_case" | "repro_case"
+    )
 }
 
 pub(super) fn fuzz_coverage_completeness(
@@ -243,11 +275,11 @@ pub(super) fn fuzz_coverage_completeness(
             declared_targets: 0,
             executable_targets: 0,
             proven_targets: 0,
-            target_coverage_ratio: 0.0,
+            target_coverage_ratio: 1.0,
             declared_operations: 0,
             executable_operations: 0,
             proven_operations: 0,
-            operation_coverage_ratio: 0.0,
+            operation_coverage_ratio: 1.0,
             skipped_targets: 0,
             skipped_operations: 0,
             skipped_reason_counts: BTreeMap::new(),
