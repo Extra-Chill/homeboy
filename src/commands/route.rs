@@ -90,6 +90,7 @@ pub fn route_after_parse(
             timeout: None,
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
+            output_file_requested: output_file.is_some(),
         },
         trace_runner_id.as_deref(),
         observer,
@@ -107,7 +108,13 @@ pub fn route_after_parse(
                 eprint!("{}", output.stderr);
             }
             if let Some(path) = output_file {
-                write_offloaded_stdout(path, &output.stdout)?;
+                write_offloaded_stdout(
+                    path,
+                    output
+                        .output_file_content
+                        .as_deref()
+                        .unwrap_or(&output.stdout),
+                )?;
             }
             print!("{}", output.stdout);
             Ok(Some(output.exit_code))

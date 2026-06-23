@@ -157,6 +157,33 @@ fn test_upload_file() {
 }
 
 #[test]
+fn test_download_file_copies_large_local_file_without_stdout_payload() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("large-source.json");
+    let target = dir.path().join("large-target.json");
+    let payload = format!("{{\"result\":\"{}\"}}\n", "x".repeat(5 * 1024 * 1024));
+    std::fs::write(&source, &payload).expect("write source");
+    let client = SshClient {
+        host: "localhost".to_string(),
+        user: "tester".to_string(),
+        port: 22,
+        identity_file: None,
+        auth: None,
+        is_local: true,
+        env: HashMap::new(),
+    };
+
+    let output = client.download_file(&source.to_string_lossy(), &target.to_string_lossy());
+
+    assert!(output.success, "download failed: {}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(target).expect("read target"),
+        payload
+    );
+}
+
+#[test]
 fn managed_session_config_adds_controlmaster_args() {
     let server = Server {
         id: "bastion".to_string(),
