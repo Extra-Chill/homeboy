@@ -16,6 +16,8 @@ const { runtimeAgentCiTaskExecutorConfig } = require('./runtime-agent-ci-plan');
 const { evaluateGatePlan } = require('./gate-plan-evaluator');
 const { assertLoopSuccess, loopEvidence, loopIteration, loopRun } = require('./loop-lifecycle.cjs');
 
+const DEFAULT_STDIO_SUMMARY_BYTES = 8192;
+
 function buildGenericAgentLoopRequest(options = {}) {
   const plan = requiredObject(options.plan, 'plan');
   const runtime = requiredObject(options.runtime, 'runtime');
@@ -305,9 +307,7 @@ function executeRuntimeProvider(options = {}) {
     env: { ...(options.env || process.env), ...(invocation.env || {}) },
     maxBuffer: 1024 * 1024 * 20,
   });
-  if (result.stderr && options.stderr !== false && (result.status !== 0 || invocation.stderr === 'inherit')) {
-    process.stderr.write(result.stderr);
-  }
+  const stderrArtifact = handleRuntimeInvocationStderr(result.stderr, { ...options, invocation, result });
   const stdout = String(result.stdout || '');
   if (!stdout.trim()) {
     return {
@@ -318,12 +318,74 @@ function executeRuntimeProvider(options = {}) {
       diagnostics: [{
         class: 'homeboy.agent_loop.no_outcome',
         message: 'Runtime agent task executor produced no JSON outcome.',
-        data: { exit_status: result.status ?? 1 },
+        data: compactObject({ exit_status: result.status ?? 1, stderr_artifact: stderrArtifact }),
       }],
+      metadata: compactObject({ runtime_invocation_stderr_artifact: stderrArtifact }),
     };
   }
   const outcome = JSON.parse(stdout);
-  return captureInvocationResult(outcome, invocation, result);
+  return captureInvocationResult(outcome, invocation, result, { stderrArtifact });
+}
+
+function handleRuntimeInvocationStderr(stderr, options = {}) {
+  const content = String(stderr || '');
+  const invocation = options.invocation || {};
+  const shouldPrint = content && options.stderr !== false && ((options.result?.status ?? 0) !== 0 || invocation.stderr === 'inherit');
+  if (!content) {
+    return null;
+  }
+  const artifact = persistRuntimeInvocationStderr(content, options);
+  if (shouldPrint) {
+    process.stderr.write(`${boundedText(content, options.stderrMaxBytes || options.stderr_max_bytes || DEFAULT_STDIO_SUMMARY_BYTES)}\n`);
+    if (artifact) {
+      process.stderr.write(`Runtime stderr artifact: ${artifact.path}\n`);
+    }
+  }
+  return artifact;
+}
+
+function persistRuntimeInvocationStderr(content, options = {}) {
+  const artifactDir = runtimeArtifactDir(options);
+  if (!artifactDir) {
+    return null;
+  }
+  const taskId = options.request?.task_id || options.plan?.workload_id || options.plan?.task_id || 'runtime-agent-task';
+  const filePath = path.join(artifactDir, `${safeFileSegment(taskId)}-runtime-stderr.txt`);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
+  return {
+    kind: 'runtime-stderr',
+    path: filePath,
+    bytes: Buffer.byteLength(content),
+  };
+}
+
+function runtimeArtifactDir(options = {}) {
+  return firstString(
+    options.stderrArtifactDir,
+    options.stderr_artifact_dir,
+    options.plan?.artifacts_path,
+    options.plan?.artifacts,
+    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
+    options.env?.HOMEBOY_RUNTIME_AGENT_ARTIFACTS,
+    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR,
+    process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS,
+  );
+}
+
+function boundedText(value, maxBytes = DEFAULT_STDIO_SUMMARY_BYTES) {
+  const content = String(value || '');
+  const limit = positiveInteger(maxBytes) || DEFAULT_STDIO_SUMMARY_BYTES;
+  if (Buffer.byteLength(content) <= limit) {
+    return content.replace(/\s+$/u, '');
+  }
+  const buffer = Buffer.from(content);
+  const truncated = buffer.subarray(0, limit).toString('utf8').replace(/\s+$/u, '');
+  return `${truncated}\n[truncated ${Buffer.byteLength(content) - Buffer.byteLength(truncated)} bytes; see artifact for full output]`;
+}
+
+function safeFileSegment(value) {
+  return String(value || 'runtime-agent-task').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'runtime-agent-task';
 }
 
 function runtimeExecutorInvocation(runtime = {}) {
@@ -364,7 +426,7 @@ function invocationStdin(invocation, request) {
   return JSON.stringify(request);
 }
 
-function captureInvocationResult(outcome, invocation, result) {
+function captureInvocationResult(outcome, invocation, result, options = {}) {
   const metadata = optionalObject(outcome.metadata);
   const invocationResult = {
     command: invocation.command,
@@ -372,6 +434,7 @@ function captureInvocationResult(outcome, invocation, result) {
     cwd: invocation.cwd || '',
     exit_status: result.status ?? 0,
     signal: result.signal || null,
+    stderr_artifact: options.stderrArtifact || undefined,
   };
   return {
     ...outcome,
@@ -675,6 +738,59 @@ function writeGenericAgentLoopArtifacts(options = {}) {
   }
 }
 
+function genericAgentLoopStdoutSummary(options = {}) {
+  const outcome = optionalObject(options.outcome);
+  const results = optionalObject(options.results);
+  const outcomeFile = options.outcomeFile || options.outcome_file || '';
+  const resultsFile = options.resultsFile || options.results_file || '';
+  const artifacts = normalizeArray(outcome.artifacts);
+  const evidenceRefs = normalizeArray(outcome.evidence_refs || outcome.evidence);
+  const diagnostics = normalizeArray(outcome.diagnostics);
+  return {
+    schema: 'homeboy/agent-task-stdout-summary/v1',
+    task_id: outcome.task_id || options.request?.task_id || '',
+    status: outcome.status || '',
+    summary: boundedText(outcome.summary || '', options.summaryMaxBytes || 2048),
+    artifact_count: artifacts.length,
+    evidence_ref_count: evidenceRefs.length,
+    diagnostic_count: diagnostics.length,
+    artifact_refs: artifacts.slice(0, 10).map(compactArtifactRef),
+    evidence_refs: evidenceRefs.slice(0, 10).map(compactEvidenceRef),
+    diagnostics: diagnostics.slice(0, 10).map(compactDiagnostic),
+    result_scenario_count: normalizeArray(results.scenarios).length,
+    files: compactObject({ outcome: outcomeFile, results: resultsFile }),
+  };
+}
+
+function compactArtifactRef(artifact = {}) {
+  return compactObject({
+    id: artifact.id,
+    name: artifact.name,
+    kind: artifact.kind || artifact.type || artifact.artifact_kind || artifact.artifactKind,
+    path: artifact.path,
+    url: artifact.url,
+    uri: artifact.uri,
+  });
+}
+
+function compactEvidenceRef(ref = {}) {
+  return compactObject({
+    id: ref.id,
+    kind: ref.kind || ref.type,
+    label: ref.label || ref.name,
+    url: ref.url,
+    uri: ref.uri,
+    path: ref.path,
+  });
+}
+
+function compactDiagnostic(diagnostic = {}) {
+  return compactObject({
+    class: diagnostic.class || diagnostic.kind || diagnostic.code,
+    message: boundedText(diagnostic.message || '', 2048),
+  });
+}
+
 function expectedArtifactsFromPlan(plan) {
   const expected = normalizeArray(plan.expected_artifacts);
   if (expected.length > 0) {
@@ -854,11 +970,16 @@ function isPlainObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function firstString(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim() !== '') || '';
+}
+
 module.exports = {
   assertGenericAgentLoopOutcome,
   assertGenericAgentLoopRuntimeContract,
   buildGenericAgentLoopRequest,
   materializeGenericAgentLoopResults,
+  genericAgentLoopStdoutSummary,
   runGenericAgentLoop,
   runGenericDeterministicLoop,
   validateGenericAgentLoopOutcomeContract,
