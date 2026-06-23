@@ -244,10 +244,16 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		return undefined;
 	}
 	const slug = workload.target?.slug || componentId;
+	const component = objectOrUndefined(context.components?.[componentId]);
+	const wordpressExtension = objectOrUndefined(component?.extensions?.wordpress);
+	const sourceSubpath = nonEmptyString(wordpressExtension?.wp_codebox_source_subpath || wordpressExtension?.wpCodeboxSourceSubpath);
+	const sourceRoot = wpCodeboxSourceRoot({ source, sourceSubpath, wordpressExtension });
 	return {
 		extraPlugin: stripUndefined({
 			slug,
 			source,
+			sourceRoot,
+			sourceSubpath,
 			path: source,
 			pluginFile: activation,
 			loadAs: 'plugin',
@@ -260,10 +266,23 @@ function buildWpCodeboxFuzzPluginRequirement({ workload = {}, componentId, sourc
 		componentContract: stripUndefined({
 			slug,
 			path: source,
+			sourceRoot,
+			sourceSubpath,
 			pluginFile: activation,
 			loadAs: 'plugin',
 		}),
 	};
+}
+
+function wpCodeboxSourceRoot({ source, sourceSubpath, wordpressExtension } = {}) {
+	const configured = nonEmptyString(wordpressExtension?.wp_codebox_source_root || wordpressExtension?.wpCodeboxSourceRoot);
+	if (configured && !configured.startsWith('~/')) {
+		return configured;
+	}
+	if (!sourceSubpath || !source.endsWith(`/${sourceSubpath}`)) {
+		return configured;
+	}
+	return source.slice(0, -sourceSubpath.length - 1);
 }
 
 function nonEmptyString(value) {
