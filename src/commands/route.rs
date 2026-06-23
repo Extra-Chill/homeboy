@@ -91,6 +91,7 @@ pub fn route_after_parse(
             active_run_id: active_run_id.as_deref(),
             detach_after_handoff: cli.detach_after_handoff,
             output_file_requested: output_file.is_some(),
+            local_output_file: output_file,
         },
         trace_runner_id.as_deref(),
         observer,

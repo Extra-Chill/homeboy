@@ -108,6 +108,11 @@ pub struct LabOffloadRequest<'a> {
     pub mutation_flag: Option<&'a str>,
     pub detach_after_handoff: bool,
     pub output_file_requested: bool,
+    /// Controller-local `--output` path, when the operator requested the global
+    /// JSON envelope be written to a file. Used to persist the durable agent-task
+    /// run id immediately (before long-running provider execution starts) so the
+    /// handle survives a local shell timeout/interruption (#5684).
+    pub local_output_file: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1500,12 +1505,12 @@ fn run_lab_offload_inner(
         remote_cwd
     );
     if let Some(run_id) = &agent_task_run_id {
-        eprintln!(
-            "Lab offload: agent-task run id `{run_id}` will be persisted before provider execution. Inspect with `homeboy agent-task status {run_id}`."
+        emit_durable_run_id_before_execution(
+            run_id,
+            runner_id,
+            request.local_output_file,
+            &mut messages,
         );
-        messages.push(format!(
-            "Lab offload: agent-task run id `{run_id}`. Inspect with `homeboy agent-task status {run_id}`."
-        ));
     }
     let workspace_mapping_metadata = lab_workspace_mapping_metadata(&workspace_mapping);
     let mut lab_metadata = lab_offload_metadata_with_workspace_mapping(
@@ -2129,6 +2134,95 @@ fn with_lab_apply_patch_step(
     )
 }
 
+/// Persist and print the durable agent-task run id *before* the long-running
+/// provider execution starts (#5684).
+///
+/// For Lab/offloaded cooks the run id is the operator handle for status, logs,
+/// artifacts, cancellation, retry and review. Provider execution can block the
+/// foreground process well past a local shell timeout, so the handle must be
+/// emitted up front: written immediately to the controller-local `--output`
+/// file as structured JSON (when requested) and printed to stdout/stderr with
+/// the exact follow-up commands. Even if the local process is then
+/// timed out or interrupted, the run id remains discoverable from this initial
+/// output rather than requiring the operator to guess from `agent-task active`
+/// / `agent-task list` / `runs list`.
+fn emit_durable_run_id_before_execution(
+    run_id: &str,
+    runner_id: &str,
+    local_output_file: Option<&str>,
+    messages: &mut Vec<String>,
+) {
+    let status_command = format!("homeboy agent-task status {run_id}");
+    let logs_command = format!("homeboy agent-task logs {run_id}");
+
+    if let Some(path) = local_output_file {
+        let envelope = serde_json::json!({
+            "success": true,
+            "data": {
+                "status": "dispatched_pending_execution",
+                "schema": "homeboy/lab-offload-durable-run/v1",
+                "durable_run_id": run_id,
+                "run_id": run_id,
+                "runner_id": runner_id,
+                "note": "Durable agent-task run id persisted before long-running Lab execution. Track it with the retrieval commands; this file is overwritten with the final result when execution completes.",
+                "retrieval_commands": {
+                    "status": status_command,
+                    "logs": logs_command,
+                },
+            },
+        });
+        let serialized = serde_json::to_string_pretty(&envelope)
+            .unwrap_or_else(|_| format!("{{\"durable_run_id\":\"{run_id}\"}}"));
+        if let Err(err) = write_local_output_file_atomically(path, &serialized) {
+            eprintln!(
+                "Lab offload: warning: could not pre-write durable run id `{run_id}` to --output `{path}`: {err}"
+            );
+        } else {
+            eprintln!(
+                "Lab offload: durable agent-task run id `{run_id}` written to --output `{path}` before execution."
+            );
+        }
+    }
+
+    eprintln!(
+        "Lab offload: agent-task run id `{run_id}` persisted before provider execution starts."
+    );
+    eprintln!("Next: {status_command}");
+    eprintln!("Next: {logs_command}");
+
+    messages.push(format!(
+        "Lab offload: durable agent-task run id `{run_id}` (persisted before execution). Track with `{status_command}` and `{logs_command}`."
+    ));
+}
+
+/// Atomically write `contents` to `path` (temp file + rename) so a concurrent
+/// reader never observes a half-written durable-run-id envelope.
+fn write_local_output_file_atomically(path: &str, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let target = std::path::Path::new(path);
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output");
+    let temp_name = format!(".{file_name}.{}.tmp", std::process::id());
+    let temp = target.with_file_name(temp_name);
+    {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(contents.as_bytes())?;
+        if !contents.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+    }
+    match std::fs::rename(&temp, target) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
 fn in_flight_daemon_disconnect_error(
     runner_id: &str,
     job_id: &str,
@@ -2482,6 +2576,85 @@ mod tests {
         let mut command = portable_lab_command(label);
         command.routing_policy.release_gate = true;
         command
+    }
+
+    #[test]
+    fn emit_durable_run_id_writes_json_to_output_before_execution() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output_path = dir.path().join("cook-output.json");
+        let output_str = output_path.to_str().expect("utf8 path");
+        let mut messages = Vec::new();
+
+        emit_durable_run_id_before_execution(
+            "agent-task-run-5684",
+            "homeboy-lab",
+            Some(output_str),
+            &mut messages,
+        );
+
+        // The durable run id must be discoverable from --output immediately,
+        // before the long-running provider execution that may exceed the local
+        // shell timeout (#5684).
+        let written = std::fs::read_to_string(&output_path).expect("read pre-written output");
+        let json: serde_json::Value = serde_json::from_str(&written).expect("valid JSON envelope");
+        assert_eq!(json["data"]["durable_run_id"], "agent-task-run-5684");
+        assert_eq!(json["data"]["run_id"], "agent-task-run-5684");
+        assert_eq!(json["data"]["status"], "dispatched_pending_execution");
+        assert_eq!(
+            json["data"]["retrieval_commands"]["status"],
+            "homeboy agent-task status agent-task-run-5684"
+        );
+        assert_eq!(
+            json["data"]["retrieval_commands"]["logs"],
+            "homeboy agent-task logs agent-task-run-5684"
+        );
+
+        // The operator-facing messages must carry both follow-up commands.
+        let joined = messages.join("\n");
+        assert!(joined.contains("homeboy agent-task status agent-task-run-5684"));
+        assert!(joined.contains("homeboy agent-task logs agent-task-run-5684"));
+    }
+
+    #[test]
+    fn emit_durable_run_id_without_output_still_records_followup_commands() {
+        let mut messages = Vec::new();
+
+        emit_durable_run_id_before_execution(
+            "agent-task-run-no-output",
+            "homeboy-lab",
+            None,
+            &mut messages,
+        );
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(message.contains("agent-task-run-no-output"));
+        assert!(message.contains("homeboy agent-task status agent-task-run-no-output"));
+        assert!(message.contains("homeboy agent-task logs agent-task-run-no-output"));
+    }
+
+    #[test]
+    fn write_local_output_file_atomically_replaces_and_appends_newline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let output_path = dir.path().join("run.json");
+        std::fs::write(&output_path, "stale").expect("seed output");
+
+        write_local_output_file_atomically(
+            output_path.to_str().expect("utf8 path"),
+            "{\"durable_run_id\":\"run-123\"}",
+        )
+        .expect("atomic write");
+
+        let written = std::fs::read_to_string(&output_path).expect("read output");
+        assert_eq!(written, "{\"durable_run_id\":\"run-123\"}\n");
+        // No leftover temp file should remain after the atomic rename.
+        assert!(std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .all(|entry| !entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
     }
 
     #[test]
@@ -3841,6 +4014,7 @@ mod tests {
             mutation_flag: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         })
         .expect("outcome");
 
@@ -3866,6 +4040,7 @@ mod tests {
             mutation_flag: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         });
 
         let Err(err) = outcome else {
@@ -3892,6 +4067,7 @@ mod tests {
             mutation_flag: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         });
 
         let Err(err) = outcome else {
@@ -3931,6 +4107,7 @@ mod tests {
             mutation_flag: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         });
 
         let Err(err) = outcome else {
@@ -3972,6 +4149,7 @@ mod tests {
             mutation_flag: None,
             detach_after_handoff: false,
             output_file_requested: false,
+            local_output_file: None,
         });
 
         let Err(err) = outcome else {
