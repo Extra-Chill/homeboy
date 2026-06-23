@@ -18,7 +18,7 @@ use crate::core::agent_task_prompts;
 use crate::core::agent_task_provider::provider_requires_cwd_git_checkout;
 use crate::core::agent_task_scheduler::{AgentTaskPlan, AgentTaskRetryPolicy};
 use crate::core::agent_task_secrets::validate_secret_env;
-use crate::core::{config, defaults, git, worktree, Error, Result};
+use crate::core::{config, defaults, worktree, Error, Result};
 
 use super::agent_task_dispatch_service::AgentTaskDispatchRequest;
 
@@ -272,12 +272,6 @@ fn resolve_dispatch_workspace(
     if let Some(cwd) = &request.cwd {
         let path = std::path::PathBuf::from(cwd);
         if !path.is_dir() {
-            if let Some(root) = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| git::repo_root(&cwd))
-            {
-                return Ok(Some(DispatchWorkspaceTarget::path(root, "cwd-fallback")));
-            }
             return Err(Error::validation_invalid_argument(
                 "cwd",
                 format!(
@@ -790,26 +784,41 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_plan_falls_back_to_current_git_root_for_stale_cwd() {
+    fn dispatch_plan_rejects_invalid_explicit_cwd_inside_git_repo() {
         let repo = tempfile::tempdir().expect("repo");
         git(repo.path(), &["init"]);
         let previous_cwd = std::env::current_dir().expect("current dir");
         std::env::set_current_dir(repo.path()).expect("enter repo");
+        let missing = repo.path().join("missing-workspace");
 
-        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
             prompt: Some("Cook inside the materialized workspace.".to_string()),
-            cwd: Some("/path/that/does/not/exist".to_string()),
+            cwd: Some(missing.display().to_string()),
             ..DispatchRequestOverrides::default()
         }));
 
         std::env::set_current_dir(previous_cwd).expect("restore cwd");
-        let plan = plan.expect("dispatch plan");
-        let expected_root = std::fs::canonicalize(repo.path()).expect("canonical repo path");
+        let error = error.expect_err("invalid explicit cwd should fail");
+        assert!(error.to_string().contains("cwd"));
+        assert!(error.to_string().contains("is not a directory"));
+    }
+
+    #[test]
+    fn dispatch_plan_resolves_valid_explicit_cwd() {
+        let workspace = tempfile::tempdir().expect("workspace");
+
+        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Cook inside the explicit workspace.".to_string()),
+            cwd: Some(workspace.path().display().to_string()),
+            ..DispatchRequestOverrides::default()
+        }))
+        .expect("dispatch plan");
+
         assert_eq!(
             plan.tasks[0].workspace.root.as_deref(),
-            Some(expected_root.to_str().expect("repo path utf8"))
+            Some(workspace.path().to_str().expect("workspace utf8"))
         );
-        assert_eq!(plan.tasks[0].metadata["workspace"]["kind"], "cwd-fallback");
+        assert_eq!(plan.tasks[0].metadata["workspace"]["kind"], "cwd");
     }
 
     #[test]
