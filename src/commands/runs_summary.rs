@@ -55,6 +55,8 @@ fn render_run_detail(run: &Value) -> String {
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
         lines.extend(super::bench_summary::bench_regression_threshold_lines(run));
+    } else if kind == "fuzz" {
+        lines.extend(super::runs::fuzz_hotspot_lines(run));
     }
     lines.extend(super::bench_summary::bench_coverage_lines(run));
     lines.extend(key_artifact_lines(run, run_id));
@@ -398,6 +400,54 @@ mod tests {
         assert!(
             summary.contains("    get: homeboy runs artifact get fuzz-run-7 seed-1 -o <path>\n")
         );
+    }
+
+    #[test]
+    fn fuzz_show_summary_surfaces_generic_hotspots_from_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join("fuzz-results.json");
+        std::fs::write(
+            &artifact_path,
+            serde_json::json!({
+                "schema": "homeboy/fuzz-campaign/v1",
+                "id": "campaign-1",
+                "hotspots": [
+                    { "id": "parser::unicode", "score": 4.5, "label": "Unicode parser" },
+                    { "id": "serializer::nested", "count": 2 }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write artifact");
+        let payload = json!({
+            "variant": "show",
+            "payload": {
+                "command": "runs.show",
+                "run": {
+                    "id": "fuzz-run-7",
+                    "kind": "fuzz",
+                    "status": "fail",
+                    "metadata": {},
+                    "artifacts": [
+                        {
+                            "id": "fuzz-results",
+                            "run_id": "fuzz-run-7",
+                            "kind": "fuzz_results",
+                            "type": "file",
+                            "path": artifact_path
+                        }
+                    ]
+                }
+            }
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Hotspots:\n"));
+        assert!(summary.contains("  Fuzz hotspots:\n"));
+        assert!(summary
+            .contains("    #1 parser::unicode (Unicode parser) score=4.5 occurrences=1 runs=1\n"));
+        assert!(summary.contains("    #2 serializer::nested score=2 occurrences=1 runs=1\n"));
     }
 
     #[test]
