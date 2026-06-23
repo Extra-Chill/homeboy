@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.70] - 2026-06-23
+
+### Changed
+- Decouple generic runtime CI from WP Codebox
+
 ## [3.12.69] - 2026-06-23
 
 ### Changed
