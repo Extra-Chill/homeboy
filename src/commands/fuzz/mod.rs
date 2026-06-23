@@ -180,7 +180,11 @@ mod tests {
     use clap::Parser;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy::core::extension::FuzzConfig;
-    use homeboy::core::fuzz::{FuzzCampaign, FuzzCoverageSummary};
+    use homeboy::core::fuzz::{FuzzCampaign, FuzzCoverageSummary, FuzzFinding, FuzzFindingStatus};
+    use homeboy::core::lifecycle::{
+        LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
+        LIFECYCLE_CONTRACT_VERSION, LIFECYCLE_RESULT_SCHEMA,
+    };
     use homeboy::core::observation::{ObservationStore, RunRecord};
     use homeboy::core::rig::RigSpec;
     use homeboy::test_support::with_isolated_home;
@@ -1022,15 +1026,50 @@ mod tests {
     }
 
     #[test]
-    fn fuzz_run_outcome_fails_when_successful_command_reports_nested_runtime_error() {
+    fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
         let mut campaign = empty_fuzz_campaign();
-        let nested_result_key = ["word", "press", "_fuzz_result"].concat();
-        campaign.metadata = serde_json::json!({
-            nested_result_key: {
-                "status": "errored",
-                "success": false,
-                "case_counts": { "passed": 0, "failed": 0, "errored": 1 }
-            }
+        campaign.findings = vec![FuzzFinding {
+            schema: homeboy::core::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+            id: "finding-1".to_string(),
+            title: "runner surfaced a failing case".to_string(),
+            severity: "high".to_string(),
+            status: FuzzFindingStatus::Open,
+            surface_id: None,
+            target_id: None,
+            operation_id: None,
+            case_id: Some("case-1".to_string()),
+            workload_id: None,
+            seed_id: None,
+            fingerprint: None,
+            artifact_ids: Vec::new(),
+            metadata: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        }];
+
+        let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
+
+        assert_eq!(outcome.status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.exit_code, 1);
+    }
+
+    #[test]
+    fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase() {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.lifecycle = Some(LifecycleResultMetadata {
+            schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
+            version: LIFECYCLE_CONTRACT_VERSION,
+            phases: vec![LifecyclePhaseResult {
+                id: "prepare".to_string(),
+                phase: LifecyclePhaseKind::Prepare,
+                status: LifecyclePhaseStatus::Failed,
+                snapshot_ref: None,
+                started_at: None,
+                finished_at: None,
+                message: Some("runtime prepare failed".to_string()),
+            }],
+            snapshot_refs: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
         });
 
         let outcome = fuzz_run_outcome(0, true, Some(&campaign), None);
