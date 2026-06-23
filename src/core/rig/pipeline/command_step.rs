@@ -64,15 +64,30 @@ pub(super) fn run_command_step(
 }
 
 fn settings_env(settings: &[(String, String)]) -> Vec<(String, String)> {
-    settings
-        .iter()
-        .map(|(key, value)| {
-            (
-                format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
-                value.clone(),
-            )
+    let mut env = Vec::new();
+    for (key, value) in settings {
+        env.push((format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()), value.clone()));
+        let sanitized = shell_safe_setting_env_key(key);
+        let raw = format!("HOMEBOY_SETTINGS_{}", key.to_uppercase());
+        if sanitized != raw {
+            env.push((sanitized, value.clone()));
+        }
+    }
+    env
+}
+
+fn shell_safe_setting_env_key(key: &str) -> String {
+    let normalized = key
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
         })
-        .collect()
+        .collect::<String>();
+    format!("HOMEBOY_SETTINGS_{normalized}")
 }
 
 pub(super) fn run_command_pipeline_step(
@@ -128,4 +143,22 @@ fn command_step_shell() -> &'static str {
 #[cfg(not(unix))]
 fn command_step_shell() -> &'static str {
     "sh"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_env_adds_shell_safe_dotted_keys() {
+        let env = settings_env(&[(
+            "components.woocommerce.extensions.wordpress.wp_codebox_source_root".to_string(),
+            "/workspace/source".to_string(),
+        )]);
+
+        assert!(env.iter().any(|(key, value)| {
+            key == "HOMEBOY_SETTINGS_COMPONENTS_WOOCOMMERCE_EXTENSIONS_WORDPRESS_WP_CODEBOX_SOURCE_ROOT"
+                && value == "/workspace/source"
+        }));
+    }
 }
