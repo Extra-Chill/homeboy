@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.59] - 2026-06-23
+
+### Changed
+- Extract fuzz contract builders
+
 ## [3.12.58] - 2026-06-22
 
 ### Changed
