@@ -8,7 +8,7 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--max-duration <duration>] [-- <runner-args>]
 homeboy fuzz list [<component>] [--rig <id>]
-homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>]
+homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>]
 homeboy fuzz validate <results-file>
 homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <path>] [--output-envelope <path>]
 homeboy fuzz compare <baseline-envelope> <candidate-envelope>
@@ -71,6 +71,25 @@ embeds it in generated result envelope metadata when reporting, and exposes the
 path to runners as `HOMEBOY_FUZZ_INVENTORY_FILE`. The inventory contract is
 product-neutral; product-specific details belong in `metadata` or flattened extra
 fields on the inventory items.
+
+`homeboy fuzz plan --inventory <path>` emits a
+`homeboy/fuzz-execution-request/v1` request in the command output. The request
+metadata includes the planner strategy, selected target ids, selected operation
+families, selected operation ids, seed/corpus refs, effective budgets, isolation
+requirements, required artifact ids, inventory provenance, and skipped target or
+operation reasons. The planner is product-neutral: it uses inventory-declared
+operation families and safety classes, not product-specific target names.
+
+Selection strategies are intentionally small. `all` selects supported
+non-destructive inventory operations. `read-only` selects read-like families,
+`crud` selects create/update/delete families, and `coverage-gaps` currently uses
+the same neutral selection surface as `all` while recording the requested
+strategy for downstream runners that can prioritize gaps. Repeat `--operation`
+to filter by operation id, operation kind, or canonical family. Repeat
+`--operation-family` to filter by canonical family. Unknown or non-canonical
+operation families are preserved in the inventory and reported under skipped
+operations with reason `unsupported`; destructive surfaces are skipped with
+reason `destructive`.
 
 Operations keep the free-form `kind` string for product-owned semantics and can
 also carry a canonical `family` for cross-runner coverage reporting. When

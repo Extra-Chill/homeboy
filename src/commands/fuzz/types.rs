@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use homeboy::core::fuzz::{
     FuzzCampaign, FuzzExecutionRequest, FuzzGate, FuzzReplayMetadata, FuzzRequiredArtifact,
@@ -132,6 +132,45 @@ pub(crate) struct FuzzPlanArgs {
     /// Stable request id. Defaults to --run-id, then the selected workload id.
     #[arg(long = "request-id", value_name = "ID")]
     pub(crate) request_id: Option<String>,
+
+    /// Inventory selection strategy.
+    #[arg(long, value_enum, default_value_t = FuzzPlanStrategy::All)]
+    pub(crate) strategy: FuzzPlanStrategy,
+
+    /// Select operations by canonical family, operation kind, or operation id.
+    #[arg(long = "operation", value_name = "FILTER")]
+    pub(crate) operations: Vec<String>,
+
+    /// Select operations by canonical family.
+    #[arg(long = "operation-family", value_name = "FAMILY")]
+    pub(crate) operation_families: Vec<String>,
+
+    /// Maximum number of cases the downstream runner should generate.
+    #[arg(long = "case-budget", value_name = "COUNT")]
+    pub(crate) case_budget: Option<u64>,
+
+    /// Maximum execution budget in seconds for downstream runners.
+    #[arg(long = "duration-budget-seconds", value_name = "SECONDS")]
+    pub(crate) duration_budget_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum FuzzPlanStrategy {
+    All,
+    ReadOnly,
+    Crud,
+    CoverageGaps,
+}
+
+impl FuzzPlanStrategy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ReadOnly => "read-only",
+            Self::Crud => "crud",
+            Self::CoverageGaps => "coverage-gaps",
+        }
+    }
 }
 
 #[derive(Args, Clone)]
