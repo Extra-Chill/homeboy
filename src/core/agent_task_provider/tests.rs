@@ -1389,6 +1389,87 @@ fn provider_outcome_roles_normalize_from_declared_aliases() {
     );
 }
 
+#[test]
+fn codebox_provider_rejects_private_runtime_result_shape() {
+    let (_, mut provider) = request("task-codebox-private", "node provider.js".to_string());
+    provider.backend = "codebox".to_string();
+    let mut outcome = failed_outcome_with_run_result(json!({
+        "agent_result": { "status": "succeeded" },
+        "metadata": { "agent_runtime": { "id": "runtime-private" } }
+    }));
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
+
+    normalize_provider_outcome_roles(&mut outcome, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Provider)
+    );
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "codebox.public_result_envelope_missing")
+        .expect("missing public envelope diagnostic");
+    assert_eq!(diagnostic.data["private_shape_detected"], true);
+    assert!(outcome.typed_artifacts.is_empty());
+}
+
+#[test]
+fn codebox_provider_consumes_public_typed_artifacts() {
+    let (_, mut provider) = request("task-codebox-public", "node provider.js".to_string());
+    provider.backend = "codebox".to_string();
+    let mut outcome = failed_outcome_with_run_result(json!({
+        "schema": "wp-codebox/artifact-result-envelope/v1",
+        "status": "succeeded",
+        "typed_artifacts": [{
+            "name": "agent_result",
+            "type": "agent_result",
+            "artifact_schema": "wp-codebox/agent-result/v1",
+            "payload": { "summary": "created patch" }
+        }]
+    }));
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
+
+    normalize_provider_outcome_roles(&mut outcome, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome.diagnostics.is_empty());
+    assert_eq!(outcome.typed_artifacts.len(), 1);
+    assert_eq!(outcome.typed_artifacts[0].name, "agent_result");
+    assert_eq!(
+        outcome.typed_artifacts[0].artifact_schema.as_deref(),
+        Some("wp-codebox/agent-result/v1")
+    );
+    assert_eq!(
+        outcome.typed_artifacts[0].payload["summary"],
+        "created patch"
+    );
+}
+
+#[test]
+fn codebox_public_envelope_reports_missing_typed_artifacts() {
+    let (_, mut provider) = request("task-codebox-empty", "node provider.js".to_string());
+    provider.backend = "codebox".to_string();
+    let mut outcome = failed_outcome_with_run_result(json!({
+        "schema": "wp-codebox/artifact-result-envelope/v1",
+        "status": "succeeded",
+        "typed_artifacts": []
+    }));
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
+
+    normalize_provider_outcome_roles(&mut outcome, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    assert!(outcome.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class == "codebox.public_result_typed_artifacts_missing"
+            && diagnostic.message.contains("typed artifacts")
+    }));
+}
+
 fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {
     AgentTaskOutcome {
         schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),

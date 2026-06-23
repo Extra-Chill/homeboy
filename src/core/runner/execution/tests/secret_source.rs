@@ -49,6 +49,40 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
 }
 
 #[test]
+fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sources() {
+    let mut expires_at = json_file_source("~/.codex/auth.json", "tokens.access_token");
+    expires_at.source = "json-file-jwt-expiration".to_string();
+    let sources = HashMap::from([
+        (
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            json_file_source("~/.codex/auth.json", "tokens.access_token"),
+        ),
+        (
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            expires_at,
+        ),
+    ]);
+
+    let provisions = provider_file_secret_source_provisions(
+        &[
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+        ],
+        &sources,
+    );
+
+    assert_eq!(provisions.len(), 1);
+    assert_eq!(provisions[0].path, "~/.codex/auth.json");
+    assert_eq!(
+        provisions[0].env_names,
+        vec![
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
     crate::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
