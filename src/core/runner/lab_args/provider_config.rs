@@ -1,7 +1,7 @@
 //! `--provider-config` argument handling for Lab offload.
 //!
 //! Provider-config payloads embed controller-local absolute paths and may be
-//! supplied as `@file`/`-`/inline JSON. These helpers inline file specs, remap
+//! supplied as `@file`/inline JSON. These helpers inline file specs, remap
 //! embedded paths, and inject a default provider config for agent-task dispatch.
 
 use serde_json::Value;
@@ -31,8 +31,8 @@ pub(in crate::core::runner) fn remap_provider_config_in_args(
 ) -> Result<Vec<String>> {
     let envelope = ExecutionEnvelope::from_args(args);
     // NOTE: do not early-return on empty mappings. A `--provider-config @file`
-    // (or `-` stdin) spec must always be inlined to JSON before offload, because
-    // the controller-local file path is meaningless on the remote runner and the
+    // spec must always be inlined to JSON before offload, because the
+    // controller-local file path is meaningless on the remote runner and the
     // remote dispatch would fail with "failed to read agent-task dispatch
     // provider-config input: IO error". Path remapping is a no-op without
     // mappings, but inlining still has to happen.
@@ -104,19 +104,33 @@ fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {
         .is_some_and(|command| matches!(command.as_str(), "dispatch" | "cook"))
 }
 
-/// Resolve a provider-config spec (inline JSON / `@file` / `-`), remap its
+/// Resolve a provider-config spec (inline JSON / `@file`), remap its
 /// embedded local paths, and return inline JSON.
 ///
-/// A `@file` or `-` (stdin) spec is ALWAYS inlined to JSON, even when there are
-/// no path mappings, because the controller-local path cannot be read by the
-/// remote runner. A plain inline-JSON spec is only rewritten when there are
-/// mappings to apply; otherwise it is returned verbatim so behavior is never
-/// worse than passing the original argument through.
+/// A `@file` spec is ALWAYS inlined to JSON, even when there are no path
+/// mappings, because the controller-local path cannot be read by the remote
+/// runner. Stdin (`-`) specs are rejected locally because offload argv
+/// materialization cannot safely block on process stdin. A plain inline-JSON spec
+/// is only rewritten when there are mappings to apply; otherwise it is returned
+/// verbatim so behavior is never worse than passing the original argument
+/// through.
 ///
-/// If a `@file`/`-` spec cannot be read or parsed, Lab offload fails locally with
+/// If a `@file` spec cannot be read or parsed, Lab offload fails locally with
 /// an actionable validation error instead of forwarding a controller-local spec
 /// to the remote runner.
 fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<String> {
+    if is_provider_config_stdin_spec(spec) {
+        return Err(Error::validation_invalid_argument(
+            "provider-config",
+            "Lab offload does not support --provider-config -",
+            None,
+            None,
+        )
+        .with_hint(
+            "Pass --provider-config as inline JSON or write stdin to a JSON file and pass --provider-config @path before Lab offload.",
+        ));
+    }
+
     let needs_inlining = is_provider_config_file_spec(spec);
 
     // Even with no mappings, an inline-JSON spec may carry stale controller-local
@@ -133,12 +147,12 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<
         Err(err) if needs_inlining => {
             return Err(Error::validation_invalid_argument(
                 "provider-config",
-                "failed to read Lab offload --provider-config @file/- input",
+                "failed to read Lab offload --provider-config @file input",
                 Some(err.to_string()),
                 None,
             )
             .with_hint(
-                "Lab offload reads --provider-config @file/- specs on the controller before dispatch; provide a readable JSON file or inline JSON.",
+                "Lab offload reads --provider-config @file specs on the controller before dispatch; provide a readable JSON file or inline JSON.",
             ));
         }
         Err(_) => return Ok(spec.to_string()),
@@ -148,11 +162,11 @@ fn remap_provider_config_spec(spec: &str, mappings: &[&LabPathRemap]) -> Result<
         Err(err) if needs_inlining => {
             return Err(Error::validation_invalid_json(
                 err,
-                Some("parse Lab offload --provider-config @file/- input".to_string()),
+                Some("parse Lab offload --provider-config @file input".to_string()),
                 Some(raw),
             )
             .with_hint(
-                "Lab offload inlines --provider-config @file/- specs before dispatch; fix the JSON or pass valid inline JSON.",
+                "Lab offload inlines --provider-config @file specs before dispatch; fix the JSON or pass valid inline JSON.",
             ));
         }
         Err(_) => return Ok(spec.to_string()),
@@ -225,10 +239,14 @@ fn provider_plugin_path_is_resolvable(path: &str, mappings: &[&LabPathRemap]) ->
     })
 }
 
-/// A provider-config spec that points at a controller-local file (`@path`) or
-/// stdin (`-`). These must be inlined before offload so the remote runner never
-/// tries to read a path that only exists on the controller.
+/// A provider-config spec that points at a controller-local file (`@path`). These
+/// must be inlined before offload so the remote runner never tries to read a path
+/// that only exists on the controller.
 fn is_provider_config_file_spec(spec: &str) -> bool {
     let trimmed = spec.trim();
-    trimmed == "-" || trimmed.starts_with('@')
+    trimmed.starts_with('@')
+}
+
+fn is_provider_config_stdin_spec(spec: &str) -> bool {
+    spec.trim() == "-"
 }
