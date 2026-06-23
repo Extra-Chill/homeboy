@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.255.6] - 2026-06-23
+
+### Changed
+- Count metadata fuzz artifacts in gates
+
+### Fixed
+- Fix artifact-only fuzz gates
+
 ## [0.255.5] - 2026-06-22
 
 ### Changed
