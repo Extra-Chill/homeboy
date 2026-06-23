@@ -19,7 +19,6 @@ use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
 use homeboy::core::agent_tasks::dispatch_service;
-use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopControllerState;
 use homeboy::core::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
 use super::super::CmdResult;
@@ -321,37 +320,18 @@ where
         executor: executor.clone(),
         defaults,
     };
-    let mut results = Vec::new();
-    let mut exit_code = 0;
-    let mut stopped_reason = "idle".to_string();
-
-    for _ in 0..args.max_actions {
-        let result = agent_task_controller_service::run_next(
-            &from_spec.loop_id,
-            executor.clone(),
-            &dispatch,
-        )?;
-        exit_code = result.exit_code;
-        let claimed = result.value.claimed;
-        let controller_state = result.value.controller.state;
-        let value = serde_json::to_value(result.value)
-            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-        results.push(value);
-
-        if exit_code != 0 {
-            stopped_reason = "action_failed".to_string();
-            break;
-        }
-        if !claimed {
-            stopped_reason = "idle".to_string();
-            break;
-        }
-        if controller_state_is_terminal(controller_state) {
-            stopped_reason = "terminal_state".to_string();
-            break;
-        }
-        stopped_reason = "max_actions_reached".to_string();
-    }
+    let resume_result = agent_task_controller_service::resume_with_options(
+        &from_spec.loop_id,
+        executor,
+        &dispatch,
+        agent_task_controller_service::ControllerResumeOptions {
+            max_actions: args.max_actions as usize,
+            stop_on_terminal: true,
+        },
+    )?;
+    let exit_code = resume_result.exit_code;
+    let stopped_reason = resume_result.value.stopped_reason.clone();
+    let results = resume_result.value.results;
 
     let status =
         homeboy::core::agent_tasks::loop_controller::controller_status_report(&from_spec.loop_id)?;
@@ -419,17 +399,6 @@ fn materialize_controller_spec(
 struct MaterializedControllerSpec {
     spec: AgentTaskRepoLoopSpec,
     value: Value,
-}
-
-fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
-    matches!(
-        state,
-        AgentTaskLoopControllerState::HumanReady
-            | AgentTaskLoopControllerState::Completed
-            | AgentTaskLoopControllerState::Abandoned
-            | AgentTaskLoopControllerState::Escalated
-            | AgentTaskLoopControllerState::Failed
-    )
 }
 
 fn parse_policy_result(

@@ -97,6 +97,7 @@ pub struct ControllerResumeReport {
     pub schema: &'static str,
     pub loop_id: String,
     pub claimed: bool,
+    pub stopped_reason: String,
     pub results: Vec<Value>,
     pub controller: AgentTaskLoopControllerRecord,
 }

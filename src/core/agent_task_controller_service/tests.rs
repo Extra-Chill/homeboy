@@ -1561,6 +1561,128 @@ fn resume_failed_action_result_includes_top_level_failure_summary() {
 }
 
 #[test]
+fn resume_with_options_stops_at_max_actions_with_pending_work_remaining() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-bounded-resume".to_string(),
+            phase: "repair".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+
+        for index in 0..3 {
+            record.record_action(
+                AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: format!("finding:{index}:repair"),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "run_plan",
+                        "run_id": format!("controller-service-bounded-{index}"),
+                        "plan": test_plan(),
+                    }),
+                },
+                "finding emitted",
+            );
+        }
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume_with_options(
+            "loop-service-bounded-resume",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+            ControllerResumeOptions {
+                max_actions: 2,
+                stop_on_terminal: true,
+            },
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.value.claimed);
+        assert_eq!(result.value.stopped_reason, "max_actions_reached");
+        assert_eq!(result.value.results.len(), 2);
+
+        let loaded =
+            controller::load_controller("loop-service-bounded-resume").expect("controller loaded");
+        assert_eq!(
+            loaded.next_actions[0].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[1].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[2].status,
+            AgentTaskLoopActionStatus::Pending
+        );
+    });
+}
+
+#[test]
+fn resume_with_options_stops_after_terminal_state() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-terminal-resume".to_string(),
+            phase: "finalize".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.record_action(
+            AgentTaskLoopPolicyAction::Complete {
+                reason: Some("done".to_string()),
+            },
+            "complete loop",
+        );
+        record.record_action(
+            AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "finding:after-terminal".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "run_plan",
+                    "run_id": "controller-service-after-terminal",
+                    "plan": test_plan(),
+                }),
+            },
+            "should not run after terminal state",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume_with_options(
+            "loop-service-terminal-resume",
+            CapturingExecutor::default(),
+            &NoopDispatchHook,
+            ControllerResumeOptions {
+                max_actions: 10,
+                stop_on_terminal: true,
+            },
+        )
+        .expect("controller resumed");
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.value.claimed);
+        assert_eq!(result.value.stopped_reason, "terminal_state");
+        assert_eq!(result.value.results.len(), 1);
+        assert_eq!(
+            result.value.controller.state,
+            AgentTaskLoopControllerState::Completed
+        );
+
+        let loaded =
+            controller::load_controller("loop-service-terminal-resume").expect("controller loaded");
+        assert_eq!(loaded.state, AgentTaskLoopControllerState::Completed);
+        assert_eq!(
+            loaded.next_actions[0].status,
+            AgentTaskLoopActionStatus::Completed
+        );
+        assert_eq!(
+            loaded.next_actions[1].status,
+            AgentTaskLoopActionStatus::Pending
+        );
+    });
+}
+
+#[test]
 fn completed_typed_artifacts_are_carried_to_later_required_workflow_artifacts() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
