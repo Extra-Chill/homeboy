@@ -785,7 +785,6 @@
         "structural::src/core/extension/lint/run.rs::GodFile",
         "structural::src/core/extension/lint/run.rs::HighItemCount",
         "structural::src/core/extension/trace/report.rs::HighItemCount",
-        "structural::src/core/extension/trace/run.rs::GodFile",
         "structural::src/core/fuzz.rs::GodFile",
         "structural::src/core/fuzz.rs::HighItemCount",
         "structural::src/core/git/github.rs::GodFile",
