@@ -81,6 +81,7 @@ fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<Ch
         .map(|(index, artifact)| {
             let ReleaseArtifact {
                 path: release_artifact_path,
+                durable_path: _,
                 artifact_type,
                 platform,
             } = artifact;

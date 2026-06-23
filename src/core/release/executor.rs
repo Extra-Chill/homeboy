@@ -431,6 +431,14 @@ mod tests {
         );
     }
 
+    fn test_repo() -> GitHubRepo {
+        GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "example".to_string(),
+            repo: "fixture".to_string(),
+        }
+    }
+
     #[test]
     fn github_release_repair_commands_include_repo_asset_notes_and_enterprise_env() {
         let github = GitHubRepo {
@@ -517,6 +525,43 @@ mod tests {
     }
 
     #[test]
+    fn github_release_artifact_paths_prefer_existing_durable_copy_and_omit_missing_assets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original_dir = temp.path().join("component/build");
+        let durable_dir = temp.path().join("artifacts/release/fixture/1.2.3");
+        std::fs::create_dir_all(&original_dir).expect("original dir");
+        std::fs::create_dir_all(&durable_dir).expect("durable dir");
+        let original = original_dir.join("fixture.zip");
+        let durable = durable_dir.join("01-fixture.zip");
+        std::fs::write(&original, "original").expect("original artifact");
+        std::fs::write(&durable, "durable").expect("durable artifact");
+        std::fs::remove_file(&original).expect("simulate cleanup removing original artifact");
+
+        let state = ReleaseState {
+            artifacts: vec![
+                ReleaseArtifact {
+                    path: original.display().to_string(),
+                    durable_path: Some(durable.display().to_string()),
+                    artifact_type: None,
+                    platform: None,
+                },
+                ReleaseArtifact {
+                    path: temp.path().join("missing.zip").display().to_string(),
+                    durable_path: None,
+                    artifact_type: None,
+                    platform: None,
+                },
+            ],
+            ..ReleaseState::default()
+        };
+
+        assert_eq!(
+            github_release::github_release_artifact_paths(&state),
+            vec![durable.display().to_string()]
+        );
+    }
+
+    #[test]
     fn cleanup_removes_build_dir_when_release_artifact_is_inside_build() {
         let temp = tempfile::tempdir().expect("tempdir");
         let build_dir = temp.path().join("build");
@@ -534,6 +579,7 @@ mod tests {
         let state = ReleaseState {
             artifacts: vec![ReleaseArtifact {
                 path: artifact_path.display().to_string(),
+                durable_path: None,
                 artifact_type: None,
                 platform: None,
             }],
@@ -700,6 +746,62 @@ mod tests {
 
         assert_eq!(state.artifacts.len(), 1);
         assert_eq!(state.artifacts[0].path, "build/artifact.zip");
+    }
+
+    #[test]
+    fn run_package_copies_existing_build_artifact_to_durable_release_artifact_path() {
+        crate::test_support::with_isolated_home(|_| {
+            let component = tempfile::tempdir().expect("component tempdir");
+            let package = release_package_extension(
+                "wordpress",
+                "mkdir -p build; printf artifact > build/fixture.zip; printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
+            );
+            crate::core::extension::save_manifest(&package).expect("save package extension");
+
+            let mut state = crate::core::release::types::ReleaseState {
+                version: Some("1.2.3".to_string()),
+                ..ReleaseState::default()
+            };
+            let result = run_package(
+                &[package],
+                &mut state,
+                "fixture",
+                &component.path().to_string_lossy(),
+                false,
+            )
+            .expect("package step");
+
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_eq!(state.artifacts.len(), 1);
+            assert_eq!(state.artifacts[0].path, "build/fixture.zip");
+            let durable_path = state.artifacts[0]
+                .durable_path
+                .as_deref()
+                .expect("durable artifact path");
+            assert!(std::path::Path::new(durable_path).is_file());
+            assert!(durable_path.contains("/release/fixture/1_2_3/01-fixture.zip"));
+
+            let repair = github_release::github_release_repair_commands(
+                "v1.2.3",
+                &test_repo(),
+                &crate::core::component::GithubConfig::default(),
+                &github_release::github_release_artifact_paths(&state),
+                None,
+                None,
+            );
+            assert!(repair.create_command.contains(durable_path));
+
+            let build_dir = component.path().join("build");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: component.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            run_cleanup(&component, &state).expect("cleanup");
+
+            assert!(!build_dir.exists());
+            assert!(std::path::Path::new(durable_path).is_file());
+        });
     }
 
     fn release_package_extension(id: &str, command: &str) -> ExtensionManifest {

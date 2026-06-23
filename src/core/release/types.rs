@@ -215,6 +215,8 @@ pub struct ReleaseRunSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseArtifact {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
