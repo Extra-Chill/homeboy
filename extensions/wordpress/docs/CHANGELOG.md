@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.12.65] - 2026-06-23
+
+### Fixed
+- derive fuzz campaign safety
+
 ## [3.12.64] - 2026-06-23
 
 ### Changed
